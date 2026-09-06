@@ -312,7 +312,8 @@
 //! `no_excused_family_is_required_by_our_profile`) fail on an *unclassified* family or an
 //! *illegitimate excuse* -- never on a *classified-but-uncovered* one. A family with a
 //! logged skip reason and no coverage at all passes all four, which is exactly how `vis`
-//! and `idem` sat uncovered before Phases 8-10, and how `caps`/`lin`/`lc` still do (#115).
+//! and `idem` sat uncovered before Phases 8-10, and how `lc` still does (#115).
+//! (`caps` and `lin` closed to COVERED in Phase 7; only `lc` remains under #115.)
 //! Phase 11 closes that gap with a fifth, deliberately UNCONDITIONAL test,
 //! `known_families_partition_into_covered_excused_or_deferred`: every family in
 //! `KNOWN_FAMILIES` must appear in exactly one of `COVERED`, `EXCUSED`, or `DEFERRED`.
@@ -360,11 +361,12 @@
 //! ratchet would just be running the suite, not ratcheting it.
 //!
 //! `DEFERRED` is `&[(&str, &str, u32)]` -- family, a non-empty written reason, and an
-//! open GitHub issue number. `caps`, `lin`, and `lc` cite **#115**, filed for exactly
-//! those three; the remaining 15 cite **#130**, filed enumerating each with its own
-//! reason. `known_families_partition_into_covered_excused_or_deferred` checks both:
-//! reason non-empty, issue is one of the two known-open numbers, and the `caps`/`lin`/
-//! `lc` trio specifically cites #115.
+//! open GitHub issue number. `lc` cites **#115** (filed for `caps`/`lin`/`lc`; the
+//! first two closed to COVERED in Phase 7, so `lc` is the only one left under it);
+//! the remaining 15 cite **#130**, filed enumerating each with its own reason.
+//! `known_families_partition_into_covered_excused_or_deferred` checks both: reason
+//! non-empty, issue is one of the two known-open numbers, and that any of the
+//! `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115.
 //!
 //! **Required-checks decision (recorded here, not executed):** `conformance (spec
 //! fixtures)` is currently NOT among this repo's required status-check contexts
@@ -7034,8 +7036,9 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 /// **REG-10 Phase 11:** being *classified* here (replayed, or skipped with a
 /// logged reason) is necessary but was never sufficient to claim real
 /// coverage — a family can sit classified-but-uncovered indefinitely, which
-/// is exactly what happened to `vis`/`idem` before Phases 8-10 and what
-/// still holds for `caps`/`lin`/`lc` (#115) and 15 others (#130) today.
+/// is exactly what happened to `vis`/`idem` before Phases 8-10, and to
+/// `caps`/`lin` before Phase 7 -- and what still holds for `lc` (#115)
+/// and 15 others (#130) today.
 /// Every family in this list must now ALSO appear in exactly one of
 /// `COVERED`, `EXCUSED`, or `DEFERRED` — enforced unconditionally by
 /// `known_families_partition_into_covered_excused_or_deferred`, which needs
