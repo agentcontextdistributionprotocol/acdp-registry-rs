@@ -244,7 +244,7 @@ process-global recorder captures HTTP request metrics plus domain counters.
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Mount `/metrics` and start recording. |
-| `bearer_token` | string | `""` | When set, `/metrics` requires `Authorization: Bearer <token>`. Empty = open. |
+| `bearer_token` | string | `""` | When set, `/metrics` requires `Authorization: Bearer <token>` and answers `401` otherwise. Empty = open, the default. A **whitespace-only** value is refused at startup when `enabled = true` ([#162](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/issues/162)): it would trim to empty and silently leave the endpoint open. Surrounding whitespace on an otherwise real token is accepted — both the configured and the presented token are trimmed before comparison. |
 | `duration_buckets` | list\<f64\> | web-latency ladder | Buckets (seconds) for the request-latency histogram; must be positive and strictly increasing. |
 
 See [HTTP-API.md · `GET /metrics`](HTTP-API.md#get-metrics-feat-10) for the

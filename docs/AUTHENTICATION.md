@@ -107,14 +107,24 @@ rejected with `403 not_authorized`.
 
 ## Presenting a bearer
 
-Two bearer parsers coexist and they do not agree. Both are deliberate and both
-are locked by tests; the difference is undocumented rather than accidental, and
-it is what this section exists to state.
+**Three** bearer parsers coexist and no two of them agree. Each is deliberate
+and each is locked by tests; the differences are undocumented rather than
+accidental, and stating them is what this section exists for.
 
-| Route group | Parser | Unrecognised header shape |
-|---|---|---|
-| `/contexts/*`, `/lineages/*`, and the other ordinary read/publish routes | `extract_bearer` (`crates/acdp-registry-auth/src/service.rs:400-405`) | treated as **anonymous** |
-| `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs:679-693`) | rejected with **403** |
+| Route group | Parser | Scheme prefixes accepted | Trims the token? | Unrecognised header shape |
+|---|---|---|---|---|
+| `/contexts/*`, `/lineages/*`, and the other ordinary read/publish routes | `extract_bearer` (`crates/acdp-registry-auth/src/service.rs:400-405`) | `Bearer ` **and** `bearer ` | yes | treated as **anonymous** |
+| `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs:679-693`) | `Bearer ` only | **no** | rejected with **403** `{"error": "admin-only"}` (`admin.rs:741-745`) |
+| `/metrics` | inline in `metrics_endpoint` (`crates/acdp-registry-core/src/metrics.rs:124-128`) | `Bearer ` only | yes | rejected with **401** + a `WWW-Authenticate` challenge (`metrics.rs:130-134`) |
+
+The `/metrics` parser is a hybrid of the other two: case-sensitive on the scheme
+like the admin one, trimming like the lax one. It is also the only one of the
+three that is not part of the ACDP auth pipeline at all — see
+[`/metrics` is gated separately](#metrics-is-gated-separately) below.
+
+No parser is case-insensitive on the scheme token. `extract_bearer` hardcodes
+two casings, so `BEARER …` and `BeArEr …` are unrecognised by **all three**;
+one parser is merely more permissive than the others, not more conformant.
 
 ### Unrecognised means anonymous on the ordinary routes
 
@@ -129,10 +139,16 @@ returns `Ok(None)` — an anonymous caller — in three cases:
 - any value `extract_bearer` does not recognise, including a non-`Bearer` scheme.
 
 Only a **well-formed** bearer whose token then fails validation is rejected, with
-`403 not_authorized` — auth failures on this registry are `403`, never `401`, and
-no `WWW-Authenticate` challenge is emitted (see
+`403 not_authorized` — auth failures **on the ACDP routes** are `403`, never
+`401`, and no `WWW-Authenticate` challenge is emitted (see
 [HTTP-API.md](HTTP-API.md#error-envelope)). A client whose token merely expired sees that
 explicitly rather than being silently downgraded.
+
+`/admin/*` also answers `403` and emits no challenge, though with its own body
+(`{"error": "admin-only"}`) rather than the ACDP error envelope. **`/metrics` is
+the exception to both halves** of that sentence: it answers `401` *and* sends
+`WWW-Authenticate: Bearer realm="metrics"`. Scope any "this registry never
+returns 401" reasoning to the ACDP routes and `/admin/*`.
 
 The consequence worth knowing when debugging: **a typo in the scheme is not an
 auth failure at all.** `Authorizaton: Bearer …` (misspelled header name),
@@ -156,20 +172,32 @@ outright (`admin.rs:684`).
 ### What each parser accepts
 
 `extract_bearer` strips `"Bearer "` or `"bearer "` and then trims the remaining
-token. `require_admin_bearer` strips `"Bearer "` only, and does not trim.
+token. `require_admin_bearer` strips `"Bearer "` only, and does not trim. The
+`/metrics` parser strips `"Bearer "` only, and does trim.
 
-Neither is case-insensitive: both hard-code their prefixes, so `BEARER` and
-`BeArEr` are rejected by both.
+None of the three is case-insensitive: each hard-codes its prefixes, so `BEARER`
+and `BeArEr` are unrecognised by all three.
 
-| `Authorization` value | `/contexts/*` | `/admin/*` |
-|---|---|---|
-| `Bearer <token>` | `<token>` | `<token>` |
-| `bearer <token>` | `<token>` | **403** |
-| `Bearer  <token>` (two spaces) | `<token>` | token is `" <token>"`, so **403** |
-| `Bearer <token>` + trailing space | `<token>` | **depends on protocol — see below** |
-| `BEARER <token>`, `BeArEr <token>` | anonymous | 403 |
-| `Bearer<TAB><token>` | anonymous | 403 |
-| `Basic <token>`, bare `<token>`, empty | anonymous | 403 |
+The `/metrics` column below describes the endpoint **with its gate active** —
+`metrics.enabled = true` and a non-blank `metrics.bearer_token`. With the token
+empty the endpoint is open and every row is `200`; a whitespace-only token is
+refused at startup rather than silently opening it (see
+[`/metrics` is gated separately](#metrics-is-gated-separately)).
+
+| `Authorization` value | `/contexts/*` | `/admin/*` | `/metrics` |
+|---|---|---|---|
+| `Bearer <token>` | `<token>` | `<token>` | `200` |
+| `bearer <token>` | `<token>` | **403** | **401** |
+| `Bearer  <token>` (two spaces) | `<token>` | token is `" <token>"`, so **403** | `200` |
+| `Bearer <token>` + trailing space | `<token>` | **depends on protocol — see below** | `200` |
+| `BEARER <token>`, `BeArEr <token>` | anonymous | 403 | **401** |
+| `Bearer<TAB><token>` | anonymous | 403 | **401** |
+| `Basic <token>`, bare `<token>`, empty | anonymous | 403 | **401** |
+
+The three columns are not the same kind of thing: on `/contexts/*` an
+unrecognised header yields an anonymous *caller*, whose eventual status depends
+on the route and on the visibility rules; on `/admin/*` and `/metrics` it is the
+response status itself.
 
 Both behaviours on the admin side are pinned by tests, so loosening either is a
 deliberate reviewed change rather than a refactor: `bearer_scheme_is_case_sensitive`
@@ -177,16 +205,17 @@ deliberate reviewed change rather than a refactor: `bearer_scheme_is_case_sensit
 
 #### Trailing whitespace depends on the HTTP version
 
-Trailing whitespace in the header *value* never reaches either parser over
-HTTP/1.1: `httparse` strips trailing SP/HTAB/CR/LF from every header value while
+Trailing whitespace in the header *value* never reaches any of the three parsers
+over HTTP/1.1: `httparse` strips trailing SP/HTAB/CR/LF from every header value while
 parsing the request. Over HTTP/2, HPACK carries the value verbatim and nothing
 strips it. The registry serves both.
 
 So `Authorization: Bearer <token> ` (one trailing space) is accepted everywhere
 over HTTP/1.1 — the space is gone before any handler sees it — and on HTTP/2 it
-is accepted by `/contexts/*` (which trims) but **rejected by `/admin/*`** (which
-does not). Only the *trailing* case is protocol-dependent; the two-space case
-above is internal to the value and behaves identically on both.
+is accepted by `/contexts/*` and `/metrics` (which trim) but **rejected by
+`/admin/*`** (which does not). Only the *trailing* case is protocol-dependent,
+and only on `/admin/*`; the two-space case above is internal to the value and
+behaves identically on both protocols everywhere.
 
 The practical consequence is that an admin token configured with stray trailing
 whitespace can appear to work in one environment and fail in another, depending
@@ -197,6 +226,48 @@ and the admin-token rules in [CONFIGURATION.md](CONFIGURATION.md).
 **Practical rule: send exactly `Authorization: Bearer <token>`, one space, no
 surrounding whitespace.** That form is accepted everywhere. Any other spelling
 works on some routes and not others.
+
+## `/metrics` is gated separately
+
+`GET /metrics` does not go through the ACDP auth pipeline at all. It is mounted
+on the un-authenticated, un-rate-limited `aux` router
+(`crates/acdp-registry-core/src/lib.rs:153-155`), so no bearer it receives is
+ever validated as an ACDP token — no signature check, no `exp`, no revocation
+lookup, no tenant resolution. The handler applies its own gate instead, and that
+gate is a plain string comparison against a configured value.
+
+The gate is applied only when `metrics.bearer_token` is non-blank
+(`crates/acdp-registry-core/src/metrics.rs:121-122`); the configured value and
+the presented one are both trimmed before comparison (`:121`, `:128`). Three
+consequences follow, and they are the ones that surprise people:
+
+- **An empty `metrics.bearer_token` leaves `/metrics` open**, to anyone who can
+  reach the port. This is the shipped default
+  (`crates/acdp-registry-types/src/config.rs:701`) and it is deliberate — the
+  endpoint is meant to be reachable from a trusted scrape network without ACDP
+  credentials. It is not an oversight, but it is a decision your deployment
+  inherits by default.
+- **A whitespace-only token used to mean the same thing, silently.** `" "` trims
+  to empty, so the gate was skipped entirely and the endpoint was served
+  unauthenticated with no failed-auth signal in the logs — the request just
+  looked like an authorized scrape. Startup validation now refuses that value
+  when `metrics.enabled = true`, so the failure is a refused boot rather than a
+  quietly open endpoint. See
+  [#162](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/issues/162).
+- **Padding is not refused here**, unlike `auth.admin_tokens`. Because both sides
+  of the comparison are trimmed, `" tok "` and `"tok"` behave identically on
+  HTTP/1.1 and HTTP/2 alike; there is no protocol-dependent credential to guard
+  against, so the guard is deliberately narrower than the admin-token one.
+
+Failures on this endpoint answer `401` with
+`WWW-Authenticate: Bearer realm="metrics"` (`metrics.rs:130-134`) — the one place
+in the registry that does. Everything else authenticated answers `403`.
+
+What `/metrics` exposes is operational rather than secret — request counts,
+latency histograms, publish outcomes — but an operator who sets
+`metrics.bearer_token` has expressed an intent to gate it, and the point of the
+startup check is that the intent is not silently discarded. Configuration
+reference: [CONFIGURATION.md](CONFIGURATION.md).
 
 ## Signing algorithms
 

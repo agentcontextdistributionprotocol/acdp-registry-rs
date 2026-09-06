@@ -1498,6 +1498,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+<!-- REG-11 #162 (Lane B) -->
+
+- **A whitespace-only `metrics.bearer_token` is refused at startup** (`#162`):
+  `metrics_endpoint` applies its bearer gate only when the *trimmed* token is
+  non-empty, so `" "` or `"\t"` was read as "no gate configured" and `/metrics`
+  was served unauthenticated to anyone who could reach the port — leaving no
+  failed-auth signal in the logs, because no authentication was attempted. The
+  realistic source is a value templated from an unset environment variable, and
+  it fails **open**. `validate_config` now refuses a blank-but-present value
+  while `metrics.enabled = true`.
+
+  An **empty** value keeps its documented meaning — `/metrics` is open, the
+  shipped default for a trusted scrape network — so only a value that was set
+  and then blanked is refused. The guard is scoped to `metrics.enabled` because
+  the route is not mounted otherwise; it still fails closed, since enabling
+  metrics later trips the check before anything binds.
+
+  Deliberately **narrower** than the `auth.admin_tokens` guard added in `#161`:
+  padded-but-non-blank values are accepted here. That guard refuses padding
+  because only one of its two sides trims, which makes a padded admin token
+  authenticate over HTTP/2 and fail over HTTP/1.1. The `/metrics` path trims the
+  configured value *and* the presented one, so `" tok "` and `"tok"` behave
+  identically on both protocols and there is nothing protocol-dependent to
+  refuse.
+
 <!-- REG-11 #161 (Lane B) -->
 
 - **Startup now refuses a blank or whitespace-padded entry in
@@ -1581,6 +1606,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tls-rustls` still resolves to `rustls/aws-lc-rs`.
 
 ### Documentation
+
+<!-- REG-11 #166 (Lane B) -->
+
+- **`docs/AUTHENTICATION.md`: corrected two false claims** (`#166`) that reached
+  `main` in `c8f9a40`.
+
+  It stated that **two** bearer parsers coexist, as a complete enumeration.
+  There are **three**: the third is inline in the `/metrics` gate
+  (`crates/acdp-registry-core/src/metrics.rs:124-128`) and is a hybrid of the
+  other two — case-sensitive on the scheme like `require_admin_bearer`, trimming
+  like `extract_bearer`. The count was wrong in two places, not one; the second
+  instance was in the per-parser acceptance table, which now carries a
+  `/metrics` column.
+
+  It also stated that auth failures "on this registry" are `403`, "never" `401`,
+  with no `WWW-Authenticate` challenge. That is true of the ACDP routes and of
+  `/admin/*`, and false of `/metrics`, which answers `401` **and** sends
+  `WWW-Authenticate: Bearer realm="metrics"` (`metrics.rs:130-134`). The sentence
+  is now scoped, and `/metrics` is named as the exception to both halves.
+
+  Both claims were introduced *by the fix for an earlier false claim* — a
+  correctly-scoped statement about the ACDP auth path was restated as a claim
+  about the whole registry. A new `/metrics` section documents that endpoint's
+  gate directly, including the fact that it sits outside the ACDP auth pipeline
+  entirely (`crates/acdp-registry-core/src/lib.rs:153-155`), so no bearer it
+  receives is ever validated as an ACDP token.
 
 <!-- REG-11 #152 (Lane B) -->
 
