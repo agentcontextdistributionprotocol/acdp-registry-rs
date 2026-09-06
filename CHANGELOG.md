@@ -1001,15 +1001,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   negative controls plus the replay tally, not colour. Measured with
   `cargo test -p acdp-registry-server --features storage-sqlite,playground
   --test conformance --test conformance_gate` against a spec worktree detached
-  at the pinned `d1f06d0…`: `replayed 30 exchange(s); failures=0`,
-  `ran by family` of `pub: 3` / `ret: 1` / `vis: 26`, `43 passed; 0 failed`
-  and `1 passed; 0 failed`. Re-pointed at a nonexistent `ACDP_SPEC_DIR` with
+  at the pinned `d1f06d0…`: `replayed 30 exchange(s); failures=0`, with a
+  `ran by family` tally of `pub: 3` / `ret: 1` / `vis: 26`. No raw pass count
+  is recorded here on purpose — that number moves with every merge that adds
+  a test (it was 43 against this branch's original merge-base, 44 once `#158`
+  landed, 46 after Phase 7) and says nothing about this change. The replay
+  tally is the invariant #143 actually has to preserve, and it did not move.
+  Re-pointed at a nonexistent `ACDP_SPEC_DIR` with
   `ACDP_REQUIRE_CONFORMANCE=1` the same command panics at
   `conformance.rs:2549` and exits 101; with neither variable set it exits **0**
   while replaying nothing, logging `ACDP_SPEC_DIR unset or no fixtures
   resolvable; skipping`. That second control is why the pin-and-require design
   exists, and why the CI job log — not the check mark — is the acceptance
-  artifact. CI reproduced the local tally line for line.
+  artifact. CI reproduced the replay tally and the per-family breakdown
+  exactly.
   Note that `MIN_REPLAYED_EXCHANGES` (derived from source as 30) is met
   *exactly*, with no headroom: losing one replayed exchange turns the required
   job red.

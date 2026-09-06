@@ -112,6 +112,26 @@ closes out `ASSUMPTIONS.md`'s 8 `UNCONFIRMED` entries logged during implementati
   `DELIVERY-STANDARD.md`'s status line says this repo is "scheduled to adopt"
   the action and that "until they do, their CI does not enforce this rule" —
   flatly false once `#155` lands. Still not filed; still owed.
+- **Correction to the quotation above (2026-09-06, `#155` review).** The two
+  paragraphs above quote `DELIVERY-STANDARD.md` as saying `acdp-registry-rs` is
+  "scheduled to adopt" the action and that "until they do, their CI does not
+  enforce this rule". **That sentence no longer exists in `acdp-ci`.** It was
+  replaced on 2026-09-05 by `566e561` (`acdp-ci#14`) — verified with
+  `git log -S "scheduled to adopt" -- DELIVERY-STANDARD.md`, whose diff removes
+  that exact line. (It was *not* `60564f6`/`acdp-ci#17`, which changed the
+  `secrets: inherit` adoption paragraph in a different section and touches
+  nothing here — a misattribution caught while checking this correction.)
+  The current text reads: `acdp-rs` and `acdp-registry-rs` "satisfy the pinning
+  rule using the inline pin shape instead — neither has adopted the action."
+  The **conclusion is unchanged and part (b) is still owed** — that replacement
+  sentence is itself falsified by `#155`, which adopts the action. Only the
+  wording of what is wrong has moved.
+  **Method note, and the reason this rotted:** quoting another repo verbatim in
+  a durable file here is the same hazard as the `bump-spec.yml` comment fixed
+  in `#139` — mirroring external state locally, where this repo cannot observe
+  the source changing. Both were true when written. Prefer a citation
+  (repo + path + commit) to a quotation whenever the source is outside this
+  repo; the citation stays valid when the text moves, the quotation does not.
 
 ### 2. `bump-spec.yml` scope
 - **Assumption:** no `bump-spec.yml` in this repo; the pinned spec SHA will never
