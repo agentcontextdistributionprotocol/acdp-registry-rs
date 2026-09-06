@@ -1633,6 +1633,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entirely (`crates/acdp-registry-core/src/lib.rs:153-155`), so no bearer it
   receives is ever validated as an ACDP token.
 
+  **The parser differences are now pinned, not merely described.** The first
+  draft of this section claimed all three parsers were "locked by tests" — a
+  third false claim of the same class it was correcting, since only the admin
+  parser's differences were covered. Measured on the parent commit: deleting
+  `.map(str::trim)` from `metrics.rs`, deleting `extract_bearer`'s `"bearer "`
+  arm, and deleting `extract_bearer`'s own `.map(str::trim)` each left the
+  entire workspace suite green. Two tests close that gap —
+  `extract_bearer_accepts_two_casings_and_trims` and
+  `metrics_bearer_parser_shape_is_pinned` — and each of the three mutations now
+  turns exactly one of them red.
+
+  This also protects `#162`'s rationale: that guard is narrower than `#161`'s
+  *because* the `/metrics` path trims both the configured and the presented
+  token, a claim asserted in four places. Had that trim been refactored away,
+  CI would have stayed green while every padded-token deployment began `401`-ing
+  its Prometheus scrapes.
+
+  Also corrected: `docs/HTTP-API.md`'s error-envelope note, which stated
+  registry-wide that no `WWW-Authenticate` challenge is emitted — the very
+  sentence `AUTHENTICATION.md` links to as its authority.
+
 <!-- REG-11 #152 (Lane B) -->
 
 - **Bearer-parsing behaviour is now documented** (`#152`), in a new
@@ -1650,7 +1671,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (default `false`), so it may be a refusal or a filtered result set.
   `/admin/*` refuses all the same inputs with `403`.
 
-  Second, the two parsers disagree. `extract_bearer` accepts `Bearer ` or
+  Second, the parsers disagree. (This entry said "the two parsers"; there are
+  three — the `/metrics` gate carries a third, corrected under `#166`.)
+  `extract_bearer` accepts `Bearer ` or
   `bearer ` and trims the token; `require_admin_bearer` accepts `Bearer ` only
   and does not trim. So `bearer <jwt>` authenticates on `/contexts/*` and 403s
   on `/admin/*`. Both admin behaviours are pinned by tests

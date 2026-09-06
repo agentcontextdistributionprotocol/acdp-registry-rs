@@ -107,9 +107,20 @@ rejected with `403 not_authorized`.
 
 ## Presenting a bearer
 
-**Three** bearer parsers coexist and no two of them agree. Each is deliberate
-and each is locked by tests; the differences are undocumented rather than
-accidental, and stating them is what this section exists for.
+**Three** bearer parsers coexist and no two of them agree. Each is deliberate,
+and the differences below are pinned by tests — `extract_bearer_accepts_two_casings_and_trims`
+(`crates/acdp-registry-auth/src/service.rs`), `bearer_scheme_is_case_sensitive`
+and `rejects_token_with_extra_whitespace` (`handlers/admin.rs:854-873`), and
+`metrics_bearer_parser_shape_is_pinned`
+(`crates/acdp-registry-server/tests/metrics_integration.rs`). The differences
+were undocumented rather than accidental, and stating them is what this section
+exists for.
+
+The `/metrics` and `/contexts/*` halves of that coverage were added alongside
+this section: before them, deleting `.map(str::trim)` from either parser, or
+dropping `extract_bearer`'s `"bearer "` arm, left the entire workspace suite
+green. Every behaviour claimed below is now locked; if you add a parser, pin its
+differences in the same commit that documents them.
 
 | Route group | Parser | Scheme prefixes accepted | Trims the token? | Unrecognised header shape |
 |---|---|---|---|---|
@@ -121,6 +132,12 @@ The `/metrics` parser is a hybrid of the other two: case-sensitive on the scheme
 like the admin one, trimming like the lax one. It is also the only one of the
 three that is not part of the ACDP auth pipeline at all — see
 [`/metrics` is gated separately](#metrics-is-gated-separately) below.
+
+Its row describes `/metrics` **with its gate active** — `metrics.enabled = true`
+and a non-blank `metrics.bearer_token`. Under the shipped defaults there is no
+third parser in play at all: `metrics.enabled` is `false`, so the route is not
+mounted and every request is a `404`; and with metrics on but the token empty,
+the endpoint is open and no header shape is rejected.
 
 No parser is case-insensitive on the scheme token. `extract_bearer` hardcodes
 two casings, so `BEARER …` and `BeArEr …` are unrecognised by **all three**;
