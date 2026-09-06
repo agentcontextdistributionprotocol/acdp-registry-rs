@@ -422,6 +422,48 @@ pub(crate) fn tenant_for_agent(bindings: &[TenantAgentBinding], agent_did: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #166 — `extract_bearer` is the lax parser of the three the registry
+    /// runs, and `docs/AUTHENTICATION.md` documents exactly how it differs
+    /// from the other two. Nothing pinned either difference: deleting the
+    /// `"bearer "` arm, and separately deleting `.map(str::trim)`, each left
+    /// the whole workspace suite green (measured on this commit's parent).
+    ///
+    /// The admin parser's equivalents are pinned (`bearer_scheme_is_case_sensitive`,
+    /// `rejects_token_with_extra_whitespace` in `handlers/admin.rs`); this is
+    /// the missing half, so the documented `/contexts/*` vs `/admin/*`
+    /// divergence is locked from BOTH sides rather than asserted from one.
+    #[test]
+    fn extract_bearer_accepts_two_casings_and_trims() {
+        // Both casings are accepted — this is the divergence from
+        // `require_admin_bearer`, which takes `"Bearer "` only.
+        assert_eq!(extract_bearer("Bearer tok"), Some("tok"));
+        assert_eq!(extract_bearer("bearer tok"), Some("tok"));
+
+        // ...and only those two. The scheme token is NOT case-insensitive:
+        // both prefixes are hard-coded, so RFC 7235's case-insensitive scheme
+        // rule is not implemented by this parser either.
+        assert_eq!(extract_bearer("BEARER tok"), None);
+        assert_eq!(extract_bearer("BeArEr tok"), None);
+
+        // It TRIMS the remaining token. `require_admin_bearer` does not, which
+        // is why `Bearer  tok` yields "tok" on /contexts/* and " tok" on
+        // /admin/*.
+        assert_eq!(extract_bearer("Bearer  tok"), Some("tok"));
+        assert_eq!(extract_bearer("Bearer tok "), Some("tok"));
+        assert_eq!(extract_bearer("Bearer \ttok\t"), Some("tok"));
+
+        // A single space after the scheme is mandatory, and a TAB is not one.
+        assert_eq!(extract_bearer("Bearer\ttok"), None);
+        assert_eq!(extract_bearer("Basic tok"), None);
+        assert_eq!(extract_bearer("tok"), None);
+        assert_eq!(extract_bearer(""), None);
+
+        // Scheme with its mandatory space and nothing after it trims to an
+        // empty token — recognised, but empty. Cf. #161, where an empty
+        // configured admin entry made exactly this shape a valid credential.
+        assert_eq!(extract_bearer("Bearer "), Some(""));
+    }
     use crate::challenge_store::InMemoryChallengeStore;
     use crate::jwt::JwtSecret;
     use crate::revocation_store::InMemoryRevocationStore;

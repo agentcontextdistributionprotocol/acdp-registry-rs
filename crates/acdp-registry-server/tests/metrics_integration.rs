@@ -400,3 +400,105 @@ async fn metrics_bearer_gate_enforced() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+/// #166 — pins the `/metrics` row of the bearer-parser table in
+/// `docs/AUTHENTICATION.md`. Before this test, deleting `.map(str::trim)` from
+/// `metrics.rs:127` left the whole workspace suite green (measured), so the
+/// documented trimming behaviour rested on nothing.
+///
+/// This matters beyond the docs: #162's startup guard is deliberately
+/// NARROWER than the `auth.admin_tokens` guard, on the stated grounds that
+/// this path trims BOTH the configured value and the presented one, so a
+/// padded token is not protocol-dependent here. That rationale is asserted in
+/// four places (`main.rs`, `CHANGELOG.md`, `docs/CONFIGURATION.md`,
+/// `docs/AUTHENTICATION.md`). If the trim is ever dropped, this test is what
+/// fails instead of every padded-token deployment 401-ing its scrapes.
+#[tokio::test]
+async fn metrics_bearer_parser_shape_is_pinned() {
+    let mut cfg = metrics_config();
+    cfg.metrics.bearer_token = "scrape-secret".into();
+    let h = harness(cfg).await;
+
+    async fn get(app: &axum::Router, hdr: Option<&str>) -> (StatusCode, Option<String>) {
+        let mut b = Request::builder().method("GET").uri("/metrics");
+        if let Some(v) = hdr {
+            b = b.header("authorization", v);
+        }
+        let resp = app
+            .clone()
+            .oneshot(b.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let challenge = resp
+            .headers()
+            .get("www-authenticate")
+            .map(|v| v.to_str().unwrap().to_string());
+        (status, challenge)
+    }
+
+    // The parser TRIMS: interior extra space and trailing space both still
+    // authenticate. This is the assertion #162's narrower guard depends on.
+    for accepted in [
+        "Bearer scrape-secret",
+        "Bearer  scrape-secret",
+        "Bearer scrape-secret ",
+        "Bearer \tscrape-secret\t",
+    ] {
+        let (status, challenge) = get(&h.router, Some(accepted)).await;
+        assert_eq!(status, StatusCode::OK, "{accepted:?} must authenticate");
+        assert!(challenge.is_none(), "{accepted:?} must not be challenged");
+    }
+
+    // The parser is CASE-SENSITIVE on the scheme and accepts only `"Bearer "`
+    // — unlike `extract_bearer`, which also takes `"bearer "`. It is also
+    // strict about the single separating space (a TAB is not one).
+    for refused in [
+        "bearer scrape-secret",
+        "BEARER scrape-secret",
+        "BeArEr scrape-secret",
+        "Bearer\tscrape-secret",
+        "Basic scrape-secret",
+        "scrape-secret",
+        "",
+    ] {
+        let (status, challenge) = get(&h.router, Some(refused)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{refused:?} must be refused"
+        );
+        assert_eq!(
+            challenge.as_deref(),
+            Some("Bearer realm=\"metrics\""),
+            "{refused:?} must carry the challenge"
+        );
+    }
+
+    // #166 — /metrics is the ONE place in this registry that answers 401 and
+    // emits a challenge. `docs/AUTHENTICATION.md` scopes its "403, never 401"
+    // sentence around exactly this exception, so pin the exception itself.
+    let (status, challenge) = get(&h.router, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(challenge.as_deref(), Some("Bearer realm=\"metrics\""));
+}
+
+/// #162 — an EMPTY `metrics.bearer_token` must keep meaning "gate disabled".
+/// The startup guard refuses whitespace-only values; it must not have made the
+/// documented open-by-default behaviour unreachable.
+#[tokio::test]
+async fn empty_metrics_bearer_token_leaves_the_endpoint_open() {
+    let cfg = metrics_config();
+    assert!(
+        cfg.metrics.bearer_token.is_empty(),
+        "this test only means anything while empty is the default"
+    );
+    let h = harness(cfg).await;
+
+    let (status, _, _) = scrape(&h.router).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an empty token must leave /metrics open"
+    );
+}

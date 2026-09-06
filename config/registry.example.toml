@@ -140,8 +140,15 @@ trusted_proxies = []
 # minted, lifecycle events, log leaves, witness cosignatures, rate-limit
 # rejections).
 enabled = false
-# When set, /metrics requires `Authorization: Bearer <token>`. Empty leaves it
-# open — appropriate only when reachable from a trusted scrape network.
+# When set, /metrics requires `Authorization: Bearer <token>` and answers 401
+# otherwise. Empty leaves it open — appropriate only when reachable from a
+# trusted scrape network.
+#
+# #162: a WHITESPACE-ONLY value is refused at startup while enabled = true. It
+# would trim to empty and be read as "no gate", serving /metrics unauthenticated
+# with nothing in the logs to show for it — almost always a value templated from
+# an unset environment variable rather than a deliberate choice. Leave the key
+# empty to open the endpoint on purpose.
 # bearer_token = ""
 # Histogram buckets (seconds) for acdp_registry_request_duration_seconds.
 # duration_buckets = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]

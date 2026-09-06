@@ -492,9 +492,39 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
              enable the limiter or drop the trusted_proxies list"
         );
     }
-    // FEAT-10: reject a non-monotonic / negative histogram bucket ladder up
-    // front — Prometheus requires strictly increasing positive bounds.
     if cfg.metrics.enabled {
+        // #162: the `/metrics` gate applies only when the TRIMMED token is
+        // non-empty (`crates/acdp-registry-core/src/metrics.rs:121-122`), so a
+        // whitespace-only value skips the bearer check entirely and serves the
+        // endpoint to anyone who can reach the port — with no failed-auth
+        // signal in the logs, because no auth was attempted.
+        //
+        // An EMPTY value means exactly "leave /metrics open" and is both the
+        // documented default and the shipped one (`MetricsConfig::default`,
+        // `crates/acdp-registry-types/src/config.rs:701`) — that stays valid.
+        // Only a blank-but-PRESENT value is refused: it is indistinguishable
+        // from a value templated out of an unset environment variable, and an
+        // operator who set the field expressed the intent to gate the endpoint.
+        //
+        // Deliberately NARROWER than the `auth.admin_tokens` guard above: a
+        // merely PADDED value is accepted here, because it is not a defect on
+        // this path. `metrics.rs` trims the configured value (`:121`) *and* the
+        // presented one (`:128`), so `" tok "` authenticates identically to
+        // `"tok"` over both HTTP/1.1 and HTTP/2. The admin guard refuses
+        // padding because only one of its two sides trims, which is what makes
+        // a padded admin token protocol-dependent; that asymmetry has no
+        // counterpart here, so refusing padding would break working configs to
+        // buy nothing.
+        if !cfg.metrics.bearer_token.is_empty() && cfg.metrics.bearer_token.trim().is_empty() {
+            anyhow::bail!(
+                "metrics.bearer_token is whitespace-only. The /metrics bearer gate is applied \
+                 only when the trimmed token is non-empty, so this value would leave the \
+                 endpoint served unauthenticated to anyone who can reach the port. Set a real \
+                 token, or leave metrics.bearer_token = \"\" to leave /metrics open deliberately."
+            );
+        }
+        // FEAT-10: reject a non-monotonic / negative histogram bucket ladder up
+        // front — Prometheus requires strictly increasing positive bounds.
         let b = &cfg.metrics.duration_buckets;
         if b.is_empty() {
             anyhow::bail!("metrics.duration_buckets must not be empty when metrics are enabled");
@@ -1621,6 +1651,72 @@ mod tests {
         let mut cfg = RegistryConfig::defaults();
         cfg.auth.admin_tokens = vec!["tok".into()];
         assert!(validate_config(&cfg).is_ok());
+    }
+
+    // #162 — a whitespace-only `metrics.bearer_token` trims to empty, which
+    // `metrics_endpoint` reads as "no gate configured" and serves /metrics
+    // unauthenticated. Empty keeps meaning "open on purpose"; blank-but-present
+    // is the templating accident.
+    #[test]
+    fn whitespace_only_metrics_bearer_token_is_rejected() {
+        for bad in [" ", "\t", "\n", "   ", " \t\n "] {
+            let mut cfg = RegistryConfig::defaults();
+            cfg.metrics.enabled = true;
+            cfg.metrics.bearer_token = bad.to_string();
+            let err = validate_config(&cfg)
+                .expect_err("a whitespace-only metrics.bearer_token must be refused");
+            assert!(
+                err.to_string().contains("metrics.bearer_token"),
+                "{bad:?}: {err}"
+            );
+        }
+    }
+
+    // #162 — the two values that must KEEP working, stated as the boundary of
+    // the guard rather than left implicit.
+    #[test]
+    fn empty_and_padded_metrics_bearer_tokens_still_start() {
+        // Empty = "/metrics is open", the documented default. Refusing this
+        // would break every deployment that scrapes over a trusted network.
+        let mut cfg = RegistryConfig::defaults();
+        cfg.metrics.enabled = true;
+        assert!(
+            cfg.metrics.bearer_token.is_empty(),
+            "this test only means anything while empty is the default"
+        );
+        assert!(validate_config(&cfg).is_ok());
+
+        // Padded but non-blank is accepted, unlike the admin-token guard:
+        // `metrics.rs` trims BOTH the configured value and the presented one,
+        // so " tok " and "tok" authenticate identically on either protocol.
+        // There is no protocol-dependent credential here to refuse.
+        for padded in [" tok", "tok ", "\ttok\t"] {
+            cfg.metrics.bearer_token = padded.to_string();
+            assert!(
+                validate_config(&cfg).is_ok(),
+                "{padded:?} is not a defect on the /metrics path"
+            );
+        }
+    }
+
+    // #162 — the guard is scoped to `metrics.enabled`, matching how the jwt
+    // guards are scoped to `auth.enabled`. With metrics off the route is never
+    // mounted (`crates/acdp-registry-core/src/state.rs:143` leaves the handle
+    // `None`), so the token is inert and refusing startup over it would be a
+    // gratuitous outage. This still fails CLOSED: enabling metrics later trips
+    // the guard at that startup, before anything binds.
+    #[test]
+    fn whitespace_metrics_bearer_token_is_inert_while_metrics_are_disabled() {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.metrics.enabled = false;
+        cfg.metrics.bearer_token = " ".into();
+        assert!(validate_config(&cfg).is_ok());
+
+        cfg.metrics.enabled = true;
+        assert!(
+            validate_config(&cfg).is_err(),
+            "the same value must be refused once /metrics is actually mounted"
+        );
     }
 
     // #156 — the other arm of the same failure: strict tenancy with no

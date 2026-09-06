@@ -736,7 +736,12 @@ documents only the registry's HTTP-status projection of them.
 | 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (also covers SSRF-policy rejection). |
 | 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Emitted only when validating an *upstream's* proofs (federation); this registry's own `/log/*` handlers never raise it — their failures are `schema_violation`, `not_found`, or `not_implemented`, and there is no `log_unavailable`. |
 
-Note: auth failures surface as `403 not_authorized`, not `401` — the registry
-does not emit a `WWW-Authenticate` challenge.
+Note: auth failures on the ACDP routes surface as `403 not_authorized`, not
+`401`, and carry no `WWW-Authenticate` challenge. `/admin/*` likewise answers
+`403` (with its own `{"error": "admin-only"}` body rather than this envelope).
+**`GET /metrics` is the exception** and is not covered by this table: it answers
+`401` with `WWW-Authenticate: Bearer realm="metrics"`, because it sits outside
+the ACDP auth pipeline entirely — see
+[AUTHENTICATION.md](AUTHENTICATION.md#metrics-is-gated-separately).
 
 [acdp-errors]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/errors.md
