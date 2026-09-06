@@ -8,6 +8,41 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+<!-- REG-11 Phase 7 -->
+
+- **`lin` and `caps` move from `DEFERRED` to `COVERED`** (`REG-11` Phase 7,
+  `#115`): two new direct-vector tests in
+  `crates/acdp-registry-server/tests/conformance.rs`.
+  - `lin_vectors_reproduce_lineage_derivation` reuses the existing
+    `assert_lineage_vector` helper (previously exercised only via
+    can-001) against `lin-001-lineage-derivation-golden`'s 3 vectors.
+    `lin-001` carries `applies_to_profiles: ["acdp-registry-core",
+    "acdp-consumer"]`, but this is a pure-function check of
+    `derive_lineage_id` with no HTTP leg, so it deliberately bypasses the
+    runtime profile gate rather than adding one.
+  - `caps_vectors_validate_capabilities_document` runs all 7 caps-*
+    fixtures' `input.response_body` through
+    `acdp::validation::validate_capabilities`, plus caps-007's 3
+    `reject_variants` (hand-applied against the single dotted path they
+    override, `limits.max_publish_per_minute`). Measured against the
+    fixtures directly: caps-001/006/007(base) accept and
+    caps-002/003/004/005 plus caps-007's 3 variants reject — 4 rejecting
+    base fixtures, not 6. caps-006 in particular is an *accept* case:
+    the `CapabilitiesDocument` schema tolerates unknown top-level fields
+    (only its `limits` sub-object is closed). Rejection is accepted from
+    either serde deserialization or `validate_capabilities` itself, since
+    both are `schema_violation` and indistinguishable to a real consumer.
+    No HTTP leg here either: `acdp-registry-server` is bin-only, so this
+    crate cannot import its own `build_capabilities` for an HTTP-level
+    comparison.
+
+  `lc` (the third family originally filed under `#115`) remains
+  `DEFERRED` — it is profile-gated, not closeable by a direct-vector pass.
+  `MIN_REPLAYED_EXCHANGES` (30) and the exchange replay count are
+  unaffected: both new tests are non-HTTP vector passes.
+
+<!-- end REG-11 Phase 7 -->
+
 <!-- REG-11 Phase 9 (Lane B) -->
 
 - **`GET /healthz` now reports the running build** (`REG-11` Phase 9,
@@ -804,6 +839,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cargo-deny), `release-plz.yml`, `docker.yml`.
 
 ### Changed
+
+<!-- REG-11 #144 + #139 (Lane C) -->
+
+- **Both bump workflows pass the bot secrets explicitly instead of
+  `secrets: inherit`** (`REG-11`, `#144`): `.github/workflows/bump-acdp.yml`
+  and `.github/workflows/bump-spec.yml` now forward only `ACDP_BOT_APP_ID`
+  and `ACDP_BOT_PRIVATE_KEY`. This is least-privilege hardening, **not** a
+  fix for a breakage — `inherit` forwarded these two under the same names,
+  so behaviour is unchanged. What changes is everything *else* that was in
+  scope: this repo holds `CARGO_REGISTRY_TOKEN`, and `inherit` handed it to
+  a job that runs `npm install` and two `curl | sh` installers. Both callees
+  declare exactly these two secrets as `required: true` at the `v1` ref the
+  callers pin, run with `permissions: {}`, and mint their own short-lived
+  App token, so `inherit` always granted strictly more than they consume.
+  No caller `permissions:` block was added — neither callee reads the
+  caller's `GITHUB_TOKEN`. (`auto-merge.yml`'s callee does, so this does not
+  transfer there.)
+
+- **`bump-spec.yml`'s `repository_dispatch` comment corrected** (`REG-11`,
+  `#139`): it claimed that trigger was "inert until the spec repo adds this
+  repo to `notify-spec-consumers.yml`'s matrix". That is false, and
+  falsifiable from this repo alone — `bump-spec.yml` has repeated successful
+  `event=repository_dispatch` / `spec-released` runs (2026-09-05 onward),
+  and PR `#147`, the spec bump merged as `e58eaf4`, was opened by
+  `app/acdp-deps-bot` off that path. The replacement deliberately does not
+  restate which consumers the spec repo notifies: mirroring another repo's
+  routing table in a comment this file cannot keep in sync is what made it
+  rot. The dispatch matrix itself is the spec repo's (`spec#40`) and is not
+  edited here.
+
+<!-- end REG-11 #144 + #139 -->
 
 <!-- REG-11 #156 (Lane B) -->
 
