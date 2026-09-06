@@ -840,6 +840,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+<!-- REG-11 #144 + #139 (Lane C) -->
+
+- **Both bump workflows pass the bot secrets explicitly instead of
+  `secrets: inherit`** (`REG-11`, `#144`): `.github/workflows/bump-acdp.yml`
+  and `.github/workflows/bump-spec.yml` now forward only `ACDP_BOT_APP_ID`
+  and `ACDP_BOT_PRIVATE_KEY`. This is least-privilege hardening, **not** a
+  fix for a breakage — `inherit` forwarded these two under the same names,
+  so behaviour is unchanged. What changes is everything *else* that was in
+  scope: this repo holds `CARGO_REGISTRY_TOKEN`, and `inherit` handed it to
+  a job that runs `npm install` and two `curl | sh` installers. Both callees
+  declare exactly these two secrets as `required: true` at the `v1` ref the
+  callers pin, run with `permissions: {}`, and mint their own short-lived
+  App token, so `inherit` always granted strictly more than they consume.
+  No caller `permissions:` block was added — neither callee reads the
+  caller's `GITHUB_TOKEN`. (`auto-merge.yml`'s callee does, so this does not
+  transfer there.)
+
+- **`bump-spec.yml`'s `repository_dispatch` comment corrected** (`REG-11`,
+  `#139`): it claimed that trigger was "inert until the spec repo adds this
+  repo to `notify-spec-consumers.yml`'s matrix". That is false, and
+  falsifiable from this repo alone — `bump-spec.yml` has repeated successful
+  `event=repository_dispatch` / `spec-released` runs (2026-09-05 onward),
+  and PR `#147`, the spec bump merged as `e58eaf4`, was opened by
+  `app/acdp-deps-bot` off that path. The replacement deliberately does not
+  restate which consumers the spec repo notifies: mirroring another repo's
+  routing table in a comment this file cannot keep in sync is what made it
+  rot. The dispatch matrix itself is the spec repo's (`spec#40`) and is not
+  edited here.
+
+<!-- end REG-11 #144 + #139 -->
+
 <!-- REG-11 #156 (Lane B) -->
 
 - **BREAKING** (`#156`): the memory-backend tenancy refusal now covers
