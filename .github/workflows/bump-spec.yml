@@ -1,9 +1,13 @@
 name: bump spec
 
 # Delegates to acdp-ci's reusable bump-spec-ref workflow, mirroring bump-acdp.yml.
-# Note: `repository_dispatch` is inert until the spec repo adds this repo to
-# notify-spec-consumers.yml's matrix (today: acdp-rs, acdp-verifier-py only).
-# `workflow_dispatch` works immediately.
+# Both triggers are live: `workflow_dispatch` for a manual bump, and
+# `repository_dispatch` (type `spec-released`) fired by the spec repo when it
+# publishes -- that path is what opened the spec bumps this repo has already
+# merged.
+# Deliberately no consumer list here: the previous version of this comment
+# named the spec repo's dispatch matrix and went stale the moment this repo was
+# added to it (#139). Another repo's routing table is not this file's to mirror.
 on:
   repository_dispatch:
     types: [spec-released]
