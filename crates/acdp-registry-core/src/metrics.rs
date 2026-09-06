@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use acdp_registry_store::ExtendedRegistryStore;
 
+use crate::secure_compare::ct_eq;
 use crate::state::AppState;
 
 /// Metric names. Centralised so the middleware, the domain-counter helpers,
@@ -125,7 +126,18 @@ pub async fn metrics_endpoint<S: ExtendedRegistryStore + 'static>(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(str::trim);
-        if presented != Some(token) {
+        // #168: compare in constant time, matching the `/admin/*` gate. `!=`
+        // on `&str` is free to stop at the first differing byte, leaking the
+        // matching-prefix length of a configured credential; `ct_eq` folds
+        // over every byte instead. Same helper as the admin allowlist, not a
+        // second copy — two copies of this would drift.
+        //
+        // A missing or malformed header short-circuits here, and that is
+        // deliberate: header SHAPE is not secret content, and the admin gate
+        // refuses on the same basis. Token LENGTH also remains observable via
+        // `ct_eq`'s length guard, which is accepted in the existing design.
+        let authorized = presented.is_some_and(|p| ct_eq(p.as_bytes(), token.as_bytes()));
+        if !authorized {
             return (
                 StatusCode::UNAUTHORIZED,
                 [(

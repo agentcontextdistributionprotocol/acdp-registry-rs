@@ -1627,6 +1627,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+<!-- REG-11 #168 (Lane B) -->
+
+- **The `/metrics` bearer gate now compares in constant time** (`#168`). It used
+  `presented != Some(token)` — `&str` equality, which is free to stop at the
+  first differing byte and so leaks the matching-prefix length of a configured
+  credential. `/admin/*` has compared with a constant-time `ct_eq` since `#23`,
+  deliberately: a dedicated helper, a doc comment, a unit test pinning the
+  property, and an allowlist fold with no early return so it does not leak
+  *which* entry matched. Two gates comparing the same kind of secret disagreed.
+
+  `ct_eq` was private to `handlers::admin`; it moves to a shared
+  `acdp_registry_core::secure_compare` and both gates now call it. One
+  implementation, not a copy each — a duplicated fold is one refactor away from
+  drifting, which is the outcome the issue explicitly warned against.
+
+  **Severity: hardening, not a live vulnerability.** Remote timing attacks on a
+  `memcmp`-style comparison over HTTP are hard, and no shipped config exposes
+  the gate. The argument is consistency with a decision this codebase already
+  made. Two limits are documented rather than glossed: the length guard returns
+  early, so token *length* remains observable at both gates; and no unit test
+  here can demonstrate constant-timeness — the tests pin behaviour, and the
+  timing property rests on a single reviewed implementation.
+
+- **Fixed a coverage hole found while implementing the above**: nothing asserted
+  that `/metrics` refuses a **wrong** bearer token. Replacing the comparison
+  with a literal `true` left the entire workspace suite green (measured). Every
+  refused case in the existing tests fails at the `"Bearer "` prefix, so the
+  authorization decision itself — the reason the gate exists — was untested, and
+  `/metrics` could have been made to accept any token with CI staying green.
+  `metrics_wrong_bearer_token_is_refused` covers it, including the near-miss
+  shapes (`Bearer scrape-secre`, `Bearer scrape-secreT`) that a timing oracle
+  would target. The equivalent mutation on `/admin/*` turns four tests red, so
+  the gap was specific to `/metrics`.
+
 <!-- REG-11 #162 (Lane B) -->
 
 - **A whitespace-only `metrics.bearer_token` is refused at startup** (`#162`):
