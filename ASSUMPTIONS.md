@@ -9,6 +9,16 @@ full recommendation + human decision on each. This file is kept as the original 
 
 1. **Inline `actions/checkout@v4` vs `checkout-spec@v1`.** CONFIRMED as-is — the `v1`
    tag doesn't even contain the shared action yet. Follow-up: file an `acdp-ci` issue.
+   *Superseded 2026-09-06 (`#155`): `v1` now contains the action and this repo adopted
+   `checkout-spec`; the inline form is gone. The original entry stands as written — its
+   premise changed, it was not wrong. See `DECISIONS.md` § "1. `checkout-spec@v1` vs
+   inline checkout".*
+   *Measured vs inferred, kept honest deliberately: what is **measured** is that `v1`
+   today dereferences to commit `0159101…` and that `git ls-tree -r v1` lists
+   `actions/checkout-spec/action.yml`. That the tag was **re-tagged** (moved) is an
+   **inference** — consistent with the evidence, but tag movement leaves no readable
+   history, so it cannot be confirmed after the fact from the repo alone. Nothing in
+   `#155` depends on it: the action is pinned at the immutable commit SHA, not at `v1`.*
 
 2. **`bump-spec.yml` out of scope.** Changed to NEEDS-FOLLOWUP — add it as a near-term
    follow-up (inert until dispatched), paired with a cross-repo spec-matrix item.

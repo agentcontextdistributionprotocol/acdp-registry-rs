@@ -8,6 +8,41 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+<!-- REG-11 Phase 7 -->
+
+- **`lin` and `caps` move from `DEFERRED` to `COVERED`** (`REG-11` Phase 7,
+  `#115`): two new direct-vector tests in
+  `crates/acdp-registry-server/tests/conformance.rs`.
+  - `lin_vectors_reproduce_lineage_derivation` reuses the existing
+    `assert_lineage_vector` helper (previously exercised only via
+    can-001) against `lin-001-lineage-derivation-golden`'s 3 vectors.
+    `lin-001` carries `applies_to_profiles: ["acdp-registry-core",
+    "acdp-consumer"]`, but this is a pure-function check of
+    `derive_lineage_id` with no HTTP leg, so it deliberately bypasses the
+    runtime profile gate rather than adding one.
+  - `caps_vectors_validate_capabilities_document` runs all 7 caps-*
+    fixtures' `input.response_body` through
+    `acdp::validation::validate_capabilities`, plus caps-007's 3
+    `reject_variants` (hand-applied against the single dotted path they
+    override, `limits.max_publish_per_minute`). Measured against the
+    fixtures directly: caps-001/006/007(base) accept and
+    caps-002/003/004/005 plus caps-007's 3 variants reject — 4 rejecting
+    base fixtures, not 6. caps-006 in particular is an *accept* case:
+    the `CapabilitiesDocument` schema tolerates unknown top-level fields
+    (only its `limits` sub-object is closed). Rejection is accepted from
+    either serde deserialization or `validate_capabilities` itself, since
+    both are `schema_violation` and indistinguishable to a real consumer.
+    No HTTP leg here either: `acdp-registry-server` is bin-only, so this
+    crate cannot import its own `build_capabilities` for an HTTP-level
+    comparison.
+
+  `lc` (the third family originally filed under `#115`) remains
+  `DEFERRED` — it is profile-gated, not closeable by a direct-vector pass.
+  `MIN_REPLAYED_EXCHANGES` (30) and the exchange replay count are
+  unaffected: both new tests are non-HTTP vector passes.
+
+<!-- end REG-11 Phase 7 -->
+
 <!-- REG-11 Phase 9 (Lane B) -->
 
 - **`GET /healthz` now reports the running build** (`REG-11` Phase 9,
@@ -805,6 +840,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+<!-- REG-11 #144 + #139 (Lane C) -->
+
+- **Both bump workflows pass the bot secrets explicitly instead of
+  `secrets: inherit`** (`REG-11`, `#144`): `.github/workflows/bump-acdp.yml`
+  and `.github/workflows/bump-spec.yml` now forward only `ACDP_BOT_APP_ID`
+  and `ACDP_BOT_PRIVATE_KEY`. This is least-privilege hardening, **not** a
+  fix for a breakage — `inherit` forwarded these two under the same names,
+  so behaviour is unchanged. What changes is everything *else* that was in
+  scope: this repo holds `CARGO_REGISTRY_TOKEN`, and `inherit` handed it to
+  a job that runs `npm install` and two `curl | sh` installers. Both callees
+  declare exactly these two secrets as `required: true` at the `v1` ref the
+  callers pin, run with `permissions: {}`, and mint their own short-lived
+  App token, so `inherit` always granted strictly more than they consume.
+  No caller `permissions:` block was added — neither callee reads the
+  caller's `GITHUB_TOKEN`. (`auto-merge.yml`'s callee does, so this does not
+  transfer there.)
+
+- **`bump-spec.yml`'s `repository_dispatch` comment corrected** (`REG-11`,
+  `#139`): it claimed that trigger was "inert until the spec repo adds this
+  repo to `notify-spec-consumers.yml`'s matrix". That is false, and
+  falsifiable from this repo alone — `bump-spec.yml` has repeated successful
+  `event=repository_dispatch` / `spec-released` runs (2026-09-05 onward),
+  and PR `#147`, the spec bump merged as `e58eaf4`, was opened by
+  `app/acdp-deps-bot` off that path. The replacement deliberately does not
+  restate which consumers the spec repo notifies: mirroring another repo's
+  routing table in a comment this file cannot keep in sync is what made it
+  rot. The dispatch matrix itself is the spec repo's (`spec#40`) and is not
+  edited here.
+
+<!-- end REG-11 #144 + #139 -->
+
 <!-- REG-11 #156 (Lane B) -->
 
 - **BREAKING** (`#156`): the memory-backend tenancy refusal now covers
@@ -957,6 +1023,69 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pass like `can`'s.
 
 <!-- end REG-11 Phase 6 -->
+
+<!-- REG-11 #143 (Lane C) -->
+
+- **`ci.yml`'s conformance job checks the spec out through
+  `acdp-ci/actions/checkout-spec` rather than a hand-rolled `actions/checkout`**
+  (`REG-11`, #143). The pinned spec ref is unchanged —
+  `d1f06d0d49b73d411a3983d3877321ccaccd38e7`, exactly as merged in #147; only
+  the mechanism that checks it out changed. This was an adoption ask, not a
+  compliance defect: #143 states outright that the previous form already
+  satisfied the substance of the spec-pinning rule.
+  The action resolves at `015910153b61c32abbe018afe85d44868897bf3b # v1` — the
+  commit `acdp-ci`'s **annotated** `v1` tag dereferences to (`refs/tags/v1` →
+  tag object `82b2a25…` → commit `0159101…`, confirmed against the remote via
+  `gh api`; the `action.yml` blob at that commit is `8c5dacd…` on GitHub and in
+  the local clone alike). That is `acdp-verifier-py`'s call-site pin verbatim,
+  and it follows `REG-8`/`REG-10`'s rule that a non-`actions/*` action resolves
+  at an immutable 40-hex SHA with a `# <version>` comment. The
+  `acdp-ci/.github/workflows/*@v1` reusable-workflow refs are untouched and stay
+  tag-tracked — a composite action is a `uses:` step inside this job, not the
+  family propagation that exemption protects.
+  Three guarantees the hand-rolled form did not have: the action rejects a `ref`
+  that is not 40-hex lowercase before any network call; it re-reads the
+  checked-out `HEAD` and fails when it differs from the pin; and it refuses the
+  `set-env: false` + `require-conformance: true` combination, which would export
+  `ACDP_REQUIRE_CONFORMANCE` without `ACDP_SPEC_DIR`.
+  The `Conformance (spec fixtures required)` step still sets both variables
+  itself rather than relying only on the action's `$GITHUB_ENV` exports, so
+  require-mode stays a property of *this* file and cannot be switched off by an
+  action input. `ACDP_SPEC_DIR` now reads the action's `path` output instead of
+  restating `${{ github.workspace }}/acdp-spec`, so the checkout location and
+  the variable cannot drift apart.
+  No `repository:` or `path:` override is passed, even though both would merely
+  restate the action's own defaults: `bump-spec-ref.yml` counts a
+  `repository: <spec>` line as a **second** pin anchor and then fails the bump
+  outright rather than rewrite only the first, so adding one would silently
+  disable `bump-spec.yml`. Checked by running that workflow's own anchor-count
+  `awk`, its `perl` rewriter and its post-rewrite assertion — copied verbatim
+  from `acdp-ci` at `v1` — against the new file: one anchor, `d1f06d0…`
+  resolved as the current pin, and a simulated bump rewrote exactly one line,
+  the spec `ref:`, leaving the action's own `@0159101…` pin alone.
+  For this job, a green result is not by itself evidence — so acceptance was two
+  negative controls plus the replay tally, not colour. Measured with
+  `cargo test -p acdp-registry-server --features storage-sqlite,playground
+  --test conformance --test conformance_gate` against a spec worktree detached
+  at the pinned `d1f06d0…`: `replayed 30 exchange(s); failures=0`, with a
+  `ran by family` tally of `pub: 3` / `ret: 1` / `vis: 26`. No raw pass count
+  is recorded here on purpose — that number moves with every merge that adds
+  a test (it was 43 against this branch's original merge-base, 44 once `#158`
+  landed, 46 after Phase 7) and says nothing about this change. The replay
+  tally is the invariant #143 actually has to preserve, and it did not move.
+  Re-pointed at a nonexistent `ACDP_SPEC_DIR` with
+  `ACDP_REQUIRE_CONFORMANCE=1` the same command panics at
+  `conformance.rs:2549` and exits 101; with neither variable set it exits **0**
+  while replaying nothing, logging `ACDP_SPEC_DIR unset or no fixtures
+  resolvable; skipping`. That second control is why the pin-and-require design
+  exists, and why the CI job log — not the check mark — is the acceptance
+  artifact. CI reproduced the replay tally and the per-family breakdown
+  exactly.
+  Note that `MIN_REPLAYED_EXCHANGES` (derived from source as 30) is met
+  *exactly*, with no headroom: losing one replayed exchange turns the required
+  job red.
+
+<!-- end REG-11 #143 -->
 
 - **BREAKING** (`REG-11` Phase 3, `#133`): `GET /admin/contexts` is now
   gated behind `require_admin_bearer`, like every other `/admin/*` route.
