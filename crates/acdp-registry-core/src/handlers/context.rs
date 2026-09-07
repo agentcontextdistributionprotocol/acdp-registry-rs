@@ -114,7 +114,7 @@ pub(crate) fn tenant_from_headers(headers: &HeaderMap) -> Option<String> {
 /// `Err(AuthChallenge("tenant assertion mismatch"))` — the header is
 /// claiming a tenant the JWT didn't bind, which is either misconfig
 /// or hostile. Same shape as a failed-auth error so it surfaces as
-/// a clean 401/403 at the response layer.
+/// a clean 403 at the response layer.
 pub(crate) fn tenant_for_request<S: ExtendedRegistryStore + 'static>(
     state: &AppState<S>,
     headers: &HeaderMap,
@@ -156,7 +156,7 @@ pub(crate) fn tenant_for_request<S: ExtendedRegistryStore + 'static>(
             Err(_) => {
                 // Token didn't validate. We do NOT short-circuit on a bad
                 // bearer here — `caller_from_headers` is the right place for
-                // that decision (it surfaces the 401). Treat tenant
+                // that decision (it surfaces the 403). Treat tenant
                 // resolution as header-only when claims can't be read.
                 header_tenant
             }
@@ -802,7 +802,7 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
     }
 
     // Resolve the tenant scope up front (before the DB read) so a strict-mode
-    // default-deny fails fast and doesn't create a 404-vs-401 existence oracle
+    // default-deny fails fast and doesn't create a 404-vs-403 existence oracle
     // between a missing row and an unscoped request.
     let requested_tenant = tenant_for_request(&state, &headers)?;
 
@@ -820,7 +820,7 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
     };
     // Tenant gate. JWT `tenant` claim is preferred over X-Tenant-Id;
     // mismatch between the two → tenant_for_request returns Err
-    // (surfaces as 401/403, not a silent not-found). When neither is
+    // (surfaces as 403, not a silent not-found). When neither is
     // present → V0 behavior, no filter.
     if let Some(requested_tenant) = requested_tenant {
         let stored = state
@@ -1342,9 +1342,11 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
 ///
 /// Returns `Ok(None)` for unauthenticated requests (no header, non-Bearer
 /// scheme, or `auth.enabled = false`); downstream code then applies the
-/// public-only filter. Returns `Err(401)` for a bearer header that *is*
+/// public-only filter. Returns `Err(403)` for a bearer header that *is*
 /// present but invalid — we don't silently degrade to anonymous because
-/// a client whose token just expired should see that explicitly.
+/// a client whose token just expired should see that explicitly. The
+/// error is `RegistryError::AuthToken`/`Jwt`, which `http_status` maps to
+/// 403 (`not_authorized`); `/metrics` is the only 401 in this registry.
 pub(crate) fn caller_from_headers<S: ExtendedRegistryStore + 'static>(
     state: &AppState<S>,
     headers: &HeaderMap,

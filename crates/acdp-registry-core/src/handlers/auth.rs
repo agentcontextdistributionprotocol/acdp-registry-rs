@@ -67,8 +67,10 @@ pub struct RevokeRequest {
 /// tokens issued to themselves (enforced inside `AuthService::revoke_token`
 /// via the `owner_of` check on the revocation store).
 ///
-/// Returns 204 on success. 401 when the bearer is missing/invalid or
-/// belongs to a different DID than the target token. 503 when the
+/// Returns 204 on success. 403 when the bearer is missing/invalid or
+/// belongs to a different DID than the target token: all three paths
+/// yield `RegistryError::AuthToken`, which `http_status` maps to 403
+/// (`not_authorized`) — this registry has no 401-bearing code. 503 when the
 /// registry was started without a revocation store (which means the
 /// signer does not consult one either).
 pub async fn revoke_token<S: ExtendedRegistryStore + 'static>(
