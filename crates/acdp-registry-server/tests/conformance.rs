@@ -363,8 +363,9 @@
 //! `DEFERRED` is `&[(&str, &str, u32)]` -- family, a non-empty written reason, and an
 //! open GitHub issue number. `lc` cites **#115** (filed for `caps`/`lin`/`lc`; the
 //! first two closed to COVERED in Phase 7, so `lc` is the only one left under it);
-//! the remaining 13 cite **#130**, filed enumerating each with its own reason (`meta`
-//! and `data-ref` closed to COVERED in Phase 10, same #130 filing).
+//! the remaining 12 cite **#130**, filed enumerating each with its own reason (`meta`
+//! and `data-ref` closed to COVERED in Phase 10, `schema` closed to COVERED in Phase 12,
+//! same #130 filing).
 //! `known_families_partition_into_covered_excused_or_deferred` checks both: reason
 //! non-empty, issue is one of the two known-open numbers, and that any of the
 //! `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115.
@@ -399,7 +400,7 @@ use acdp::producer::Producer;
 use acdp::registry::RegistryServer;
 use acdp::types::capabilities::{CapabilitiesDocument, Limits};
 use acdp::types::primitives::{AgentDid, ContentHash, ContextType, CtxId, Visibility};
-use acdp::types::publish::PublishRequest;
+use acdp::types::publish::{PublishRequest, PublishResponse};
 use acdp::types::{DataRef, DataRefType, EmbeddedContent, EmbeddedEncoding};
 use acdp::AnchorEntry;
 #[cfg(feature = "playground")]
@@ -7238,6 +7239,328 @@ async fn data_ref001_007_publish_path_rejections_enforced() {
     );
 }
 
+// ─── REG-11 Phase 12: `schema` (RFC-ACDP-0007 §3.3.1 openness map + RFC-ACDP-0005 §2.2.1 absent-vs-null) ───
+
+/// The exact number of schema-* ids in `acdp-registry-core`'s own
+/// `required_fixtures` at spec pin d1f06d0 -- verified directly against
+/// `registries/profiles.json`, NOT the number of schema-*.json files on
+/// disk. There are 14 schema-* fixtures on disk (001..014); only 8 --
+/// schema-002/003/008/009/010/011/012/014 -- sit in
+/// `acdp-registry-core`'s `required_fixtures`. The other 6 (schema-001,
+/// -004, -005, -006, -007, -013) sit only in the `acdp-consumer` profile's
+/// `required_fixtures` (search-response / capabilities-top-level /
+/// error-details shapes this registry, as opposed to a consumer parsing
+/// search results, never needs to reject) and are correctly out of scope
+/// here.
+const EXPECTED_SCHEMA_FIXTURE_COUNT: usize = 8;
+const EXPECTED_SCHEMA_ASSERTION_COUNT: usize = 8;
+
+fn schema_producer(seed: u8) -> Producer {
+    common::producer("schema", seed)
+}
+
+/// POST an arbitrary raw JSON `body` to `/contexts` on `app` and return
+/// `(status, parsed body)`. Unlike [`anc_publish`], which serializes a
+/// typed `PublishRequest` through its own `Serialize` impl, this posts a
+/// hand-built [`Value`] verbatim -- required because every violation this
+/// family tests (schema-003/008/009/011/012) is exactly a shape the typed
+/// builder cannot produce in the first place: `Signature`/`DataPeriod`/
+/// `EmbeddedContent` are `#[serde(deny_unknown_fields)]` with no Rust field
+/// to carry an extra key, and `DataRef::format`/`DataRef::location` are
+/// `Option<_>` with `skip_serializing_if = "Option::is_none"`, so a `None`
+/// serializes as an OMITTED key, never a literal JSON `null`. Reaching the
+/// registry's own rejection path (`serde_json::from_slice::<PublishRequest>`
+/// in `acdp-registry-core`'s `handlers/context.rs:322-323`, which maps any
+/// deserialization failure to `AcdpError::SchemaViolation` -> HTTP 400 /
+/// `schema_violation`, BEFORE hash/signature verification or
+/// `validate_post_schema` ever run) requires posting raw JSON instead.
+async fn anc_publish_raw(app: &axum::Router, body: &Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    (status, v)
+}
+
+/// Build a schema-valid publish-request [`Value`] (empty `data_refs`,
+/// `Public`, `DataSnapshot`) via the real `RequestBuilder`, then serialize
+/// it to a raw [`Value`] -- the base each schema-00N case below patches
+/// exactly one field of, via [`anc_publish_raw`].
+fn schema_base_publish_value(seed: u8, title: &str) -> Value {
+    let req = schema_producer(seed)
+        .publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    serde_json::to_value(&req).unwrap()
+}
+
+/// Read `expected.http_status`, falling back to `expected.status` --
+/// schema-003 (at spec pin d1f06d0) carries only `status`, while
+/// schema-008/009/011/012 carry `http_status` (008/009 carry both, same
+/// value). Panics loudly if neither key is present or numeric.
+fn schema_expected_http_status(fx: &Value, id: &str) -> u16 {
+    fx["expected"]["http_status"]
+        .as_u64()
+        .or_else(|| fx["expected"]["status"].as_u64())
+        .unwrap_or_else(|| {
+            panic!("{id}: expected.http_status/expected.status missing or not a number: {fx}")
+        }) as u16
+}
+
+fn schema_expected_error_code<'a>(fx: &'a Value, id: &str) -> &'a str {
+    fx["expected"]["error_code"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{id}: expected.error_code missing or not a string: {fx}"))
+}
+
+/// One `(fixture id, in-place JSON patch)` pair used by the
+/// schema-003/008/009/011/012 loop below.
+type SchemaBodyPatch = (&'static str, fn(&mut Value, &Value));
+
+/// schema-002/003/008/009/010/011/012/014 (RFC-ACDP-0007 §3.3.1's openness
+/// map -- `PublishResponse`, `Signature`, `DataPeriod`, `EmbeddedContent`,
+/// and `Limits` are CLOSED sub-objects; RFC-ACDP-0005 §2.2.1's absent-vs-null
+/// convention -- `DataRef.format`/`DataRef.location`/`Limits.
+/// idempotency_key_ttl_seconds` are non-nullable optionals) -- the 8
+/// schema-* ids in `acdp-registry-core`'s `required_fixtures` at spec pin
+/// d1f06d0; see [`EXPECTED_SCHEMA_FIXTURE_COUNT`]'s doc comment for why that
+/// is 8, not the 14 schema-*.json files that exist on disk.
+///
+/// Every one of the 8 fixtures is worded from the CONSUMER's point of view
+/// (`consumer_outcome`/`consumer_error`, never `registry_outcome` alone),
+/// but each closed sub-object / non-nullable optional involved is this
+/// registry's OWN wire type (`acdp::types::*`, the same crate both producer
+/// and registry link against), so the registry-side contrapositive holds
+/// directly: a shape this registry's own (de)serialization layer cannot
+/// PRODUCE is exactly a shape a strict consumer parsing this registry's own
+/// output would never have to reject, and a shape a strict consumer WOULD
+/// reject is exactly a shape this registry's own `serde_json::from_slice::
+/// <PublishRequest>` (`handlers/context.rs:322`) or `CapabilitiesDocument`
+/// deserialization also rejects, for the identical closed-schema /
+/// non-nullable-optional reason.
+///
+/// schema-002 is the "registry never emits" half of that contrapositive,
+/// same precedent as REG-11 Phase 11's `body`/`status` families: rather
+/// than only proving the fixture's own malformed `response_body`
+/// (`content_hash` echoed back) fails to deserialize as `PublishResponse`
+/// -- true, but that only proves the TYPE is closed, not that THIS
+/// registry never emits the forbidden field -- this drives a real publish
+/// through `app` and asserts the ACTUAL served response both parses as
+/// `PublishResponse` and carries no `content_hash` key at all.
+///
+/// schema-003/008/009/011/012 are publish-path rejections, each isolating
+/// one closed sub-object or non-nullable optional by splicing the fixture's
+/// own malformed JSON fragment into an otherwise-valid signed body's raw
+/// `Value` (never a typed struct -- see [`anc_publish_raw`]'s doc comment
+/// for why the typed builder cannot produce these shapes at all) and
+/// POSTing it directly via [`anc_publish_raw`]. None of the 5 needs a
+/// data-ref-007-style substitution: each fixture's own fragment already
+/// targets a field this registry's real `acdp-types` 0.9.1 dependency
+/// actually has (unlike data-ref-007's schema-only `embedded.content_hash`
+/// nesting -- see `data_ref001_007_publish_path_rejections_enforced`'s doc
+/// comment), so splicing it verbatim exercises the exact intended rejection
+/// reason, not an accidental one.
+///
+/// schema-010 needs one deliberate departure from "splice the fixture's own
+/// fragment verbatim," and is the one genuine wrong-reason trap this family
+/// contains -- the same shape as data-ref-007's, found by checking rather
+/// than inheriting the plan's claim that this family is uniformly
+/// splice-verbatim-safe. At spec pin d1f06d0, schema-010's own
+/// `input.response_body_excerpt` is only `{"limits": {...}}`, NOT a full
+/// `CapabilitiesDocument` -- it omits every other required top-level field
+/// (`acdp_version`, `registry_did`, `supported_signature_algorithms`,
+/// `supported_did_methods`, `profiles`). Deserializing that excerpt
+/// verbatim as `CapabilitiesDocument` fails at those MISSING top-level
+/// fields before `Limits`'s `deny_unknown_fields` ever gets a chance to
+/// reject the excerpt's `limits.extra` key -- `schema_violation` either
+/// way, but for the wrong reason: a naive splice-verbatim test would report
+/// coverage of "limits is a closed sub-object" that does not actually
+/// exist. So this test instead takes this registry's OWN real, already-
+/// valid capabilities document (`caps()`, `conformance.rs:431` --
+/// self-checked as `"accept"` first) and splices ONLY the fixture's
+/// malformed `limits` object onto it, isolating the exact field this
+/// fixture exists to exercise.
+///
+/// schema-014's `input.response_body` IS already a full, otherwise-valid
+/// document (only `limits.idempotency_key_ttl_seconds` is `null`), so it is
+/// used verbatim -- no splicing needed, no trap.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_vectors_openness_and_absent_vs_null_enforced() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping schema-002/003/\
+             008/009/010/011/012/014 (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut asserted = 0usize;
+    let mut found_ids: Vec<&str> = Vec::new();
+    let app = harness().await;
+
+    // schema-002: registry never emits `content_hash` on a publish response.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "schema-002") {
+        found_ids.push("schema-002");
+        let malformed = fx["input"]["response_body"].clone();
+        assert!(
+            serde_json::from_value::<PublishResponse>(malformed).is_err(),
+            "schema-002 self-check: input.response_body (carrying content_hash) must itself \
+             fail to deserialize as PublishResponse (deny_unknown_fields): {fx}"
+        );
+        let req = schema_producer(240)
+            .publish_request()
+            .title("schema-002 publish response shape")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let (status, v) = anc_publish(&app, &req).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "schema-002: this repo's POST /contexts returns 200 on success; body = {v}"
+        );
+        assert!(
+            v.get("content_hash").is_none(),
+            "schema-002: registry's own publish response must never carry content_hash: {v}"
+        );
+        assert!(
+            serde_json::from_value::<PublishResponse>(v.clone()).is_ok(),
+            "schema-002: registry's own real publish response must deserialize cleanly as \
+             PublishResponse (i.e. carry no unknown/forbidden field): {v}"
+        );
+        asserted += 1;
+    }
+
+    // schema-003/008/009/011/012: publish-path rejections, each isolating
+    // one closed sub-object / non-nullable optional by patching exactly one
+    // field of an otherwise-valid signed body's raw JSON `Value`.
+    let patches: [SchemaBodyPatch; 5] = [
+        ("schema-003", |body: &mut Value, fx: &Value| {
+            body["data_refs"] =
+                json!([fx["input"]["request_body_excerpt"]["data_refs"][0].clone()]);
+        }),
+        ("schema-008", |body: &mut Value, fx: &Value| {
+            body["signature"] = fx["input"]["request_body_excerpt"]["signature"].clone();
+        }),
+        ("schema-009", |body: &mut Value, fx: &Value| {
+            body["data_period"] = fx["input"]["request_body_excerpt"]["data_period"].clone();
+        }),
+        ("schema-011", |body: &mut Value, fx: &Value| {
+            body["data_refs"] = json!([fx["input"]["data_ref_under_test"].clone()]);
+        }),
+        ("schema-012", |body: &mut Value, fx: &Value| {
+            body["data_refs"] = json!([fx["input"]["data_ref_under_test"].clone()]);
+        }),
+    ];
+    for (i, (id, patch)) in patches.into_iter().enumerate() {
+        let Some(fx) = find_fixture_by_id(&fixtures, id) else {
+            continue;
+        };
+        found_ids.push(id);
+
+        let mut body = schema_base_publish_value(241 + i as u8, &format!("{id} publish"));
+        patch(&mut body, &fx);
+
+        let (status, v) = anc_publish_raw(&app, &body).await;
+        let want_status = schema_expected_http_status(&fx, id);
+        let want_code = schema_expected_error_code(&fx, id);
+        assert_eq!(status.as_u16(), want_status, "{id}: body = {v}");
+        assert_eq!(v["error"]["code"], want_code, "{id}: body = {v}");
+        asserted += 1;
+    }
+
+    // schema-010: closed `limits` sub-object inside the open capabilities
+    // document -- MERGED onto this registry's OWN real, valid document
+    // (never the fixture's bare `{"limits": {...}}` excerpt, and never a
+    // wholesale replacement of the base's own `limits` object either -- see
+    // this test's doc comment for why either would fail for the wrong
+    // reason: this harness's own `caps()` sets `supports_idempotency_key:
+    // true`, which `acdp_validation::validate_capabilities` (RFC-ACDP-0007
+    // §3.2) then requires `limits.idempotency_key_ttl_seconds` for; the
+    // fixture's own `limits` fragment never carries that key at all, so a
+    // wholesale `overridden["limits"] = ...` replacement would ALSO reject
+    // -- correctly, but for a second, unintended reason (a missing
+    // required TTL, the caps-004 violation) that would mask whether the
+    // `extra` key rejection this fixture exists to prove is even reached.
+    // Merging the fixture's keys onto a clone of the base's own `limits`
+    // object -- same technique as caps-007's reject_variants
+    // (`conformance.rs`, `caps_vectors_validate_capabilities_document`),
+    // generalized from one field to all of the fixture's -- keeps
+    // `idempotency_key_ttl_seconds` intact and isolates exactly the field
+    // this fixture exists to exercise.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "schema-010") {
+        found_ids.push("schema-010");
+        let base = serde_json::to_value(caps()).unwrap();
+        assert_capabilities_outcome(
+            &base,
+            "accept",
+            "schema-010 base (this registry's own caps())",
+        );
+        let mut overridden = base;
+        let fixture_limits = fx["input"]["response_body_excerpt"]["limits"]
+            .as_object()
+            .unwrap_or_else(|| {
+                panic!(
+                    "schema-010: input.response_body_excerpt.limits missing or not an object: {fx}"
+                )
+            });
+        let base_limits = overridden["limits"].as_object_mut().unwrap_or_else(|| {
+            panic!("schema-010: this registry's own caps() must serialize limits as an object")
+        });
+        for (k, v) in fixture_limits {
+            base_limits.insert(k.clone(), v.clone());
+        }
+        let want = fx["expected"]["consumer_outcome"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!("schema-010: expected.consumer_outcome missing or not a string: {fx}")
+            });
+        assert_capabilities_outcome(&overridden, want, "schema-010");
+        asserted += 1;
+    }
+
+    // schema-014: full, otherwise-valid document; only
+    // limits.idempotency_key_ttl_seconds is null -- used verbatim, no trap.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "schema-014") {
+        found_ids.push("schema-014");
+        let body = fx["input"]["response_body"].clone();
+        let want = fx["expected"]["consumer_outcome"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!("schema-014: expected.consumer_outcome missing or not a string: {fx}")
+            });
+        assert_capabilities_outcome(&body, want, "schema-014");
+        asserted += 1;
+    }
+
+    assert_eq!(
+        found_ids.len(),
+        EXPECTED_SCHEMA_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_SCHEMA_FIXTURE_COUNT} schema-* fixtures (of \
+         acdp-registry-core's required_fixtures) at spec pin d1f06d0: found {found_ids:?}"
+    );
+    assert_eq!(
+        asserted, EXPECTED_SCHEMA_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_SCHEMA_ASSERTION_COUNT} schema-* outcome assertions at spec \
+         pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
+         this ratchet exists to prevent"
+    );
+}
+
 // ─── Phase 1: harness fidelity gates ───
 
 /// A fixture whose `applies_to_profiles` is disjoint from `HARNESS_PROFILES`
@@ -7617,13 +7940,16 @@ const KNOWN_FAMILIES: &[&str] = &[
 /// family that appears in `required_fixtures` or anywhere in
 /// `conditional_fixtures` (`registries/profiles.json` at the pin named in
 /// `ci.yml`'s `conformance` job), sorted and deduped. Mirrors the *family*
-/// footprint, not coverage status: `can`, `idem`, `pub`, `ret`, and `vis`
-/// are already `COVERED`, and the other eleven (`body`, `caps`,
-/// `did-ssrf`, `dk`, `err`, `lin`, `rate`, `rev`,
-/// `schema`, `sig`, `status`) are currently `DEFERRED` -- both groups are
+/// footprint, not coverage status: `can`, `idem`, `pub`, `ret`, `vis`,
+/// `caps`, `lin`, `meta`, and `data-ref` are already `COVERED` (this
+/// sentence previously undercounted `caps`/`lin` as still `DEFERRED` after
+/// their own Phase 7 closure -- a staleness the same shape as the one Phase
+/// 10 found and fixed for a fourth repeated fact; corrected here as of
+/// Phase 12), and the other eight (`body`, `did-ssrf`, `dk`, `err`, `rate`,
+/// `rev`, `sig`, `status`) are currently `DEFERRED` -- both groups are
 /// spec-required all the same, so both must be unexcusable. (`meta` and
-/// `data-ref` closed to `COVERED` in Phase 10 -- see `COVERED`'s own
-/// entries and `DEFERRED`'s doc comment.)
+/// `data-ref` closed to `COVERED` in Phase 10, `schema` in Phase 12 -- see
+/// `COVERED`'s own entries and `DEFERRED`'s doc comment.)
 ///
 /// Deliberately NOT filtered down to only the currently-`DEFERRED` subset:
 /// doing that would make this list implicitly depend on `COVERED`'s
@@ -7805,6 +8131,12 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
             "data_ref001_007_publish_path_rejections_enforced",
         ])],
     ),
+    (
+        "schema",
+        &[CoverageMechanism::Direct(&[
+            "schema_vectors_openness_and_absent_vs_null_enforced",
+        ])],
+    ),
 ];
 
 /// Families with no coverage yet, each with a non-empty written reason and
@@ -7818,7 +8150,9 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 /// were filed under **#130** alongside the rest below, and REG-11 Phase 10
 /// closed both to `COVERED` the same way (`meta001_003_metadata_depth_and_
 /// size_caps_enforced`, `data_ref001_007_publish_path_rejections_enforced`
-/// in `COVERED` above). The remaining 13 cite
+/// in `COVERED` above). REG-11 Phase 12 closed `schema` to `COVERED` the
+/// same way (`schema_vectors_openness_and_absent_vs_null_enforced` in
+/// `COVERED` above). The remaining 12 cite
 /// **#130** (filed for Phase 6, enumerating each with its own reason).
 /// `known_families_partition_into_covered_excused_or_deferred` checks: the
 /// reason is non-empty, the issue is one of the two known-open numbers, and
@@ -7836,12 +8170,6 @@ const DEFERRED: &[(&str, &str, u32)] = &[
         "body",
         "schema/vector fixtures with no HTTP shape; needs a direct-vector pass like \
          `can`'s (REG-10 Phase 7 precedent).",
-        130,
-    ),
-    (
-        "schema",
-        "same shape as `body` -- absent-vs-null wire conventions, vector-shaped, needs a \
-         direct-vector pass.",
         130,
     ),
     (

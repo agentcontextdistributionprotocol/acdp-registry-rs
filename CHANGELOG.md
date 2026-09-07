@@ -176,6 +176,79 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- end REG-11 Phase 10 -->
 
+<!-- REG-11 Phase 12 -->
+
+- **`schema` moves from `DEFERRED` to `COVERED`** (`REG-11` Phase 12,
+  `#130`): one new test,
+  `schema_vectors_openness_and_absent_vs_null_enforced`, in
+  `crates/acdp-registry-server/tests/conformance.rs`, covering the 8
+  `schema-*` ids in `acdp-registry-core`'s `required_fixtures` at spec pin
+  `d1f06d0` (verified directly against `registries/profiles.json`; the
+  backlog plan's claim of 8 was correct, but only as the required-for-core
+  subset — 14 `schema-*.json` fixtures exist on disk, 001..014; the other
+  6 target `acdp-consumer` only and are correctly out of scope):
+  schema-002/003/008/009/010/011/012/014.
+  - schema-002 is the "registry never emits" half of RFC-ACDP-0007
+    §3.3.1's openness map applied to `PublishResponse` — a real publish
+    through the harness, asserting the served response both parses as
+    `PublishResponse` and carries no `content_hash` key, not merely that
+    the fixture's own malformed body fails to deserialize.
+  - schema-003/008/009/011/012 are publish-path rejections, each isolating
+    one closed sub-object (`EmbeddedContent`, `Signature`, `DataPeriod`) or
+    non-nullable optional (`DataRef.format`/`.location`) by splicing the
+    fixture's own malformed JSON fragment into an otherwise-valid signed
+    body's raw `Value` and POSTing it directly — a new helper,
+    `anc_publish_raw`, since the violation in each case is a shape the
+    typed `PublishRequest`/`DataRef` builders cannot produce at all
+    (`deny_unknown_fields` has no Rust field to carry an extra key; `Option`
+    fields with `skip_serializing_if` never serialize a literal `null`).
+  - schema-010 surfaced a genuine wrong-reason trap, the same shape as
+    Phase 10's data-ref-007: its own `input.response_body_excerpt` is a
+    bare `{"limits": {...}}`, not a full `CapabilitiesDocument`, so
+    deserializing it verbatim fails on missing top-level fields before
+    `Limits`'s `deny_unknown_fields` (confirmed live at
+    `acdp-types-0.9.1/src/capabilities.rs:96-98`, not the stale `0.8.4`
+    line the plan cited) ever rejects the excerpt's `limits.extra` key.
+    Worse, replacing this registry's own real `caps()` document's `limits`
+    wholesale (rather than merging) strips
+    `limits.idempotency_key_ttl_seconds`, which
+    `acdp_validation::validate_capabilities` requires whenever
+    `supports_idempotency_key` is `true` (as `caps()`'s is) — a second,
+    unintended rejection reason caught by mutation-testing this test
+    itself before landing it. The final version merges the fixture's
+    `limits` keys onto a clone of `caps()`'s own (self-checked "accept")
+    `limits` object, isolating exactly the field the fixture exists to
+    exercise.
+  - schema-014's `input.response_body` is already a full, otherwise-valid
+    document (only `limits.idempotency_key_ttl_seconds` is `null`), so it
+    is used verbatim — no splicing, no trap.
+
+  `MIN_REPLAYED_EXCHANGES` (30) and the exchange replay count are
+  unaffected — measured: `conformance: replayed 30 exchange(s);
+  failures=0`, identical before and after this change (48 -> 49 passed in
+  `conformance.rs`; `conformance_gate.rs` unchanged at 1 passed). The new
+  test self-skips cleanly (measured) when `ACDP_SPEC_DIR` is unset.
+  Mutation-tested (measured) against a scratch copy of the spec tree
+  outside this repo and outside the pinned spec worktree: independently
+  perturbing each of schema-002/003/008/009/010/011/012/014's fixture data
+  or expectations, and deleting a fixture outright, turned the test red
+  every time (the schema-010 case surfaced the wrong-reason bug above,
+  fixed before the mutation suite passed clean); the scratch copy was
+  discarded afterward, not the pinned worktree, which diffs identical to
+  upstream both before and after.
+
+  Repeated-fact updates alongside the `COVERED`/`DEFERRED` move: the
+  `CORE_INEXCUSABLE_FAMILIES` doc comment's "already `COVERED`" / "still
+  `DEFERRED`" family lists, and both "the remaining N cite #130" counts
+  (module header and the `DEFERRED` doc comment). The `CORE_INEXCUSABLE_
+  FAMILIES` comment also carried a pre-existing staleness predating this
+  phase — `caps` and `lin` were still listed as "currently `DEFERRED`"
+  there despite closing to `COVERED` in Phase 7, the same shape of gap
+  Phase 10 found and fixed for a different repeated fact — corrected here
+  while touching the same sentence to remove `schema`.
+
+<!-- end REG-11 Phase 12 -->
+
 - **A coverage-completeness ratchet closes the gap Phases 7-10 left open**
   (`REG-10` Phase 11): the existing four `KNOWN_FAMILIES`/`EXCUSED` ratchet
   tests fail only on an *unclassified* family or an *illegitimate excuse* —
