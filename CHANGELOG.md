@@ -176,6 +176,51 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- end REG-11 Phase 10 -->
 
+<!-- REG-11 Phase 11 -->
+
+- **`body` and `status` move from `DEFERRED` to `COVERED`** (`REG-11`
+  Phase 11, `#130`): two new direct tests in
+  `crates/acdp-registry-server/tests/conformance.rs`. Neither family
+  carries a `request`/publish shape at all — both are pure response-body
+  assertions (`body-*`'s `input.body_fields_under_test`, `status-*`'s
+  `input.response_body`/`response_body_excerpt`) — and both fields are
+  registry-ASSIGNED (`origin_registry`) or registry-DERIVED
+  (`registry_state.status`), so no `PublishRequest` field lets a caller
+  drive either through this registry's own HTTP surface. Both tests prove
+  the "registry never emits" contrapositive instead: publish a context,
+  `GET` it back, and assert the SERVED shape.
+  - `body001_002_origin_registry_hostname_never_did_form` covers
+    body-001/002 (RFC-ACDP-0002 §3.1): the served `origin_registry`
+    equals this harness's configured authority, matches ctx_id's own
+    authority component, contains no `:`, and passes
+    `acdp::validation::validate_body` (body-001's positive shape); and
+    body-002's own `did:web:registry.example.com` literal, spliced onto a
+    clone of the served body, is confirmed rejected by that same
+    validator as `schema_violation` — the fixture's negative value gets
+    real teeth even though this registry can never produce it itself.
+  - `status001_004_served_status_matches_open_enum_pattern` covers
+    status-001..004 (RFC-ACDP-0004 §4.1): the served
+    `registry_state.status` round-trips through
+    `acdp::types::primitives::Status::parse` (status-001's forward-compat
+    positive shape), and each of status-002/003/004's own rejected
+    literals (uppercase, embedded space, empty) is confirmed to fail that
+    same open-enum parser and never equal the live served value.
+
+  `MIN_REPLAYED_EXCHANGES` (30) and the exchange replay count are
+  unaffected — measured: `conformance: replayed 30 exchange(s);
+  failures=0`, identical before and after this change; both new tests use
+  the shared `harness()` outside the generic replay loop, same as
+  `meta`/`data-ref`. Both self-skip cleanly (measured) when
+  `ACDP_SPEC_DIR` is unset. Mutation-tested (measured) against a scratch
+  copy of the spec tree outside this repo and outside the pinned spec
+  worktree: perturbing body-002's `origin_registry` to a bare hostname
+  (no longer a DID) and status-002's `status` to `"active"` (no longer
+  malformed) each independently turned their respective test red, then
+  the scratch copy was discarded (not the pinned worktree) and both
+  tests were reconfirmed green.
+
+<!-- end REG-11 Phase 11 -->
+
 - **A coverage-completeness ratchet closes the gap Phases 7-10 left open**
   (`REG-10` Phase 11): the existing four `KNOWN_FAMILIES`/`EXCUSED` ratchet
   tests fail only on an *unclassified* family or an *illegitimate excuse* —

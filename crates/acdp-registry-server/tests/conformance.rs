@@ -363,8 +363,9 @@
 //! `DEFERRED` is `&[(&str, &str, u32)]` -- family, a non-empty written reason, and an
 //! open GitHub issue number. `lc` cites **#115** (filed for `caps`/`lin`/`lc`; the
 //! first two closed to COVERED in Phase 7, so `lc` is the only one left under it);
-//! the remaining 13 cite **#130**, filed enumerating each with its own reason (`meta`
-//! and `data-ref` closed to COVERED in Phase 10, same #130 filing).
+//! the remaining 11 cite **#130**, filed enumerating each with its own reason (`meta`
+//! and `data-ref` closed to COVERED in Phase 10; `body` and `status` closed to
+//! COVERED in Phase 11, same #130 filing).
 //! `known_families_partition_into_covered_excused_or_deferred` checks both: reason
 //! non-empty, issue is one of the two known-open numbers, and that any of the
 //! `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115.
@@ -7238,6 +7239,328 @@ async fn data_ref001_007_publish_path_rejections_enforced() {
     );
 }
 
+// ─── REG-11 Phase 11: `body` (RFC-ACDP-0002 §3.1) ───
+
+const EXPECTED_BODY_FIXTURE_COUNT: usize = 2;
+const EXPECTED_BODY_ASSERTION_COUNT: usize = 2;
+
+fn body_producer(seed: u8) -> Producer {
+    common::producer("body", seed)
+}
+
+/// body-001/002 (RFC-ACDP-0002 §3.1, `acdp-context-body.schema.json`):
+/// `body.origin_registry` MUST be a bare DNS hostname matching the ctx_id
+/// authority (body-001, positive) and MUST NOT be a `did:web:` URI
+/// (body-002, negative) -- the two encodings serve distinct purposes
+/// (`origin_registry` vs. `capabilities.registry_did`) and MUST NOT be
+/// interchanged on the wire, per each fixture's own `rationale`.
+///
+/// Neither fixture carries a `request`/publish shape -- both are pure
+/// response-body assertions (`input.body_fields_under_test`,
+/// `expected.checks`), the same shape problem `anc-002`/`anc-003`/`meta-*`
+/// solved. `origin_registry` is also a registry-ASSIGNED field
+/// (`acdp::types::body::Body`'s own doc comment: "NOT in ProducerContent")
+/// -- nothing in `PublishRequest` lets a caller set it, so there is no
+/// publish-path input that could ever trigger body-002's violation through
+/// this registry's own HTTP surface. This test proves the stronger claim
+/// the "Registry never emits" framing asks for: publish a context, GET it
+/// back, and confirm the SERVED `origin_registry` (a) satisfies body-001's
+/// positive shape -- equals this harness's configured authority, matches
+/// ctx_id's own authority component, contains no `:`, and passes
+/// `acdp::validation::validate_body`'s own check -- and (b) could never
+/// equal body-002's rejected DID-form literal. To give body-002's own
+/// fixture value teeth (not just an observation about what this registry
+/// happens to emit), this test also splices that literal onto a clone of
+/// the served `Body` and confirms `acdp::validation::validate_body` --
+/// the identical validator this registry's publish/retrieve paths run --
+/// rejects it as `SchemaViolation`.
+#[tokio::test(flavor = "multi_thread")]
+async fn body001_002_origin_registry_hostname_never_did_form() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping body-001..002 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut asserted = 0usize;
+    let mut found_ids: Vec<&str> = Vec::new();
+    let app = harness().await;
+
+    let req = body_producer(230)
+        .publish_request()
+        .title("body-001/002 origin_registry shape")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = anc_publish(&app, &req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body-001/002 setup publish: body = {v}"
+    );
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+    let (status, served) = anc_get(
+        &app,
+        &format!("/contexts/{}", pct_encode_path_segment(&ctx_id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body-001/002 GET: body = {served}");
+    let served_body: acdp::types::body::Body = serde_json::from_value(served["body"].clone())
+        .unwrap_or_else(|e| {
+            panic!(
+                "body-001/002: served body must deserialize as acdp::types::body::Body: {e}; \
+                 body = {served}"
+            )
+        });
+
+    // body-001: positive shape -- bare hostname equal to this harness's
+    // configured authority and to ctx_id's own authority component.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "body-001") {
+        found_ids.push("body-001");
+        assert_eq!(
+            fx["expected"]["outcome"].as_str(),
+            Some("accept"),
+            "body-001: expected.outcome missing/changed: {fx}"
+        );
+        assert_eq!(
+            served_body.origin_registry, AUTHORITY,
+            "body-001: served origin_registry must equal this harness's configured authority"
+        );
+        assert!(
+            !served_body.origin_registry.contains(':'),
+            "body-001: served origin_registry must be a bare hostname (no ':'): {}",
+            served_body.origin_registry
+        );
+        let ctx_authority = served_body
+            .ctx_id
+            .as_str()
+            .strip_prefix("acdp://")
+            .and_then(|rest| rest.split('/').next())
+            .unwrap_or_else(|| {
+                panic!(
+                    "body-001: ctx_id has no authority component: {}",
+                    served_body.ctx_id.as_str()
+                )
+            });
+        assert_eq!(
+            served_body.origin_registry, ctx_authority,
+            "body-001: served origin_registry must equal ctx_id's own authority component"
+        );
+        assert!(
+            acdp::validation::validate_body(&served_body).is_ok(),
+            "body-001: served body must pass acdp::validation::validate_body: {served_body:?}"
+        );
+        asserted += 1;
+    }
+
+    // body-002: negative shape -- the fixture's own DID-form value, spliced
+    // onto a clone of the served body, must be rejected.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "body-002") {
+        found_ids.push("body-002");
+        let bad_origin = fx["input"]["body_fields_under_test"]["origin_registry"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!("body-002: input.body_fields_under_test.origin_registry missing: {fx}")
+            })
+            .to_string();
+        assert!(
+            bad_origin.starts_with("did:"),
+            "body-002 self-check: fixture's own origin_registry must be a DID URI: {bad_origin}"
+        );
+        assert_eq!(
+            fx["expected"]["outcome"].as_str(),
+            Some("failure"),
+            "body-002: expected.outcome missing/changed: {fx}"
+        );
+        assert_eq!(
+            fx["expected"]["error_code"].as_str(),
+            Some("schema_violation"),
+            "body-002: expected.error_code missing/changed: {fx}"
+        );
+        assert_ne!(
+            served_body.origin_registry, bad_origin,
+            "body-002: this registry's served origin_registry must never equal the DID form"
+        );
+        let mut mutated = served_body.clone();
+        mutated.origin_registry = bad_origin;
+        let err = acdp::validation::validate_body(&mutated)
+            .expect_err("body-002: validate_body must reject a DID-form origin_registry");
+        assert!(
+            matches!(err, acdp::error::AcdpError::SchemaViolation(_)),
+            "body-002: expected SchemaViolation, got {err:?}"
+        );
+        asserted += 1;
+    }
+
+    assert_eq!(
+        found_ids.len(),
+        EXPECTED_BODY_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_BODY_FIXTURE_COUNT} body-* fixtures at spec pin d1f06d0: \
+         found {found_ids:?}"
+    );
+    assert_eq!(
+        asserted, EXPECTED_BODY_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_BODY_ASSERTION_COUNT} body-* outcome assertions at spec pin \
+         d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
+         this ratchet exists to prevent"
+    );
+}
+
+// ─── REG-11 Phase 11: `status` (RFC-ACDP-0004 §4.1) ───
+
+const EXPECTED_STATUS_FIXTURE_COUNT: usize = 4;
+const EXPECTED_STATUS_ASSERTION_COUNT: usize = 4;
+
+fn status_producer(seed: u8) -> Producer {
+    common::producer("status", seed)
+}
+
+/// status-001..004 (RFC-ACDP-0004 §4.1, `acdp-common.schema.json#/$defs/
+/// status`): the open-enum `status` grammar (`^[a-z][a-z0-9_]*$`, length
+/// 1..=64) a consumer sees in `GET /contexts/{ctx_id}`'s
+/// `registry_state.status`. status-001 pins the forward-compat POSITIVE
+/// case (a valid-pattern but possibly-unrecognized value MUST be accepted,
+/// per RFC-ACDP-0004 §4.1's implementer-note recipes); status-002/003/004
+/// pin three NEGATIVE shapes -- uppercase, an embedded space, and empty --
+/// that MUST be rejected. This family is about the response-FIELD grammar,
+/// not lifecycle state transitions (`DEFERRED`'s former reason for this
+/// family, before this test).
+///
+/// All four fixtures describe a CONSUMER's obligation deserializing a
+/// `registry_state.status` value (`expected.consumer_outcome`/
+/// `expected.consumer_error`), not a registry publish-path input -- no
+/// `PublishRequest` field lets a caller set `registry_state.status`
+/// directly (it is registry-derived: `acdp-registry-sqlite`'s
+/// `row_to_context`/`parse_status`). So, like `body-001/002` above, this
+/// test proves the "Registry never emits" contrapositive: publish a
+/// context, GET it back, and confirm the SERVED status (a) round-trips
+/// through the exact `Status::parse` this registry's own store layer uses
+/// (status-001's positive shape), and (b) can never equal any of
+/// status-002/003/004's rejected literals, which `Status::parse` -- the
+/// same open-enum parser -- refuses to construct at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn status001_004_served_status_matches_open_enum_pattern() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping \
+             status-001..004 (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut asserted = 0usize;
+    let mut found_ids: Vec<&str> = Vec::new();
+    let app = harness().await;
+
+    let req = status_producer(231)
+        .publish_request()
+        .title("status-001..004 registry_state.status shape")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = anc_publish(&app, &req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "status-001..004 setup publish: body = {v}"
+    );
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+    let (status, served) = anc_get(
+        &app,
+        &format!("/contexts/{}", pct_encode_path_segment(&ctx_id)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "status-001..004 GET: body = {served}"
+    );
+    let served_status = served["registry_state"]["status"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "status-001..004: served registry_state.status missing or not a string: {served}"
+            )
+        })
+        .to_string();
+
+    // status-001: forward-compat positive shape.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "status-001") {
+        found_ids.push("status-001");
+        let fixture_status = fx["input"]["response_body"]["registry_state"]["status"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!("status-001: input.response_body.registry_state.status missing: {fx}")
+            });
+        assert_eq!(
+            fx["expected"]["consumer_outcome"].as_str(),
+            Some("accept"),
+            "status-001: expected.consumer_outcome missing/changed: {fx}"
+        );
+        assert!(
+            acdp::types::primitives::Status::parse(fixture_status).is_ok(),
+            "status-001 self-check: fixture's own status {fixture_status:?} must itself satisfy \
+             the open-enum pattern (accepted, per its own expected.consumer_outcome): {fx}"
+        );
+        assert!(
+            acdp::types::primitives::Status::parse(&served_status).is_ok(),
+            "status-001: this registry's served registry_state.status {served_status:?} must \
+             satisfy the open-enum pattern"
+        );
+        asserted += 1;
+    }
+
+    // status-002/003/004: negative shapes -- uppercase, embedded space, empty.
+    for id in ["status-002", "status-003", "status-004"] {
+        if let Some(fx) = find_fixture_by_id(&fixtures, id) {
+            found_ids.push(id);
+            let bad_status = fx["input"]["response_body_excerpt"]["registry_state"]["status"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!("{id}: input.response_body_excerpt.registry_state.status missing: {fx}")
+                });
+            assert_eq!(
+                fx["expected"]["consumer_outcome"].as_str(),
+                Some("reject"),
+                "{id}: expected.consumer_outcome missing/changed: {fx}"
+            );
+            assert_eq!(
+                fx["expected"]["consumer_error"].as_str(),
+                Some("schema_violation"),
+                "{id}: expected.consumer_error missing/changed: {fx}"
+            );
+            assert!(
+                acdp::types::primitives::Status::parse(bad_status).is_err(),
+                "{id} self-check: fixture's own status {bad_status:?} must itself fail the \
+                 open-enum pattern: {fx}"
+            );
+            assert_ne!(
+                served_status, bad_status,
+                "{id}: this registry's served registry_state.status must never equal the \
+                 rejected literal {bad_status:?}"
+            );
+            asserted += 1;
+        }
+    }
+
+    assert_eq!(
+        found_ids.len(),
+        EXPECTED_STATUS_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_STATUS_FIXTURE_COUNT} status-* fixtures at spec pin \
+         d1f06d0: found {found_ids:?}"
+    );
+    assert_eq!(
+        asserted, EXPECTED_STATUS_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_STATUS_ASSERTION_COUNT} status-* outcome assertions at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
+    );
+}
+
 // ─── Phase 1: harness fidelity gates ───
 
 /// A fixture whose `applies_to_profiles` is disjoint from `HARNESS_PROFILES`
@@ -7617,13 +7940,14 @@ const KNOWN_FAMILIES: &[&str] = &[
 /// family that appears in `required_fixtures` or anywhere in
 /// `conditional_fixtures` (`registries/profiles.json` at the pin named in
 /// `ci.yml`'s `conformance` job), sorted and deduped. Mirrors the *family*
-/// footprint, not coverage status: `can`, `idem`, `pub`, `ret`, and `vis`
-/// are already `COVERED`, and the other eleven (`body`, `caps`,
-/// `did-ssrf`, `dk`, `err`, `lin`, `rate`, `rev`,
-/// `schema`, `sig`, `status`) are currently `DEFERRED` -- both groups are
-/// spec-required all the same, so both must be unexcusable. (`meta` and
-/// `data-ref` closed to `COVERED` in Phase 10 -- see `COVERED`'s own
-/// entries and `DEFERRED`'s doc comment.)
+/// footprint, not coverage status: `can`, `caps`, `data-ref`, `idem`,
+/// `lin`, `meta`, `pub`, `ret`, and `vis` are already `COVERED`
+/// (`caps`/`lin` closed in REG-11 Phase 7, `meta`/`data-ref` in Phase 10),
+/// and the other seven (`did-ssrf`, `dk`, `err`, `rate`, `rev`, `schema`,
+/// `sig`) are currently `DEFERRED` -- both groups are spec-required all
+/// the same, so both must be unexcusable. (`body` and `status` closed to
+/// `COVERED` in Phase 11 -- see `COVERED`'s own entries and `DEFERRED`'s
+/// doc comment.)
 ///
 /// Deliberately NOT filtered down to only the currently-`DEFERRED` subset:
 /// doing that would make this list implicitly depend on `COVERED`'s
@@ -7805,6 +8129,18 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
             "data_ref001_007_publish_path_rejections_enforced",
         ])],
     ),
+    (
+        "body",
+        &[CoverageMechanism::Direct(&[
+            "body001_002_origin_registry_hostname_never_did_form",
+        ])],
+    ),
+    (
+        "status",
+        &[CoverageMechanism::Direct(&[
+            "status001_004_served_status_matches_open_enum_pattern",
+        ])],
+    ),
 ];
 
 /// Families with no coverage yet, each with a non-empty written reason and
@@ -7814,11 +8150,15 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 /// (`caps_vectors_validate_capabilities_document`,
 /// `lin_vectors_reproduce_lineage_derivation` in `COVERED` above) --
 /// `lc` alone remains DEFERRED under #115, since it is profile-gated
-/// rather than closeable by a direct vector pass. `meta` and `data-ref`
-/// were filed under **#130** alongside the rest below, and REG-11 Phase 10
-/// closed both to `COVERED` the same way (`meta001_003_metadata_depth_and_
-/// size_caps_enforced`, `data_ref001_007_publish_path_rejections_enforced`
-/// in `COVERED` above). The remaining 13 cite
+/// rather than closeable by a direct vector pass. `meta`, `data-ref`,
+/// `body`, and `status` were filed under **#130** alongside the rest
+/// below; REG-11 Phase 10 closed `meta`/`data-ref` to `COVERED`
+/// (`meta001_003_metadata_depth_and_size_caps_enforced`,
+/// `data_ref001_007_publish_path_rejections_enforced`), and Phase 11
+/// closed `body`/`status` the same way
+/// (`body001_002_origin_registry_hostname_never_did_form`,
+/// `status001_004_served_status_matches_open_enum_pattern`, both in
+/// `COVERED` above). The remaining 11 cite
 /// **#130** (filed for Phase 6, enumerating each with its own reason).
 /// `known_families_partition_into_covered_excused_or_deferred` checks: the
 /// reason is non-empty, the issue is one of the two known-open numbers, and
@@ -7831,12 +8171,6 @@ const DEFERRED: &[(&str, &str, u32)] = &[
          required -- plausibly excusable, but that has never been declared, so it stays \
          DEFERRED rather than silently assumed EXCUSED.",
         115,
-    ),
-    (
-        "body",
-        "schema/vector fixtures with no HTTP shape; needs a direct-vector pass like \
-         `can`'s (REG-10 Phase 7 precedent).",
-        130,
     ),
     (
         "schema",
@@ -7889,13 +8223,6 @@ const DEFERRED: &[(&str, &str, u32)] = &[
          `Retry-After` (error.rs:42,61,75) -- already proven end-to-end for the sibling \
          challenge limiter (http_integration.rs:843-873). Needs a direct/replayed pass \
          exercising the publish-path limiter the same way, not a new mechanism.",
-        130,
-    ),
-    (
-        "status",
-        "response-field grammar for the `status` string (RFC-ACDP-0004 \u{a7}4.1) -- \
-         valid pattern vs. invalid (uppercase, embedded space, empty) -- not lifecycle \
-         state transitions. No direct or replayed coverage yet.",
         130,
     ),
     (
