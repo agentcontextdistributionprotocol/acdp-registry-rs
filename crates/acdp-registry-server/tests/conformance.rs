@@ -363,7 +363,8 @@
 //! `DEFERRED` is `&[(&str, &str, u32)]` -- family, a non-empty written reason, and an
 //! open GitHub issue number. `lc` cites **#115** (filed for `caps`/`lin`/`lc`; the
 //! first two closed to COVERED in Phase 7, so `lc` is the only one left under it);
-//! the remaining 15 cite **#130**, filed enumerating each with its own reason.
+//! the remaining 13 cite **#130**, filed enumerating each with its own reason (`meta`
+//! and `data-ref` closed to COVERED in Phase 10, same #130 filing).
 //! `known_families_partition_into_covered_excused_or_deferred` checks both: reason
 //! non-empty, issue is one of the two known-open numbers, and that any of the
 //! `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115.
@@ -399,6 +400,7 @@ use acdp::registry::RegistryServer;
 use acdp::types::capabilities::{CapabilitiesDocument, Limits};
 use acdp::types::primitives::{AgentDid, ContentHash, ContextType, CtxId, Visibility};
 use acdp::types::publish::PublishRequest;
+use acdp::types::{DataRef, DataRefType, EmbeddedContent, EmbeddedEncoding};
 use acdp::AnchorEntry;
 #[cfg(feature = "playground")]
 use acdp_registry_auth::{
@@ -6807,6 +6809,435 @@ fn caps_vectors_validate_capabilities_document() {
     );
 }
 
+// ─── REG-11 Phase 10: `meta` (RFC-ACDP-0002 §3.3/§5.2) ───
+
+const EXPECTED_META_FIXTURE_COUNT: usize = 3;
+const EXPECTED_META_ASSERTION_COUNT: usize = 3;
+
+fn meta_producer(seed: u8) -> Producer {
+    common::producer("meta", seed)
+}
+
+/// meta-001/002/003 (RFC-ACDP-0002 §3.3, §5.2): metadata nesting-depth (≤8,
+/// inclusive) and JCS-canonical-size (≤65536 bytes) runtime caps -- "runtime
+/// -only" per meta-001's own description, since JSON Schema 2020-12 cannot
+/// express max nesting depth. Like `anc-*`, none of these three fixtures is
+/// reachable through the generic replayer: meta-001/002 carry only an
+/// `input.metadata_under_test` fragment (no top-level `request`), and
+/// meta-003 -- like anc-001 -- expects a positive (2xx) publish outcome
+/// `extract_shapes`'s Shape A refuses by design.
+///
+/// meta-001's own metadata is concrete (depth 9) and used verbatim.
+/// meta-002 is different: at spec pin d1f06d0 its own JSON carries no
+/// concrete payload at all (`metadata_under_test_summary` + `constraint`,
+/// not `metadata_under_test`) -- it only *describes* one workable
+/// construction ("100 keys `k0..k99`, each a ~700-byte ASCII string,
+/// canonicalizing to ~70KB"). This test builds exactly that construction
+/// and proves -- via `acdp::crypto::canonicalize_value`, the same JCS
+/// surface `acdp_validation::validate_metadata` calls internally -- that
+/// the built payload actually clears the fixture's own declared boundary
+/// (`len(jcs_canonicalize(metadata)) > 65536`) before ever sending it,
+/// rather than trusting the construction blindly.
+///
+/// meta-001/002 would be rejected by `RequestBuilder::build()` itself
+/// (`acdp_validation::validate_metadata` runs inside `build()`), so both
+/// build a metadata-free base request and patch the malformed metadata onto
+/// the struct literal directly -- the anc-002/anc-003 technique
+/// (`anc002_malformed_anchor_content_hash_is_rejected`'s own doc comment).
+/// The registry's own `validate_post_schema` runs the identical check
+/// BEFORE hash/signature verification (schema -> hash -> signature order,
+/// `acdp-server`'s `PublishValidator::validate_post_schema` doc comment),
+/// so the (now-stale, computed over the metadata-free base) content_hash/
+/// signature never come into play for a rejection this early.
+#[tokio::test(flavor = "multi_thread")]
+async fn meta001_003_metadata_depth_and_size_caps_enforced() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping meta-001..003 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut asserted = 0usize;
+    let mut found_ids: Vec<&str> = Vec::new();
+    let app = harness().await;
+
+    // meta-001: concrete depth-9 metadata, must be rejected schema_violation.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "meta-001") {
+        found_ids.push("meta-001");
+        let metadata = fx["input"]["metadata_under_test"].clone();
+        assert!(
+            metadata.is_object(),
+            "meta-001 must carry input.metadata_under_test as an object: {fx}"
+        );
+        assert!(
+            acdp::validation::validate_metadata(&metadata).is_err(),
+            "meta-001 self-check: input.metadata_under_test must itself fail \
+             acdp::validation::validate_metadata (depth > 8): {fx}"
+        );
+        let base = meta_producer(220)
+            .publish_request()
+            .title("meta-001 too-deep metadata")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let req = PublishRequest {
+            metadata: Some(metadata),
+            ..base
+        };
+        let (status, v) = anc_publish(&app, &req).await;
+        let want_status = fx["expected"]["http_status"].as_u64().unwrap_or_else(|| {
+            panic!("meta-001: expected.http_status missing or not a number: {fx}")
+        }) as u16;
+        let want_code = fx["expected"]["error_code"].as_str().unwrap_or_else(|| {
+            panic!("meta-001: expected.error_code missing or not a string: {fx}")
+        });
+        assert_eq!(status.as_u16(), want_status, "meta-001: body = {v}");
+        assert_eq!(v["error"]["code"], want_code, "meta-001: body = {v}");
+        asserted += 1;
+    }
+
+    // meta-002: concrete payload omitted by the fixture; build the
+    // construction it describes and prove it clears the 65536-byte JCS cap.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "meta-002") {
+        found_ids.push("meta-002");
+        assert!(
+            fx["input"].get("metadata_under_test").is_none(),
+            "meta-002 was expected to omit a concrete input.metadata_under_test (per its own \
+             metadata_under_test_summary) at spec pin d1f06d0 -- if a later pin carries a \
+             concrete payload, use it directly instead of this synthesized construction: {fx}"
+        );
+        let mut obj = serde_json::Map::new();
+        for i in 0..100 {
+            obj.insert(format!("k{i}"), json!("x".repeat(700)));
+        }
+        let metadata = Value::Object(obj);
+        let jcs_len = acdp::crypto::canonicalize_value(&metadata).len();
+        assert!(
+            jcs_len > 65_536,
+            "meta-002 self-check: constructed metadata's JCS-canonical size must exceed 65536 \
+             bytes (fixture's own boundary), got {jcs_len}"
+        );
+        assert!(
+            acdp::validation::validate_metadata(&metadata).is_err(),
+            "meta-002 self-check: constructed metadata must itself fail \
+             acdp::validation::validate_metadata (JCS size > 65536)"
+        );
+        let base = meta_producer(221)
+            .publish_request()
+            .title("meta-002 too-large metadata")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let req = PublishRequest {
+            metadata: Some(metadata),
+            ..base
+        };
+        let (status, v) = anc_publish(&app, &req).await;
+        let want_status = fx["expected"]["http_status"].as_u64().unwrap_or_else(|| {
+            panic!("meta-002: expected.http_status missing or not a number: {fx}")
+        }) as u16;
+        let want_code = fx["expected"]["error_code"].as_str().unwrap_or_else(|| {
+            panic!("meta-002: expected.error_code missing or not a string: {fx}")
+        });
+        assert_eq!(status.as_u16(), want_status, "meta-002: body = {v}");
+        assert_eq!(v["error"]["code"], want_code, "meta-002: body = {v}");
+        asserted += 1;
+    }
+
+    // meta-003: depth-8 boundary, must be ACCEPTED and round-trip.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "meta-003") {
+        found_ids.push("meta-003");
+        let metadata = fx["input"]["metadata_under_test"].clone();
+        assert!(
+            metadata.is_object(),
+            "meta-003 must carry input.metadata_under_test as an object: {fx}"
+        );
+        assert!(
+            acdp::validation::validate_metadata(&metadata).is_ok(),
+            "meta-003 self-check: input.metadata_under_test must itself PASS \
+             acdp::validation::validate_metadata (depth == 8, the inclusive boundary): {fx}"
+        );
+        let req = meta_producer(222)
+            .publish_request()
+            .title("meta-003 valid edge-depth metadata")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .metadata(metadata.clone())
+            .build()
+            .unwrap();
+        let (status, v) = anc_publish(&app, &req).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "meta-003: this repo's POST /contexts returns 200 on success; body = {v}"
+        );
+        let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+        let (status, served) = anc_get(
+            &app,
+            &format!("/contexts/{}/body", pct_encode_path_segment(&ctx_id)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "meta-003 GET body = {served}");
+        assert_eq!(
+            served["metadata"], metadata,
+            "meta-003: served metadata must be byte-identical to what was signed"
+        );
+        let recomputed = acdp::crypto::compute_content_hash(&served).unwrap();
+        assert_eq!(
+            &recomputed, &req.content_hash,
+            "meta-003: compute_content_hash over the served body must reproduce the published \
+             content_hash"
+        );
+        asserted += 1;
+    }
+
+    assert_eq!(
+        found_ids.len(),
+        EXPECTED_META_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_META_FIXTURE_COUNT} meta-* fixtures at spec pin d1f06d0: \
+         found {found_ids:?}"
+    );
+    assert_eq!(
+        asserted, EXPECTED_META_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_META_ASSERTION_COUNT} meta-* outcome assertions at spec pin \
+         d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
+         this ratchet exists to prevent"
+    );
+}
+
+// ─── REG-11 Phase 10: `data-ref` (RFC-ACDP-0002 §6) ───
+
+const EXPECTED_DATA_REF_FIXTURE_COUNT: usize = 7;
+const EXPECTED_DATA_REF_ASSERTION_COUNT: usize = 7;
+
+fn data_ref_producer(seed: u8) -> Producer {
+    common::producer("dref", seed)
+}
+
+/// Splice `dr` into a freshly-signed, otherwise-data_refs-empty publish
+/// request and POST it to `app`. `RequestBuilder::build()` would itself
+/// reject every malformed `dr` this function is ever called with
+/// (`acdp_validation::validate_data_ref` runs inside `build()`), so this
+/// builds a valid, data_refs-empty base request first and patches the
+/// fixture-derived `DataRef` onto the struct literal directly -- the same
+/// technique `meta001_003_metadata_depth_and_size_caps_enforced` above
+/// reuses for `metadata`, originating with anc-002/anc-003. The registry's
+/// own `validate_post_schema` runs the identical `acdp_validation::
+/// validate_data_ref` check on the wire body BEFORE hash/signature
+/// verification, so the base's (now-stale) content_hash/signature never
+/// matching the spliced-in `dr` doesn't matter: schema-level rejection
+/// fires first.
+async fn publish_with_data_ref(
+    app: &axum::Router,
+    seed: u8,
+    title: &str,
+    dr: DataRef,
+) -> (StatusCode, Value) {
+    let base = data_ref_producer(seed)
+        .publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let req = PublishRequest {
+        data_refs: vec![dr],
+        ..base
+    };
+    anc_publish(app, &req).await
+}
+
+/// data-ref-001..007 (RFC-ACDP-0002 §6, `acdp-data-ref.schema.json`'s
+/// `oneOf` + runtime invariants): the 7 DataRef publish-path rejections in
+/// `acdp-registry-core`'s `required_fixtures` -- verified directly against
+/// `registries/profiles.json` at this pin. `data-ref-008` (`applies_to_
+/// profiles: [acdp-consumer]` only, a consumer fetch-time hash check) is
+/// deliberately NOT in that list and is NOT covered here.
+///
+/// None of the 7 is reachable through the generic replayer: each carries
+/// only an `input.data_ref_under_test` fragment (no top-level `request`),
+/// the same shape problem `anc-002`/`anc-003` solved for `anchors`. This
+/// test deserializes each fixture's own fragment directly into the real
+/// `DataRef` type and splices it into a freshly-signed body via
+/// `publish_with_data_ref` above, then asserts the outcome against the
+/// fixture's own `expected.http_status`/`expected.error_code` (never
+/// hardcoded per-id, so a spec correction to either value is caught
+/// automatically rather than silently mismatched against a stale literal).
+///
+/// data-ref-005 and data-ref-007 are two exceptions to the direct-splice
+/// rule above, for two independent reasons -- see each branch's own inline
+/// comment in the loop body for the full writeup:
+///   * data-ref-005: at spec pin d1f06d0 its own JSON carries a literal
+///     placeholder string ("<a base64 string whose decoded byte length is
+///     65537>", not valid base64) rather than a concrete payload -- by
+///     design, per its own `_note`. This test builds a real 65537-byte
+///     payload, base64-encodes it with the same `STANDARD` engine
+///     `acdp_validation` itself decodes with, and proves via a decode
+///     round-trip that it clears the fixture's own declared boundary (one
+///     byte past the 65536-byte cap) before ever sending it.
+///   * data-ref-007: at spec pin d1f06d0 the schema nests `content_hash`
+///     inside `embedded` (a field the `acdp` 0.9.1 dependency's
+///     `EmbeddedContent` type does not have -- deserializing the fixture's
+///     JSON verbatim fails with "unknown field", not the
+///     `data_ref_hash_mismatch` this fixture pins), so this test moves the
+///     fixture's own wrong-hash and content values to the DataRef-level
+///     `content_hash` field `acdp_validation::verify_embedded_hash`
+///     actually reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn data_ref001_007_publish_path_rejections_enforced() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping \
+             data-ref-001..007 (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut asserted = 0usize;
+    let mut found_ids: Vec<&str> = Vec::new();
+    let app = harness().await;
+
+    for (i, id) in [
+        "data-ref-001",
+        "data-ref-002",
+        "data-ref-003",
+        "data-ref-004",
+        "data-ref-005",
+        "data-ref-006",
+        "data-ref-007",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let Some(fx) = find_fixture_by_id(&fixtures, id) else {
+            continue;
+        };
+        found_ids.push(id);
+
+        let dr: DataRef = if id == "data-ref-005" {
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            let raw = vec![0x41u8; 65_537];
+            let b64 = STANDARD.encode(&raw);
+            let decoded_len = STANDARD
+                .decode(&b64)
+                .unwrap_or_else(|e| {
+                    panic!("data-ref-005 self-check: encode/decode round trip failed: {e}")
+                })
+                .len();
+            assert_eq!(
+                decoded_len, 65_537,
+                "data-ref-005 self-check: constructed payload must decode to 65537 bytes (one \
+                 past the fixture's own 65536-byte cap)"
+            );
+            DataRef {
+                ref_type: DataRefType::RawData,
+                description: None,
+                size_bytes: None,
+                format: None,
+                schema_version: None,
+                content_hash: None,
+                location: None,
+                embedded: Some(EmbeddedContent {
+                    encoding: EmbeddedEncoding::Base64,
+                    content: Value::String(b64),
+                }),
+                extensions: Default::default(),
+            }
+        } else if id == "data-ref-007" {
+            // Spec pin d1f06d0's `acdp-data-ref.schema.json` (schemas/json/
+            // acdp-data-ref.schema.json:108-111, whose own description
+            // names this exact fixture) nests `content_hash` INSIDE
+            // `embedded`, alongside the historical DataRef-top-level
+            // `content_hash` (same schema file, :47-50) -- but the `acdp`
+            // 0.9.1 dependency this registry actually runs (this crate's
+            // Cargo.lock) has not caught up to that addition: its
+            // `EmbeddedContent` type is `#[serde(deny_unknown_fields)]`
+            // with only `encoding`/`content` (no `content_hash` field at
+            // all), and `acdp_validation::verify_embedded_hash` reads the
+            // DataRef-level `dr.content_hash`, never a nested
+            // `emb.content_hash`. Splicing the fixture's own JSON verbatim
+            // (nested `embedded.content_hash`) would fail at
+            // *deserialization*, before validation ever runs, with an
+            // "unknown field" `schema_violation` -- the right HTTP status
+            // by accident, but for the wrong reason, not the
+            // `data_ref_hash_mismatch` this fixture pins. So this
+            // reproduces the fixture's own values (the same wrong hash,
+            // the same "hello world" content) at the wire location THIS
+            // implementation's validator actually reads, proving the
+            // intended RFC-ACDP-0002 §6.6 check 8 / §6.7 semantic holds
+            // here, rather than silently masking the schema/dependency
+            // divergence by skipping the fixture.
+            let embedded = &fx["input"]["data_ref_under_test"]["embedded"];
+            let wrong_hash = embedded["content_hash"].as_str().unwrap_or_else(|| {
+                panic!(
+                    "data-ref-007: input.data_ref_under_test.embedded.content_hash missing or \
+                     not a string: {fx}"
+                )
+            });
+            let content = embedded["content"].as_str().unwrap_or_else(|| {
+                panic!(
+                    "data-ref-007: input.data_ref_under_test.embedded.content missing or not a \
+                     string: {fx}"
+                )
+            });
+            assert_eq!(
+                embedded["encoding"].as_str(),
+                Some("utf8"),
+                "data-ref-007: input.data_ref_under_test.embedded.encoding must be \"utf8\": {fx}"
+            );
+            DataRef {
+                ref_type: DataRefType::RawData,
+                description: None,
+                size_bytes: None,
+                format: None,
+                schema_version: None,
+                content_hash: Some(ContentHash(wrong_hash.to_string())),
+                location: None,
+                embedded: Some(EmbeddedContent {
+                    encoding: EmbeddedEncoding::Utf8,
+                    content: Value::String(content.to_string()),
+                }),
+                extensions: Default::default(),
+            }
+        } else {
+            let dr_json = fx["input"]["data_ref_under_test"].clone();
+            serde_json::from_value(dr_json).unwrap_or_else(|e| {
+                panic!("{id}: input.data_ref_under_test did not parse as DataRef: {e}")
+            })
+        };
+
+        let (status, v) =
+            publish_with_data_ref(&app, 200 + i as u8, &format!("{id} publish"), dr).await;
+        let want_status = fx["expected"]["http_status"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{id}: expected.http_status missing or not a number: {fx}"))
+            as u16;
+        let want_code = fx["expected"]["error_code"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{id}: expected.error_code missing or not a string: {fx}"));
+        assert_eq!(status.as_u16(), want_status, "{id}: body = {v}");
+        assert_eq!(v["error"]["code"], want_code, "{id}: body = {v}");
+        asserted += 1;
+    }
+
+    assert_eq!(
+        found_ids.len(),
+        EXPECTED_DATA_REF_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_DATA_REF_FIXTURE_COUNT} data-ref-00[1-7] fixtures at spec \
+         pin d1f06d0: found {found_ids:?}"
+    );
+    assert_eq!(
+        asserted, EXPECTED_DATA_REF_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_DATA_REF_ASSERTION_COUNT} data-ref-* outcome assertions at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
+    );
+}
+
 // ─── Phase 1: harness fidelity gates ───
 
 /// A fixture whose `applies_to_profiles` is disjoint from `HARNESS_PROFILES`
@@ -7037,8 +7468,8 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 /// logged reason) is necessary but was never sufficient to claim real
 /// coverage — a family can sit classified-but-uncovered indefinitely, which
 /// is exactly what happened to `vis`/`idem` before Phases 8-10, and to
-/// `caps`/`lin` before Phase 7 -- and what still holds for `lc` (#115)
-/// and 15 others (#130) today.
+/// `caps`/`lin` before Phase 7, and to `meta`/`data-ref` before Phase 10 --
+/// and what still holds for `lc` (#115) and 13 others (#130) today.
 /// Every family in this list must now ALSO appear in exactly one of
 /// `COVERED`, `EXCUSED`, or `DEFERRED` — enforced unconditionally by
 /// `known_families_partition_into_covered_excused_or_deferred`, which needs
@@ -7187,10 +7618,12 @@ const KNOWN_FAMILIES: &[&str] = &[
 /// `conditional_fixtures` (`registries/profiles.json` at the pin named in
 /// `ci.yml`'s `conformance` job), sorted and deduped. Mirrors the *family*
 /// footprint, not coverage status: `can`, `idem`, `pub`, `ret`, and `vis`
-/// are already `COVERED`, and the other thirteen (`body`, `caps`,
-/// `data-ref`, `did-ssrf`, `dk`, `err`, `lin`, `meta`, `rate`, `rev`,
+/// are already `COVERED`, and the other eleven (`body`, `caps`,
+/// `did-ssrf`, `dk`, `err`, `lin`, `rate`, `rev`,
 /// `schema`, `sig`, `status`) are currently `DEFERRED` -- both groups are
-/// spec-required all the same, so both must be unexcusable.
+/// spec-required all the same, so both must be unexcusable. (`meta` and
+/// `data-ref` closed to `COVERED` in Phase 10 -- see `COVERED`'s own
+/// entries and `DEFERRED`'s doc comment.)
 ///
 /// Deliberately NOT filtered down to only the currently-`DEFERRED` subset:
 /// doing that would make this list implicitly depend on `COVERED`'s
@@ -7360,6 +7793,18 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
             "wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted",
         ])],
     ),
+    (
+        "meta",
+        &[CoverageMechanism::Direct(&[
+            "meta001_003_metadata_depth_and_size_caps_enforced",
+        ])],
+    ),
+    (
+        "data-ref",
+        &[CoverageMechanism::Direct(&[
+            "data_ref001_007_publish_path_rejections_enforced",
+        ])],
+    ),
 ];
 
 /// Families with no coverage yet, each with a non-empty written reason and
@@ -7369,8 +7814,12 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 /// (`caps_vectors_validate_capabilities_document`,
 /// `lin_vectors_reproduce_lineage_derivation` in `COVERED` above) --
 /// `lc` alone remains DEFERRED under #115, since it is profile-gated
-/// rather than closeable by a direct vector pass. The remaining 15 cite
-/// **#130** (filed for this phase, enumerating each with its own reason).
+/// rather than closeable by a direct vector pass. `meta` and `data-ref`
+/// were filed under **#130** alongside the rest below, and REG-11 Phase 10
+/// closed both to `COVERED` the same way (`meta001_003_metadata_depth_and_
+/// size_caps_enforced`, `data_ref001_007_publish_path_rejections_enforced`
+/// in `COVERED` above). The remaining 13 cite
+/// **#130** (filed for Phase 6, enumerating each with its own reason).
 /// `known_families_partition_into_covered_excused_or_deferred` checks: the
 /// reason is non-empty, the issue is one of the two known-open numbers, and
 /// `lc` specifically cites #115.
@@ -7422,17 +7871,6 @@ const DEFERRED: &[(&str, &str, u32)] = &[
         130,
     ),
     (
-        "data-ref",
-        "DataRef publish-path rejections (RFC-ACDP-0002 \u{a7}6): the 7 data-ref-* \
-         fixtures in acdp-registry-core's required_fixtures (data-ref-001..007) are \
-         registry-side publish validation -- neither/both location+embedded, a \
-         credentialed URI, a missing structured scheme, an oversized/non-UTF-8/hash- \
-         mismatched embedded payload; the 8th, data-ref-008-external-data-ref-hash- \
-         mismatch, is a consumer fetch-time check and is not required of this profile. \
-         Needs a direct-vector or replayed pass against the publish validation path.",
-        130,
-    ),
-    (
         "cur",
         "cursor/pagination semantics; no direct or replayed coverage yet.",
         130,
@@ -7440,11 +7878,6 @@ const DEFERRED: &[(&str, &str, u32)] = &[
     (
         "err",
         "error-envelope shape; no direct or replayed coverage yet.",
-        130,
-    ),
-    (
-        "meta",
-        "metadata conventions; no direct or replayed coverage yet.",
         130,
     ),
     (

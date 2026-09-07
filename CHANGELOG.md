@@ -108,6 +108,74 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- end REG-11 Phase 9 -->
 
+<!-- REG-11 Phase 10 -->
+
+- **`meta` and `data-ref` move from `DEFERRED` to `COVERED`** (`REG-11`
+  Phase 10, `#130`): two new direct-splice tests in
+  `crates/acdp-registry-server/tests/conformance.rs`, following the
+  fragment-splice-into-a-self-signed-publish technique
+  `anc001_well_formed_anchor_is_accepted_and_round_trips`/
+  `anc002_malformed_anchor_content_hash_is_rejected` established — neither
+  family is reachable through the generic replayer (both carry only an
+  `input.*_under_test` fragment, no top-level `request`, and meta-003
+  expects a positive publish outcome the replayer's Shape A refuses by
+  design).
+  - `meta001_003_metadata_depth_and_size_caps_enforced` covers all 3
+    `meta-*` fixtures (RFC-ACDP-0002 §3.3/§5.2): meta-001's concrete
+    depth-9 metadata and meta-003's depth-8 boundary are used verbatim;
+    meta-002 carries no concrete payload at spec pin `d1f06d0` (only a
+    described construction), so this test builds the described "100 keys,
+    each ~700 bytes" shape itself and proves — via
+    `acdp::crypto::canonicalize_value` — that it clears the fixture's own
+    65536-byte JCS boundary before sending it. meta-001/002 splice their
+    metadata onto a metadata-free base request's struct literal (the
+    anc-002 technique: `RequestBuilder::build()` would otherwise reject
+    them client-side); meta-003 builds normally and round-trips (served
+    body + recomputed `content_hash`), mirroring anc-001.
+  - `data_ref001_007_publish_path_rejections_enforced` covers
+    data-ref-001..007 (RFC-ACDP-0002 §6) — the 7 DataRef publish-path
+    rejections in `acdp-registry-core`'s `required_fixtures`, verified
+    directly against `registries/profiles.json` at this pin.
+    `data-ref-008-external-data-ref-hash-mismatch` is
+    `applies_to_profiles: [acdp-consumer]` only (a consumer fetch-time
+    check) and is correctly excluded, not merely omitted. Each fixture's
+    `data_ref_under_test` fragment deserializes directly into the real
+    `DataRef` type and is spliced into a data_refs-empty base request the
+    same way. Two fixtures needed adaptation, not straight splicing:
+    - data-ref-005's own JSON carries a placeholder string ("<a base64
+      string whose decoded byte length is 65537>", not valid base64) by
+      design; this test builds a real 65537-byte payload and proves via a
+      decode round-trip (same `STANDARD` base64 engine
+      `acdp_validation` itself decodes with) that it clears the cap.
+    - data-ref-007 exposed a genuine spec/dependency divergence: spec pin
+      `d1f06d0`'s `acdp-data-ref.schema.json` nests `content_hash` inside
+      `embedded` (citing this exact fixture in its own description), but
+      the `acdp` `0.9.1` dependency this registry runs has not caught up
+      — its `EmbeddedContent` type has no `content_hash` field at all
+      (`#[serde(deny_unknown_fields)]` on `encoding`/`content` only), and
+      `acdp_validation::verify_embedded_hash` reads the DataRef-level
+      `content_hash`, never a nested one. Splicing the fixture's JSON
+      verbatim would fail at deserialization with an "unknown field"
+      `schema_violation` — the right HTTP status by accident, for the
+      wrong reason, not the `data_ref_hash_mismatch` the fixture pins. The
+      test instead moves the fixture's own wrong-hash and content values
+      to the DataRef-level `content_hash` field the dependency's validator
+      actually reads, proving the intended RFC-ACDP-0002 §6.6 check 8
+      semantic holds here rather than silently masking the divergence.
+
+  `MIN_REPLAYED_EXCHANGES` (30) and the exchange replay count are
+  unaffected — measured: `conformance: replayed 30 exchange(s);
+  failures=0`, identical before and after this change; both new tests use
+  a dedicated harness outside the generic replay loop, same as `anc-*`.
+  Both self-skip cleanly (measured) when `ACDP_SPEC_DIR` is unset.
+  Mutation-tested (measured) against a scratch copy of the spec tree
+  outside this repo and outside the pinned spec worktree: perturbing
+  meta-003's metadata to depth 9 and data-ref-001's `expected.error_code`
+  each independently turned their respective test red, then were
+  reverted (the scratch copy was discarded, not the pinned worktree).
+
+<!-- end REG-11 Phase 10 -->
+
 - **A coverage-completeness ratchet closes the gap Phases 7-10 left open**
   (`REG-10` Phase 11): the existing four `KNOWN_FAMILIES`/`EXCUSED` ratchet
   tests fail only on an *unclassified* family or an *illegitimate excuse* —
