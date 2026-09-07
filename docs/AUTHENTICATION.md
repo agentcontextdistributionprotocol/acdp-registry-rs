@@ -280,6 +280,18 @@ Failures on this endpoint answer `401` with
 `WWW-Authenticate: Bearer realm="metrics"` (`metrics.rs:130-134`) — the one place
 in the registry that does. Everything else authenticated answers `403`.
 
+The presented token is compared to the configured one in **constant time**,
+using the same `ct_eq` helper as the `/admin/*` allowlist
+(`crates/acdp-registry-core/src/secure_compare.rs`) — one implementation shared
+by both gates rather than a copy each, so they cannot drift
+([#168](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/issues/168)).
+Two limits worth stating rather than leaving implied: the helper returns early
+when lengths differ, so token *length* stays observable at both gates (accepted
+in the existing design — what is protected is the token's contents); and
+constant-timeness is a property no unit test in this repo can demonstrate. The
+tests pin the authorization *behaviour*; the timing property rests on there
+being a single reviewed implementation.
+
 What `/metrics` exposes is operational rather than secret — request counts,
 latency histograms, publish outcomes — but an operator who sets
 `metrics.bearer_token` has expressed an intent to gate it, and the point of the
