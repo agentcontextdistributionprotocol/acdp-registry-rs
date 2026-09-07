@@ -330,6 +330,66 @@
 //! `DEFERRED` entry always should have carried precisely (it previously misdescribed
 //! rev-002's before/after semantics as rev-001's own).
 //!
+//! `did-ssrf-*` (RFC-ACDP-0008 §4.8) is likewise not HTTP-replayable by the generic
+//! loop: `targets_unadvertised_profile` passes it (its `applies_to_profiles` includes
+//! `acdp-registry-core`) and it carries no unseeded precondition, but `extract_shapes`
+//! matches none of Shapes A/B/C/D -- its `input.endpoint`/`input.body` shape satisfies
+//! neither Shape A/B (no top-level/per-scenario `request`) nor Shape C (`input.endpoint`
+//! is `POST /contexts`, not `GET /contexts/{ctx_id}`) -- so it falls to the same
+//! `"non-HTTP fixture (vectors / schema / informative)"` fallback as `can`/`sig`,
+//! confirmed for this phase by re-reading `extract_shapes` directly rather than trusting
+//! the prior `DEFERRED` reason's claim on faith (it held up). The seam this repo
+//! delegates to already existed before this phase: `acdp::did::WebResolver` applies
+//! `SsrfPolicy::default()` unconditionally (`did-ssrf-001/002/003`), and
+//! `acdp::safe_http` -- the crate `WebResolver` itself is built on -- exposes
+//! `reject_if_any_forbidden` (its own doc comment names it "the canonical enforcement
+//! point the mixed-answer conformance fixtures pin (did-ssrf-004, ...)") and
+//! `SsrfPolicy::classify_redirect` for the same-authority redirect rule (`did-ssrf-005`).
+//! REG-11 Phase 14 gives all five DIRECT coverage via
+//! `did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets`: `did-ssrf-001/
+//! 002/003` drive the real, async `WebResolver::resolve` end-to-end (offline and
+//! deterministic -- the SSRF policy refuses before any socket activity, so no network
+//! access is needed) and cross-check the resulting `AcdpError::KeyResolution` against
+//! this repo's own `RegistryError` wire projection (`key_resolution_failed`/400,
+//! matching the fixtures exactly); `did-ssrf-004`/`005` drive `reject_if_any_forbidden`/
+//! `classify_redirect` directly with the fixtures' own DNS-answer and redirect
+//! literals. Those last two calls are one layer beneath the full `WebResolver`/reqwest
+//! pipeline (no live TLS/DNS mock is stood up here), so the test does NOT assert a final
+//! wire status for them -- only that the pure enforcement point itself rejects, plus (by
+//! reading, not running, `classify_reqwest_error`) documents the `"SSRF policy"` marker
+//! that layer keys off of to reclassify a DNS/redirect refusal as permanent
+//! (`KeyResolution`) rather than transient (`KeyResolutionUnreachable`); see that test's
+//! own doc comment for the full chain and which half is measured vs. derived.
+//!
+//! `err-001` (RFC-ACDP-0007 §4) and `rate-001` (RFC-ACDP-0008 §4.3) are non-HTTP by the
+//! same fallback (their `input.endpoint` is `"any"` / `"POST /contexts"`, matching no
+//! shape). `err-001`'s own text calls its trigger "implementation-defined... fixtures
+//! cannot reproduce" -- no black-box request through this registry's HTTP surface can
+//! deterministically force a persistence-layer throw, unlike a schema violation. REG-11
+//! Phase 14 gives it DIRECT coverage via
+//! `err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing`, which drives
+//! the real, production `RegistryError -> HTTP response` projection
+//! (`acdp_registry_types::error::RegistryError`'s `IntoResponse` impl, the one every
+//! handler's `Result<_, RegistryError>` actually returns through) for every variant that
+//! legitimately projects to `internal_error` in this codebase, each seeded with a
+//! deliberately sensitive-looking detail string, and asserts none of it reaches the wire
+//! -- the same discipline `acdp-registry-types::error`'s own
+//! `internal_errors_do_not_leak_detail` unit test already applies, now also proven from
+//! this repo's conformance file against the fixture's own pinned status/code/content-type
+//! (not its illustrative message text, which is not normatively pinned character-for-
+//! character). `rate-001` -- "black-box conformance testing cannot deterministically
+//! trigger a rate limit," per its own text -- gets DIRECT coverage via
+//! `rate001_publish_rate_limit_trips_429_with_retry_after`, which is not a missing seam:
+//! `limits.publish_rate_per_minute` (`config.rs:560-561`) is a live config knob enforced
+//! by the in-process fixed-window `AgentRateLimiter` (`rate_limit.rs`, wired at
+//! `state.rs:86-89`), already proven end-to-end for the sibling challenge limiter
+//! (`http_integration.rs:843-873`, `challenge_endpoint_is_rate_limited`). This test
+//! exercises the SAME limiter on the publish path for real: a harness configured with
+//! `publish_rate_per_minute = 1`, one publish that succeeds, a second (different content,
+//! same producer) that trips the limiter, and asserts the REAL HTTP response -- 429,
+//! `application/acdp+json`, `error.code == "rate_limited"`, and a present `Retry-After`
+//! header -- against the fixture's own pinned status/code.
+//!
 //! ## Coverage completeness ratchet (`COVERED` / `DEFERRED`, REG-10 Phase 11)
 //!
 //! The four tests above (`all_conformance_fixtures_are_bucketed_into_known_families`,
@@ -337,9 +397,11 @@
 //! `no_excused_family_is_required_by_our_profile`) fail on an *unclassified* family or an
 //! *illegitimate excuse* -- never on a *classified-but-uncovered* one. A family with a
 //! logged skip reason and no coverage at all passes all four, which is exactly how `vis`
-//! and `idem` sat uncovered before Phases 8-10, and how `lc` still does (#115).
-//! (`caps` and `lin` closed to COVERED in Phase 7; only `lc` remains under #115.)
-//! Phase 11 closes that gap with a fifth, deliberately UNCONDITIONAL test,
+//! and `idem` sat uncovered before Phases 8-10, and how `cur`/`rcpt`/`lhr`/`log` still do
+//! (#130). (`caps`/`lin` closed to COVERED in Phase 7; `lc` was DEFERRED under #115 until
+//! Phase 14 declared it EXCUSED instead -- see `EXCUSED`'s own entry for `lc` -- so #115
+//! now has zero `DEFERRED` members.) Phase 11 closes that gap with a fifth, deliberately
+//! UNCONDITIONAL test,
 //! `known_families_partition_into_covered_excused_or_deferred`: every family in
 //! `KNOWN_FAMILIES` must appear in exactly one of `COVERED`, `EXCUSED`, or `DEFERRED`.
 //! "Uncovered" stops being a silent default and becomes something a contributor must
@@ -386,28 +448,34 @@
 //! ratchet would just be running the suite, not ratcheting it.
 //!
 //! `DEFERRED` is `&[(&str, &str, u32)]` -- family, a non-empty written reason, and an
-//! open GitHub issue number. `lc` cites **#115** (filed for `caps`/`lin`/`lc`; the
-//! first two closed to COVERED in Phase 7, so `lc` is the only one left under it);
-//! the remaining 7 cite **#130**, filed enumerating each with its own reason (`meta`
-//! and `data-ref` closed to COVERED in Phase 10; `body` and `status` in Phase 11;
-//! `schema` in Phase 12; `sig`, `rev`, and `dk` in Phase 13, same #130 filing).
+//! open GitHub issue number. **#115** was filed for `caps`/`lin`/`lc`: the first two
+//! closed to `COVERED` in Phase 7, and `lc` -- the only one of the three ever left in
+//! `DEFERRED` -- was moved to `EXCUSED` in Phase 14 (see `EXCUSED`'s own entry for `lc`),
+//! so #115 now has zero `DEFERRED` members; the check below tolerates that (it only
+//! requires #115 membership OF whichever of the trio still happen to sit in `DEFERRED`,
+//! never that one must). The remaining `cur`/`rcpt`/`lhr`/`log` cite **#130**, filed
+//! enumerating each with its own reason (`meta` and `data-ref` closed to `COVERED` in
+//! Phase 10; `body` and `status` in Phase 11; `schema` in Phase 12; `sig`/`rev`/`dk` in
+//! Phase 13; `did-ssrf`/`err`/`rate` in Phase 14, same #130 filing).
 //! `known_families_partition_into_covered_excused_or_deferred` checks both: reason
 //! non-empty, issue is one of the two known-open numbers, and that any of the
 //! `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115.
 //!
-//! **Required-checks decision (recorded here, not executed):** `conformance (spec
-//! fixtures)` is currently NOT among this repo's required status-check contexts
-//! (verified directly against branch protection: `rustfmt`, `clippy`, `tests` only).
-//! With the coverage story now split across a spec-dependent half (`Replayed`, the
-//! `conformance` job) and a spec-independent half (`Direct` and the set-equality ratchet
-//! itself, the `tests` job), leaving `conformance` advisory means only the WEAKER half of
-//! this ratchet -- the part expressible without executing HTTP replay -- ever blocks a
-//! merge; a regression that silently drops a fixture's replayed exchanges (while its
-//! `COVERED` entry and direct tests stay intact) would go unnoticed by required checks.
-//! The decision, per this phase's own acceptance criteria: `conformance (spec fixtures)`
-//! SHOULD join the required contexts. This is a repo-admin action (branch protection
-//! settings), deliberately left undone by this change -- see `CHANGELOG.md` and
-//! `ASSUMPTIONS.md` for the follow-up recorded for a human to action.
+//! **Required-checks status (current, re-verified 2026-09-01 per `ASSUMPTIONS.md`):**
+//! `conformance (spec fixtures)` IS among this repo's required status-check contexts --
+//! `required_status_checks.contexts` is `["rustfmt", "clippy", "tests", "conformance
+//! (spec fixtures)"]` on branch protection today. REG-10 Phase 11 recorded a
+//! recommendation to add it (it was advisory-only then) and left the branch-protection
+//! change itself to a repo admin, since executing that change is out of scope for any
+//! single diff to this file; a repo admin actioned it on 2026-09-01 (`ASSUMPTIONS.md`'s
+//! "Executed" entry for the Phase 11 recommendation). The underlying split this decision
+//! was about is still real and still worth stating: the coverage ratchet has a
+//! spec-independent half (`Direct` coverage and the set-equality tests, all in the
+//! required `tests` job, needing no `ACDP_SPEC_DIR`) and a spec-dependent half
+//! (`Replayed` coverage, verified inside `replays_spec_fixtures_when_present`, which
+//! needs the spec and lives in the `conformance` job) -- but with BOTH jobs now required,
+//! a regression that silently drops a `COVERED`-`Replayed` family's exchanges is caught
+//! by a required check too, not merely advised on.
 
 #![cfg(feature = "storage-sqlite")]
 
@@ -440,10 +508,12 @@ use acdp_registry_sqlite::SqliteStore;
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::{
     config::PinnedAgentKey, AuthConfig, LimitsConfig, PlaygroundConfig, RegistryConfig,
-    RegistrySection, StorageBackend, StorageConfig, WebhookConfig, REGISTRY_ADVERTISABLE_PROFILES,
+    RegistryError, RegistrySection, StorageBackend, StorageConfig, WebhookConfig,
+    REGISTRY_ADVERTISABLE_PROFILES,
 };
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::response::IntoResponse;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -8139,7 +8209,7 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 /// coverage — a family can sit classified-but-uncovered indefinitely, which
 /// is exactly what happened to `vis`/`idem` before Phases 8-10, and to
 /// `caps`/`lin` before Phase 7, and to `meta`/`data-ref` before Phase 10 --
-/// and what still holds for `lc` (#115) and 13 others (#130) today.
+/// and what still holds for `cur`/`rcpt`/`lhr`/`log` (#130) today.
 /// Every family in this list must now ALSO appear in exactly one of
 /// `COVERED`, `EXCUSED`, or `DEFERRED` — enforced unconditionally by
 /// `known_families_partition_into_covered_excused_or_deferred`, which needs
@@ -8291,10 +8361,12 @@ const KNOWN_FAMILIES: &[&str] = &[
 /// `idem`, `lin`, `meta`, `pub`, `ret`, `rev`, `schema`, `sig`, `status`, and
 /// `vis` are all now `COVERED` (`caps`/`lin` since Phase 7; `meta`/`data-ref`
 /// since Phase 10; `body`/`status` since Phase 11; `schema` since Phase 12;
-/// `sig`/`rev`/`dk` since Phase 13), and the other three (`did-ssrf`, `err`,
-/// `rate`) are currently `DEFERRED` -- both groups are spec-required all the
-/// same, so both must be unexcusable. See `COVERED`'s own entries and
-/// `DEFERRED`'s doc comment.
+/// `sig`/`rev`/`dk` since Phase 13; `did-ssrf`/`err`/`rate` since Phase 14) --
+/// every family this const names is now `COVERED`, none `DEFERRED`, but the
+/// const itself is unchanged by that: it mirrors spec-required *family
+/// membership*, not coverage status, so a `DEFERRED` -> `COVERED` move (the
+/// good-path direction, see below) never touches it. See `COVERED`'s own
+/// entries and `DEFERRED`'s doc comment.
 ///
 /// Deliberately NOT filtered down to only the currently-`DEFERRED` subset:
 /// doing that would make this list implicitly depend on `COVERED`'s
@@ -8361,10 +8433,29 @@ const EXCUSED: &[(&str, &str)] = &[
         "applies_to_profiles = [acdp-registry-receipts, acdp-consumer], and none of \
          its 1 fixture is in acdp-registry-core's required_fixtures or \
          conditional_fixtures -- same structural shape as lc (a profile this harness \
-         doesn't advertise), but excused on a substantive ground lc is not: RFC-ACDP-0010 \
-         \u{a7}10 assigns historical producer-key verification to the consumer holding \
-         the receipt, not to the issuing registry, so no harness configuration change \
-         would make this registry responsible for it.",
+         doesn't advertise), and both are now excused, but rot's is the STRONGER, \
+         substantive ground: RFC-ACDP-0010 \u{a7}10 assigns historical producer-key \
+         verification to the consumer holding the receipt, not to the issuing registry, \
+         so no harness configuration change would make this registry responsible for it \
+         -- whereas lc's excuse (below) rests solely on this harness's current profile \
+         advertisement, nothing about the obligation itself.",
+    ),
+    (
+        "lc",
+        "profile-gated: applies_to_profiles = [acdp-registry-lifecycle] on all 3 \
+         fixtures (RFC-ACDP-0013), disjoint from this harness's advertised \
+         HARNESS_PROFILES = [acdp-registry-core] -- verified directly against \
+         registries/profiles.json at spec pin d1f06d0, both for applies_to_profiles on \
+         each lc-* fixture and for lc's absence from acdp-registry-core's \
+         required_fixtures and conditional_fixtures. The runtime profile gate \
+         (targets_unadvertised_profile) therefore skips all 3 before they ever reach a \
+         shape, so they are never owed under what this harness advertises today. \
+         REG-11 Phase 14 (a user decision, not re-derived here) declares this \
+         excusable rather than leaving it silently DEFERRED under #115 -- see \
+         DEFERRED's own doc comment for the history. Weaker ground than rot's (above): \
+         advertising acdp-registry-lifecycle would make this obligation live, so this \
+         excuse is a statement about today's harness configuration, not about who owns \
+         the obligation.",
     ),
 ];
 
@@ -8516,6 +8607,24 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
             "did_key_golden_vector_accepted_and_gated",
         ])],
     ),
+    (
+        "did-ssrf",
+        &[CoverageMechanism::Direct(&[
+            "did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets",
+        ])],
+    ),
+    (
+        "err",
+        &[CoverageMechanism::Direct(&[
+            "err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing",
+        ])],
+    ),
+    (
+        "rate",
+        &[CoverageMechanism::Direct(&[
+            "rate001_publish_rate_limit_trips_429_with_retry_after",
+        ])],
+    ),
 ];
 
 /// Families with no coverage yet, each with a non-empty written reason and
@@ -8523,64 +8632,35 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 /// filed under **#115** (Q1 of `plans/reg10-conformance-and-ci-hygiene.md`)
 /// alongside `lc`, but REG-11 Phase 7 gave them direct-vector coverage
 /// (`caps_vectors_validate_capabilities_document`,
-/// `lin_vectors_reproduce_lineage_derivation` in `COVERED` above) --
-/// `lc` alone remains DEFERRED under #115, since it is profile-gated
-/// rather than closeable by a direct vector pass. `meta`, `data-ref`,
-/// `body`, and `status` were filed under **#130** alongside the rest
-/// below; REG-11 Phase 10 closed `meta`/`data-ref` to `COVERED`
-/// (`meta001_003_metadata_depth_and_size_caps_enforced`,
-/// `data_ref001_007_publish_path_rejections_enforced`), and Phase 11
-/// closed `body`/`status` the same way
+/// `lin_vectors_reproduce_lineage_derivation` in `COVERED` above) -- and
+/// `lc`, the only one of the three ever left in `DEFERRED`, was moved to
+/// `EXCUSED` in Phase 14 (it is profile-gated, not closeable by a direct
+/// vector pass, but the user decision behind Phase 14 was to declare that
+/// excusable rather than leave it silently uncovered -- see `EXCUSED`'s own
+/// `lc` entry). #115 therefore has zero `DEFERRED` members as of this
+/// phase. `meta`, `data-ref`, `body`, and `status` were filed under **#130**
+/// alongside the rest below; REG-11 Phase 10 closed `meta`/`data-ref` to
+/// `COVERED` (`meta001_003_metadata_depth_and_size_caps_enforced`,
+/// `data_ref001_007_publish_path_rejections_enforced`), Phase 11 closed
+/// `body`/`status` the same way
 /// (`body001_002_origin_registry_hostname_never_did_form`,
 /// `status001_004_served_status_matches_open_enum_pattern`, both in
-/// `COVERED` above). Phase 12 closed `schema`
-/// (`schema_vectors_openness_and_absent_vs_null_enforced`), and Phase 13 closed
-/// `sig`, `rev`, and `dk` (see `COVERED` above). The remaining 7 cite
-/// **#130** (filed for Phase 6, enumerating each with its own reason).
+/// `COVERED` above), Phase 12 closed `schema`
+/// (`schema_vectors_openness_and_absent_vs_null_enforced`), Phase 13 closed
+/// `sig`, `rev`, and `dk`, and Phase 14 closed the last three
+/// `CORE_INEXCUSABLE_FAMILIES` stragglers, `did-ssrf`/`err`/`rate` (see
+/// `COVERED` above for all of these). The remaining `cur`/`rcpt`/`lhr`/`log`
+/// cite **#130** (filed for Phase 6, enumerating each with its own reason);
+/// none of the four is in `CORE_INEXCUSABLE_FAMILIES`, so none is under the
+/// same closure pressure `did-ssrf`/`err`/`rate` were.
 /// `known_families_partition_into_covered_excused_or_deferred` checks: the
 /// reason is non-empty, the issue is one of the two known-open numbers, and
-/// `lc` specifically cites #115.
+/// any of the `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115
+/// (vacuously true today, since none of the three is).
 const DEFERRED: &[(&str, &str, u32)] = &[
-    (
-        "lc",
-        "profile-gated-uncovered: lc-*'s 3 fixtures target a profile this harness does \
-         not advertise, so they are skipped by the runtime profile gate rather than \
-         required -- plausibly excusable, but that has never been declared, so it stays \
-         DEFERRED rather than silently assumed EXCUSED.",
-        115,
-    ),
-    (
-        "did-ssrf",
-        "producer-DID-resolution SSRF refusal. NOT a missing resolver seam: all 5 \
-         did-ssrf-* fixtures fall out at fixture-shape extraction and are reported \
-         as \"non-HTTP fixture (vectors / schema / informative)\" in this suite's own \
-         skip tally -- so they never reach a resolver at all. The seam also already \
-         exists: acdp_did::WebResolver applies SsrfPolicy::default() unconditionally \
-         (covering the 001-003 IP-literal cases), and exposes with_ssrf_policy plus \
-         with_test_endpoint under the test-transport feature, which is already enabled \
-         on acdp in this crate's dev-dependencies. What is missing is a direct-vector \
-         pass like can's, not a capability.",
-        130,
-    ),
     (
         "cur",
         "cursor/pagination semantics; no direct or replayed coverage yet.",
-        130,
-    ),
-    (
-        "err",
-        "error-envelope shape; no direct or replayed coverage yet.",
-        130,
-    ),
-    (
-        "rate",
-        "rate-limiting obligations (RFC-ACDP-0008 \u{a7}4.3); not a missing seam -- \
-         `limits.publish_rate_per_minute` (config.rs:560-561) is a live config knob \
-         enforced by the in-process fixed-window `AgentRateLimiter` \
-         (rate_limit.rs, wired at state.rs:86-89) emitting 429 `rate_limited` with \
-         `Retry-After` (error.rs:42,61,75) -- already proven end-to-end for the sibling \
-         challenge limiter (http_integration.rs:843-873). Needs a direct/replayed pass \
-         exercising the publish-path limiter the same way, not a new mechanism.",
         130,
     ),
     (
@@ -9909,6 +9989,698 @@ async fn dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolve
     assert_eq!(
         found, EXPECTED_DK_NEGATIVE_FIXTURE_COUNT,
         "expected exactly {EXPECTED_DK_NEGATIVE_FIXTURE_COUNT} dk-00[124] fixtures at spec pin \
+         d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
+         this ratchet exists to prevent"
+    );
+}
+
+// ─── REG-11 Phase 14: `did-ssrf` (RFC-ACDP-0008 §4.8), `err` (RFC-ACDP-0007
+// §4), `rate` (RFC-ACDP-0008 §4.3) -- the last three `CORE_INEXCUSABLE_
+// FAMILIES` stragglers -- plus `lc` -> `EXCUSED` (see `EXCUSED`'s own entry
+// for `lc`, above; that move needed no new test, only a declaration) ───
+
+const EXPECTED_DID_SSRF_FIXTURE_COUNT: usize = 5;
+const EXPECTED_DID_SSRF_ASSERTION_COUNT: usize = 5;
+
+/// True iff `did`'s authority (the segment right after `did:web:`, percent-
+/// decoded) parses as a bare IP literal -- i.e. resolving it needs no real
+/// DNS lookup. Used to separate did-ssrf-002/003's hostname-based
+/// `additional_test_cases` (`metadata.example.com`, `internal.example.com`
+/// -- each fixture's own note says these resolve, VIA DNS, to a forbidden
+/// address) from their IP-literal siblings: this test suite runs offline,
+/// so only the IP-literal cases -- refused by `SsrfPolicy::check_url`
+/// BEFORE any socket or DNS activity -- are deterministically reproducible
+/// here. The hostname cases are real RFC-ACDP-0008 §4.8 obligations too
+/// (DNS-rebinding protection), just not ones this test can exercise without
+/// a live resolver; `acdp-did`'s own test suite
+/// (`did_resolver_rejects_hostname_resolving_to_loopback`, `acdp-did-0.9.1/
+/// src/web.rs`) covers that shape against real `localhost` DNS.
+fn did_web_authority_is_ip_literal(did: &str) -> bool {
+    let Ok(url) = acdp::did::did_web_to_url(did) else {
+        return false;
+    };
+    let after_scheme = url.strip_prefix("https://").unwrap_or(url.as_str());
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    let host = authority.trim_start_matches('[').trim_end_matches(']');
+    host.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// did-ssrf-001..005 (RFC-ACDP-0008 §4.8, `acdp-registry-core`'s own
+/// `required_fixtures` -- see `CORE_INEXCUSABLE_FAMILIES`): producer
+/// `did:web` resolution MUST refuse loopback/IMDS/private-range targets
+/// (001/002/003), MUST reject a mixed public+forbidden DNS answer set in
+/// its entirety rather than filtering and proceeding (004), and MUST treat
+/// a same-host different-port redirect as a DIFFERENT authority (005).
+///
+/// **The prior `DEFERRED` reason's claim, verified before building on it
+/// (per this phase's own instructions, and because a previous agent
+/// overturned a wrong ruling here once already):** re-reading
+/// `extract_shapes` directly (not trusting the old prose) confirms all 5
+/// did-ssrf-* fixtures really do fall out at fixture-shape extraction.
+/// `targets_unadvertised_profile` passes them through (`applies_to_
+/// profiles` includes `acdp-registry-core`, which is in `HARNESS_
+/// PROFILES`), and there is no `setup`/`preconditions` key, so
+/// `unseeded_precondition_reason` is `None` too -- but `extract_shapes`
+/// itself matches none of Shapes A/B/C/D: no top-level `request` (Shape A/
+/// B need one), no `setup` (Shape D), and Shape C's own destructuring
+/// requires `input.endpoint` to split into exactly `("GET",
+/// "/contexts/{ctx_id}")`, which `"POST /contexts"` never does. So every
+/// one of these fixtures falls to the same `"non-HTTP fixture (vectors /
+/// schema / informative)"` catch-all `can`/`sig` also land in -- confirmed,
+/// not assumed. The seam claim also held up: `acdp::did::WebResolver`
+/// (`acdp-did` 0.9.1, re-exported by the `acdp` facade this crate already
+/// depends on) applies `SsrfPolicy::default()` unconditionally, and
+/// `acdp::safe_http` (the crate `WebResolver` itself is built over, also
+/// re-exported by the facade, `url` an unconditional dependency of it) is
+/// where the 004/005 enforcement actually lives -- both reachable from this
+/// dev-dependency-only test binary with zero new Cargo dependencies (the
+/// `client`/`test-transport` features are already unified on via
+/// `acdp-client`'s own unconditional `acdp-did/client` requirement and this
+/// crate's own `acdp = { features = ["test-transport"] }` dev-dependency).
+///
+/// **What is measured vs. derived, honestly:**
+///   * did-ssrf-001/002/003 (IP-literal cases only, see
+///     `did_web_authority_is_ip_literal`'s doc comment for why hostname
+///     cases are excluded): MEASURED end-to-end through the real, public
+///     `WebResolver::resolve` -- offline and deterministic, since the SSRF
+///     policy refuses before any socket activity -- and the resulting
+///     `AcdpError::KeyResolution` is fed through this repo's OWN
+///     `RegistryError::from`/`wire_code`/`http_status` (the exact
+///     projection every handler's `Result<_, RegistryError>` return type
+///     goes through), asserted equal to the fixture's own pinned
+///     `key_resolution_failed`/400. This is a genuine, if not fully
+///     glued-into-one-HTTP-call, proof: the registry's publish path in
+///     THIS harness runs under `playground.enabled = true`
+///     (`config()`, `:509` above), which bypasses did:web resolution
+///     entirely, so no black-box `POST /contexts` in this harness's own
+///     configuration ever reaches `WebResolver` -- the same reason `sig-*`/
+///     `rev-*`'s golden vectors need `pinned_producer_harness` instead of
+///     the shared `harness()`.
+///   * did-ssrf-004/005: MEASURED only at the pure-function layer
+///     (`reject_if_any_forbidden`, `SsrfPolicy::classify_redirect`) --
+///     `acdp-safe-http`'s own doc comment names `reject_if_any_forbidden`
+///     as "the canonical enforcement point the mixed-answer conformance
+///     fixtures pin (did-ssrf-004, ...)". Both calls sit one layer beneath
+///     the full `WebResolver`/reqwest pipeline (no live TLS/DNS mock is
+///     stood up here), so this test does NOT assert a final `key_
+///     resolution_failed`/400 for either -- only that the enforcement point
+///     itself rejects. DERIVED (by reading, not running,
+///     `classify_reqwest_error` in `acdp-did-0.9.1/src/web.rs`): a DNS
+///     answer failing `reject_if_any_forbidden` surfaces to reqwest as a
+///     connect-shaped error, which `classify_reqwest_error` would normally
+///     re-tag `KeyResolutionUnreachable` (502, retryable) -- EXCEPT it
+///     checks the error chain for the literal substring `"SSRF policy"`
+///     first, which `reject_if_any_forbidden`'s own message carries,
+///     overriding that to `KeyResolution` (400, permanent). A redirect-
+///     policy refusal is classified into the same `else` arm regardless of
+///     that substring (it is not `is_connect()`/`is_timeout()`), so it also
+///     resolves to `KeyResolution`. Both conclusions are read off the
+///     source, not exercised by this test -- reported as derived, not
+///     measured, per this phase's own reporting requirement.
+#[tokio::test(flavor = "multi_thread")]
+async fn did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping \
+             did-ssrf-001..005 (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut asserted = 0usize;
+    let mut found_ids: Vec<&str> = Vec::new();
+
+    // did-ssrf-001/002/003: IP-literal did:web authorities the default
+    // WebResolver must refuse before any socket activity.
+    for id in ["did-ssrf-001", "did-ssrf-002", "did-ssrf-003"] {
+        let Some(fx) = find_fixture_by_id(&fixtures, id) else {
+            continue;
+        };
+        found_ids.push(id);
+
+        assert_eq!(
+            fx["expected"]["outcome"].as_str(),
+            Some("failure"),
+            "{id}: expected.outcome missing/changed: {fx}"
+        );
+        assert_eq!(
+            fx["expected"]["http_status"].as_u64(),
+            Some(400),
+            "{id}: expected.http_status missing/changed: {fx}"
+        );
+        assert_eq!(
+            fx["expected"]["error_code"].as_str(),
+            Some("key_resolution_failed"),
+            "{id}: expected.error_code missing/changed: {fx}"
+        );
+
+        let primary_did = fx["input"]["body"]["agent_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{id}: input.body.agent_id missing: {fx}"))
+            .to_string();
+        let mut dids_to_check = vec![primary_did];
+        if let Some(cases) = fx["input"]["additional_test_cases"].as_array() {
+            for c in cases {
+                if let Some(s) = c.as_str() {
+                    dids_to_check.push(s.to_string());
+                }
+            }
+        }
+
+        let mut checked_any = false;
+        for did in dids_to_check {
+            if !did_web_authority_is_ip_literal(&did) {
+                // Hostname case requiring real DNS -- see
+                // did_web_authority_is_ip_literal's doc comment.
+                continue;
+            }
+            checked_any = true;
+            let resolver = acdp::did::WebResolver::new();
+            let result = resolver.resolve(&did).await;
+            let err = match result {
+                Err(e) => e,
+                Ok(doc) => {
+                    panic!("{id}: WebResolver::resolve({did:?}) unexpectedly succeeded: {doc:?}")
+                }
+            };
+            assert!(
+                matches!(err, acdp::error::AcdpError::KeyResolution(_)),
+                "{id}: {did:?} must be refused as a permanent AcdpError::KeyResolution \
+                 (400), got {err:?}"
+            );
+            // Bridge to this repo's own wire projection: the exact
+            // RegistryError -> HTTP mapping every handler's
+            // `Result<_, RegistryError>` return type goes through.
+            let registry_err = RegistryError::from(err);
+            assert_eq!(
+                registry_err.http_status(),
+                400,
+                "{id}: {did:?} must project to HTTP 400 via this repo's RegistryError"
+            );
+            assert_eq!(
+                registry_err.wire_code(),
+                "key_resolution_failed",
+                "{id}: {did:?} must project to key_resolution_failed via this repo's \
+                 RegistryError"
+            );
+        }
+        assert!(
+            checked_any,
+            "{id}: no IP-literal did:web case found to check (primary + \
+             additional_test_cases) -- did the fixture's own shape change?"
+        );
+
+        asserted += 1;
+    }
+
+    // did-ssrf-004: a DNS answer mixing one public and one forbidden
+    // address must be rejected in its ENTIRETY, at the same enforcement
+    // point `acdp-safe-http` itself documents as canonical for this exact
+    // fixture. See this test's own doc comment for why this stops short of
+    // asserting the full pipeline's wire status.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "did-ssrf-004") {
+        found_ids.push("did-ssrf-004");
+        assert_eq!(
+            fx["expected"]["outcome"].as_str(),
+            Some("failure"),
+            "did-ssrf-004: expected.outcome missing/changed: {fx}"
+        );
+        assert_eq!(
+            fx["expected"]["error_code"].as_str(),
+            Some("key_resolution_failed"),
+            "did-ssrf-004: expected.error_code missing/changed: {fx}"
+        );
+
+        let policy = acdp::safe_http::SsrfPolicy::default();
+        let mut mixed_sets: Vec<(String, Vec<std::net::IpAddr>)> = Vec::new();
+        let mock = &fx["input"]["dns_mock"];
+        let host = mock["host"]
+            .as_str()
+            .unwrap_or_else(|| panic!("did-ssrf-004: input.dns_mock.host missing: {fx}"))
+            .to_string();
+        let answers: Vec<std::net::IpAddr> = mock["answers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("did-ssrf-004: input.dns_mock.answers missing: {fx}"))
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| panic!("did-ssrf-004: bad dns_mock answer in {fx}"))
+            })
+            .collect();
+        mixed_sets.push((host, answers));
+        if let Some(cases) = fx["input"]["additional_test_cases"].as_array() {
+            for case in cases {
+                let h = case["host"]
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        panic!("did-ssrf-004: additional_test_cases.host missing: {fx}")
+                    })
+                    .to_string();
+                let ans: Vec<std::net::IpAddr> = case["answers"]
+                    .as_array()
+                    .unwrap_or_else(|| {
+                        panic!("did-ssrf-004: additional_test_cases.answers missing: {fx}")
+                    })
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or_else(|| panic!("did-ssrf-004: bad answer in {fx}"))
+                    })
+                    .collect();
+                mixed_sets.push((h, ans));
+            }
+        }
+        assert!(
+            mixed_sets.len() >= 2,
+            "did-ssrf-004 self-check: expected the primary dns_mock plus at least one \
+             additional_test_cases entry: {fx}"
+        );
+        for (host, answers) in &mixed_sets {
+            let candidates: Vec<std::net::SocketAddr> = answers
+                .iter()
+                .map(|ip| std::net::SocketAddr::new(*ip, 443))
+                .collect();
+            let err = acdp::safe_http::reject_if_any_forbidden(&policy, host, &candidates)
+                .expect_err(&format!(
+                    "did-ssrf-004: mixed answer set for {host:?} ({answers:?}) must be \
+                     rejected in its entirety, not filtered-and-proceed"
+                ));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("SSRF policy"),
+                "did-ssrf-004: rejection for {host:?} must identify the SSRF policy so the \
+                 full WebResolver pipeline reclassifies it as permanent (see this test's \
+                 doc comment); got: {msg:?}"
+            );
+        }
+        asserted += 1;
+    }
+
+    // did-ssrf-005: a redirect to the SAME host but a DIFFERENT port is a
+    // DIFFERENT authority and must be refused; the fixture's own positive
+    // control (explicit :443, the https default) proves the check isn't
+    // vacuously rejecting every redirect.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "did-ssrf-005") {
+        found_ids.push("did-ssrf-005");
+        assert_eq!(
+            fx["expected"]["outcome"].as_str(),
+            Some("failure"),
+            "did-ssrf-005: expected.outcome missing/changed: {fx}"
+        );
+        assert_eq!(
+            fx["expected"]["error_code"].as_str(),
+            Some("key_resolution_failed"),
+            "did-ssrf-005: expected.error_code missing/changed: {fx}"
+        );
+
+        let policy = acdp::safe_http::SsrfPolicy::default();
+        let from = fx["input"]["redirect_from"]
+            .as_str()
+            .unwrap_or_else(|| panic!("did-ssrf-005: input.redirect_from missing: {fx}"));
+        let to = fx["input"]["redirect_to"]
+            .as_str()
+            .unwrap_or_else(|| panic!("did-ssrf-005: input.redirect_to missing: {fx}"));
+        let rejection = policy
+            .classify_redirect(from, to)
+            .expect_err("did-ssrf-005: cross-port redirect must be rejected");
+        assert_eq!(
+            rejection.reason,
+            acdp::safe_http::SsrfReason::CrossAuthority,
+            "did-ssrf-005: rejection reason must be CrossAuthority, got {rejection:?}"
+        );
+
+        // Positive control: the fixture's own additional_test_cases proves
+        // the SAME check does not reject a same-port (explicit :443)
+        // redirect -- ruling out a vacuously-always-rejects implementation.
+        let cases = fx["input"]["additional_test_cases"]
+            .as_array()
+            .unwrap_or_else(|| panic!("did-ssrf-005: input.additional_test_cases missing: {fx}"));
+        assert!(
+            !cases.is_empty(),
+            "did-ssrf-005 self-check: expected at least one additional_test_cases entry: {fx}"
+        );
+        for case in cases {
+            let to2 = case["redirect_to"].as_str().unwrap_or_else(|| {
+                panic!("did-ssrf-005: additional_test_cases.redirect_to missing: {fx}")
+            });
+            let expect_match = case["authority_match"].as_bool().unwrap_or_else(|| {
+                panic!("did-ssrf-005: additional_test_cases.authority_match missing: {fx}")
+            });
+            let result = policy.classify_redirect(from, to2);
+            assert_eq!(
+                result.is_ok(),
+                expect_match,
+                "did-ssrf-005: classify_redirect({from:?}, {to2:?}) authority_match mismatch: \
+                 {fx}"
+            );
+        }
+        asserted += 1;
+    }
+
+    assert_eq!(
+        found_ids.len(),
+        EXPECTED_DID_SSRF_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_DID_SSRF_FIXTURE_COUNT} did-ssrf-* fixtures at spec pin \
+         d1f06d0: found {found_ids:?}"
+    );
+    assert_eq!(
+        asserted, EXPECTED_DID_SSRF_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_DID_SSRF_ASSERTION_COUNT} did-ssrf-* outcome assertions at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
+    );
+}
+
+const EXPECTED_ERR_FIXTURE_COUNT: usize = 1;
+const EXPECTED_ERR_ASSERTION_COUNT: usize = 5;
+
+/// err-001 (RFC-ACDP-0007 §4, `acdp-registry-core`'s own `required_fixtures`
+/// -- see `CORE_INEXCUSABLE_FAMILIES`): on an unhandled internal failure the
+/// registry MUST return the standard error envelope with HTTP 500, code
+/// `internal_error`, media type `application/acdp+json`, and a message that
+/// leaks no stack trace or sensitive context. The fixture's own words:
+/// "Implementation-defined trigger — fixtures cannot reproduce; this is a
+/// structural test for the response shape." No black-box request through
+/// this registry's own HTTP surface can deterministically force a
+/// persistence-layer throw (unlike a schema violation, which a malformed
+/// body triggers on demand) -- same non-reproducibility this file already
+/// accepts for `can`/`anc`/`sig`'s own golden-vector reasons, just for a
+/// different underlying cause.
+///
+/// So this test drives the REAL, production `RegistryError -> HTTP
+/// response` projection this registry's binary actually wires
+/// (`acdp_registry_types::error::RegistryError`'s `IntoResponse` impl,
+/// `#[cfg(feature = "axum")]`, the exact type every handler's
+/// `Result<_, RegistryError>` return value goes through) -- not a
+/// reimplementation of it -- for every `RegistryError` variant that
+/// legitimately projects to `internal_error` in this codebase (`Storage`,
+/// `Config`, `WebhookDelivery`, `Internal`, and
+/// `Acdp(AcdpError::RegistryInternal)`), each seeded with a deliberately
+/// sensitive-looking detail string (a SQL error, a secrets-file path, an
+/// internal webhook URL, a panic location, a pool-exhaustion message), and
+/// asserts NONE of that detail reaches the wire. This mirrors
+/// `acdp-registry-types::error`'s own `internal_errors_do_not_leak_detail`
+/// unit test (same five variants, same discipline) but from THIS repo's
+/// conformance file, cross-checked against err-001's own fixture literals
+/// (`http_status`, `error_code`, `content_type`) rather than a hand-typed
+/// expectation. The fixture's illustrative `expected.envelope.error.message`
+/// ("An unexpected error occurred.") is NOT asserted verbatim -- nothing in
+/// err-001's own text pins the message's exact wording (only its non-leak
+/// property, which the "MUST NOT leak" prose is actually about), and this
+/// repo's real implementation emits a different string
+/// (`RegistryError::wire_message_and_details`, `"internal error"`) -- so
+/// asserting the fixture's literal text would be a wrong-reason pass
+/// (green for matching a string, not for the property that actually
+/// matters).
+#[tokio::test(flavor = "multi_thread")]
+async fn err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping err-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut found_ids: Vec<&str> = Vec::new();
+    let Some(fx) = find_fixture_by_id(&fixtures, "err-001") else {
+        panic!("err-001 fixture not found under {}", fixtures.display());
+    };
+    found_ids.push("err-001");
+
+    assert_eq!(
+        fx["expected"]["outcome"].as_str(),
+        Some("failure"),
+        "err-001: expected.outcome missing/changed: {fx}"
+    );
+    let want_status = fx["expected"]["http_status"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("err-001: expected.http_status missing: {fx}"))
+        as u16;
+    let want_code = fx["expected"]["error_code"]
+        .as_str()
+        .unwrap_or_else(|| panic!("err-001: expected.error_code missing: {fx}"))
+        .to_string();
+    let want_content_type = fx["expected"]["content_type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("err-001: expected.content_type missing: {fx}"))
+        .to_string();
+
+    let sensitive_cases: Vec<(&str, RegistryError)> = vec![
+        (
+            "SQLSTATE 42P01",
+            RegistryError::Storage(
+                "relation \"contexts\" does not exist (SQLSTATE 42P01) at line 42".into(),
+            ),
+        ),
+        (
+            "/etc/secret.toml",
+            RegistryError::Config("missing [auth] section in /etc/secret.toml".into()),
+        ),
+        (
+            "internal.example.com",
+            RegistryError::WebhookDelivery(
+                "delivery to https://internal.example.com/hook failed: connection refused".into(),
+            ),
+        ),
+        (
+            "src/store.rs:921",
+            RegistryError::Internal("panic at src/store.rs:921".into()),
+        ),
+        (
+            "connection pool exhausted",
+            RegistryError::Acdp(acdp::error::AcdpError::RegistryInternal(
+                "connection pool exhausted".into(),
+            )),
+        ),
+    ];
+
+    let mut asserted = 0usize;
+    for (leak_needle, err) in sensitive_cases {
+        assert_eq!(
+            err.wire_code(),
+            want_code.as_str(),
+            "err-001 self-check: variant must wire_code() to the fixture's own error_code"
+        );
+        assert_eq!(
+            err.http_status(),
+            want_status,
+            "err-001 self-check: variant must http_status() to the fixture's own http_status"
+        );
+        let resp = err.into_response();
+        assert_eq!(
+            resp.status().as_u16(),
+            want_status,
+            "err-001: HTTP status must match the fixture"
+        );
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            content_type, want_content_type,
+            "err-001: Content-Type must match the fixture"
+        );
+        let body = body_to_json(resp).await;
+        assert_eq!(
+            body["error"]["code"].as_str(),
+            Some(want_code.as_str()),
+            "err-001: wire error.code must match the fixture: {body}"
+        );
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            !message.contains(leak_needle),
+            "err-001: internal_error message MUST NOT leak sensitive detail ({leak_needle:?}), \
+             got: {message:?}"
+        );
+        asserted += 1;
+    }
+
+    assert_eq!(
+        found_ids.len(),
+        EXPECTED_ERR_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_ERR_FIXTURE_COUNT} err-* fixtures at spec pin d1f06d0: \
+         found {found_ids:?}"
+    );
+    assert_eq!(
+        asserted, EXPECTED_ERR_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_ERR_ASSERTION_COUNT} err-* outcome assertions at spec pin \
+         d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
+         this ratchet exists to prevent"
+    );
+}
+
+const EXPECTED_RATE_FIXTURE_COUNT: usize = 1;
+const EXPECTED_RATE_ASSERTION_COUNT: usize = 1;
+
+fn rate_producer(seed: u8) -> Producer {
+    common::producer("rate", seed)
+}
+
+/// rate-001 (RFC-ACDP-0008 §4.3, `acdp-registry-core`'s own
+/// `required_fixtures` -- see `CORE_INEXCUSABLE_FAMILIES`): the wire shape
+/// of a per-agent rate-limit rejection -- HTTP 429, standard error
+/// envelope, `error.code == "rate_limited"`, and a `Retry-After` header
+/// that MUST be present. The fixture's own words: "black-box conformance
+/// testing cannot deterministically trigger a rate limit on an arbitrary
+/// registry, so this fixture is informative... implementers MUST self-test
+/// by submitting publishes faster than their advertised limit." This is NOT
+/// a missing seam: `limits.publish_rate_per_minute`
+/// (`acdp-registry-types/src/config.rs:560-561`) is a live config knob
+/// enforced by the in-process fixed-window `AgentRateLimiter`
+/// (`acdp-registry-core/src/rate_limit.rs`, wired at
+/// `acdp-registry-core/src/state.rs:86-89`) that the publish handler
+/// already checks (`acdp-registry-core/src/handlers/context.rs:391-398`,
+/// keyed on the signing `agent_id`, before the expensive verify/persist
+/// pipeline) and that emits `RegistryError::RateLimited` ->
+/// 429/`rate_limited`/`Retry-After`
+/// (`acdp-registry-types/src/error.rs`) -- already proven end-to-end for
+/// the sibling `/auth/challenge` limiter by `http_integration.rs`'s
+/// `challenge_endpoint_is_rate_limited` (`:843-873` at the pin this
+/// phase's plan named). This test exercises the SAME limiter, same
+/// mechanism, on the publish path instead: a harness configured with
+/// `publish_rate_per_minute = 1`, one publish that succeeds under budget,
+/// and a second (different content, same producer) that trips the limiter
+/// -- asserting the REAL HTTP response against the fixture's own pinned
+/// `http_status`/`response_body.error.code`, not a hand-typed literal.
+#[tokio::test(flavor = "multi_thread")]
+async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping rate-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut found_ids: Vec<&str> = Vec::new();
+    let Some(fx) = find_fixture_by_id(&fixtures, "rate-001") else {
+        panic!("rate-001 fixture not found under {}", fixtures.display());
+    };
+    found_ids.push("rate-001");
+
+    assert_eq!(
+        fx["expected"]["outcome"].as_str(),
+        Some("failure"),
+        "rate-001: expected.outcome missing/changed: {fx}"
+    );
+    let want_status = fx["expected"]["http_status"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("rate-001: expected.http_status missing: {fx}"))
+        as u16;
+    let want_code = fx["expected"]["response_body"]["error"]["code"]
+        .as_str()
+        .unwrap_or_else(|| panic!("rate-001: expected.response_body.error.code missing: {fx}"))
+        .to_string();
+    let want_content_type = fx["expected"]["headers"]["Content-Type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("rate-001: expected.headers.Content-Type missing: {fx}"))
+        .to_string();
+
+    let mut cfg = config();
+    cfg.limits.publish_rate_per_minute = 1;
+    let app = common::build_harness_with_webhook(
+        cfg,
+        caps(),
+        AUTHORITY,
+        common::StoreMode::Memory,
+        None,
+        None,
+    )
+    .await
+    .router;
+
+    let rate_prod = rate_producer(241);
+    let first = rate_prod
+        .publish_request()
+        .title("rate-001 first (within budget)")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status1, v1) = anc_publish(&app, &first).await;
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "rate-001 setup publish must succeed under budget: {v1}"
+    );
+
+    let second = rate_prod
+        .publish_request()
+        .title("rate-001 second (over budget)")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&second).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status().as_u16(),
+        want_status,
+        "rate-001: second publish over budget must hit the fixture's own http_status"
+    );
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(
+        content_type, want_content_type,
+        "rate-001: Content-Type must match the fixture"
+    );
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let retry_after = retry_after.unwrap_or_else(|| {
+        panic!("rate-001: a 429 rate_limited response MUST carry a Retry-After header")
+    });
+    // This repo's implementation always emits an integer-seconds value
+    // (RegistryError::into_response, error.rs); the fixture also permits an
+    // HTTP-date, which this implementation does not use -- checked here
+    // against what this repo actually does, not the full spec-permitted
+    // range.
+    let retry_after_secs: u64 = retry_after.parse().unwrap_or_else(|e| {
+        panic!("rate-001: Retry-After must parse as integer seconds in this implementation: {e}")
+    });
+    assert!(
+        retry_after_secs >= 1,
+        "rate-001: Retry-After must be a positive number of seconds, got {retry_after_secs}"
+    );
+    let body = body_to_json(resp).await;
+    assert_eq!(
+        body["error"]["code"].as_str(),
+        Some(want_code.as_str()),
+        "rate-001: wire error.code must match the fixture: {body}"
+    );
+
+    let asserted = 1usize;
+    assert_eq!(
+        found_ids.len(),
+        EXPECTED_RATE_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_RATE_FIXTURE_COUNT} rate-* fixtures at spec pin d1f06d0: \
+         found {found_ids:?}"
+    );
+    assert_eq!(
+        asserted, EXPECTED_RATE_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_RATE_ASSERTION_COUNT} rate-* outcome assertions at spec pin \
          d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
          this ratchet exists to prevent"
     );

@@ -421,6 +421,159 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- end REG-11 Phase 13 -->
 
+<!-- REG-11 Phase 14 -->
+
+- **`did-ssrf`, `err`, and `rate` move from `DEFERRED` to `COVERED` — the
+  last three `CORE_INEXCUSABLE_FAMILIES` stragglers — and `lc` moves from
+  `DEFERRED` to `EXCUSED`** (`REG-11` Phase 14, `#115`/`#130`): three new
+  direct tests in `crates/acdp-registry-server/tests/conformance.rs`, plus
+  one ratchet declaration requiring no new test.
+  - **Real fixture counts, verified against `registries/profiles.json` at
+    spec pin `d1f06d0`**: `did-ssrf` carries exactly 5 fixtures
+    (`did-ssrf-001`..`005`), all unconditionally in
+    `acdp-registry-core.required_fixtures`. `err` and `rate` carry exactly
+    1 fixture each (`err-001`, `rate-001`), also both unconditionally
+    required — not derived from the plan's prose, read directly off the
+    pinned spec file and cross-checked against the fixture count on disk.
+  - **The prior `did-ssrf` `DEFERRED` reason's claim was verified, not
+    trusted, before building on it** (a previous agent overturned a wrong
+    ruling on this exact family once already): re-reading `extract_shapes`
+    directly confirms all 5 `did-ssrf-*` fixtures really do fall out at
+    fixture-shape extraction (`targets_unadvertised_profile` passes them —
+    `applies_to_profiles` includes `acdp-registry-core` — but their
+    `input.endpoint`/`input.body` shape satisfies none of Shapes A/B/C/D),
+    landing in the same `"non-HTTP fixture (vectors / schema /
+    informative)"` bucket as `can`/`sig`. Measured directly in this run's
+    own skip tally: `did-ssrf: 5 (non-HTTP fixture (vectors / schema /
+    informative))`, `err: 1 (...)`, `rate: 1 (...)`. The seam claim held up
+    too: `acdp::did::WebResolver` (re-exported by the `acdp` facade this
+    crate already depends on) applies `SsrfPolicy::default()`
+    unconditionally, and `acdp::safe_http` exposes `reject_if_any_forbidden`
+    and `SsrfPolicy::classify_redirect` for the mixed-answer and
+    same-authority-redirect rules — all reachable from this dev-dependency
+    test binary with **zero new Cargo dependencies** (the `client`/
+    `test-transport` features were already unified on transitively via
+    `acdp-client`'s own unconditional `acdp-did/client` requirement and
+    this crate's existing `acdp = { features = ["test-transport"] }`
+    dev-dependency).
+  - `did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets`:
+    `did-ssrf-001`/`002`/`003` (IP-literal cases only — hostname-based
+    `additional_test_cases` needing real DNS, e.g. `metadata.example.com`,
+    are explicitly excluded and documented, not silently dropped) drive the
+    real, async `WebResolver::resolve` end-to-end — offline and
+    deterministic, since the SSRF policy refuses before any socket
+    activity — and cross-check the resulting `AcdpError::KeyResolution`
+    against this repo's own `RegistryError::wire_code`/`http_status`
+    (`key_resolution_failed`/400, matching the fixtures exactly).
+    `did-ssrf-004`/`005` drive `reject_if_any_forbidden`/`classify_redirect`
+    directly with the fixtures' own DNS-answer and redirect literals — one
+    layer beneath the full `WebResolver`/reqwest pipeline (no live TLS/DNS
+    mock stood up), so the test does NOT claim a final wire status for
+    those two, only that the pure enforcement point itself rejects (plus,
+    by reading — not running — `classify_reqwest_error`, documents why that
+    should still resolve to `key_resolution_failed`/400 end-to-end: the
+    `"SSRF policy"` substring match). This distinction (measured vs.
+    derived) is spelled out in the test's own doc comment so it is never
+    mistaken for a full-pipeline proof.
+  - `err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing`:
+    `err-001`'s own text calls its trigger "implementation-defined...
+    fixtures cannot reproduce" — no black-box request can deterministically
+    force a persistence-layer throw. This test instead drives the REAL
+    production `RegistryError -> HTTP response` projection (the
+    `IntoResponse` impl every handler's `Result<_, RegistryError>` return
+    type goes through) for all five variants that legitimately project to
+    `internal_error` in this codebase, each seeded with a deliberately
+    sensitive-looking detail string, asserting none of it reaches the wire
+    — mirroring `acdp-registry-types::error`'s own
+    `internal_errors_do_not_leak_detail` unit test, now also proven from
+    this repo's conformance file against the fixture's pinned
+    status/code/content-type. The fixture's illustrative message text ("An
+    unexpected error occurred.") is deliberately NOT asserted verbatim —
+    this repo's real implementation emits a different string ("internal
+    error"), and nothing in `err-001`'s own text pins the wording, only the
+    non-leak property.
+  - `rate001_publish_rate_limit_trips_429_with_retry_after`: not a missing
+    seam — `limits.publish_rate_per_minute` is a live config knob enforced
+    by the in-process `AgentRateLimiter`, already proven end-to-end for the
+    sibling `/auth/challenge` limiter by `http_integration.rs`'s
+    `challenge_endpoint_is_rate_limited`. This test exercises the SAME
+    limiter on the publish path for real: a harness configured with
+    `publish_rate_per_minute = 1`, one publish that succeeds, a second
+    (different content, same producer) that trips the limiter, asserting
+    the REAL HTTP response (429, `application/acdp+json`,
+    `error.code == "rate_limited"`, a present `Retry-After` header) against
+    the fixture's own pinned status/code.
+  - **`lc` moves `DEFERRED` -> `EXCUSED`** (a user decision, not
+    re-derived here): `lc`'s 3 fixtures each carry `applies_to_profiles:
+    ["acdp-registry-lifecycle"]`, disjoint from this harness's advertised
+    `HARNESS_PROFILES = ["acdp-registry-core"]` — verified directly against
+    `registries/profiles.json` at this pin, both for each fixture's
+    `applies_to_profiles` and for `lc`'s absence from
+    `acdp-registry-core`'s `required_fixtures`/`conditional_fixtures`.
+    `no_excused_family_is_required_by_our_profile` still passes (spec-gated
+    guard confirming no excused family is actually owed). This needed no
+    new test — only a written excuse in `EXCUSED` — since the runtime
+    profile gate already skips all 3 fixtures; what was missing was the
+    *declaration*, not a capability. #115 now has zero `DEFERRED` members.
+  - **Corrected a stale claim found while editing the same module doc
+    comment this phase's changes live in** (same discipline as Phase 13's
+    unrelated `CORE_INEXCUSABLE_FAMILIES` fix): the "Required-checks
+    decision" paragraph said `conformance (spec fixtures)` was NOT among
+    this repo's required branch-protection contexts and that adding it was
+    "deliberately left undone." Re-verified directly against branch
+    protection: `required_status_checks.contexts` is now
+    `["rustfmt", "clippy", "tests", "conformance (spec fixtures)"]` — a
+    repo admin actioned the Phase 11 recommendation on 2026-09-01 (see
+    `ASSUMPTIONS.md`'s "Executed" entry for that decision). The paragraph
+    is rewritten to state the current, verified status rather than the
+    stale one; the underlying `Replayed`-vs-`Direct` split it was
+    explaining is left in place since it is still accurate. (The
+    equivalent stale sentence in this Phase 13 changelog entry above is
+    left as a historical record of what was true when it was written, not
+    rewritten.)
+
+  `MIN_REPLAYED_EXCHANGES` (30) and the exchange replay count are
+  unaffected — measured: `conformance: replayed 30 exchange(s);
+  failures=0`, identical before and after this change; all three new tests
+  sit outside the generic replay loop, same as `anc-*`/`sig`/`rev`/`dk`.
+  All three self-skip cleanly (measured) when `ACDP_SPEC_DIR` is unset — no
+  panics. Test counts: 56 -> 59 passed in `conformance.rs` (+3), 1 passed
+  in `conformance_gate.rs` (unchanged) — 60 total. `cargo fmt --check` and
+  `cargo clippy --all-targets --features storage-sqlite,playground -- -D
+  warnings` both clean.
+
+  **Mutation-tested (measured)** against a scratch copy of the spec tree
+  under `/tmp`, outside this repo and outside the pinned spec worktree —
+  each mutation applied, run in isolation, confirmed red, then reverted
+  before the next; the scratch copy was deleted afterward and a final run
+  against the real pinned worktree reconfirmed green (60/60, replayed 30,
+  failures=0):
+  - `err-001`: `expected.error_code` -> a wrong string -- RED (wire_code
+    self-check).
+  - `err-001`: `expected.http_status` -> `599` -- RED (http_status
+    self-check).
+  - `rate-001`: `expected.response_body.error.code` -> a wrong string --
+    RED (wire error.code mismatch).
+  - `rate-001`: `expected.http_status` -> `599` -- RED (real HTTP status
+    mismatch after tripping the real limiter).
+  - `did-ssrf-001`: `expected.error_code` -> a wrong string -- RED (fixture
+    self-check).
+  - `did-ssrf-004`: `dns_mock.answers` changed to two PUBLIC addresses
+    (removing the forbidden one) -- RED (`reject_if_any_forbidden`
+    genuinely stopped rejecting; the mixed-answer enforcement is really
+    exercised, not assumed).
+  - `did-ssrf-005`: `redirect_to` changed to keep the same port (`:443`,
+    matching `redirect_from`) -- RED (`classify_redirect` genuinely started
+    accepting the redirect).
+  - `did-ssrf-005`: the fixture's own positive-control
+    `additional_test_cases[0].authority_match` flipped `true` -> `false` --
+    RED (the test's independently-computed `classify_redirect` result,
+    `true`, mismatched the now-wrong fixture expectation, `false`) --
+    proves this assertion is a real comparison, not an echo of whatever the
+    fixture says.
+
+<!-- end REG-11 Phase 14 -->
+
 - **A coverage-completeness ratchet closes the gap Phases 7-10 left open**
   (`REG-10` Phase 11): the existing four `KNOWN_FAMILIES`/`EXCUSED` ratchet
   tests fail only on an *unclassified* family or an *illegitimate excuse* —
