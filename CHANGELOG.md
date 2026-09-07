@@ -1736,6 +1736,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Documentation
 
+<!-- REG-11 #164 (Lane C) -->
+
+- **Corrected a class of stale `401` doc comments in the ACDP request path**
+  (`#164`): six comments across
+  `crates/acdp-registry-core/src/handlers/{auth.rs,context.rs}` described
+  auth failures as `401`. They return `RegistryError::AuthToken`/`Jwt`/
+  `AuthChallenge`, which `http_status` maps to **403** (`not_authorized`),
+  pinned by `auth_errors_are_403`. Comments only — no logic, signature, or
+  behaviour changed.
+
+  The most load-bearing was `caller_from_headers`' *"Returns `Err(401)`"*,
+  which had already been cited as a source in a `#152` review and put a false
+  `401` claim into `docs/HTTP-API.md`'s neighbourhood before being caught —
+  which is what makes this a defect worth fixing rather than a typo: a stale
+  doc comment is more credible than prose in an issue, because it sits
+  directly above the function.
+
+  Fixed as a class rather than the two reported instances. The sweep is
+  bounded by a fact that makes it checkable: `StatusCode::UNAUTHORIZED` has
+  exactly **one** non-test occurrence in `crates/` (`metrics.rs:130`), so
+  `/metrics` is the only endpoint in this registry that answers `401`, and any
+  comment claiming `401` on an ACDP path is wrong by construction. Comments
+  that correctly describe `/metrics`, and those in `error.rs` explaining why
+  there is no 401-bearing code, were deliberately left alone.
+
+<!-- end REG-11 #164 -->
+
 <!-- REG-11 #166 (Lane B) -->
 
 - **`docs/AUTHENTICATION.md`: corrected two false claims** (`#166`) that reached
