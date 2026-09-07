@@ -305,6 +305,31 @@
 //! and are recorded not-applicable, with this reasoning, in that same test's
 //! doc comment rather than silently dropped.
 //!
+//! `sig-*`/`rev-*`/`dk-*` (RFC-ACDP-0001 §5.4/§5.11.1, RFC-ACDP-0014 §4/§5) are golden
+//! vectors and did:key resolution negatives, not HTTP-replayable by the generic loop for
+//! the same reason as `can`/`anc`: no top-level `request`, and the positive vectors carry
+//! real cryptographic material a synthetic replay can't verify. REG-11 Phase 13 gives
+//! `sig-001`/`sig-002` and `rev-001` DIRECT coverage via
+//! `sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_publish` (+ its
+//! `sig001_signature_byte_perturbation_is_rejected` mutation proof),
+//! `sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected`, and
+//! `rev001_key_revocation_context_golden_accepted_and_self_signed_rejected` -- all three
+//! use `playground.pinned_keys` (`acdp-registry-core/src/playground.rs`) to get REAL
+//! Ed25519/ECDSA-P256 verification of a did:web producer without a live DID resolver,
+//! rather than the unpinned playground branch that accepts any signature. `sig-003` and
+//! `dk-003` were already covered by the pre-existing `did_key_golden_vector_accepted_and_
+//! gated` (above), merely not yet registered in `COVERED`; Phase 13 registers it under
+//! both families. `dk-001`/`dk-002`/`dk-004` get DIRECT coverage via
+//! `dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver`, which
+//! documents a discovered wrong-reason trap (see that test's own doc comment): this
+//! repo's `acdp` v0.9.1 dependency rejects all three with `schema_violation`, not the
+//! fixtures' pinned `key_resolution_failed` -- spec-sanctioned for `dk-002` only, a
+//! genuine (unfixable from this file) conformance gap for `dk-001`/`dk-004`. `rev-002`
+//! stays out of scope: it applies only to `acdp-consumer`, never `acdp-registry-core`
+//! (`HARNESS_PROFILES`), matching the "registry side only" framing `rev`'s now-removed
+//! `DEFERRED` entry always should have carried precisely (it previously misdescribed
+//! rev-002's before/after semantics as rev-001's own).
+//!
 //! ## Coverage completeness ratchet (`COVERED` / `DEFERRED`, REG-10 Phase 11)
 //!
 //! The four tests above (`all_conformance_fixtures_are_bucketed_into_known_families`,
@@ -363,8 +388,9 @@
 //! `DEFERRED` is `&[(&str, &str, u32)]` -- family, a non-empty written reason, and an
 //! open GitHub issue number. `lc` cites **#115** (filed for `caps`/`lin`/`lc`; the
 //! first two closed to COVERED in Phase 7, so `lc` is the only one left under it);
-//! the remaining 13 cite **#130**, filed enumerating each with its own reason (`meta`
-//! and `data-ref` closed to COVERED in Phase 10, same #130 filing).
+//! the remaining 10 cite **#130**, filed enumerating each with its own reason (`meta`
+//! and `data-ref` closed to COVERED in Phase 10; `sig`, `rev`, and `dk` closed to
+//! COVERED in Phase 13, same #130 filing).
 //! `known_families_partition_into_covered_excused_or_deferred` checks both: reason
 //! non-empty, issue is one of the two known-open numbers, and that any of the
 //! `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115.
@@ -413,8 +439,8 @@ use acdp_registry_sqlite::SqliteStore;
 #[cfg(feature = "playground")]
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::{
-    AuthConfig, LimitsConfig, PlaygroundConfig, RegistryConfig, RegistrySection, StorageBackend,
-    StorageConfig, WebhookConfig, REGISTRY_ADVERTISABLE_PROFILES,
+    config::PinnedAgentKey, AuthConfig, LimitsConfig, PlaygroundConfig, RegistryConfig,
+    RegistrySection, StorageBackend, StorageConfig, WebhookConfig, REGISTRY_ADVERTISABLE_PROFILES,
 };
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -7617,13 +7643,13 @@ const KNOWN_FAMILIES: &[&str] = &[
 /// family that appears in `required_fixtures` or anywhere in
 /// `conditional_fixtures` (`registries/profiles.json` at the pin named in
 /// `ci.yml`'s `conformance` job), sorted and deduped. Mirrors the *family*
-/// footprint, not coverage status: `can`, `idem`, `pub`, `ret`, and `vis`
-/// are already `COVERED`, and the other eleven (`body`, `caps`,
-/// `did-ssrf`, `dk`, `err`, `lin`, `rate`, `rev`,
-/// `schema`, `sig`, `status`) are currently `DEFERRED` -- both groups are
-/// spec-required all the same, so both must be unexcusable. (`meta` and
-/// `data-ref` closed to `COVERED` in Phase 10 -- see `COVERED`'s own
-/// entries and `DEFERRED`'s doc comment.)
+/// footprint, not coverage status: `can`, `caps`, `data-ref`, `dk`, `idem`,
+/// `lin`, `meta`, `pub`, `ret`, `rev`, `sig`, and `vis` are already
+/// `COVERED` (`caps`/`lin` since Phase 7; `meta`/`data-ref` since Phase 10;
+/// `sig`/`rev`/`dk` since Phase 13 -- see `COVERED`'s own entries and
+/// `DEFERRED`'s doc comment), and the other six (`body`, `did-ssrf`, `err`,
+/// `rate`, `schema`, `status`) are currently `DEFERRED` -- both groups are
+/// spec-required all the same, so both must be unexcusable.
 ///
 /// Deliberately NOT filtered down to only the currently-`DEFERRED` subset:
 /// doing that would make this list implicitly depend on `COVERED`'s
@@ -7805,6 +7831,28 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
             "data_ref001_007_publish_path_rejections_enforced",
         ])],
     ),
+    (
+        "sig",
+        &[CoverageMechanism::Direct(&[
+            "sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_publish",
+            "sig001_signature_byte_perturbation_is_rejected",
+            "sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected",
+            "did_key_golden_vector_accepted_and_gated",
+        ])],
+    ),
+    (
+        "rev",
+        &[CoverageMechanism::Direct(&[
+            "rev001_key_revocation_context_golden_accepted_and_self_signed_rejected",
+        ])],
+    ),
+    (
+        "dk",
+        &[CoverageMechanism::Direct(&[
+            "dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver",
+            "did_key_golden_vector_accepted_and_gated",
+        ])],
+    ),
 ];
 
 /// Families with no coverage yet, each with a non-empty written reason and
@@ -7818,7 +7866,15 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 /// were filed under **#130** alongside the rest below, and REG-11 Phase 10
 /// closed both to `COVERED` the same way (`meta001_003_metadata_depth_and_
 /// size_caps_enforced`, `data_ref001_007_publish_path_rejections_enforced`
-/// in `COVERED` above). The remaining 13 cite
+/// in `COVERED` above). REG-11 Phase 13 closed three more the same way:
+/// `sig` (`sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_
+/// publish`, `sig001_signature_byte_perturbation_is_rejected`,
+/// `sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected`, plus the
+/// pre-existing `did_key_golden_vector_accepted_and_gated` for sig-003),
+/// `rev` (`rev001_key_revocation_context_golden_accepted_and_self_signed_
+/// rejected`), and `dk` (`dk001_002_004_did_key_resolution_negatives_hit_
+/// schema_layer_not_resolver`, plus `did_key_golden_vector_accepted_and_
+/// gated` for dk-003) -- all in `COVERED` above. The remaining 10 cite
 /// **#130** (filed for Phase 6, enumerating each with its own reason).
 /// `known_families_partition_into_covered_excused_or_deferred` checks: the
 /// reason is non-empty, the issue is one of the two known-open numbers, and
@@ -7842,19 +7898,6 @@ const DEFERRED: &[(&str, &str, u32)] = &[
         "schema",
         "same shape as `body` -- absent-vs-null wire conventions, vector-shaped, needs a \
          direct-vector pass.",
-        130,
-    ),
-    (
-        "sig",
-        "signature goldens; needs synthesized bodies bound to fixture hashes before a \
-         direct pass is possible.",
-        130,
-    ),
-    (
-        "dk",
-        "did:key goldens; conditional on advertising did:key (acdp-registry-core's \
-         conditional_fixtures), currently unowed under this harness's advertised \
-         capabilities.",
         130,
     ),
     (
@@ -7928,14 +7971,6 @@ const DEFERRED: &[(&str, &str, u32)] = &[
          acdp-registry-transparency-log/acdp-consumer and the harness advertises only \
          acdp-registry-core (HARNESS_PROFILES, conformance.rs:425). Neither is a \
          missing seam.",
-        130,
-    ),
-    (
-        "rev",
-        "key revocation (RFC-ACDP-0014 \u{a7}4/\u{a7}5) -- the registry side: accepting \
-         and publishing a key-revocation context and its before/after compromise-boundary \
-         semantics, not a verification-side obligation. No direct or replayed coverage \
-         yet.",
         130,
     ),
 ];
@@ -8587,5 +8622,652 @@ async fn registry_advertisable_profiles_matches_spec_derived_set() {
         !const_ids.iter().any(|id| id == "acdp-consumer"),
         "acdp-consumer is not a registry profile -- it must never appear in \
          REGISTRY_ADVERTISABLE_PROFILES"
+    );
+}
+
+// ─── REG-11 Phase 13: sig (golden signatures) + rev (key-revocation golden)
+// + dk (did:key resolution negatives) ───
+//
+// All three families share one producer identity used by the sig-001,
+// sig-002, sig-003, and rev-001 fixtures at spec pin d1f06d0:
+// `did:web:agents.example.com:test-producer`. This test file's shared
+// `caps()`/`harness()` cannot verify a did:web signature (no live DID
+// resolver in-process — see the module doc-comment's playground note), so
+// these tests reuse the `playground.pinned_keys` mechanism
+// (`acdp-registry-core/src/playground.rs`, FEAT-Phase5) instead of the
+// unpinned playground default: a pinned agent's publish is cryptographically
+// verified against the pinned public key via `acdp::crypto::verify`, which
+// is real Ed25519/ECDSA-P256 verification, not the "any signature passes"
+// unpinned branch. That distinction is exactly what the mutation tests below
+// exist to prove.
+
+/// A playground-enabled harness that pins exactly one signing key for
+/// `did:web:agents.example.com:test-producer` (the sig-001/002/003 and
+/// rev-001 fixtures' shared test-producer DID), in `pinned_only` (strict)
+/// mode so no OTHER agent can slip through unverified. Mirrors
+/// `anc_caps_050`'s / `did_key_harness`'s pattern of building a local,
+/// per-test-family harness rather than touching the shared `caps()`/`config()`.
+async fn pinned_producer_harness(
+    caps: CapabilitiesDocument,
+    public_key_b64: &str,
+    algorithm: &str,
+) -> axum::Router {
+    let mut cfg = config();
+    cfg.playground.pinned_keys = vec![PinnedAgentKey {
+        agent_did: "did:web:agents.example.com:test-producer".into(),
+        public_key_b64: public_key_b64.into(),
+        algorithm: algorithm.into(),
+        valid_from: None,
+        valid_until: None,
+    }];
+    cfg.playground.pinned_only = true;
+    common::build_harness_with_webhook(cfg, caps, AUTHORITY, common::StoreMode::Memory, None, None)
+        .await
+        .router
+}
+
+/// POST a raw JSON `Value` to `/contexts` — the shape sig-001/002/003's
+/// `expected.publish_request_body` and rev-001's hand-built bodies need,
+/// as opposed to `anc_publish`'s typed `&PublishRequest`. Mirrors the
+/// inline `post` closure `did_key_golden_vector_accepted_and_gated` (above)
+/// already uses for the same reason (a byte-pinned golden body, not a
+/// freshly-built one).
+async fn post_publish_json(app: &axum::Router, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .header("content-type", "application/acdp+json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    (status, v)
+}
+
+const EXPECTED_SIG001_VECTOR_COUNT: usize = 1;
+
+/// sig-001 (RFC-ACDP-0001 §5.4, required unconditionally by
+/// `acdp-registry-core.required_fixtures`): the Ed25519 golden vector.
+///
+/// Three layers, from purest to most integrated:
+///   1. Recompute the JCS canonical form + `content_hash` over the fixture's
+///      own `producer_content` via `acdp::crypto::canonical_preimage` (the
+///      same public API `can_vectors_reproduce_canonical_form_and_hash`
+///      uses) and assert byte/hex equality against the fixture's
+///      `expected.canonical_form`/`content_hash` — proves this repo's
+///      canonicalization pipeline, not just its dependency's test suite,
+///      reproduces the golden hash.
+///   2. Verify the fixture's own golden `signature_value_base64` offline via
+///      `acdp::crypto::verify::verify_ed25519` against the fixture's own
+///      public key — pure crypto, no HTTP, no registry involved.
+///   3. POST the fixture's own `expected.publish_request_body` VERBATIM to a
+///      registry that pins the fixture's public key for its producer DID
+///      (`pinned_producer_harness`) and assert HTTP 200 + a minted `ctx_id`.
+///
+/// Layer 3 is the one the mutation test below (`sig001_signature_byte_
+/// perturbation_is_rejected`) exists to prove is non-vacuous: unlike the
+/// *unpinned* playground branch (`enforce_pinned_signature`'s `Ok(PinOutcome::
+/// Unpinned)` arm, `playground.rs`), which accepts "any agent_id+signature
+/// pair" per its own doc comment, the *pinned* branch this test drives
+/// really does call `acdp::crypto::verify::verify_ed25519` — so a corrupted
+/// signature byte does not silently pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_publish() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping sig-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "sig-001") else {
+        return;
+    };
+    let vectors = fx["vectors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sig-001: vectors missing or not an array: {fx}"));
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_SIG001_VECTOR_COUNT,
+        "sig-001 must carry exactly {EXPECTED_SIG001_VECTOR_COUNT} vector at spec pin d1f06d0: {fx}"
+    );
+    let v = &vectors[0];
+    let producer_content = &v["producer_content"];
+    let expected = &v["expected"];
+
+    // Layer 1: recompute canonical form + content_hash.
+    let (canonical_bytes, hash) = acdp::crypto::canonical_preimage(producer_content)
+        .unwrap_or_else(|e| panic!("sig-001: canonical_preimage failed: {e}"));
+    let canonical_str = String::from_utf8(canonical_bytes)
+        .unwrap_or_else(|e| panic!("sig-001: canonical form is not valid UTF-8: {e}"));
+    assert_eq!(
+        canonical_str,
+        expected["canonical_form"].as_str().unwrap(),
+        "sig-001: recomputed canonical_form mismatch"
+    );
+    assert_eq!(
+        hash.as_str(),
+        expected["content_hash"].as_str().unwrap(),
+        "sig-001: recomputed content_hash mismatch"
+    );
+
+    // Layer 2: offline golden-signature verification.
+    let pub_key_hex = fx["test_keypair"]["public_key_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("sig-001: test_keypair.public_key_hex missing: {fx}"));
+    let pub_bytes: [u8; 32] = hex::decode(pub_key_hex)
+        .unwrap_or_else(|e| panic!("sig-001: public_key_hex is not valid hex: {e}"))
+        .try_into()
+        .unwrap_or_else(|v: Vec<u8>| {
+            panic!(
+                "sig-001: public_key_hex decoded to {} bytes, want 32",
+                v.len()
+            )
+        });
+    let sig_b64 = expected["signature_value_base64"].as_str().unwrap();
+    acdp::crypto::verify::verify_ed25519(&pub_bytes, sig_b64, hash.as_str())
+        .unwrap_or_else(|e| panic!("sig-001: golden signature failed offline verification: {e}"));
+
+    // Layer 3: HTTP publish via a pinned-key registry, verbatim body.
+    let pub_key_b64 = fx["test_keypair"]["public_key_base64"]
+        .as_str()
+        .unwrap_or_else(|| panic!("sig-001: test_keypair.public_key_base64 missing: {fx}"));
+    let req_body = expected["publish_request_body"].clone();
+    assert!(
+        req_body.is_object(),
+        "sig-001 must carry vectors[0].expected.publish_request_body"
+    );
+    let app = pinned_producer_harness(caps(), pub_key_b64, "ed25519").await;
+    let (status, body) = post_publish_json(&app, req_body).await;
+    assert_eq!(status, StatusCode::OK, "sig-001 accept body = {body}");
+    assert!(
+        body["ctx_id"].as_str().is_some_and(|s| !s.is_empty()),
+        "sig-001: response must carry a non-empty ctx_id: {body}"
+    );
+}
+
+/// Mutation proof for `sig001_ed25519_golden_verified_offline_and_accepted_
+/// via_pinned_publish`: perturb one byte of the golden `signature.value` and
+/// confirm the SAME pinned-key harness rejects it with `invalid_signature`/
+/// 400 (`acdp-registry-core/src/playground.rs`'s `verify_ed25519_pinned` ->
+/// `acdp::crypto::verify::verify_ed25519` -> `AcdpError::InvalidSignature`,
+/// `error.rs`'s `http_status_for_acdp` maps it to 400). If the pinned-key
+/// path ever regressed to the *unpinned* "any signature passes" branch,
+/// this test — not the accept-path test above — is what would catch it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sig001_signature_byte_perturbation_is_rejected() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping sig-001 \
+             mutation check (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "sig-001") else {
+        return;
+    };
+    let pub_key_b64 = fx["test_keypair"]["public_key_base64"].as_str().unwrap();
+    let mut req_body = fx["vectors"][0]["expected"]["publish_request_body"].clone();
+
+    // Flip the first base64 character of the signature value -- base64's
+    // alphabet is closed under this (still decodes), so the corruption is
+    // caught by signature *verification*, not by base64 decode failure.
+    let sig_val = req_body["signature"]["value"].as_str().unwrap().to_string();
+    let mut chars: Vec<char> = sig_val.chars().collect();
+    chars[0] = if chars[0] == 'A' { 'B' } else { 'A' };
+    let corrupted: String = chars.into_iter().collect();
+    assert_ne!(
+        corrupted, sig_val,
+        "sig-001 mutation: corrupted signature must differ from golden"
+    );
+    req_body["signature"]["value"] = Value::String(corrupted);
+
+    let app = pinned_producer_harness(caps(), pub_key_b64, "ed25519").await;
+    let (status, body) = post_publish_json(&app, req_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "sig-001 mutation: a corrupted signature byte must be rejected, got body = {body}"
+    );
+    assert_eq!(
+        body["error"]["code"], "invalid_signature",
+        "sig-001 mutation: body = {body}"
+    );
+}
+
+const EXPECTED_SIG002_VECTOR_COUNT: usize = 2;
+
+/// sig-002 (RFC-ACDP-0001 §5.4, conditional on `supported_signature_
+/// algorithms` including `"ecdsa-p256"` — live under this file's shared
+/// `caps()`, `:436`, which advertises exactly that): the ECDSA-P256 golden
+/// vector, TWO vectors in one fixture:
+///   * vector 0 — a real RFC-6979-deterministic P-256 signature over the
+///     SAME `producer_content` as sig-001 (byte-identical, per the fixture's
+///     own description) — MUST be accepted.
+///   * vector 1 — the identical mathematical signature re-encoded as ASN.1
+///     DER (70 bytes) instead of the required IEEE-1363 r‖s (64 bytes) wire
+///     form — MUST be rejected `invalid_signature`, per
+///     `registries/signature-algorithms.md`'s NORMATIVE prohibition on
+///     accepting DER. This repo's `acdp::crypto::verify::verify_ecdsa_p256`
+///     rejects any signature whose decoded length isn't exactly 64 bytes
+///     before attempting a cryptographic check at all, which is exactly
+///     what this vector needs -- an implementation that first converts DER
+///     to r‖s and *then* verifies would wrongly accept it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping sig-002 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "sig-002") else {
+        return;
+    };
+    let vectors = fx["vectors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sig-002: vectors missing or not an array: {fx}"));
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_SIG002_VECTOR_COUNT,
+        "sig-002 must carry exactly {EXPECTED_SIG002_VECTOR_COUNT} vectors at spec pin d1f06d0: {fx}"
+    );
+
+    let pub_key_b64 = {
+        // `test_keypair.public_key_uncompressed_sec1_hex` is hex, not base64
+        // -- decode then re-encode as standard base64, the form
+        // `PinnedAgentKey::public_key_b64` and `verify_ecdsa_p256` both want.
+        let sec1_hex = fx["test_keypair"]["public_key_uncompressed_sec1_hex"]
+            .as_str()
+            .unwrap();
+        let sec1_bytes = hex::decode(sec1_hex).unwrap();
+        assert_eq!(
+            sec1_bytes.len(),
+            65,
+            "sig-002: SEC1 public key must be 65 bytes"
+        );
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        STANDARD.encode(&sec1_bytes)
+    };
+
+    // Vector 0: accept.
+    let expected0 = &vectors[0]["expected"];
+    let content_hash0 = expected0["content_hash"].as_str().unwrap();
+    let sig0_b64 = expected0["signature_value_base64"].as_str().unwrap();
+    let sec1_bytes = {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        STANDARD.decode(&pub_key_b64).unwrap()
+    };
+    acdp::crypto::verify::verify_ecdsa_p256(&sec1_bytes, sig0_b64, content_hash0).unwrap_or_else(
+        |e| panic!("sig-002 vector 0: golden signature failed offline verification: {e}"),
+    );
+
+    let app = pinned_producer_harness(caps(), &pub_key_b64, "ecdsa-p256").await;
+    let req_body0 = expected0["publish_request_body"].clone();
+    let (status, body) = post_publish_json(&app, req_body0).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "sig-002 vector 0 accept body = {body}"
+    );
+    assert!(body["ctx_id"].as_str().is_some_and(|s| !s.is_empty()));
+
+    // Vector 1: DER-encoded signature, same message -- MUST be rejected.
+    let expected1 = &vectors[1]["expected"];
+    assert_eq!(expected1["error_code"].as_str(), Some("invalid_signature"));
+    let der_sig_b64 = expected1["der_encoded_signature_base64"].as_str().unwrap();
+    assert!(
+        acdp::crypto::verify::verify_ecdsa_p256(&sec1_bytes, der_sig_b64, content_hash0).is_err(),
+        "sig-002 vector 1: a DER-encoded signature must fail offline verification too"
+    );
+    let app2 = pinned_producer_harness(caps(), &pub_key_b64, "ecdsa-p256").await;
+    let req_body1 = expected1["publish_request_body"].clone();
+    let (status, body) = post_publish_json(&app2, req_body1).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "sig-002 vector 1: DER signature must be rejected, body = {body}"
+    );
+    assert_eq!(
+        body["error"]["code"], "invalid_signature",
+        "sig-002 vector 1 body = {body}"
+    );
+}
+
+/// A `0.3.0`-advertising registry, for the rev-001 test below -- built
+/// locally so as not to touch the shared `caps()` (`:433`, `"0.1.0"`),
+/// mirroring `anc_caps_050`'s / `did_key_caps`'s pattern. RFC-ACDP-0014
+/// §4/§5's key-revocation shape gate and self-signed-revocation refusal
+/// (`key_revocation_gate_applies`, `acdp-server`'s `validator.rs`) both key
+/// off `capabilities.acdp_version >= 0.3.0`.
+fn rev_caps_030() -> CapabilitiesDocument {
+    let mut c = caps();
+    c.acdp_version = "0.3.0".into();
+    c
+}
+
+const EXPECTED_REV001_VECTOR_COUNT: usize = 1;
+
+/// rev-001 (RFC-ACDP-0014 §4/§5, conditional on `acdp_version >= 0.3.0`):
+/// the key-revocation golden vector, PLUS a hand-built negative proving
+/// RFC-ACDP-0014 §5 step 2 (a revocation MUST NOT be signed by the key it
+/// revokes).
+///
+/// The plan (`backlog-reg11.md`, Phases 10+, bullet 13) calls this "a
+/// publish-path fixture (Pattern H) despite its wrong DEFERRED reason" --
+/// confirmed here: the DEFERRED entry this replaces described rev's absence
+/// as covering "before/after compromise-boundary semantics", but that
+/// framing belongs to rev-002 (an `acdp-consumer`-only fixture, out of
+/// scope for this registry-core harness -- see `HARNESS_PROFILES`).
+/// rev-001 itself is a single-vector ACCEPT golden, structurally identical
+/// to sig-001/003: JCS-canonicalize, hash, Ed25519-sign, publish.
+///
+///   * Positive: the fixture's own `expected.publish_request_body` --
+///     signed by K2 (the producer's CURRENT key, sig-003's test seed) --
+///     revoking K1 (sig-001's test key). K2's fingerprint != the revoked
+///     fingerprint, so `KeyRevocation::check_not_self_signed` passes and the
+///     publish is accepted.
+///   * Negative (mutation-quality, not a separate fixture id): the SAME
+///     `producer_content` -- content_hash is unaffected by which key signs,
+///     since `signature`/`key_id` sit outside the §5.7 exclusion-set-stripped
+///     hash preimage -- re-signed by K1 ITSELF (the key being revoked) and
+///     pinned as K1. `fingerprint(K1) == metadata.revoked_key_fingerprint`,
+///     so the registry MUST refuse with `key_not_authorized`/403
+///     (RFC-ACDP-0014 §5 step 2; `acdp-types`'s `KeyRevocation::
+///     check_not_self_signed`). This is the fixture's own
+///     `verification_steps[4]` made concrete via `Producer`, not a
+///     freestanding fixture -- there is no rev-00X id for it in the pinned
+///     spec.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rev001_key_revocation_context_golden_accepted_and_self_signed_rejected() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping rev-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "rev-001") else {
+        return;
+    };
+    let vectors = fx["vectors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("rev-001: vectors missing or not an array: {fx}"));
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_REV001_VECTOR_COUNT,
+        "rev-001 must carry exactly {EXPECTED_REV001_VECTOR_COUNT} vector at spec pin d1f06d0: {fx}"
+    );
+    let expected = &vectors[0]["expected"];
+
+    // Recompute canonical form + content_hash from producer_content, same
+    // discipline as sig-001.
+    let (canonical_bytes, hash) = acdp::crypto::canonical_preimage(&vectors[0]["producer_content"])
+        .unwrap_or_else(|e| panic!("rev-001: canonical_preimage failed: {e}"));
+    let canonical_str = String::from_utf8(canonical_bytes).unwrap();
+    assert_eq!(
+        canonical_str,
+        expected["canonical_form"].as_str().unwrap(),
+        "rev-001: recomputed canonical_form mismatch"
+    );
+    assert_eq!(
+        hash.as_str(),
+        expected["content_hash"].as_str().unwrap(),
+        "rev-001: recomputed content_hash mismatch"
+    );
+
+    // K2 (current key, signs the golden) and K1 (revoked key) public keys,
+    // both named in the fixture's top-level `test_keypair`/`revoked_key`.
+    let k2_pub_hex = fx["test_keypair"]["public_key_hex"].as_str().unwrap();
+    let k2_pub_bytes: [u8; 32] = hex::decode(k2_pub_hex).unwrap().try_into().unwrap();
+    acdp::crypto::verify::verify_ed25519(
+        &k2_pub_bytes,
+        expected["signature_value_base64"].as_str().unwrap(),
+        hash.as_str(),
+    )
+    .unwrap_or_else(|e| panic!("rev-001: golden signature failed offline verification: {e}"));
+
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let k2_pub_b64 = STANDARD.encode(k2_pub_bytes);
+
+    // Positive: publish the fixture's own body, verbatim, via a K2-pinned
+    // 0.3.0 registry.
+    let app = pinned_producer_harness(rev_caps_030(), &k2_pub_b64, "ed25519").await;
+    let req_body = expected["publish_request_body"].clone();
+    let (status, body) = post_publish_json(&app, req_body).await;
+    assert_eq!(status, StatusCode::OK, "rev-001 accept body = {body}");
+    let ctx_id = body["ctx_id"].as_str().unwrap().to_string();
+
+    let (status, served) = anc_get(
+        &app,
+        &format!("/contexts/{}/body", pct_encode_path_segment(&ctx_id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rev-001 GET body = {served}");
+    assert_eq!(
+        served["type"], "key-revocation",
+        "rev-001: served body = {served}"
+    );
+    assert_eq!(
+        served["metadata"]["revoked_key_fingerprint"],
+        vectors[0]["producer_content"]["metadata"]["revoked_key_fingerprint"],
+        "rev-001: served metadata = {served}"
+    );
+
+    // Negative: the SAME producer_content, signed and pinned by K1 -- the
+    // key it revokes. Same content_hash (signature/key_id are outside the
+    // hash preimage), different signer.
+    let k1_pub_hex = fx["revoked_key"]["public_key_hex"].as_str().unwrap();
+    let k1_pub_bytes: [u8; 32] = hex::decode(k1_pub_hex).unwrap().try_into().unwrap();
+    let k1_pub_b64 = STANDARD.encode(k1_pub_bytes);
+    let k1_signing_key = SigningKey::from_bytes(&[0u8; 32]); // sig-001's all-zero seed.
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.encode(k1_signing_key.verifying_key_bytes()),
+        k1_pub_b64,
+        "rev-001 self-signed variant: K1 seed [0u8;32] must reproduce the fixture's own \
+         revoked_key.public_key_hex -- otherwise this isn't really testing a self-signed \
+         revocation"
+    );
+    let self_signed_value =
+        k1_signing_key.sign_content_hash(&ContentHash(hash.as_str().to_string()));
+
+    let mut self_signed_body = expected["publish_request_body"].clone();
+    self_signed_body["signature"]["key_id"] =
+        Value::String("did:web:agents.example.com:test-producer#key-1".into());
+    self_signed_body["signature"]["value"] = Value::String(self_signed_value);
+
+    let app_k1 = pinned_producer_harness(rev_caps_030(), &k1_pub_b64, "ed25519").await;
+    let (status, body) = post_publish_json(&app_k1, self_signed_body).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "rev-001 self-signed variant must be rejected, body = {body}"
+    );
+    assert_eq!(
+        body["error"]["code"], "key_not_authorized",
+        "rev-001 self-signed variant body = {body}"
+    );
+}
+
+const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
+
+/// dk-001/002/004 (RFC-ACDP-0001 §5.11.1, conditional -- bundled with
+/// sig-003 under "supported_did_methods includes did:key" -- live on
+/// `did_key_harness(did_key_caps())`, the same posture
+/// `did_key_golden_vector_accepted_and_gated` (above, `:4874`) already
+/// builds for sig-003/dk-003): three did:key resolution NEGATIVES.
+///
+/// **Discovered wrong-reason trap (report this plainly, do not paper over
+/// it):** this repo's `acdp` v0.9.1 dependency does NOT reach
+/// `acdp_verify::verify_publish_request_signature_offline` (the resolver
+/// path RFC-ACDP-0001 §5.11.1 describes, and that emits
+/// `key_resolution_failed`) for any of these three fixtures. Two SEPARATE
+/// upstream schema-layer checks -- `acdp_validation::validate_agent_did`
+/// (calls `acdp_did::key::resolve_did_key` for a did:key `agent_id`) and
+/// `validate_did_key_key_id_form` (calls `acdp_did::key::resolve_did_key_url`
+/// for a did:key `signature.key_id`) -- run FIRST, as part of schema
+/// validation (`validate_publish_request`, before `validate_post_schema`'s
+/// registry-limit/crypto steps), and BOTH wrap any resolution failure as
+/// `AcdpError::SchemaViolation`, not `AcdpError::KeyResolution`. Verified
+/// empirically against this exact dependency version (`acdp = "0.9.1"`,
+/// this crate's `Cargo.toml`) before writing these assertions -- see this
+/// phase's report for the raw probe output.
+///
+///   * dk-001 (wrong multicodec prefix) -> observed `schema_violation`/400,
+///     NOT the fixture's pinned `key_resolution_failed`. The fixture's own
+///     `expected.behavior` text states this MUST be `key_resolution_failed`
+///     with no schema-validation carve-out -- this is a genuine conformance
+///     gap in the `acdp` v0.9.1 dependency, not something this crate (which
+///     may only edit this test file) can fix. The HTTP status (400,
+///     permanent) and the overall security property (never falls back to a
+///     raw key, never mis-reports `unsupported_algorithm`) both still hold.
+///   * dk-002 (malformed multibase, 3 cases) -> observed `schema_violation`/
+///     400 for all three. UNLIKE dk-001/004, this fixture's own
+///     `expected.behavior` text EXPLICITLY sanctions this: "Registries MAY
+///     reject case-by-case at schema validation with schema_violation if
+///     their did pattern catches it first" -- so this is a genuine pass,
+///     not a gap.
+///   * dk-004 (fragment mismatch) -> observed `schema_violation`/400, NOT
+///     `key_resolution_failed`. Same gap as dk-001: `validate_did_key_key_id_
+///     form` wraps `resolve_did_key_url`'s (correctly-worded, per its own
+///     doc comment) `key_resolution_failed` into `schema_violation` before
+///     the offline verifier ever runs. No schema-validation carve-out in
+///     this fixture's text either.
+///
+/// This test pins the OBSERVED, currently-necessary wire codes rather than
+/// the fixture's literal `expected.error_code` for dk-001/004 -- asserting
+/// the fixture's literal value would either be dishonestly worked around or
+/// permanently red, and an always-red new test is not a usable CI ratchet.
+/// If a future `acdp` release changes this routing, this test's asserts
+/// must be revisited (and the gap note above retired).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping dk-001/002/004 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut found = 0usize;
+    let app = did_key_harness(did_key_caps()).await;
+
+    fn base_req(agent_id: &str, key_id: &str) -> PublishRequest {
+        // A throwaway, well-formed did:key producer gives the right shape
+        // (and a real content_hash matching this exact body) -- the
+        // signature bytes never matter here, since every one of these three
+        // fixtures is rejected before signature verification ever runs
+        // (see this test's doc comment).
+        let p = Producer::new_did_key(SigningKey::from_bytes(&[9u8; 32]));
+        let mut req = p
+            .publish_request()
+            .title("dk negative probe")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .acdp_version("0.2.0")
+            .build()
+            .unwrap();
+        req.agent_id = AgentDid::new(agent_id);
+        req.signature.key_id = key_id.to_string();
+        // agent_id changed, so content_hash (which covers agent_id) must be
+        // recomputed to still pass Step 4 (hash recomputation) -- otherwise
+        // this would fail with hash_mismatch, a THIRD wrong reason.
+        let (_, hash) =
+            acdp::crypto::canonical_preimage(&serde_json::to_value(&req).unwrap()).unwrap();
+        req.content_hash = hash;
+        req
+    }
+
+    // dk-001: wrong multicodec prefix (secp256k1, 0xe701) in agent_id.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "dk-001") {
+        found += 1;
+        let agent_id = fx["input"]["agent_id"].as_str().unwrap();
+        let key_id = fx["input"]["signature_key_id"].as_str().unwrap();
+        assert_eq!(
+            fx["expected"]["http_status"].as_u64(),
+            Some(400),
+            "dk-001: {fx}"
+        );
+        let req = base_req(agent_id, key_id);
+        let (status, body) = post_publish_json(&app, serde_json::to_value(&req).unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "dk-001 body = {body}");
+        assert_eq!(
+            body["error"]["code"], "schema_violation",
+            "dk-001: observed wire code (see doc comment for the divergence from this \
+             fixture's pinned key_resolution_failed) -- body = {body}"
+        );
+    }
+
+    // dk-002: malformed multibase, 3 cases, all sharing one expected outcome
+    // (schema_violation is explicitly sanctioned by this fixture's own text).
+    if let Some(fx) = find_fixture_by_id(&fixtures, "dk-002") {
+        found += 1;
+        let cases = fx["input"]["cases"]
+            .as_array()
+            .unwrap_or_else(|| panic!("dk-002: input.cases missing or not an array: {fx}"));
+        assert_eq!(
+            cases.len(),
+            3,
+            "dk-002 must carry exactly 3 cases at spec pin d1f06d0: {fx}"
+        );
+        assert_eq!(
+            fx["expected"]["http_status"].as_u64(),
+            Some(400),
+            "dk-002: {fx}"
+        );
+        for case in cases {
+            let agent_id = case["agent_id"].as_str().unwrap();
+            let msi = agent_id.strip_prefix("did:key:").unwrap_or(agent_id);
+            let key_id = format!("{agent_id}#{msi}");
+            let req = base_req(agent_id, &key_id);
+            let (status, body) = post_publish_json(&app, serde_json::to_value(&req).unwrap()).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "dk-002 case {:?} body = {body}",
+                case["case"]
+            );
+            assert_eq!(
+                body["error"]["code"], "schema_violation",
+                "dk-002 case {:?} body = {body}",
+                case["case"]
+            );
+        }
+    }
+
+    // dk-004: fragment mismatch -- agent_id itself is a well-formed did:key
+    // (sig-003's own), only the key_id's fragment is wrong.
+    if let Some(fx) = find_fixture_by_id(&fixtures, "dk-004") {
+        found += 1;
+        let agent_id = fx["input"]["agent_id"].as_str().unwrap();
+        let key_id = fx["input"]["signature_key_id"].as_str().unwrap();
+        assert_eq!(
+            fx["expected"]["http_status"].as_u64(),
+            Some(400),
+            "dk-004: {fx}"
+        );
+        let req = base_req(agent_id, key_id);
+        let (status, body) = post_publish_json(&app, serde_json::to_value(&req).unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "dk-004 body = {body}");
+        assert_eq!(
+            body["error"]["code"], "schema_violation",
+            "dk-004: observed wire code (see doc comment for the divergence from this \
+             fixture's pinned key_resolution_failed) -- body = {body}"
+        );
+    }
+
+    assert_eq!(
+        found, EXPECTED_DK_NEGATIVE_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_DK_NEGATIVE_FIXTURE_COUNT} dk-00[124] fixtures at spec pin \
+         d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
+         this ratchet exists to prevent"
     );
 }

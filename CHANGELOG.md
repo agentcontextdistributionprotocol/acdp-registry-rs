@@ -176,6 +176,135 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- end REG-11 Phase 10 -->
 
+<!-- REG-11 Phase 13 -->
+
+- **`sig`, `rev`, and `dk` move from `DEFERRED` to `COVERED`** (`REG-11`
+  Phase 13, `#130`): five new direct tests plus one existing test newly
+  registered, in `crates/acdp-registry-server/tests/conformance.rs`. All
+  three families are golden-signature/did:key vectors the generic replayer
+  cannot reach (no top-level `request`, and the positive vectors carry real
+  cryptographic material a synthetic replay can't verify), so — like
+  `anc`/`can` — they get DIRECT, in-process coverage beside the replayer,
+  which still (correctly) reports them non-HTTP-replayable.
+  - **Real fixture counts, corrected against the plan**: `sig` carries 3
+    fixtures at spec pin `d1f06d0`, not the 1 the plan named — `sig-001`
+    (Ed25519, unconditionally required), `sig-002` (ECDSA-P256, 2 vectors,
+    conditional on `supported_signature_algorithms` including
+    `ecdsa-p256`, which this file's shared `caps()` already advertises —
+    a LIVE obligation, not a hypothetical one), and `sig-003` (did:key,
+    conditional on advertising `did:key`). `rev` carries 2 fixtures
+    (`rev-001`, `rev-002`), but only `rev-001` applies to
+    `acdp-registry-core` — `rev-002` is `acdp-consumer`-only and stays out
+    of scope (`HARNESS_PROFILES` advertises only `acdp-registry-core`).
+    `dk` carries 4 fixtures (`dk-001`..`dk-004`), all bundled into the same
+    `conditional_fixtures` entry as `sig-003` (`supported_did_methods`
+    includes `did:key`) except `dk-003`, gated the opposite way
+    (`did:key` NOT advertised at `acdp_version >= 0.2.0`).
+  - **New mechanism: `playground.pinned_keys`.** This file's shared
+    `caps()`/`harness()` cannot cryptographically verify a `did:web`
+    signature (no live DID resolver in-process), so `sig-001`/`sig-002`/
+    `rev-001` (all `did:web` producers) use
+    `acdp-registry-core`'s existing `playground.pinned_keys` +
+    `pinned_only` mechanism (`playground.rs`, FEAT-Phase5) instead: a
+    dedicated per-test harness pins the fixture's own public key for its
+    producer DID, so the publish path runs REAL Ed25519/ECDSA-P256
+    verification (`acdp::crypto::verify`) against a golden vector, not the
+    *unpinned* playground branch that — per its own doc comment — accepts
+    "any agent_id+signature pair".
+  - `sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_publish`
+    recomputes `canonical_form`/`content_hash` from `sig-001`'s
+    `producer_content` via `acdp::crypto::canonical_preimage`, verifies the
+    golden signature offline via `acdp::crypto::verify::verify_ed25519`,
+    then POSTs the fixture's own `publish_request_body` verbatim to a
+    pinned-key harness and asserts HTTP 200.
+    `sig001_signature_byte_perturbation_is_rejected` is the accompanying
+    mutation proof the task explicitly asked for: flips one base64
+    character of the golden signature and asserts the SAME pinned harness
+    now rejects it `invalid_signature`/400 — proving the pinned path is
+    real verification, not a rubber stamp.
+  - `sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected` covers
+    both of `sig-002`'s vectors: the RFC-6979-deterministic P-256 accept
+    vector, and — same `producer_content`, same mathematical signature,
+    re-encoded as 70-byte ASN.1 DER instead of the required 64-byte IEEE
+    1363 r‖s — the registry MUST reject the DER encoding as
+    `invalid_signature` per `registries/signature-algorithms.md`'s
+    NORMATIVE prohibition. `acdp::crypto::verify::verify_ecdsa_p256`
+    rejects on decoded length before any cryptographic operation, so an
+    implementation that DER-decodes first and verifies second would wrongly
+    accept it; this test proves this repo's dependency doesn't.
+  - `rev001_key_revocation_context_golden_accepted_and_self_signed_rejected`
+    covers `rev-001` (RFC-ACDP-0014 §4/§5) two ways: the fixture's own
+    accept vector (a producer-signed key-revocation context, signed by K2,
+    revoking K1 — `KeyRevocation::check_not_self_signed` passes since
+    `fingerprint(K2) != revoked_key_fingerprint`), plus a hand-built
+    negative (same `producer_content`, since `content_hash` excludes
+    `signature`/`key_id`, re-signed and re-pinned as K1 — the very key
+    being revoked). The negative is `rev-001`'s own
+    `verification_steps[4]` made concrete via `Producer`, not a separate
+    fixture id (none exists in the pinned spec): the registry MUST reject
+    it `key_not_authorized`/403 (RFC-ACDP-0014 §5 step 2). **The plan's own
+    text flagged `rev`'s prior `DEFERRED` reason as wrong** — confirmed:
+    that reason described "before/after compromise-boundary semantics",
+    which is `rev-002`'s content (out of scope), not `rev-001`'s. `rev-001`
+    is a plain accept golden, structurally identical to `sig-001`/`003`.
+  - `dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver`
+    covers `dk-001` (wrong multicodec prefix), `dk-002` (3 malformed-multibase
+    cases), and `dk-004` (fragment mismatch) — and documents a genuine
+    **wrong-reason trap found while writing it, of the same shape as
+    Phase 10's `data-ref-007`, but more severe**: empirically verified
+    (against this exact `acdp = "0.9.1"` dependency), this repo's own
+    upstream schema-layer validation (`acdp_validation::validate_agent_did`
+    / `validate_did_key_key_id_form`) calls the SAME did:key resolver
+    functions the RFC-ACDP-0001 §5.11.1 resolver path would, but wraps
+    every failure as `AcdpError::SchemaViolation` — so `verify_publish_
+    request_signature_offline` (the code path that would emit
+    `key_resolution_failed`) is never reached for any of these three
+    fixtures. Unlike `data-ref-007`, there is no alternative request shape
+    that reaches the intended path — this is architectural, not fixable by
+    restructuring the test's input. `dk-002`'s own fixture text explicitly
+    sanctions `schema_violation` as an alternative outcome ("Registries MAY
+    reject case-by-case at schema validation... if their did pattern
+    catches it first") — a genuine pass. `dk-001` and `dk-004` carry no
+    such carve-out and DO diverge from their pinned `key_resolution_failed`
+    — a real conformance gap in the `acdp` v0.9.1 dependency this phase
+    cannot fix (out of scope: only `conformance.rs`/`CHANGELOG.md` may be
+    touched). This test asserts the OBSERVED `schema_violation`/400 rather
+    than the fixture's literal code for those two, with the divergence
+    stated in both the test's doc comment and here — an always-red test
+    pinned to a code this dependency will never produce is not a usable CI
+    ratchet. **Flagged for follow-up**: a cross-repo issue against the
+    `acdp` crate (mirroring how `data-ref-007` was filed as
+    `agentcontextdistributionprotocol#60`) has not been opened by this
+    phase — recorded here for a human to action, not filed unilaterally.
+  - `did_key_golden_vector_accepted_and_gated` (pre-existing, REG-11 Phase
+    prior to this one) already exercised `sig-003`'s accept path and
+    `dk-003`'s capability-gate rejection end-to-end; it simply had never
+    been registered in `COVERED`. This phase registers it under both `sig`
+    and `dk`.
+
+  `MIN_REPLAYED_EXCHANGES` (30) and the exchange replay count are
+  unaffected — measured: `conformance: replayed 30 exchange(s);
+  failures=0`, identical before and after this change; every new test uses
+  a dedicated pinned-key harness outside the generic replay loop, same as
+  `anc-*`/`meta`/`data-ref`. All new tests self-skip cleanly (measured)
+  when `ACDP_SPEC_DIR` is unset. Mutation-tested (measured) against a
+  scratch copy of the spec tree outside this repo and outside the pinned
+  spec worktree: perturbing `sig-001`'s `content_hash`, perturbing one
+  base64 character of `sig-001`'s golden signature, perturbing `rev-001`'s
+  `content_hash`, and shrinking `dk-002`'s case count each independently
+  turned their respective test red, then were reverted (the scratch copies
+  were discarded, not the pinned worktree).
+
+  This phase also corrected one pre-existing, unrelated staleness bug found
+  while editing the same doc comment `sig`/`rev`/`dk` live in: the
+  `CORE_INEXCUSABLE_FAMILIES` doc comment still listed `caps` and `lin` as
+  `DEFERRED` (Phase 7 moved both to `COVERED` and missed updating this
+  prose). Corrected here alongside the three-family move this phase makes;
+  the two "remaining N cite #130" counters elsewhere (accurate before this
+  phase) are updated from 13 to 10 to match.
+
+<!-- end REG-11 Phase 13 -->
+
 - **A coverage-completeness ratchet closes the gap Phases 7-10 left open**
   (`REG-10` Phase 11): the existing four `KNOWN_FAMILIES`/`EXCUSED` ratchet
   tests fail only on an *unclassified* family or an *illegitimate excuse* —
