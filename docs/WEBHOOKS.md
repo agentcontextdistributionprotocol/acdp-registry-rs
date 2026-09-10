@@ -179,8 +179,8 @@ change, however many variants that change touches; those are recorded here.
 `schema_version` tracks the **envelope** and moves only when the envelope shape
 changes. Per-variant field changes do not move it, no matter how many variants
 they touch: the value is stamped per *delivery*, so bumping it would assert that
-something about every delivery changed — including the four event types that were
-never affected. Those changes are recorded here instead. Newest first.
+something about that delivery's envelope changed, when the envelope is exactly
+what did not change. Those changes are recorded here instead. Newest first.
 
 | change | affects | `schema_version` |
 |--------|---------|------------------|

@@ -602,7 +602,8 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   and sounder argument: `schema_version` is stamped **per delivery**, so it describes that
   delivery's envelope, not the stream — a `search_executed` body carrying `"1.1"` would
   assert that something about *that delivery* changed when nothing did. Bumping is not a
-  blast-radius trade-off, it is emitting a falsehood on four of five types. Independently
+  blast-radius trade-off, it is emitting a falsehood on every delivery — the envelope, which
+  is what the value describes, changed for none of them. Independently
   corroborated by **RFC-ACDP-0009 §2.10**, which reserves this profile's version field as the
   schema version of the event *envelope* — the narrowed scope matches what the spec already
   reserved, rather than being a carve-out invented to fit this case.

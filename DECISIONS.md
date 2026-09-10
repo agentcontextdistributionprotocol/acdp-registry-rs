@@ -825,7 +825,8 @@ no receiver's model.
 The decision stands on a sounder argument: **`schema_version` is stamped per delivery**, so it
 describes that delivery's envelope, not the stream. A `search_executed` body carrying `"1.1"`
 would assert that something about *that delivery* changed when nothing did — bumping is not a
-blast-radius trade-off, it is emitting a falsehood on four of five types. Independently
+blast-radius trade-off, it is emitting a falsehood on every delivery, since the envelope it
+describes changed for none of them. Independently
 corroborated by **RFC-ACDP-0009 §2.10**, which reserves this profile's version field as the
 schema version of the event *envelope*, independent of `acdp_version`: the narrowed scope
 matches what the spec already reserved rather than being a carve-out invented to fit this case.
