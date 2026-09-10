@@ -1,0 +1,225 @@
+//! The keyset-pagination cursor codec shared by every store backend.
+//!
+//! This lives here, rather than in a backend, because **all backends must produce
+//! interchangeable cursors**. A cursor minted by the sqlite store has to decode in the
+//! postgres store and vice versa; two private copies of one wire format is how they
+//! silently stop agreeing. It was exactly that — byte-for-byte duplicated between
+//! `acdp-registry-sqlite` and `acdp-registry-pg` — until #187.
+//!
+//! # Wire format
+//!
+//! `STANDARD_BASE64("{mint_ms}:{anchor_ms}:{ctx_id}")`, where:
+//!
+//! - `mint_ms` — when the cursor was issued (Unix ms). Drives expiry, and is the *only*
+//!   thing expiry looks at, so a cursor cannot be refreshed by replaying it.
+//! - `anchor_ms` — the keyset position: the `created_at` of the last row on the page.
+//! - `ctx_id` — the tiebreaker for rows sharing an `anchor_ms`. Split with `splitn(3, ':')`
+//!   so a `ctx_id` containing `:` (every `acdp://` URI does) survives intact.
+//!
+//! Cursors are **unsigned plaintext**. They are deliberately not a confidentiality
+//! boundary: everything inside is either a timestamp or an identifier the requester was
+//! already shown. RFC-ACDP-0005 §2.5.4's requirement is that a cursor carry no
+//! *client-decodable visibility information*, which this format satisfies by carrying no
+//! visibility information at all. Visibility is recomputed per page from the current
+//! requester, never remembered in the cursor.
+//!
+//! # Expiry
+//!
+//! Cursors live `CURSOR_TTL_SECS` (1 hour), matching RFC-ACDP-0005 §2.5.4's "MUST remain
+//! valid across a single iteration session of at most 1 hour". Past that,
+//! [`decode_cursor`] returns `AcdpError::CursorExpired` — distinct from the malformed case,
+//! which returns `AcdpError::InvalidCursor`. Keeping those two apart is a spec requirement
+//! and is covered by the `cur` conformance family; do not collapse them.
+
+use acdp::error::AcdpError;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use chrono::{DateTime, Utc};
+
+/// How long an issued cursor stays usable, per RFC-ACDP-0005 §2.5.4.
+const CURSOR_TTL_SECS: i64 = 3600;
+
+/// Mint a cursor for the last row of a page.
+///
+/// `created_at_ms` is that row's `created_at`; the mint stamp is taken from the clock here,
+/// so every issued cursor starts a fresh TTL window.
+pub fn encode_cursor(created_at_ms: i64, ctx_id: &str) -> String {
+    let mint_ms = Utc::now().timestamp_millis();
+    B64.encode(format!("{mint_ms}:{created_at_ms}:{ctx_id}"))
+}
+
+/// Decode a cursor into its `(anchor, ctx_id)` keyset position.
+///
+/// Returns `AcdpError::CursorExpired` for a well-formed cursor past its TTL, and
+/// `AcdpError::InvalidCursor` for anything unparseable. The two are separate wire codes
+/// (`cursor_expired` / `invalid_cursor`, both HTTP 400) and callers rely on the distinction.
+pub fn decode_cursor(s: &str) -> Result<Option<(DateTime<Utc>, String)>, AcdpError> {
+    let bytes = B64
+        .decode(s)
+        .map_err(|_| AcdpError::InvalidCursor("cursor is not valid base64".into()))?;
+    let decoded = String::from_utf8(bytes)
+        .map_err(|_| AcdpError::InvalidCursor("cursor is not utf-8".into()))?;
+    let mut parts = decoded.splitn(3, ':');
+    let mint = parts
+        .next()
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing mint".into()))?;
+    let anchor = parts
+        .next()
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing anchor".into()))?;
+    let ctx_id = parts
+        .next()
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing ctx_id".into()))?;
+    let mint_ms: i64 = mint
+        .parse()
+        .map_err(|_| AcdpError::InvalidCursor("cursor mint not int".into()))?;
+    let anchor_ms: i64 = anchor
+        .parse()
+        .map_err(|_| AcdpError::InvalidCursor("cursor anchor not int".into()))?;
+    let now = Utc::now().timestamp_millis();
+    if now.saturating_sub(mint_ms) > CURSOR_TTL_SECS * 1000 {
+        return Err(AcdpError::CursorExpired);
+    }
+    let anchor_ts = DateTime::<Utc>::from_timestamp_millis(anchor_ms)
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor anchor out of range".into()))?;
+    Ok(Some((anchor_ts, ctx_id.to_string())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_cursor, encode_cursor, B64, CURSOR_TTL_SECS};
+    use acdp::error::AcdpError;
+    use base64::Engine as _;
+    use chrono::Utc;
+
+    #[test]
+    fn cursor_round_trips_anchor_and_ctx_id() {
+        let anchor_ms = 1_700_000_123_456_i64;
+        let cur = encode_cursor(anchor_ms, "acdp://reg/ctx-1");
+        let (ts, ctx_id) = decode_cursor(&cur)
+            .expect("decode ok")
+            .expect("cursor present");
+        assert_eq!(ts.timestamp_millis(), anchor_ms);
+        assert_eq!(ctx_id, "acdp://reg/ctx-1");
+    }
+
+    /// A `ctx_id` containing `:` must survive the round trip — every `acdp://` URI has
+    /// several, so a `split(':')` here instead of `splitn(3, ':')` would truncate real ids.
+    #[test]
+    fn cursor_preserves_colons_in_ctx_id() {
+        let anchor_ms = 1_700_000_123_456_i64;
+        let ctx = "acdp://registry.example.com/12345678-1234-4321-8123-123456781234";
+        let cur = encode_cursor(anchor_ms, ctx);
+        let (_, decoded) = decode_cursor(&cur)
+            .expect("decode ok")
+            .expect("cursor present");
+        assert_eq!(decoded, ctx);
+    }
+
+    #[test]
+    fn cursor_rejects_malformed_input() {
+        // Not base64.
+        assert!(matches!(
+            decode_cursor("!!!not-base64!!!"),
+            Err(AcdpError::InvalidCursor(_))
+        ));
+        // Valid base64 but missing the ctx_id field.
+        let truncated = B64.encode("123:456");
+        assert!(matches!(
+            decode_cursor(&truncated),
+            Err(AcdpError::InvalidCursor(_))
+        ));
+    }
+
+    /// The remaining parse-failure arms, one test each.
+    ///
+    /// The pre-existing coverage reached only two of them (not-base64, missing ctx_id) while
+    /// the codec has seven live arms. Asserting the **variant** rather than the message text
+    /// is deliberate: the payload is an implementation detail that has already changed once,
+    /// and a test pinned to it would have to be rewritten every time it does.
+    #[test]
+    fn cursor_rejects_each_parse_failure_arm() {
+        // Valid base64, invalid UTF-8.
+        let not_utf8 = B64.encode([0xff, 0xfe, 0xfd]);
+        assert!(
+            matches!(decode_cursor(&not_utf8), Err(AcdpError::InvalidCursor(_))),
+            "non-utf8 payload must be rejected"
+        );
+
+        // No separator at all -> the anchor field is absent.
+        let no_sep = B64.encode("abc");
+        assert!(
+            matches!(decode_cursor(&no_sep), Err(AcdpError::InvalidCursor(_))),
+            "a payload with no ':' has no anchor and must be rejected"
+        );
+
+        // Non-integer mint.
+        let bad_mint = B64.encode("notanint:456:acdp://reg/ctx-1");
+        assert!(
+            matches!(decode_cursor(&bad_mint), Err(AcdpError::InvalidCursor(_))),
+            "a non-integer mint must be rejected"
+        );
+
+        // Non-integer anchor.
+        let now_ms = Utc::now().timestamp_millis();
+        let bad_anchor = B64.encode(format!("{now_ms}:notanint:acdp://reg/ctx-1"));
+        assert!(
+            matches!(decode_cursor(&bad_anchor), Err(AcdpError::InvalidCursor(_))),
+            "a non-integer anchor must be rejected"
+        );
+
+        // Anchor integer that is not a representable timestamp.
+        let out_of_range = B64.encode(format!("{now_ms}:{}:acdp://reg/ctx-1", i64::MAX));
+        assert!(
+            matches!(
+                decode_cursor(&out_of_range),
+                Err(AcdpError::InvalidCursor(_))
+            ),
+            "an anchor outside the representable range must be rejected"
+        );
+    }
+
+    #[test]
+    fn expired_cursor_is_rejected() {
+        // Craft a cursor minted just past the TTL window. Note this hand-mints the plaintext
+        // rather than calling `encode_cursor`, which always stamps `now` — backdating the
+        // mint is the only way to exercise the real clock comparison without mocking it.
+        let now_ms = Utc::now().timestamp_millis();
+        let stale_mint = now_ms - (CURSOR_TTL_SECS * 1000 + 5_000);
+        let raw = B64.encode(format!("{stale_mint}:{now_ms}:acdp://reg/ctx-1"));
+        assert!(
+            matches!(decode_cursor(&raw), Err(AcdpError::CursorExpired)),
+            "a cursor older than the TTL must be rejected so stale pages can't be replayed"
+        );
+    }
+
+    /// Expiry and malformedness are separate wire codes (`cursor_expired` vs
+    /// `invalid_cursor`, RFC-ACDP-0005 §2.5.4) and the `cur` conformance family asserts the
+    /// distinction. A refactor that collapsed them would still pass every test above.
+    #[test]
+    fn expired_and_malformed_are_distinct_variants() {
+        let now_ms = Utc::now().timestamp_millis();
+        let stale = B64.encode(format!(
+            "{}:{now_ms}:acdp://reg/ctx-1",
+            now_ms - (CURSOR_TTL_SECS * 1000 + 5_000)
+        ));
+        assert!(matches!(
+            decode_cursor(&stale),
+            Err(AcdpError::CursorExpired)
+        ));
+        assert!(matches!(
+            decode_cursor("!!!not-base64!!!"),
+            Err(AcdpError::InvalidCursor(_))
+        ));
+    }
+
+    /// A cursor minted inside the window must still decode — otherwise
+    /// `expired_cursor_is_rejected` would pass against a codec that rejects everything.
+    #[test]
+    fn fresh_cursor_is_not_expired() {
+        let cur = encode_cursor(1_700_000_123_456_i64, "acdp://reg/ctx-1");
+        assert!(
+            decode_cursor(&cur).is_ok(),
+            "a just-minted cursor must decode"
+        );
+    }
+}
