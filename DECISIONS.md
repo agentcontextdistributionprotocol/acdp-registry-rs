@@ -678,7 +678,7 @@ and cannot:
   operator's own configured value, no attacker-controlled input, no request-path timing
   channel).
 - **No latent second consumer anywhere.** `acdp-registry-webhook` only *produces*
-  `X-ACDP-Signature` (`lib.rs:249`) and never verifies one, so there is no MAC compare to
+  `X-ACDP-Signature` (`lib.rs:258`) and never verifies one, so there is no MAC compare to
   protect; `acdp-registry-auth` verifies via `jsonwebtoken::decode`, so the signature
   compare is inside RustCrypto, not our code; replay protection is an atomic
   `ChallengeStore::take(&nonce)` lookup, not a byte compare; and the `prior_hash`
