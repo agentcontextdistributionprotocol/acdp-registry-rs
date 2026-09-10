@@ -155,17 +155,7 @@ fn verify_ed25519_pinned(
     pinned: &PinnedAgentKey,
     req: &PublishRequest,
 ) -> Result<(), RegistryError> {
-    let pub_bytes_vec = STANDARD.decode(&pinned.public_key_b64).map_err(|e| {
-        RegistryError::Config(format!(
-            "pinned public_key_b64 for {agent_did} is not valid base64: {e}"
-        ))
-    })?;
-    let pub_bytes: [u8; 32] = pub_bytes_vec.as_slice().try_into().map_err(|_| {
-        RegistryError::Config(format!(
-            "pinned ed25519 public_key_b64 for {agent_did} decoded to {} bytes (expected 32)",
-            pub_bytes_vec.len()
-        ))
-    })?;
+    let pub_bytes = decode_ed25519_pinned(agent_did, pinned)?;
 
     acdp::crypto::verify::verify_ed25519(
         &pub_bytes,
@@ -180,6 +170,51 @@ fn verify_ecdsa_p256_pinned(
     pinned: &PinnedAgentKey,
     req: &PublishRequest,
 ) -> Result<(), RegistryError> {
+    let pub_bytes = decode_ecdsa_p256_pinned(agent_did, pinned)?;
+
+    acdp::crypto::verify::verify_ecdsa_p256(
+        &pub_bytes,
+        &req.signature.value,
+        req.content_hash.as_str(),
+    )
+    .map_err(RegistryError::Acdp)
+}
+
+/// Decode a pinned ed25519 key, enforcing exactly the rules the verify path
+/// enforces. Extracted (W3-U1, #193) so the startup validator and the request
+/// path cannot drift: these length/encoding rules are the definition of a
+/// usable pinned key, and a second copy would be the defect this closes.
+///
+/// Error text is byte-identical to what the request path emitted before the
+/// extraction — deliberately, so request-path behaviour is unchanged.
+fn decode_ed25519_pinned(
+    agent_did: &str,
+    pinned: &PinnedAgentKey,
+) -> Result<[u8; 32], RegistryError> {
+    let pub_bytes_vec = STANDARD.decode(&pinned.public_key_b64).map_err(|e| {
+        RegistryError::Config(format!(
+            "pinned public_key_b64 for {agent_did} is not valid base64: {e}"
+        ))
+    })?;
+    pub_bytes_vec.as_slice().try_into().map_err(|_| {
+        RegistryError::Config(format!(
+            "pinned ed25519 public_key_b64 for {agent_did} decoded to {} bytes (expected 32)",
+            pub_bytes_vec.len()
+        ))
+    })
+}
+
+/// Decode a pinned ecdsa-p256 key. Separate from the ed25519 decoder on
+/// purpose: that one yields `[u8; 32]`, this one a `Vec<u8>` plus a tag check.
+/// A single shared decoder would have forced the ed25519 caller into an
+/// `.expect()` — a new panic path in a request handler, where there is none.
+///
+/// The length check MUST stay before the `pub_bytes[0]` index, or an empty
+/// decode panics.
+fn decode_ecdsa_p256_pinned(
+    agent_did: &str,
+    pinned: &PinnedAgentKey,
+) -> Result<Vec<u8>, RegistryError> {
     let pub_bytes = STANDARD.decode(&pinned.public_key_b64).map_err(|e| {
         RegistryError::Config(format!(
             "pinned public_key_b64 for {agent_did} is not valid base64: {e}"
@@ -198,13 +233,128 @@ fn verify_ecdsa_p256_pinned(
             pub_bytes[0]
         )));
     }
+    Ok(pub_bytes)
+}
 
-    acdp::crypto::verify::verify_ecdsa_p256(
-        &pub_bytes,
-        &req.signature.value,
-        req.content_hash.as_str(),
-    )
-    .map_err(RegistryError::Acdp)
+/// Validate a `[playground]` section before it is allowed to take effect
+/// (W3-U1, closing #192 and #193).
+///
+/// Called from **two** places that must agree: the server binary's
+/// `validate_config` at startup, and `POST /admin/pinned-keys/reload` at
+/// runtime. Before this, only the former validated anything and only
+/// shallowly, so an operator could reload their way past every startup guard.
+///
+/// `receipt_configured` is passed in because the RFC-ACDP-0010 §7 rule couples
+/// `[playground]` to `[receipt]`, and the live cell this guards only ever holds
+/// `playground` — the reload path supplies the *running* receipt posture, which
+/// is the right input since receipts are restart-only.
+///
+/// `now` is injected rather than read from the clock so callers can test
+/// validity windows deterministically; the types crate's clock helper is
+/// private to it.
+///
+/// Returns non-fatal warnings on success. Warnings are *returned* rather than
+/// logged so the caller owns presentation and tests can assert on them without
+/// a tracing subscriber.
+pub fn validate_playground_config(
+    cfg: &PlaygroundConfig,
+    receipt_configured: bool,
+    now: i64,
+) -> Result<Vec<String>, String> {
+    // Structural defects first: deterministic, time-independent, and silent
+    // today (they surface only as per-request 500s).
+    for (i, pin) in cfg.pinned_keys.iter().enumerate() {
+        let did = pin.agent_did.as_str();
+        let alg = PinnedAlgorithm::parse(&pin.algorithm).ok_or_else(|| {
+            format!(
+                "playground.pinned_keys[{i}] ({did}): algorithm '{}' is not supported (expected \
+                 one of: ed25519, ecdsa-p256). A publish from this agent that selects this entry \
+                 is rejected at request time (HTTP 500, internal_error).",
+                pin.algorithm
+            )
+        })?;
+        match alg {
+            PinnedAlgorithm::Ed25519 => {
+                decode_ed25519_pinned(did, pin)
+                    .map(|_| ())
+                    .map_err(|e| format!("playground.pinned_keys[{i}]: {e}"))?;
+            }
+            PinnedAlgorithm::EcdsaP256 => {
+                decode_ecdsa_p256_pinned(did, pin)
+                    .map(|_| ())
+                    .map_err(|e| format!("playground.pinned_keys[{i}]: {e}"))?;
+            }
+        }
+        if let (Some(from), Some(until)) = (pin.valid_from, pin.valid_until) {
+            if from >= until {
+                return Err(format!(
+                    "playground.pinned_keys[{i}] ({did}): valid_from ({from}) is not before \
+                     valid_until ({until}), so this entry can never be in its validity window"
+                ));
+            }
+        }
+    }
+
+    // RFC-ACDP-0010 §7: a receipts-advertising registry has no unverified
+    // publish path. Enforced here rather than only at startup so a reload
+    // cannot reintroduce the state (#192).
+    if receipt_configured && cfg.enabled && !cfg.pinned_only {
+        return Err(
+            "playground.enabled with pinned_only=false is incompatible with [receipt]: a \
+             receipts-advertising registry has no unverified publish path (RFC-ACDP-0010 \
+             §7: no degraded mode). Set playground.pinned_only=true (every publish then \
+             verifies against a playground.pinned_keys entry) or disable playground.enabled."
+                .to_string(),
+        );
+    }
+
+    // W2-U1 (#185), moved here from the binary so both doors share one copy.
+    if cfg.enabled && cfg.pinned_only && cfg.pinned_keys.is_empty() {
+        return Err(
+            "playground.pinned_only=true has no effect while playground.pinned_keys is \
+             empty: this config does NOT restrict publishing — every non-did:key agent \
+             falls through to the fully unverified playground path and is accepted \
+             without a signature check. Add at least one [[playground.pinned_keys]] entry, \
+             or set playground.enabled=false."
+                .to_string(),
+        );
+    }
+
+    // Non-fatal: no entry currently in window. NOT a boot failure — expiry is
+    // time-dependent, so refusing would make bootability a function of the wall
+    // clock, and in lax mode this state is behaviourally identical to having no
+    // pins at all, which is supported. But the two branches do OPPOSITE things,
+    // so the text branches too.
+    let mut warnings = Vec::new();
+    if cfg.enabled && !cfg.pinned_keys.is_empty() {
+        let any_live = cfg.pinned_keys.iter().any(|p| p.is_valid_at(now));
+        if !any_live {
+            let n = cfg.pinned_keys.len();
+            let latest = cfg
+                .pinned_keys
+                .iter()
+                .filter_map(|p| p.valid_until)
+                .max()
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            warnings.push(if cfg.pinned_only {
+                format!(
+                    "playground.pinned_keys: no entry is currently within its validity window \
+                     ({n} entries, most recent valid_until {latest}). With pinned_only=true every \
+                     did:web publish is now rejected until a key is rotated in; did:key publishes \
+                     and all reads are unaffected."
+                )
+            } else {
+                format!(
+                    "playground.pinned_keys: no entry is currently within its validity window \
+                     ({n} entries, most recent valid_until {latest}). With pinned_only=false \
+                     publishes from these agents are now ACCEPTED WITH NO SIGNATURE CHECK — \
+                     pinning is inert until a key is rotated in."
+                )
+            });
+        }
+    }
+    Ok(warnings)
 }
 
 #[cfg(test)]

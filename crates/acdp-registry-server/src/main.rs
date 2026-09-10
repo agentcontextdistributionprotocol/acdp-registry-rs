@@ -57,6 +57,16 @@ async fn main() -> anyhow::Result<()> {
 
 /// FEAT-09: pre-bind config validation. Each check matches a runtime
 /// requirement that would otherwise be discovered lazily.
+/// Wall-clock seconds, for validity-window checks. The types crate's own
+/// helper is private to it, and the validator takes `now` explicitly so tests
+/// can pin a deterministic instant.
+fn current_unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
     if cfg.auth.enabled {
         match cfg.auth.jwt_signing_alg.as_str() {
@@ -253,15 +263,21 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
     // Checked unconditionally, OUTSIDE the `[receipt]` block below: a
     // registry with no receipts configured is precisely the deployment that
     // gets no other warning, and it was silently wide open before this.
-    if cfg.playground.enabled && cfg.playground.pinned_only && cfg.playground.pinned_keys.is_empty()
-    {
-        anyhow::bail!(
-            "playground.pinned_only=true has no effect while playground.pinned_keys is \
-             empty: this config does NOT restrict publishing — every non-did:key agent \
-             falls through to the fully unverified playground path and is accepted \
-             without a signature check. Add at least one [[playground.pinned_keys]] entry, \
-             or set playground.enabled=false."
-        );
+    // W3-U1 (#192, #193): one definition of "is this playground section
+    // usable", shared with POST /admin/pinned-keys/reload so the two doors
+    // cannot drift. Warnings are returned rather than logged by the validator
+    // so the caller owns presentation; we surface them at WARN here.
+    match acdp_registry_core::playground::validate_playground_config(
+        &cfg.playground,
+        cfg.receipt.is_configured(),
+        current_unix_seconds(),
+    ) {
+        Ok(warnings) => {
+            for w in warnings {
+                tracing::warn!("{w}");
+            }
+        }
+        Err(e) => anyhow::bail!("{e}"),
     }
 
     // ACDP 0.2.0: receipt signing identity (RFC-ACDP-0010). Parse the key
@@ -279,14 +295,6 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
         // signature from a non-pinned agent with no check at all) is
         // structurally incompatible with RFC-ACDP-0010 §7's "no degraded
         // mode" — that's the case this guards against.
-        if cfg.playground.enabled && !cfg.playground.pinned_only {
-            anyhow::bail!(
-                "playground.enabled with pinned_only=false is incompatible with [receipt]: a \
-                 receipts-advertising registry has no unverified publish path (RFC-ACDP-0010 \
-                 §7: no degraded mode). Set playground.pinned_only=true (every publish then \
-                 verifies against a playground.pinned_keys entry) or disable playground.enabled."
-            );
-        }
         acdp_registry_core::receipt::build_signer(&cfg.receipt, &cfg.registry.authority)
             .map_err(|e| anyhow::anyhow!("receipt: {e}"))?;
         // Also build the DID document up front: it additionally validates
@@ -1424,6 +1432,132 @@ mod tests {
         assert!(
             validate_config(&cfg).is_ok(),
             "strict playground with a pinned key and no receipts must boot"
+        );
+    }
+
+    // W3-U1 (#193): the empty-list guard checks the pinned list is non-EMPTY,
+    // never that an entry is USABLE. A typo'd algorithm or junk key material
+    // boots clean today and then fails every publish that selects the entry.
+
+    fn pinned(
+        agent: &str,
+        alg: &str,
+        key_b64: String,
+    ) -> acdp_registry_types::config::PinnedAgentKey {
+        acdp_registry_types::config::PinnedAgentKey {
+            agent_did: agent.into(),
+            public_key_b64: key_b64,
+            algorithm: alg.into(),
+            valid_from: None,
+            valid_until: None,
+        }
+    }
+
+    fn cfg_with_pin(p: acdp_registry_types::config::PinnedAgentKey) -> RegistryConfig {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.playground.enabled = true;
+        cfg.playground.pinned_keys.push(p);
+        cfg
+    }
+
+    fn ed25519_key() -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode([7u8; 32])
+    }
+
+    #[test]
+    fn pinned_key_with_unknown_algorithm_is_rejected() {
+        let cfg = cfg_with_pin(pinned("did:web:a.test:alice", "Ed25519", ed25519_key()));
+        let err = validate_config(&cfg).expect_err("unknown pinned algorithm must be refused");
+        assert!(err.to_string().contains("is not supported"), "got: {err}");
+    }
+
+    #[test]
+    fn pinned_key_with_invalid_base64_is_rejected() {
+        let cfg = cfg_with_pin(pinned(
+            "did:web:a.test:alice",
+            "ed25519",
+            "not base64!!".into(),
+        ));
+        let err = validate_config(&cfg).expect_err("invalid base64 pinned key must be refused");
+        assert!(err.to_string().contains("not valid base64"), "got: {err}");
+    }
+
+    #[test]
+    fn pinned_ed25519_key_of_wrong_length_is_rejected() {
+        use base64::Engine as _;
+        let short = base64::engine::general_purpose::STANDARD.encode([7u8; 16]);
+        let cfg = cfg_with_pin(pinned("did:web:a.test:alice", "ed25519", short));
+        let err = validate_config(&cfg).expect_err("wrong ed25519 key length must be refused");
+        assert!(err.to_string().contains("expected 32"), "got: {err}");
+    }
+
+    #[test]
+    fn pinned_ecdsa_key_of_wrong_length_is_rejected() {
+        use base64::Engine as _;
+        let short = base64::engine::general_purpose::STANDARD.encode([4u8; 33]);
+        let cfg = cfg_with_pin(pinned("did:web:a.test:alice", "ecdsa-p256", short));
+        let err = validate_config(&cfg).expect_err("wrong ecdsa key length must be refused");
+        assert!(err.to_string().contains("expected 65"), "got: {err}");
+    }
+
+    #[test]
+    fn pinned_ecdsa_key_without_sec1_tag_is_rejected() {
+        use base64::Engine as _;
+        let mut raw = [0u8; 65];
+        raw[0] = 0x03; // compressed-point tag, not SEC1-uncompressed
+        let bad = base64::engine::general_purpose::STANDARD.encode(raw);
+        let cfg = cfg_with_pin(pinned("did:web:a.test:alice", "ecdsa-p256", bad));
+        let err = validate_config(&cfg).expect_err("non-0x04 ecdsa key must be refused");
+        assert!(err.to_string().contains("0x04"), "got: {err}");
+    }
+
+    #[test]
+    fn pinned_key_with_inverted_validity_window_is_rejected() {
+        let mut p = pinned("did:web:a.test:alice", "ed25519", ed25519_key());
+        p.valid_from = Some(2_000);
+        p.valid_until = Some(1_000);
+        let cfg = cfg_with_pin(p);
+        let err = validate_config(&cfg).expect_err("inverted validity window must be refused");
+        assert!(
+            err.to_string()
+                .contains("can never be in its validity window"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rotated_out_pinned_key_with_junk_material_is_rejected() {
+        // The sharpest over-refusal case, and deliberately refused: an entry
+        // that is already outside its window AND structurally broken is inert
+        // today (pinned_for skips it) and refuses after W3-U1. A rotated-out
+        // entry should be deleted, not left broken — but this is a config that
+        // boots today and will not after, so it is called out in the CHANGELOG.
+        let mut p = pinned("did:web:a.test:alice", "ed25519", "not base64!!".into());
+        p.valid_until = Some(1_000); // long past
+        let cfg = cfg_with_pin(p);
+        let err = validate_config(&cfg)
+            .expect_err("a rotated-out entry with junk key material must still be refused");
+        assert!(err.to_string().contains("not valid base64"), "got: {err}");
+    }
+
+    #[test]
+    fn valid_pinned_key_still_boots() {
+        let cfg = cfg_with_pin(pinned("did:web:a.test:alice", "ed25519", ed25519_key()));
+        assert!(
+            validate_config(&cfg).is_ok(),
+            "a valid pinned config must still boot"
+        );
+    }
+
+    #[test]
+    fn structurally_bad_pinned_key_is_rejected_even_when_playground_disabled() {
+        // A latent typo should be caught before the operator flips the flag.
+        let mut cfg = cfg_with_pin(pinned("did:web:a.test:alice", "Ed25519", ed25519_key()));
+        cfg.playground.enabled = false;
+        assert!(
+            validate_config(&cfg).is_err(),
+            "structural pinned-key defects are refused regardless of playground.enabled"
         );
     }
 
