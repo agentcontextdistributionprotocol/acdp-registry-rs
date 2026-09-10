@@ -2505,6 +2505,121 @@ mod tests {
         );
     }
 
+    /// Test 2c — the hook fires for a KEY-REVOCATION predecessor. Every other
+    /// fixture here uses `ContextType::DataSnapshot`, so a guard keyed on the
+    /// predecessor's type survives the entire rest of the suite:
+    ///
+    /// ```ignore
+    /// if !prev_body.context_type.is_key_revocation() { admit(&prev_body)?; }
+    /// ```
+    ///
+    /// Every other test still passes — their predecessors are all non-revocations,
+    /// so `admit` still runs — while production skips the hook for EXACTLY the
+    /// case RFC-ACDP-0014 §4 constrains: arms 1/2/3/6 all sit behind
+    /// `prev.context_type.is_key_revocation()`. Same total-disablement profile as
+    /// the swallow in test 2b.
+    ///
+    /// This is a store-level test, so the predecessor need not be a spec-valid
+    /// revocation — `commit_publish` never inspects `context_type`, it only hands
+    /// the stored body to the closure. What matters is that the type reaches the
+    /// hook intact.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_fires_for_a_key_revocation_predecessor() {
+        use crate::SqliteStore;
+        use acdp::crypto::SigningKey;
+        use acdp::producer::Producer;
+        use acdp::registry::store::{PublishCommit, PublishCommitOutcome, RegistryStore};
+        use acdp::types::primitives::{AgentDid, ContextType, CtxId, Visibility};
+        use acdp_registry_store::ExtendedRegistryStore;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        store.migrate().await.unwrap();
+        let store = Arc::new(store);
+
+        let p = Producer::new(
+            SigningKey::from_bytes(&[48u8; 32]),
+            AgentDid::new("did:web:agents.test:revpred".to_string()),
+            "did:web:agents.test:revpred#key-1".to_string(),
+        );
+
+        // v1 IS a key-revocation — the one predecessor type §4 actually constrains.
+        let v1 = p
+            .publish_request()
+            .title("revocation-of-key-1")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let s = store.clone();
+        let v1c = v1.clone();
+        let v1_out = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v1c,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: None,
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let v1_ctx = match v1_out {
+            PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => {
+                r.ctx_id.as_str().to_string()
+            }
+        };
+        let v1_body = store.get(&CtxId(v1_ctx)).unwrap().unwrap().body;
+        assert_eq!(
+            v1_body.context_type,
+            ContextType::KeyRevocation,
+            "fixture sanity: the predecessor must really be a key-revocation"
+        );
+
+        let v2 = p
+            .supersede_body(&v1_body)
+            .title("successor-of-a-revocation")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        let seen: Arc<Mutex<Option<ContextType>>> = Arc::new(Mutex::new(None));
+        let seen_c = seen.clone();
+        let capture = move |b: &acdp::types::body::Body| {
+            *seen_c.lock().unwrap() = Some(b.context_type.clone());
+            Ok(())
+        };
+        let s = store.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&capture),
+            })
+        })
+        .await
+        .unwrap();
+        assert!(
+            outcome.is_ok(),
+            "the closure admitted, so the publish must succeed: {outcome:?}"
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(ContextType::KeyRevocation),
+            "the hook MUST run when the predecessor is a key-revocation — that is the \
+             only case RFC-ACDP-0014 §4 constrains, so a type-keyed guard here would \
+             disable the rule entirely while passing every other test"
+        );
+    }
+
     /// Test 3 — ORDERING / anti-oracle guard. A non-owner superseding someone
     /// else's context must be turned away as `superseded_target{NotFound}`
     /// WITHOUT the admission hook ever firing. If the hook ran first, publish
