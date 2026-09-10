@@ -3,8 +3,8 @@
 //! This lives here, rather than in a backend, because **all backends must produce
 //! interchangeable cursors**. A cursor minted by the sqlite store has to decode in the
 //! postgres store and vice versa; two private copies of one wire format is how they
-//! silently stop agreeing. It was exactly that — byte-for-byte duplicated between
-//! `acdp-registry-sqlite` and `acdp-registry-pg` — until #187.
+//! silently stop agreeing — which is exactly what #187 found in `acdp-registry-sqlite`
+//! and `acdp-registry-pg`, byte-for-byte duplicated, and what this module replaces.
 //!
 //! # Wire format
 //!
@@ -53,6 +53,12 @@ pub fn encode_cursor(created_at_ms: i64, ctx_id: &str) -> String {
 /// Returns `AcdpError::CursorExpired` for a well-formed cursor past its TTL, and
 /// `AcdpError::InvalidCursor` for anything unparseable. The two are separate wire codes
 /// (`cursor_expired` / `invalid_cursor`, both HTTP 400) and callers rely on the distinction.
+///
+/// The `Option` in the return type is vestigial: on the success path this **always** yields
+/// `Ok(Some(..))`, never `Ok(None)`. It survives because both callers pass an
+/// `Option<&str>` through `.map(decode_cursor).transpose()?.flatten()`, and flattening one
+/// level there is cheaper than a wrapper. Do not write code that branches on `Ok(None)`
+/// expecting it to mean anything.
 pub fn decode_cursor(s: &str) -> Result<Option<(DateTime<Utc>, String)>, AcdpError> {
     let bytes = B64
         .decode(s)
@@ -130,7 +136,11 @@ mod tests {
         ));
     }
 
-    /// The remaining parse-failure arms, one test each.
+    /// The remaining parse-failure arms.
+    ///
+    /// Deliberately one test rather than five: they share setup and a failure in any arm is
+    /// equally a bug. Note the consequence, though — this is fail-fast, so a break in the
+    /// first arm masks the other four until it is fixed.
     ///
     /// The pre-existing coverage reached only two of them (not-base64, missing ctx_id) while
     /// the codec has seven live arms. Asserting the **variant** rather than the message text
@@ -175,6 +185,61 @@ mod tests {
                 Err(AcdpError::InvalidCursor(_))
             ),
             "an anchor outside the representable range must be rejected"
+        );
+    }
+
+    /// Pins the TTL **duration**, which nothing pinned before.
+    ///
+    /// The Phase 1 verification round found that `CURSOR_TTL_SECS: 3600 -> 60`, and dropping
+    /// the `* 1000` so the window becomes 3.6 *seconds*, both left every test green: the suite
+    /// proved "expired is rejected" and "just-minted is not" with a ~3600x gap between them,
+    /// and every test imports the constant from `super::` so encode and decode move together.
+    /// The module doc now publishes "1 hour" as a contract, so that gap became load-bearing.
+    /// Bracketing the boundary to within ten seconds closes it.
+    #[test]
+    fn cursor_ttl_is_one_hour_of_milliseconds() {
+        assert_eq!(
+            CURSOR_TTL_SECS, 3600,
+            "the module doc publishes a one-hour TTL as a contract (RFC-ACDP-0005 §2.5.4)"
+        );
+        let now_ms = Utc::now().timestamp_millis();
+        let inside = B64.encode(format!("{}:{now_ms}:acdp://reg/ctx-1", now_ms - 3_595_000));
+        assert!(
+            decode_cursor(&inside).is_ok(),
+            "a cursor minted 3595s ago is still inside the 1h window -- if this fails the TTL \
+             is too short, e.g. the `* 1000` was dropped and the window is 3.6 seconds"
+        );
+        let outside = B64.encode(format!("{}:{now_ms}:acdp://reg/ctx-1", now_ms - 3_605_000));
+        assert!(
+            matches!(decode_cursor(&outside), Err(AcdpError::CursorExpired)),
+            "a cursor minted 3605s ago is outside the 1h window -- if this fails the TTL is \
+             too long"
+        );
+    }
+
+    /// Pins the base64 **alphabet**, which nothing pinned before.
+    ///
+    /// Interchangeability across backends is the whole reason this module exists, and the
+    /// alphabet is part of that contract — but every other test reaches `B64` through
+    /// `super::`, so swapping the engine moves encode and decode together and stays invisible.
+    /// The Phase 1 verification round confirmed it: `STANDARD -> URL_SAFE_NO_PAD` left all
+    /// tests green. This one decodes with an engine named right here instead.
+    #[test]
+    fn cursor_uses_the_standard_base64_alphabet() {
+        use base64::engine::general_purpose::STANDARD as PINNED_STANDARD;
+        let ctx = "acdp://reg/ctx-1";
+        let cur = encode_cursor(1_700_000_123_456_i64, ctx);
+        let raw = PINNED_STANDARD
+            .decode(&cur)
+            .expect("cursors must be STANDARD base64 so another backend can decode them");
+        let text = String::from_utf8(raw).expect("payload is utf-8");
+        assert!(
+            text.ends_with(":1700000123456:acdp://reg/ctx-1"),
+            "decoded under an explicitly-STANDARD engine, got {text:?}"
+        );
+        assert!(
+            !cur.contains('-') && !cur.contains('_'),
+            "'-' and '_' belong to the URL-safe alphabet, not STANDARD: {cur:?}"
         );
     }
 
