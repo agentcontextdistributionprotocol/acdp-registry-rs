@@ -322,7 +322,7 @@
 //! both families. `dk-001`/`dk-002`/`dk-004` get DIRECT coverage via
 //! `dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver`, which
 //! documents a discovered wrong-reason trap (see that test's own doc comment): this
-//! repo's `acdp` v0.9.1 dependency rejects all three with `schema_violation`, not the
+//! repo's `acdp` dependency rejects all three with `schema_violation`, not the
 //! fixtures' pinned `key_resolution_failed` -- spec-sanctioned for `dk-002` only, a
 //! genuine (unfixable from this file) conformance gap for `dk-001`/`dk-004`. `rev-002`
 //! stays out of scope: it applies only to `acdp-consumer`, never `acdp-registry-core`
@@ -383,7 +383,7 @@
 //! `limits.publish_rate_per_minute` (`config.rs:560-561`) is a live config knob enforced
 //! by the in-process fixed-window `AgentRateLimiter` (`rate_limit.rs`, wired at
 //! `state.rs:86-89`), already proven end-to-end for the sibling challenge limiter
-//! (`http_integration.rs:843-873`, `challenge_endpoint_is_rate_limited`). This test
+//! (`http_integration.rs:889-922`, `challenge_endpoint_is_rate_limited`). This test
 //! exercises the SAME limiter on the publish path for real: a harness configured with
 //! `publish_rate_per_minute = 1`, one publish that succeeds, a second (different content,
 //! same producer) that trips the limiter, and asserts the REAL HTTP response -- 429,
@@ -397,8 +397,10 @@
 //! `no_excused_family_is_required_by_our_profile`) fail on an *unclassified* family or an
 //! *illegitimate excuse* -- never on a *classified-but-uncovered* one. A family with a
 //! logged skip reason and no coverage at all passes all four, which is exactly how `vis`
-//! and `idem` sat uncovered before Phases 8-10, and how `cur`/`rcpt`/`lhr`/`log` still do
-//! (#130). (`caps`/`lin` closed to COVERED in Phase 7; `lc` was DEFERRED under #115 until
+//! and `idem` sat uncovered before Phases 8-10. As of Phase 15 the only families still in
+//! that position are `rcpt`/`lhr`/`log`, and only for their consumer-role residue (#130);
+//! `cur` closed to `COVERED` in Phase 15. (`caps`/`lin` closed to COVERED in Phase 7; `lc`
+//! was DEFERRED under #115 until
 //! Phase 14 declared it EXCUSED instead -- see `EXCUSED`'s own entry for `lc` -- so #115
 //! now has zero `DEFERRED` members.) Phase 11 closes that gap with a fifth, deliberately
 //! UNCONDITIONAL test,
@@ -436,16 +438,31 @@
 //! `covered_direct_families_have_present_test_functions` scanning this file's own
 //! compiled-in source (`include_str!`) for each named function, confirming it still
 //! exists with a test attribute directly above it. Be honest about what that check CAN
-//! and CANNOT detect: it is an EXISTENCE check, not a correctness check. It proves a
-//! named test has not been deleted or silently de-registered (attribute stripped,
-//! renamed away from `COVERED`'s literal string) -- exactly the mutation this phase must
-//! catch -- but it cannot prove the test's assertions still say anything meaningful; a
-//! gutted `assert!(true)` body would still read as "present," and so would `#[ignore]`
-//! written above `#[test]` (the reverse, idiomatic order is caught) or the whole function
-//! wrapped in a `/* ... */` block comment. A const naming test functions and re-deriving
+//! and CANNOT detect. It proves a named test has not been deleted or silently
+//! de-registered (attribute stripped, renamed away from `COVERED`'s literal string) --
+//! exactly the mutation this phase must catch -- and, since Phase 15, that the body still
+//! contains at least one assertion, because existence alone pins the SYMBOL rather than
+//! the coverage: two separate verification rounds gutted a named function's body while
+//! leaving its name and attribute in place, and every check stayed green. What it still
+//! CANNOT do is judge whether those assertions say anything meaningful: `assert!(true)`
+//! satisfies it, as does the token `assert` inside a comment or a string. `#[ignore]`
+//! written above `#[test]` (the reverse, idiomatic order is caught) and a function wrapped
+//! in a `/* ... */` block comment also still read as "present". A const naming test
+//! functions and re-deriving
 //! "present + still a test" from source is the best a self-contained, spec-independent
 //! check can do; genuinely re-executing every direct test's assertions as part of this
 //! ratchet would just be running the suite, not ratcheting it.
+//!
+//! Phase 15 tested that limit rather than assuming it, across three verification rounds,
+//! and the conclusion is worth stating once at the top: **these guards catch wholesale
+//! gutting and deletion, and that is all they can ever catch.** A substring test over
+//! `include_str!` cannot distinguish an assertion from the letters `a-s-s-e-r-t` in a
+//! comment, and tightening the substring only moves the goalposts one mutation further
+//! out. Proving a test asserts something REAL needs a mutation oracle -- break the code
+//! under test, observe the test go red (`cargo-mutants`, or a fault-injection harness
+//! over `src/`) -- which is a different mechanism, not a stricter regex. Recorded on
+//! #130. Do not read a passing ratchet as evidence that the tests it names prove
+//! anything; read it as evidence they have not been deleted.
 //!
 //! `DEFERRED` is `&[(&str, &str, u32)]` -- family, a non-empty written reason, and an
 //! open GitHub issue number. **#115** was filed for `caps`/`lin`/`lc`: the first two
@@ -453,13 +470,38 @@
 //! `DEFERRED` -- was moved to `EXCUSED` in Phase 14 (see `EXCUSED`'s own entry for `lc`),
 //! so #115 now has zero `DEFERRED` members; the check below tolerates that (it only
 //! requires #115 membership OF whichever of the trio still happen to sit in `DEFERRED`,
-//! never that one must). The remaining `cur`/`rcpt`/`lhr`/`log` cite **#130**, filed
+//! never that one must). The remaining `rcpt`/`lhr`/`log` cite **#130**, filed
 //! enumerating each with its own reason (`meta` and `data-ref` closed to `COVERED` in
 //! Phase 10; `body` and `status` in Phase 11; `schema` in Phase 12; `sig`/`rev`/`dk` in
-//! Phase 13; `did-ssrf`/`err`/`rate` in Phase 14, same #130 filing).
+//! Phase 13; `did-ssrf`/`err`/`rate` in Phase 14; `cur` in Phase 15, same #130 filing).
 //! `known_families_partition_into_covered_excused_or_deferred` checks both: reason
 //! non-empty, issue is one of the two known-open numbers, and that any of the
 //! `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115.
+//!
+//! ## Partial coverage: `DEFERRED_PARTIAL_DIRECT` (REG-11 Phase 15)
+//!
+//! The partition above buckets by **family**, which leaves a gap once a family is
+//! only *partly* closable. `rcpt`/`lhr`/`log` each split cleanly in two: a producer
+//! half this registry really implements and whose spec goldens are recomputed here,
+//! and a consumer-role verification half it does not implement and is not owed (see
+//! each family's `DEFERRED` reason). The family stays `DEFERRED` -- truthfully, for
+//! the residue -- but nothing in the partition asks a `DEFERRED` family to name any
+//! test, so the golden-half tests would sit unguarded: deleting one would leave every
+//! check green.
+//!
+//! `DEFERRED_PARTIAL_DIRECT` closes that, with two tests rather than one because the
+//! first attempt was itself falsifiable:
+//! `deferred_partial_direct_test_functions_are_present` checks each named test exists,
+//! still wears its attribute, and still carries its `EXPECTED_*_ASSERTION_COUNT`
+//! ratchet (existence alone pins the symbol, not the coverage -- a gutted body passed
+//! it); and `deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct` checks
+//! the const's own membership against the `DEFERRED` prose, because otherwise deleting
+//! an entry simply made the first test vacuous while the reason still claimed the test
+//! could not be deleted.
+//!
+//! Deliberately not a fourth partition bucket, and not a fourth `DEFERRED` tuple
+//! field: `DEFERRED` is destructured by two other checks and its type is quoted above,
+//! so widening it edits five sites to gain only name-adjacency to the reason string.
 //!
 //! **Required-checks status (current, re-verified 2026-09-01 per `ASSUMPTIONS.md`):**
 //! `conformance (spec fixtures)` IS among this repo's required status-check contexts --
@@ -520,7 +562,7 @@ use tower::ServiceExt;
 const AUTHORITY: &str = "registry.test";
 
 /// Profiles the conformance harness registry advertises. Mirrors `caps().profiles`
-/// (`conformance.rs:61`) and `config().registry.profiles` (`:86`) — keep all three
+/// and `config().registry.profiles` — keep all three
 /// in step; `harness_profiles_match_caps_and_config` enforces it.
 const HARNESS_PROFILES: &[&str] = &["acdp-registry-core"];
 
@@ -1353,7 +1395,7 @@ fn parse_scenarios_array(scenarios: &[Value]) -> Option<Vec<ShapeDScenario>> {
             // "May be approximate; not guaranteed to be exact"
             // (`schemas/json/acdp-search-response.schema.json`), "SHOULD
             // NOT be relied upon for exact counts"
-            // (`rfcs/RFC-ACDP-0005-discovery.md:219`), and the spec's own
+            // (`rfcs/RFC-ACDP-0005-discovery.md:221`), and the spec's own
             // `examples/search/empty-page-post-filter-response.json` ships
             // the identical shape (`{"matches": [], "total_estimate": 12}`)
             // -- an empty post-filtered page with a non-zero estimate.
@@ -3614,7 +3656,7 @@ async fn vis005_private_audience_search_excluded_via_derived_from() {
     // divergence: the spec itself now agrees -- `total_estimate` "May be
     // approximate; not guaranteed to be exact"
     // (`acdp-search-response.schema.json`), "SHOULD NOT be relied upon for
-    // exact counts" (`rfcs/RFC-ACDP-0005-discovery.md:219`), and the
+    // exact counts" (`rfcs/RFC-ACDP-0005-discovery.md:221`), and the
     // spec's own `examples/search/empty-page-post-filter-response.json`
     // ships the identical shape (empty `matches[]`, non-zero
     // `total_estimate`). `1` is one of `total_estimate_constraints`'s own
@@ -5258,7 +5300,7 @@ fn wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted() {
 // `anc001_well_formed_anchor_is_accepted_and_round_trips`'s own doc comment
 // above; also `CHANGELOG.md`).** This repo's `POST /contexts` returns HTTP
 // **200** on a successful publish
-// (`crates/acdp-registry-core/src/handlers/context.rs:635`,
+// (`crates/acdp-registry-core/src/handlers/context.rs:656`,
 // `Ok(Json(response))`), never the fixtures' own literal `201`. Every
 // status this section asserts is the CORRECTED value (200/200/409/200/200
 // for `idem-001`..`005`), not the fixture literal -- each test below also
@@ -5286,7 +5328,7 @@ fn wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted() {
 // this file's harness can produce. Tolerated, not required or conditional:
 // NOT owed, and deliberately out of scope for this phase. `idem-007` is in
 // `conditional_fixtures`, gated on `acdp_version >= 0.3.0`
-// (`profiles.json:128`); this harness's `caps()` (`:327` above) advertises
+// (`profiles.json:128`); this harness's `caps()` (above) advertises
 // `"0.1.0"`, so the condition never fires and the fixture is NOT owed
 // either. (Separately, even if it WERE owed: `idem-007` pins a CONSUMER-side
 // cross-field check over a capabilities document -- "a 0.3.0 document with
@@ -5374,7 +5416,7 @@ async fn idem001_004_publish_idempotency_key_lifecycle_and_restart_durability() 
     };
 
     // Sanity: every one of the four fixtures' own preconditions is exactly
-    // what this harness's caps() (`:327` above) advertises --
+    // what this harness's caps() (above) advertises --
     // supports_idempotency_key: true, limits.idempotency_key_ttl_seconds:
     // 86400 -- so this harness is a faithful stand-in for what each fixture
     // asks to be tested against.
@@ -5634,9 +5676,10 @@ async fn idem001_004_publish_idempotency_key_lifecycle_and_restart_durability() 
 /// did:key producer (offline-verifiable, no network resolver needed)
 /// against a NON-playground harness, routed through
 /// `RegistryServer::publish_verified_did_key_in_tenant` ->
-/// `commit_via_store` (`registry/server.rs:666`,
-/// `let idempotency = if self.caps.supports_idempotency_key { ... } else
-/// { None }`), which every SDK-routed publish path (verified did:web,
+/// `commit_via_store` (in the external `acdp-server` crate's
+/// `registry/server.rs`; the gate reads `let idempotency = if
+/// self.caps.supports_idempotency_key { ... } else { None }`), which every
+/// SDK-routed publish path (verified did:web,
 /// did:key, pinned-verified) shares and which gates correctly.
 ///
 /// That leaves a second, independent enforcement point for the SAME rule:
@@ -5645,9 +5688,9 @@ async fn idem001_004_publish_idempotency_key_lifecycle_and_restart_durability() 
 /// idempotency lookup/record dance around `publish_unverified_for_tests`)
 /// DOES reach `commit_via_store` -- `publish_unverified_for_tests` ends
 /// with an unconditional `self.commit_via_store(req, None, None, None)`
-/// (`server.rs:557`) -- but that call hardcodes `None` for the idempotency
-/// key, so `commit_via_store`'s `supports_idempotency_key` gate
-/// (`server.rs:666`) is a no-op for this path. The playground branch must
+/// -- but that call hardcodes `None` for the idempotency key, so
+/// `commit_via_store`'s `supports_idempotency_key` gate is a no-op for this
+/// path. The playground branch must
 /// therefore consult
 /// `state.server.capabilities().supports_idempotency_key` itself. Before
 /// REG-11 Phase 5 (#128) it did not: a first attempt at this test, built
@@ -5937,7 +5980,7 @@ async fn idem_playground_branch_writes_no_idempotency_record_when_gated_off() {
 // (Context Correction 5 in the plan): anc-001 expects a *positive* publish
 // outcome carrying a content_hash/signature its own `input.notes` calls
 // placeholders that do not recompute over the fixture's own body —
-// `extract_shapes`'s Shape A (`:389-393` above) refuses any non-400 publish
+// `extract_shapes`'s Shape A (above) refuses any non-400 publish
 // outcome by design, for exactly that reason — and anc-002/anc-003 carry
 // only an `input.anchor_under_test` fragment, no full body. So, following
 // the same precedent as
@@ -5969,9 +6012,9 @@ async fn idem_playground_branch_writes_no_idempotency_record_when_gated_off() {
 //     `conditional_fixtures`.
 
 /// Capabilities for a `0.5.0`-advertising registry, built LOCALLY for the
-/// three anc-* tests below — do NOT mutate the shared `caps()` (`:142`,
-/// `"0.1.0"`), which `replays_spec_fixtures_when_present` (and other tests)
-/// depend on. Mirrors `did_key_caps()` (`:877`)'s pattern of cloning
+/// three anc-* tests below — do NOT mutate the shared `caps()`
+/// (`"0.1.0"`), which `replays_spec_fixtures_when_present` (and other tests)
+/// depend on. Mirrors `did_key_caps()`'s pattern of cloning
 /// `caps()` and bumping the one field under test.
 fn anc_caps_050() -> CapabilitiesDocument {
     let mut c = caps();
@@ -5981,9 +6024,9 @@ fn anc_caps_050() -> CapabilitiesDocument {
 
 /// A `0.5.0`-advertising harness, playground on (so a freshly-signed
 /// synthetic producer identity can publish without a live DID resolver) —
-/// the same shape as the file's shared `harness()` (`:205`) except for the
+/// the same shape as the file's shared `harness()` except for the
 /// swapped-in capabilities document, built locally the same way
-/// `did_key_harness()` (`:887`) builds its own isolated harness rather than
+/// `did_key_harness()` builds its own isolated harness rather than
 /// touching the shared one.
 async fn anc_harness_050() -> axum::Router {
     common::build_harness_with_webhook(
@@ -6073,7 +6116,7 @@ fn find_fixture_by_id(fixtures: &Path, id: &str) -> Option<Value> {
 
 /// anc-001 (RFC-ACDP-0016 §4/§5): a publish body carrying one well-formed
 /// `anchors` entry must be accepted, served intact, and its recomputed
-/// `content_hash` must match. `extract_shapes`'s Shape A (`:389-393`)
+/// `content_hash` must match. `extract_shapes`'s Shape A
 /// refuses this fixture by design — it is a *positive* publish outcome, and
 /// anc-001's own `content_hash`/`signature` are placeholders (per its
 /// `input.notes`) that don't recompute over its own body. So this test
@@ -7176,7 +7219,7 @@ async fn publish_with_data_ref(
 ///     round-trip that it clears the fixture's own declared boundary (one
 ///     byte past the 65536-byte cap) before ever sending it.
 ///   * data-ref-007: at spec pin d1f06d0 the schema nests `content_hash`
-///     inside `embedded` (a field the `acdp` 0.9.1 dependency's
+///     inside `embedded` (a field the `acdp` dependency's
 ///     `EmbeddedContent` type does not have -- deserializing the fixture's
 ///     JSON verbatim fails with "unknown field", not the
 ///     `data_ref_hash_mismatch` this fixture pins), so this test moves the
@@ -7249,7 +7292,7 @@ async fn data_ref001_007_publish_path_rejections_enforced() {
             // names this exact fixture) nests `content_hash` INSIDE
             // `embedded`, alongside the historical DataRef-top-level
             // `content_hash` (same schema file, :47-50) -- but the `acdp`
-            // 0.9.1 dependency this registry actually runs (this crate's
+            // dependency this registry actually runs (this crate's
             // Cargo.lock) has not caught up to that addition: its
             // `EmbeddedContent` type is `#[serde(deny_unknown_fields)]`
             // with only `encoding`/`content` (no `content_hash` field at
@@ -7785,7 +7828,7 @@ type SchemaBodyPatch = (&'static str, fn(&mut Value, &Value));
 /// for why the typed builder cannot produce these shapes at all) and
 /// POSTing it directly via [`anc_publish_raw`]. None of the 5 needs a
 /// data-ref-007-style substitution: each fixture's own fragment already
-/// targets a field this registry's real `acdp-types` 0.9.1 dependency
+/// targets a field this registry's real `acdp-types` dependency
 /// actually has (unlike data-ref-007's schema-only `embedded.content_hash`
 /// nesting -- see `data_ref001_007_publish_path_rejections_enforced`'s doc
 /// comment), so splicing it verbatim exercises the exact intended rejection
@@ -7806,7 +7849,7 @@ type SchemaBodyPatch = (&'static str, fn(&mut Value, &Value));
 /// way, but for the wrong reason: a naive splice-verbatim test would report
 /// coverage of "limits is a closed sub-object" that does not actually
 /// exist. So this test instead takes this registry's OWN real, already-
-/// valid capabilities document (`caps()`, `conformance.rs:431` --
+/// valid capabilities document (`caps()` --
 /// self-checked as `"accept"` first) and splices ONLY the fixture's
 /// malformed `limits` object onto it, isolating the exact field this
 /// fixture exists to exercise.
@@ -8209,7 +8252,7 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 /// coverage — a family can sit classified-but-uncovered indefinitely, which
 /// is exactly what happened to `vis`/`idem` before Phases 8-10, and to
 /// `caps`/`lin` before Phase 7, and to `meta`/`data-ref` before Phase 10 --
-/// and what still holds for `cur`/`rcpt`/`lhr`/`log` (#130) today.
+/// and what still holds for `rcpt`/`lhr`/`log`'s consumer-role residue (#130) today.
 /// Every family in this list must now ALSO appear in exactly one of
 /// `COVERED`, `EXCUSED`, or `DEFERRED` — enforced unconditionally by
 /// `known_families_partition_into_covered_excused_or_deferred`, which needs
@@ -8301,7 +8344,7 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 /// `idem` (RFC-ACDP-0003 §6 idempotency keys) was never `EXCUSED` either —
 /// `idem-001`..`idem-005` sit in `acdp-registry-core`'s own
 /// `conditional_fixtures`, gated on `supports_idempotency_key: true`, which
-/// `caps()` (`:327` above) advertises, making them live obligations. The
+/// `caps()` (above) advertises, making them live obligations. The
 /// generic replay harness still classifies all five "requires pre-seeded
 /// state" (their `preconditions` key — an existing idempotency record —
 /// isn't a shape any of A/B/C/D dispatch on), but REG-10 Phase 10 gives
@@ -8625,6 +8668,17 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
             "rate001_publish_rate_limit_trips_429_with_retry_after",
         ])],
     ),
+    // REG-11 Phase 15 (#130). `Direct` and never `Replayed`: neither cur-* fixture
+    // carries an `input.request`, so both land in the replayer's terminal non-HTTP
+    // bucket and the family produces zero replayed exchanges -- a `Replayed` claim
+    // here would fail the per-family `ran` oracle inside
+    // `replays_spec_fixtures_when_present`.
+    (
+        "cur",
+        &[CoverageMechanism::Direct(&[
+            "cur001_002_expired_and_malformed_cursors_are_distinguished",
+        ])],
+    ),
 ];
 
 /// Families with no coverage yet, each with a non-empty written reason and
@@ -8649,51 +8703,112 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 /// (`schema_vectors_openness_and_absent_vs_null_enforced`), Phase 13 closed
 /// `sig`, `rev`, and `dk`, and Phase 14 closed the last three
 /// `CORE_INEXCUSABLE_FAMILIES` stragglers, `did-ssrf`/`err`/`rate` (see
-/// `COVERED` above for all of these). The remaining `cur`/`rcpt`/`lhr`/`log`
-/// cite **#130** (filed for Phase 6, enumerating each with its own reason);
-/// none of the four is in `CORE_INEXCUSABLE_FAMILIES`, so none is under the
-/// same closure pressure `did-ssrf`/`err`/`rate` were.
+/// `COVERED` above for all of these), and Phase 15 closed `cur`. The
+/// remaining `rcpt`/`lhr`/`log` cite **#130** (filed for Phase 6,
+/// enumerating each with its own reason); none of the three is in
+/// `CORE_INEXCUSABLE_FAMILIES`, so none is under the same closure pressure
+/// `did-ssrf`/`err`/`rate` were. Each is deferred only for its consumer-role
+/// residue; the producer half each one DOES owe is covered and pinned by
+/// `DEFERRED_PARTIAL_DIRECT`.
 /// `known_families_partition_into_covered_excused_or_deferred` checks: the
 /// reason is non-empty, the issue is one of the two known-open numbers, and
 /// any of the `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115
 /// (vacuously true today, since none of the three is).
 const DEFERRED: &[(&str, &str, u32)] = &[
     (
-        "cur",
-        "cursor/pagination semantics; no direct or replayed coverage yet.",
-        130,
-    ),
-    (
         "rcpt",
-        "receipt verification (RFC-ACDP-0010); two causes, not one: rcpt-001 carries no \
-         applies_to_profiles and is skipped as a non-HTTP golden vector (needs a \
-         direct-vector pass); rcpt-002/003/004 are restricted to \
-         acdp-registry-receipts/acdp-consumer and the harness advertises only \
-         acdp-registry-core (HARNESS_PROFILES, conformance.rs:425). Neither is a \
-         missing seam.",
+        "receipt VERIFICATION (RFC-ACDP-0010 \u{a7}8), which is the consumer role and not one \
+         this crate plays: acdp-registry-core implements only the producer side \
+         (load_signing_key / build_signer / build_did_document -- there is no verify fn in \
+         crates/acdp-registry-core/src/receipt.rs). rcpt-002/003/004 declare \
+         applies_to_profiles [acdp-registry-receipts, acdp-consumer]; this harness advertises \
+         only acdp-registry-core (see HARNESS_PROFILES), so targets_unadvertised_profile \
+         skips them first. Two independent reasons this is not owed, and neither is a missing \
+         seam: advertising a profile the registry does not implement would make this ratchet \
+         lie; and these fixtures carry no endpoint and no vectors array, so a 'direct pass' \
+         over them would run the acdp-types verifier over spec data and assert nothing about \
+         THIS registry -- manufactured coverage of exactly the kind this file exists to \
+         prevent. The producer half IS covered: rcpt-001 is recomputed by \
+         rcpt001_registry_receipt_golden_recomputed_and_remintable, which \
+         DEFERRED_PARTIAL_DIRECT pins and \
+         deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct ties to this \
+         sentence, so neither the test nor its pin can be dropped while this claim stands.",
         130,
     ),
     (
         "lhr",
-        "lineage-head receipts (RFC-ACDP-0011); two causes, not one: lhr-001 carries no \
-         applies_to_profiles and is skipped as a non-HTTP golden vector (needs a \
-         direct-vector pass); lhr-002/003/004 are restricted to \
-         acdp-registry-head-receipts/acdp-consumer and the harness advertises only \
-         acdp-registry-core (HARNESS_PROFILES, conformance.rs:425). Neither is a \
-         missing seam.",
+        "lineage-head receipt VERIFICATION (RFC-ACDP-0011), the consumer role; as with rcpt, \
+         acdp-registry-core mints lineage-head receipts but never verifies them. \
+         lhr-002/003/004 declare applies_to_profiles [acdp-registry-head-receipts, \
+         acdp-consumer]; this harness advertises only acdp-registry-core (see \
+         HARNESS_PROFILES), so targets_unadvertised_profile skips them first. Two independent \
+         reasons this is not owed: advertising an unimplemented profile would make this \
+         ratchet lie; and these fixtures carry no endpoint and no vectors array, so a 'direct \
+         pass' would assert something about acdp-types, not about this registry. The producer \
+         half IS covered: lhr-001 is recomputed by \
+         lhr001_lineage_head_receipt_golden_recomputed_and_remintable, pinned by \
+         DEFERRED_PARTIAL_DIRECT and tied to this sentence by \
+         deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct.",
         130,
     ),
     (
         "log",
-        "transparency-log verification (RFC-ACDP-0012); the emission side is implemented \
-         and always mounted (/log/checkpoint, /log/proof, /log/entries, \
-         crates/acdp-registry-core/src/lib.rs:86-88). Two causes, not one: log-001/003 \
-         carry no applies_to_profiles and are skipped as non-HTTP golden vectors (need \
-         a direct-vector pass); log-002/004 are restricted to \
-         acdp-registry-transparency-log/acdp-consumer and the harness advertises only \
-         acdp-registry-core (HARNESS_PROFILES, conformance.rs:425). Neither is a \
-         missing seam.",
+        "transparency-log VERIFICATION (RFC-ACDP-0012), the consumer role. The emission side \
+         is implemented and always mounted (/log/checkpoint, /log/proof, /log/entries, \
+         crates/acdp-registry-core/src/lib.rs:87-89); verification of someone else's log is \
+         not this crate's job. log-002/004 declare applies_to_profiles \
+         [acdp-registry-transparency-log, acdp-consumer]; this harness advertises only \
+         acdp-registry-core (see HARNESS_PROFILES), so targets_unadvertised_profile skips \
+         them first. Two independent reasons this is not owed: advertising an unimplemented \
+         profile would make this ratchet lie; and these fixtures carry no endpoint and no \
+         vectors array, so a 'direct pass' would assert something about acdp-crypto's merkle \
+         code, not about this registry. The emission half IS covered: log-001 and log-003 are \
+         recomputed by log001_leaf_root_and_inclusion_golden_recomputed and \
+         log003_consistency_proof_golden_recomputed, pinned by DEFERRED_PARTIAL_DIRECT and \
+         tied to this sentence by \
+         deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct.",
         130,
+    ),
+];
+
+/// The hole the strict `COVERED`/`EXCUSED`/`DEFERRED` partition otherwise leaves,
+/// and the reason it is a separate const rather than a fourth `DEFERRED` field.
+///
+/// `rcpt`/`lhr`/`log` are each `DEFERRED` for a residue this harness legitimately
+/// cannot reach (see their reasons above), yet each ALSO has a golden half that is
+/// now fully recomputed by a direct test. The partition buckets by *family*, not by
+/// fixture, so those direct tests would otherwise be unguarded: deleting
+/// `rcpt001_registry_receipt_golden_recomputed_and_remintable` would leave every
+/// existing check green, because a `DEFERRED` family is not required to name any
+/// test function at all. This const closes that gap, and
+/// `deferred_partial_direct_test_functions_are_present` enforces it.
+///
+/// Deliberately NOT a fourth field on the `DEFERRED` tuple, which was the obvious
+/// alternative: `DEFERRED` is destructured in two other checks
+/// (`known_families_partition_into_covered_excused_or_deferred` and
+/// `core_inexcusable_families_are_never_excused_or_unclassified`) and its type is
+/// quoted in the module doc, so widening it edits five sites to gain only
+/// name-adjacency to the reason string. Deliberately NOT a fourth partition member
+/// either -- that would touch every set check in the file.
+///
+/// A family here MUST also be in `DEFERRED`. `cur` is absent on purpose: it is fully
+/// `COVERED`, not partially, so its tests are already pinned by `COVERED`'s own
+/// `Direct(...)` list.
+const DEFERRED_PARTIAL_DIRECT: &[(&str, &[&str])] = &[
+    (
+        "rcpt",
+        &["rcpt001_registry_receipt_golden_recomputed_and_remintable"],
+    ),
+    (
+        "lhr",
+        &["lhr001_lineage_head_receipt_golden_recomputed_and_remintable"],
+    ),
+    (
+        "log",
+        &[
+            "log001_leaf_root_and_inclusion_golden_recomputed",
+            "log003_consistency_proof_golden_recomputed",
+        ],
     ),
 ];
 
@@ -8733,6 +8848,87 @@ fn source_has_present_test_fn(name: &str) -> bool {
     false
 }
 
+/// The source text of `name`'s function body: from its `fn` line to the brace that
+/// actually closes it, found by counting.
+///
+/// **This used to stop at the first `\n}\n`, and that was a real hole.** A body
+/// gutted to a single line -- `async fn foo() {}` -- has no closing brace at column 0
+/// of its own, so the scan ran on into the NEXT function and returned a span
+/// containing the *neighbour's* assertions. Both anti-vacuity guards that depend on
+/// this helper were satisfied by them: gutting `cur001_002_...` or `rcpt001_...` to
+/// `() {}` left all 66 tests green, and `cargo fmt` keeps `{}` on one line, so
+/// formatting did not rescue it either. The round-2 verification of Phase 4 found
+/// this by trying the cheaper mutation after the obvious one was fixed.
+///
+/// The counter skips braces inside string literals, line comments, and the `'{'` /
+/// `'}'` char literals this file genuinely contains (at two sites), so it does not
+/// terminate early on them. It does **NOT** handle `/* ... */` block comments or raw
+/// strings (`r"..."`, `r#"..."#`); a body using either is mis-extracted, and the
+/// callers below will report a confusing failure about a body that is in fact fine.
+/// Handling them correctly means writing a real Rust lexer, which is deliberately not
+/// done here -- see the ceiling note below.
+///
+/// **The ceiling, stated plainly, because three verification rounds hit it.** This
+/// helper feeds substring checks, and a substring check cannot tell an assertion from
+/// the letters `a-s-s-e-r-t` in a comment. Round 1 patched where the check was wired;
+/// round 2 patched this span finder; round 3 confirmed the span finder is now sound
+/// and the *predicate* is the hole -- a body of `{ /* assert */ }` or
+/// `{ let _ = "EXPECTED_ asserted"; }` defeats both guards while proving nothing, and
+/// tightening the substring only moves the goalposts (`assert!(true)` survives any
+/// tightening). Every ratchet expressible as "this text appears in this span" is
+/// satisfiable by text that computes nothing.
+///
+/// So these guards catch WHOLESALE GUTTING and deletion. They are not, and cannot be
+/// made into, proof that a test asserts something real. That property needs a mutation
+/// oracle -- break the code under test and observe the test go red (`cargo-mutants` or
+/// a fault-injection harness over `src/`) -- not a text oracle. Tracked on #130 rather
+/// than patched a fourth time.
+fn source_test_fn_body(name: &str) -> Option<&'static str> {
+    let def_needle = format!("fn {name}(");
+    let start = OWN_SOURCE.find(&def_needle)?;
+    let rest = &OWN_SOURCE[start..];
+    let bytes = rest.as_bytes();
+    let open = rest.find('{')?;
+
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut in_string = false;
+    let mut in_line_comment = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_line_comment {
+            if byte == b'\n' {
+                in_line_comment = false;
+            }
+        } else if in_string {
+            match byte {
+                b'\\' => index += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'/' if bytes.get(index + 1) == Some(&b'/') => in_line_comment = true,
+                // `'{'` / `'}'` -- a char literal, not a delimiter. Lifetimes
+                // (`'a`) fall through harmlessly, having no closing quote here.
+                b'\'' if bytes.get(index + 2) == Some(&b'\'') => index += 2,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&rest[..=index]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
 /// Unconditional (no spec needed) half of Phase 11's mutation proof: every
 /// `CoverageMechanism::Direct` test-function name in `COVERED` genuinely
 /// exists in this file's own source, still wearing a test attribute.
@@ -8763,8 +8959,247 @@ fn covered_direct_families_have_present_test_functions() {
                          test-attribute-registered function -- coverage was removed without \
                          updating COVERED"
                     );
+                    // Existence pins the SYMBOL, not the coverage, so also require
+                    // that some assertion survives in the body. READ THE LIMIT
+                    // HONESTLY: this catches WHOLESALE GUTTING and nothing finer. It
+                    // is a substring test, so the seven letters of `assert` inside a
+                    // comment or a string satisfy it, as does `assert!(true)`. Three
+                    // verification rounds established that no version of this check
+                    // can do better -- see `source_test_fn_body` for why the mechanism
+                    // itself is the ceiling. It is kept because wholesale gutting is a
+                    // real, cheap mistake and this catches it for free; it is NOT
+                    // evidence that the test proves anything. Kept deliberately
+                    // generic (any `assert`) rather than the stricter
+                    // EXPECTED_*/`asserted` ratchet used by
+                    // `deferred_partial_direct_test_functions_are_present` (which is
+                    // in practice WEAKER -- both its tokens fit in one comment), because
+                    // that counting convention is a Phase 15 idiom that most
+                    // COVERED families predate. (No count here on purpose: this
+                    // one was written as 21, "corrected" to 19, and is 21 --
+                    // COVERED holds 21 families, 19 of them carrying a Direct
+                    // mechanism, and `pub`/`ret` use a one-line tuple form that
+                    // a line-oriented grep misses. A number in prose is a pin.)
+                    let body = source_test_fn_body(name).unwrap_or_else(|| {
+                        panic!(
+                            "could not locate the body of `{name}`. The brace counter in \
+                             source_test_fn_body does not handle `/* ... */` block comments \
+                             or raw strings; if `{name}` now uses either, that is the cause \
+                             and the test function itself is probably fine"
+                        )
+                    });
+                    assert!(
+                        body.contains("assert"),
+                        "COVERED family \"{family}\"'s direct test `{name}` contains no \
+                         assertion at all. The function still exists and still wears its test \
+                         attribute, so the existence check above cannot see this -- but a \
+                         test that asserts nothing passes unconditionally, and a `Direct` \
+                         coverage claim resting on it is false"
+                    );
                 }
             }
+        }
+    }
+}
+
+/// `DEFERRED_PARTIAL_DIRECT`'s enforcement, and the sibling of
+/// `covered_direct_families_have_present_test_functions` above: a family that
+/// is `DEFERRED` for its profile-gated residue while its golden half IS
+/// covered must keep naming the tests that cover that half, and those tests
+/// must still exist wearing a test attribute. Without this, the direct tests
+/// for `rcpt`/`lhr`/`log` are the only new coverage in the file that nothing
+/// guards -- the partition asks a `DEFERRED` family for a reason string, not
+/// for test functions. Also checks the containment invariant in the other
+/// direction, so a family cannot claim partial-direct coverage while sitting
+/// in `COVERED` or `EXCUSED`.
+#[test]
+fn deferred_partial_direct_test_functions_are_present() {
+    let deferred: std::collections::BTreeSet<&str> =
+        DEFERRED.iter().map(|(family, _, _)| *family).collect();
+
+    for (family, names) in DEFERRED_PARTIAL_DIRECT {
+        assert!(
+            deferred.contains(family),
+            "\"{family}\" is in DEFERRED_PARTIAL_DIRECT but not in DEFERRED -- a family \
+             whose golden half is pinned here must still be deferred for its residue; if it \
+             is now fully covered, move its tests into COVERED's Direct(...) list instead"
+        );
+        assert!(
+            !names.is_empty(),
+            "DEFERRED_PARTIAL_DIRECT family \"{family}\" names no test functions at all"
+        );
+        for name in *names {
+            assert!(
+                source_has_present_test_fn(name),
+                "DEFERRED family \"{family}\" claims its golden half is covered by \
+                 `{name}`, but that function no longer exists in this file as a present, \
+                 test-attribute-registered function -- coverage was removed without updating \
+                 DEFERRED_PARTIAL_DIRECT or the family's DEFERRED reason"
+            );
+            // Existence alone pins the SYMBOL, not the coverage: a verification round
+            // gutted rcpt001's body while keeping its name and attribute, and every
+            // test stayed green. These goldens have no external `ran`-tally counterpart
+            // the way COVERED's `Replayed` families do, so require that the body still
+            // carries its EXPECTED_*_ASSERTION_COUNT ratchet. SAME CEILING as the
+            // COVERED check, and in practice this one is WEAKER despite looking
+            // stricter: both tokens are matched anywhere in the span, so the single
+            // comment line `// EXPECTED_ asserted` satisfies it. Catches wholesale
+            // gutting; proves nothing beyond that. See `source_test_fn_body`.
+            let body = source_test_fn_body(name).unwrap_or_else(|| {
+                panic!(
+                    "could not locate the body of `{name}`. The brace counter in \
+                     source_test_fn_body does not handle `/* ... */` block comments or raw \
+                     strings; if `{name}` now uses either, that is the cause and the test \
+                     function itself is probably fine"
+                )
+            });
+            assert!(
+                body.contains("EXPECTED_") && body.contains("asserted"),
+                "DEFERRED family \"{family}\"'s golden test `{name}` no longer carries its \
+                 assertion-count ratchet (an `asserted` tally checked against an EXPECTED_* \
+                 const). The function still exists and still wears its test attribute, so \
+                 the existence check above cannot see this -- but a gutted body proves \
+                 nothing, which is the exact failure mode this family's DEFERRED reason \
+                 claims is impossible"
+            );
+        }
+    }
+}
+
+/// CHARTER rule 10's durable answer for this file: **line pins rot, so forbid them.**
+///
+/// Seventeen `conformance.rs`-relative self-citations had accumulated here across
+/// sixteen lines (one line carried two), each correct when written and every one of
+/// them stale by the time it was found --
+/// clustered in eras, because each was written against the file as it stood that
+/// week. Two had drifted far enough to be actively misleading, citing unrelated
+/// module-doc lines. Phase 4 replaced them all with symbol references, which cannot
+/// rot, and this test is what stops them coming back.
+///
+/// **The enforcement had to be a test.** An earlier draft of this phase claimed
+/// rustdoc would validate intra-doc links here. It does not: `cargo doc` never
+/// documents test targets (it invokes rustdoc only on this crate's `src/main.rs`),
+/// and rustc does not evaluate `rustdoc::` lints, so a broken reference in a
+/// `tests/` file produces zero warnings from both `cargo test` and
+/// `RUSTDOCFLAGS="-D warnings" cargo doc`. Any criterion resting on "rustdoc clean"
+/// would have been vacuous for every change in this unit. This test runs in the
+/// required `tests` job, needs no spec checkout and no CI change.
+///
+/// **The pattern is deliberately narrow** -- a backtick immediately followed by a
+/// colon and a digit, or this file's own name followed by a colon and a digit. It
+/// does NOT match `some_other_file.rs:NNN`, and must not be broadened to, because
+/// *cross-file* pins are legitimate and are meant to stay numeric: a reference into
+/// another file cannot be expressed as a symbol this file can resolve. Roughly two
+/// dozen such pins are intentionally left in place -- deliberately not stated as an
+/// exact number, because a count in prose is itself a pin that rots, which is the
+/// whole point of this test.
+///
+/// **Known limitation, stated rather than hidden.** Those surviving cross-file pins
+/// are exactly the class this guard CANNOT check, and they do rot: the acdp 0.10.0
+/// bump inside this unit silently invalidated three pins into `acdp-server` and the
+/// spec pin moved a fourth, all four found by review rather than by any test. They
+/// are repaired, and the ones pointing into crates this repo does not vendor are now
+/// symbol references for the same reason self-citations are. A companion check that
+/// resolved each in-repo cross-file pin against a quoted snippet would close the
+/// rest; it is not built here, and pretending otherwise would be the kind of
+/// overclaim this file exists to prevent.
+///
+/// Two further limitations, both deliberate. A backticked colon-number that is NOT
+/// a citation -- a port, say -- would be flagged; unbacktick it. And the digit must
+/// follow the colon IMMEDIATELY: prose spellings like "(line NNNN)", and a space
+/// after the colon, are not caught. Tolerating that space was tried and reverted,
+/// because it instantly false-positived on ordinary prose in this very file
+/// (`` `total_estimate`: 2 ``, a backticked term followed by a count). A guard that
+/// reddens the required `tests` job on innocent prose is worse than one with a known
+/// gap, so the gap is documented instead of closed.
+///
+/// **On the two exceptions this phase was told to allow-list:** neither needs one,
+/// and it is worth recording why rather than carrying a dead allow-list. The
+/// carve-out granted to another lane cites `crates/acdp-registry-sqlite/src/store.rs`
+/// and its pg sibling, and the `err-001` leak-check payload is the bare string
+/// `src/store.rs` plus a line number -- both are cross-file forms, so the narrow
+/// pattern above skips them by construction, not by exemption. Do not "fix" the
+/// `err-001` strings: they are deliberately leak-shaped *test payload*, asserting
+/// that an internal error envelope does NOT echo them back.
+///
+/// The needles are assembled at runtime so this function's own source does not
+/// contain a literal instance of what it searches for.
+#[test]
+fn no_numeric_self_citations() {
+    let backtick_colon = format!("{}{}", '`', ':');
+    let own_file_colon = format!("conformance{}rs{}", '.', ':');
+
+    let mut offenders: Vec<String> = Vec::new();
+    for (index, line) in OWN_SOURCE.lines().enumerate() {
+        for needle in [&backtick_colon, &own_file_colon] {
+            let mut from = 0usize;
+            while let Some(found) = line[from..].find(needle.as_str()) {
+                let after = from + found + needle.len();
+                if line[after..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit())
+                {
+                    offenders.push(format!("  line {}: {}", index + 1, line.trim()));
+                    break;
+                }
+                from = after;
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "numeric self-citation(s) reintroduced into this file -- line pins rot as the \
+         file grows, and every one of the seventeen that had accumulated here was stale \
+         by the time it was found. Cite the symbol instead (`caps()`, `extract_shapes`'s Shape A), \
+         which cannot drift. Cross-file pins into OTHER files are fine and are not matched \
+         here.\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The reverse-containment half of `DEFERRED_PARTIAL_DIRECT`, and the reason it
+/// exists: without it, the const's own membership is pinned by nothing.
+///
+/// The Phase 3 verification round found this by dropping the whole
+/// `("rcpt", ...)` tuple from `DEFERRED_PARTIAL_DIRECT` *and* de-registering
+/// `rcpt001` -- everything stayed green, because the presence test iterates over
+/// the const and an absent entry simply is not checked. That made the `rcpt`
+/// `DEFERRED` reason's claim that its golden test "cannot be deleted while this
+/// entry stands" false: the entry stood, and the test was deleted.
+///
+/// So tie the machine check to the prose that makes the claim. Every golden test
+/// identifier a `DEFERRED` reason names must be pinned by that family's
+/// `DEFERRED_PARTIAL_DIRECT` list. Deleting the const entry now requires also
+/// editing the reason text that names the test -- a visible, reviewable change to
+/// the claim itself, rather than a silent loss of coverage.
+#[test]
+fn deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct() {
+    let pinned: std::collections::BTreeMap<&str, &[&str]> =
+        DEFERRED_PARTIAL_DIRECT.iter().copied().collect();
+
+    for (family, reason, _) in DEFERRED {
+        let named: Vec<&str> = reason
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|word| word.contains("_golden_recomputed"))
+            .collect();
+        if named.is_empty() {
+            continue;
+        }
+        let listed = pinned.get(family).unwrap_or_else(|| {
+            panic!(
+                "DEFERRED family \"{family}\"'s reason names golden test(s) {named:?}, but \
+                 the family has no DEFERRED_PARTIAL_DIRECT entry -- the reason claims a \
+                 guarantee nothing enforces"
+            )
+        });
+        for name in named {
+            assert!(
+                listed.contains(&name),
+                "DEFERRED family \"{family}\"'s reason names `{name}` as covering its \
+                 golden half, but DEFERRED_PARTIAL_DIRECT does not pin it -- prose and \
+                 ratchet disagree"
+            );
         }
     }
 }
@@ -9567,7 +10002,7 @@ const EXPECTED_SIG002_VECTOR_COUNT: usize = 2;
 
 /// sig-002 (RFC-ACDP-0001 §5.4, conditional on `supported_signature_
 /// algorithms` including `"ecdsa-p256"` — live under this file's shared
-/// `caps()`, `:436`, which advertises exactly that): the ECDSA-P256 golden
+/// `caps()`, which advertises exactly that): the ECDSA-P256 golden
 /// vector, TWO vectors in one fixture:
 ///   * vector 0 — a real RFC-6979-deterministic P-256 signature over the
 ///     SAME `producer_content` as sig-001 (byte-identical, per the fixture's
@@ -9664,7 +10099,7 @@ async fn sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected() {
 }
 
 /// A `0.3.0`-advertising registry, for the rev-001 test below -- built
-/// locally so as not to touch the shared `caps()` (`:433`, `"0.1.0"`),
+/// locally so as not to touch the shared `caps()` (`"0.1.0"`),
 /// mirroring `anc_caps_050`'s / `did_key_caps`'s pattern. RFC-ACDP-0014
 /// §4/§5's key-revocation shape gate and self-signed-revocation refusal
 /// (`key_revocation_gate_applies`, `acdp-server`'s `validator.rs`) both key
@@ -9823,11 +10258,11 @@ const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
 /// dk-001/002/004 (RFC-ACDP-0001 §5.11.1, conditional -- bundled with
 /// sig-003 under "supported_did_methods includes did:key" -- live on
 /// `did_key_harness(did_key_caps())`, the same posture
-/// `did_key_golden_vector_accepted_and_gated` (above, `:4874`) already
+/// `did_key_golden_vector_accepted_and_gated` (above) already
 /// builds for sig-003/dk-003): three did:key resolution NEGATIVES.
 ///
 /// **Discovered wrong-reason trap (report this plainly, do not paper over
-/// it):** this repo's `acdp` v0.9.1 dependency does NOT reach
+/// it):** this repo's `acdp` dependency does NOT reach
 /// `acdp_verify::verify_publish_request_signature_offline` (the resolver
 /// path RFC-ACDP-0001 §5.11.1 describes, and that emits
 /// `key_resolution_failed`) for any of these three fixtures. Two SEPARATE
@@ -9838,15 +10273,16 @@ const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
 /// validation (`validate_publish_request`, before `validate_post_schema`'s
 /// registry-limit/crypto steps), and BOTH wrap any resolution failure as
 /// `AcdpError::SchemaViolation`, not `AcdpError::KeyResolution`. Verified
-/// empirically against this exact dependency version (`acdp = "0.9.1"`,
-/// this crate's `Cargo.toml`) before writing these assertions -- see this
-/// phase's report for the raw probe output.
+/// empirically against the `acdp` dependency this workspace locks (see
+/// `Cargo.lock` -- this crate's own `Cargo.toml` says
+/// `acdp = { workspace = true }` and carries no version) before writing
+/// these assertions, and the assertion below re-verifies it on every run.
 ///
 ///   * dk-001 (wrong multicodec prefix) -> observed `schema_violation`/400,
 ///     NOT the fixture's pinned `key_resolution_failed`. The fixture's own
 ///     `expected.behavior` text states this MUST be `key_resolution_failed`
 ///     with no schema-validation carve-out -- this is a genuine conformance
-///     gap in the `acdp` v0.9.1 dependency, not something this crate (which
+///     gap in the `acdp` dependency, not something this crate (which
 ///     may only edit this test file) can fix. The HTTP status (400,
 ///     permanent) and the overall security property (never falls back to a
 ///     raw key, never mis-reports `unsupported_algorithm`) both still hold.
@@ -10013,8 +10449,8 @@ const EXPECTED_DID_SSRF_ASSERTION_COUNT: usize = 5;
 /// here. The hostname cases are real RFC-ACDP-0008 §4.8 obligations too
 /// (DNS-rebinding protection), just not ones this test can exercise without
 /// a live resolver; `acdp-did`'s own test suite
-/// (`did_resolver_rejects_hostname_resolving_to_loopback`, `acdp-did-0.9.1/
-/// src/web.rs`) covers that shape against real `localhost` DNS.
+/// (`did_resolver_rejects_hostname_resolving_to_loopback`, `acdp-did`'s
+/// `src/web.rs`) covers that shape against real `localhost` DNS.
 fn did_web_authority_is_ip_literal(did: &str) -> bool {
     let Ok(url) = acdp::did::did_web_to_url(did) else {
         return false;
@@ -10048,7 +10484,7 @@ fn did_web_authority_is_ip_literal(did: &str) -> bool {
 /// one of these fixtures falls to the same `"non-HTTP fixture (vectors /
 /// schema / informative)"` catch-all `can`/`sig` also land in -- confirmed,
 /// not assumed. The seam claim also held up: `acdp::did::WebResolver`
-/// (`acdp-did` 0.9.1, re-exported by the `acdp` facade this crate already
+/// (`acdp-did`, re-exported by the `acdp` facade this crate already
 /// depends on) applies `SsrfPolicy::default()` unconditionally, and
 /// `acdp::safe_http` (the crate `WebResolver` itself is built over, also
 /// re-exported by the facade, `url` an unconditional dependency of it) is
@@ -10071,7 +10507,7 @@ fn did_web_authority_is_ip_literal(did: &str) -> bool {
 ///     `key_resolution_failed`/400. This is a genuine, if not fully
 ///     glued-into-one-HTTP-call, proof: the registry's publish path in
 ///     THIS harness runs under `playground.enabled = true`
-///     (`config()`, `:509` above), which bypasses did:web resolution
+///     (`config()` above), which bypasses did:web resolution
 ///     entirely, so no black-box `POST /contexts` in this harness's own
 ///     configuration ever reaches `WebResolver` -- the same reason `sig-*`/
 ///     `rev-*`'s golden vectors need `pinned_producer_harness` instead of
@@ -10085,7 +10521,7 @@ fn did_web_authority_is_ip_literal(did: &str) -> bool {
 ///     stood up here), so this test does NOT assert a final `key_
 ///     resolution_failed`/400 for either -- only that the enforcement point
 ///     itself rejects. DERIVED (by reading, not running,
-///     `classify_reqwest_error` in `acdp-did-0.9.1/src/web.rs`): a DNS
+///     `classify_reqwest_error` in `acdp-did`'s `src/web.rs`): a DNS
 ///     answer failing `reject_if_any_forbidden` surfaces to reqwest as a
 ///     connect-shaped error, which `classify_reqwest_error` would normally
 ///     re-tag `KeyResolutionUnreachable` (502, retryable) -- EXCEPT it
@@ -10540,8 +10976,7 @@ fn rate_producer(seed: u8) -> Producer {
 /// 429/`rate_limited`/`Retry-After`
 /// (`acdp-registry-types/src/error.rs`) -- already proven end-to-end for
 /// the sibling `/auth/challenge` limiter by `http_integration.rs`'s
-/// `challenge_endpoint_is_rate_limited` (`:843-873` at the pin this
-/// phase's plan named). This test exercises the SAME limiter, same
+/// `challenge_endpoint_is_rate_limited`. This test exercises the SAME limiter, same
 /// mechanism, on the publish path instead: a harness configured with
 /// `publish_rate_per_minute = 1`, one publish that succeeds under budget,
 /// and a second (different content, same producer) that trips the limiter
@@ -10683,5 +11118,1073 @@ async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
         "expected exactly {EXPECTED_RATE_ASSERTION_COUNT} rate-* outcome assertions at spec pin \
          d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
          this ratchet exists to prevent"
+    );
+}
+
+// ─── REG-11 Phase 15: `cur` (RFC-ACDP-0005 §2.5.4 "Cursor stability") ───────────────
+
+/// Both `cur-*` fixtures at spec pin `d1f06d0`: `cur-001` (expired) and
+/// `cur-002` (malformed).
+const EXPECTED_CUR_FIXTURE_COUNT: usize = 2;
+/// One outcome assertion per fixture. Deliberately NOT counting the
+/// unaged-cursor control below: the control proves the *test* is honest, not
+/// that a *fixture* was satisfied, and conflating the two would let a dropped
+/// fixture hide behind a passing control.
+const EXPECTED_CUR_ASSERTION_COUNT: usize = 2;
+
+fn cur_producer(seed: u8) -> Producer {
+    common::producer("cur", seed)
+}
+
+/// `GET`, returning the status, the `content-type`, and the parsed body.
+///
+/// `anc_get` discards headers, but both `cur-*` fixtures pin
+/// `expected.content_type`, so the header has to survive to the assertion.
+async fn cur_get(app: &axum::Router, uri: &str) -> (StatusCode, Option<String>, Value) {
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let v = body_to_json(resp).await;
+    (status, content_type, v)
+}
+
+/// #130 / `cur-001` + `cur-002` — the two pagination-cursor failure modes, driven
+/// over real HTTP and kept distinct from each other.
+///
+/// **Why this is a `Direct` test and not a replayed exchange.** Neither fixture
+/// carries an `input.request` object — `cur-001`'s input is prose plus
+/// `cursor_state: "expired"`, and its endpoint names a
+/// `<previously-issued-cursor>` placeholder no static replay could ever fill.
+/// Both therefore land in the generic replayer's terminal
+/// `"non-HTTP fixture (vectors / schema / informative)"` bucket. Note they are
+/// **not** profile-gated: `applies_to_profiles` is absent, and
+/// `targets_unadvertised_profile` returns `false` for absent, so they pass that
+/// gate and fail to match any of Shapes A-D instead.
+///
+/// **Why ageing the mint stamp is honest and not a forgery.** Cursors are
+/// unsigned plaintext — `STANDARD_BASE64("{mint_ms}:{anchor_ms}:{ctx_id}")` — with
+/// a one-hour TTL enforced at decode. The cursor this test replays is a *real*
+/// one the registry just minted; only its mint stamp is rewritten, so the bytes
+/// submitted are exactly what the registry itself would have produced for the
+/// same `(anchor, ctx_id)` an hour earlier. There is no signature to forge and no
+/// state to fabricate, and the real `decode_cursor`, the real TTL comparison and
+/// the real error mapping all run untouched. The store's own unit test
+/// `expired_cursor_is_rejected` uses the identical technique one layer down; this
+/// is that property lifted to the HTTP boundary, which is where the fixture
+/// specifies it.
+///
+/// **The control is load-bearing.** Replaying the *unaged* cursor must still
+/// return `200` and a second page. Without it, a test that broke pagination
+/// outright would still see `400` on the aged cursor and pass for the wrong
+/// reason. Verified by mutation: with the mint stamp left unaged, the expiry
+/// assertion fails against a real `200` + `next_cursor` body.
+///
+/// **Two things this test deliberately does not assert.** (1) `cur-002`'s
+/// `rationale` says a registry "MUST NOT leak why a cursor failed to parse beyond
+/// the registered code"; this registry's message names the parse reason
+/// (`"invalid cursor: cursor is not valid base64"`). It echoes no caller input and
+/// exposes no registry state, and every field of the machine-checkable `expected`
+/// block passes — but the prose is not fully satisfied. Changing the message is a
+/// `src/` change, out of scope for a test-only unit; logged in `ASSUMPTIONS.md`.
+/// (2) `cur-001`'s "or the underlying result set changed" arm is not implemented —
+/// keyset pagination carries no result-set fingerprint — and the fixture reads
+/// "either ... or", so the TTL arm satisfies it.
+///
+/// **Scope note.** The cursor codec is duplicated byte-for-byte between the sqlite
+/// and postgres stores rather than shared. This harness is sqlite-backed, so the
+/// postgres path is covered only *incidentally* — a future divergence between the
+/// two would not be caught here. Deduplicating them is a `src/` change in crates
+/// this unit does not hold; recorded so the coverage claim is not read as broader
+/// than it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn cur001_002_expired_and_malformed_cursors_are_distinguished() {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping cur-001..002 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut found_ids: Vec<&str> = Vec::new();
+    let mut asserted = 0usize;
+
+    // Both fixtures use a FLAT `expected` block (`error_code` / `http_status` /
+    // `content_type`), unlike rate-001's nested `response_body.error.code`.
+    let Some(fx_expired) = find_fixture_by_id(&fixtures, "cur-001") else {
+        panic!("cur-001 fixture not found under {}", fixtures.display());
+    };
+    found_ids.push("cur-001");
+    let Some(fx_invalid) = find_fixture_by_id(&fixtures, "cur-002") else {
+        panic!("cur-002 fixture not found under {}", fixtures.display());
+    };
+    found_ids.push("cur-002");
+
+    let want = |fx: &Value, id: &str| -> (u16, String, String) {
+        assert_eq!(
+            fx["expected"]["outcome"].as_str(),
+            Some("failure"),
+            "{id}: expected.outcome missing/changed: {fx}"
+        );
+        let status = fx["expected"]["http_status"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{id}: expected.http_status missing: {fx}"))
+            as u16;
+        let code = fx["expected"]["error_code"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{id}: expected.error_code missing: {fx}"))
+            .to_string();
+        let ctype = fx["expected"]["content_type"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{id}: expected.content_type missing: {fx}"))
+            .to_string();
+        (status, code, ctype)
+    };
+    let (exp_status, exp_code, exp_ctype) = want(&fx_expired, "cur-001");
+    let (inv_status, inv_code, inv_ctype) = want(&fx_invalid, "cur-002");
+
+    let app = common::build_harness_with_webhook(
+        config(),
+        caps(),
+        AUTHORITY,
+        common::StoreMode::Memory,
+        None,
+        None,
+    )
+    .await
+    .router;
+
+    // Three public rows so `limit=1` leaves a real second page. Search orders by
+    // `created_at DESC, ctx_id ASC` at millisecond resolution, so publishes must be
+    // separated in time or page identity is nondeterministic -- the same reason
+    // `search_paginates_past_fully_hidden_pages` sleeps between publishes.
+    for i in 0..3u8 {
+        let req = cur_producer(150 + i)
+            .publish_request()
+            .title(format!("market data snapshot {i}"))
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let (status, v) = anc_publish(&app, &req).await;
+        assert_eq!(status, StatusCode::OK, "cur: publish {i} failed: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+
+    // ── cur-001: a cursor the registry really issued, replayed past its TTL ──
+    let (s1, _, page1) = cur_get(&app, "/contexts/search?q=market+data&limit=1").await;
+    assert_eq!(
+        s1,
+        StatusCode::OK,
+        "cur-001: first page must succeed: {page1}"
+    );
+    let issued = page1["next_cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("cur-001: first page must yield a next_cursor: {page1}"))
+        .to_string();
+
+    // Control FIRST: the unaged cursor must still page. If this fails, the aged
+    // assertion below would be meaningless.
+    let (s_ctl, _, ctl) = cur_get(
+        &app,
+        &format!(
+            "/contexts/search?q=market+data&limit=1&cursor={}",
+            pct_encode_path_segment(&issued)
+        ),
+    )
+    .await;
+    assert_eq!(
+        s_ctl,
+        StatusCode::OK,
+        "cur-001 control: the unaged cursor must still page, else the expiry assertion \
+         proves nothing: {ctl}"
+    );
+    // ...and it must ADVANCE, not silently re-serve page 1. A registry that ignored a
+    // well-formed cursor would still return 200, so liveness alone is too weak a control.
+    assert_ne!(
+        ctl["matches"][0]["ctx_id"], page1["matches"][0]["ctx_id"],
+        "cur-001 control: the unaged cursor must advance past page 1, not re-serve it -- \
+         a silently-ignored cursor would otherwise satisfy this control: {ctl}"
+    );
+
+    // Age ONLY the mint stamp; anchor and ctx_id stay exactly as minted.
+    let raw = String::from_utf8(
+        b64.decode(issued.as_bytes())
+            .expect("cur-001: a registry-minted cursor must be STANDARD base64"),
+    )
+    .expect("cur-001: a registry-minted cursor must be UTF-8");
+    let mut parts = raw.splitn(3, ':');
+    let _mint = parts
+        .next()
+        .expect("cur-001: cursor must carry a mint stamp");
+    let anchor = parts.next().expect("cur-001: cursor must carry an anchor");
+    let ctx_id = parts.next().expect("cur-001: cursor must carry a ctx_id");
+    let stale_mint = chrono::Utc::now().timestamp_millis() - 3_605_000;
+    let aged = b64.encode(format!("{stale_mint}:{anchor}:{ctx_id}"));
+
+    let (s_aged, ct_aged, v_aged) = cur_get(
+        &app,
+        &format!(
+            "/contexts/search?q=market+data&limit=1&cursor={}",
+            pct_encode_path_segment(&aged)
+        ),
+    )
+    .await;
+    assert_eq!(
+        s_aged.as_u16(),
+        exp_status,
+        "cur-001: an expired cursor must be refused, not silently treated as a first-page \
+         request: {v_aged}"
+    );
+    assert_eq!(
+        v_aged["error"]["code"].as_str(),
+        Some(exp_code.as_str()),
+        "cur-001: wire error.code must match the fixture: {v_aged}"
+    );
+    assert_eq!(
+        ct_aged.as_deref(),
+        Some(exp_ctype.as_str()),
+        "cur-001: content-type must match the fixture"
+    );
+    asserted += 1;
+
+    // ── cur-002: a cursor that was never parseable ──
+    // The fixture's own endpoint carries this exact percent-encoded value.
+    let (s_bad, ct_bad, v_bad) = cur_get(
+        &app,
+        "/contexts/search?q=market+data&cursor=not-a-real-cursor-%21%21%21",
+    )
+    .await;
+    assert_eq!(
+        s_bad.as_u16(),
+        inv_status,
+        "cur-002: a malformed cursor must be rejected outright, never best-effort \
+         interpreted: {v_bad}"
+    );
+    assert_eq!(
+        v_bad["error"]["code"].as_str(),
+        Some(inv_code.as_str()),
+        "cur-002: wire error.code must match the fixture: {v_bad}"
+    );
+    assert_eq!(
+        ct_bad.as_deref(),
+        Some(inv_ctype.as_str()),
+        "cur-002: content-type must match the fixture"
+    );
+    // TRIPWIRE, not a requirement. cur-002's prose `rationale` says a registry
+    // "MUST NOT leak why a cursor failed to parse beyond the registered code", and
+    // this registry's message does name the reason. That clause has NO normative
+    // backing -- RFC-ACDP-0005 2.5.4's cursor MUSTs cover validity, re-scoping, and
+    // client-decodable VISIBILITY information (a property of the cursor payload, not
+    // of the message); none of them concerns parse-failure detail. And `rationale` is
+    // corpus-wide descriptive here, never asserted, for all 74 fixtures that carry one.
+    // So this is not a gap being tolerated; it is fixture prose with no force.
+    //
+    // What this pins is the CURRENT behaviour, so the claim above cannot quietly become
+    // false. The message literals live in the two store crates, outside this unit's
+    // granted paths, duplicated byte-for-byte -- so nothing else binds them to the
+    // sentence you just read.
+    assert!(
+        v_bad["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("base64")),
+        "cur-002: the invalid_cursor message no longer names the parse reason. If the \
+         store crates' cursor messages were deliberately tightened, that is an \
+         IMPROVEMENT, not a regression -- retire this tripwire, the note above it, and \
+         the corresponding ASSUMPTIONS.md entry, which all describe behaviour that has \
+         now changed (see #187): {v_bad}"
+    );
+    asserted += 1;
+
+    // The two codes must stay distinct -- the whole point of both fixtures'
+    // rationale sections.
+    assert_ne!(
+        exp_code, inv_code,
+        "cur: cursor_expired and invalid_cursor must remain distinct wire codes"
+    );
+
+    assert_eq!(
+        found_ids.len(),
+        EXPECTED_CUR_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_CUR_FIXTURE_COUNT} cur-* fixtures at spec pin d1f06d0: \
+         found {found_ids:?}"
+    );
+    assert_eq!(
+        asserted, EXPECTED_CUR_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_CUR_ASSERTION_COUNT} cur-* outcome assertions at spec pin \
+         d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
+         this ratchet exists to prevent"
+    );
+}
+
+// ─── REG-11 Phase 15: `rcpt` / `lhr` golden halves (RFC-ACDP-0010 §6, RFC-ACDP-0011 §4) ───
+
+/// `rcpt-001` and `lhr-001` each carry exactly one vector.
+const EXPECTED_RCPT001_VECTOR_COUNT: usize = 1;
+const EXPECTED_LHR001_VECTOR_COUNT: usize = 1;
+/// Five recomputed properties per receipt golden: canonical form, preimage hash,
+/// offline signature verification, a re-mint through THIS repo's own signer, and
+/// the vector's own cross-check (producer-key fingerprint / lineage derivation).
+const EXPECTED_RCPT001_ASSERTION_COUNT: usize = 6;
+const EXPECTED_LHR001_ASSERTION_COUNT: usize = 6;
+
+/// The receipt-key identity every #130 golden pins:
+/// `did:web:registry.example.com#receipt-key-1`.
+///
+/// These are literals ON PURPOSE, and the reason is a bug that was here until the
+/// Phase 2 verification round found it. The obvious shortcut is to split the golden's
+/// own `key_id` into authority + fragment and hand those to [`golden_signer`] -- but
+/// then `reminted.signature.key_id == key_id` is a round-trip tautology, because
+/// `build_signer` simply reassembles `did:web:{authority}#{fragment}` from the very
+/// string it was given. It passes for ANY fragment. That was confirmed by mutation:
+/// with the split-derived form, rewriting every golden's fragment to `BOGUS-FRAGMENT`
+/// left all four tests green.
+///
+/// Pinning the identity here and asserting the golden equals it is what gives the
+/// `key_id` assertion content. Note the authority half was never laundered -- it is
+/// constrained through the signed preimage (`registry_did` in rcpt-001/lhr-001) and
+/// through the RFC-ACDP-0012 §6 `log_id`-vs-`registry_did` rule (log-001/log-003) --
+/// but the fragment half was, and only a pinned literal catches it.
+const GOLDEN_KEY_AUTHORITY: &str = "registry.example.com";
+const GOLDEN_KEY_FRAGMENT: &str = "receipt-key-1";
+const GOLDEN_KEY_ID: &str = "did:web:registry.example.com#receipt-key-1";
+
+/// Build a [`ReceiptSigner`] from a golden vector's published seed, through this
+/// repo's own `acdp_registry_core::receipt::build_signer` rather than the
+/// dependency's constructor.
+///
+/// That indirection is the point: it puts the registry's *own* signer-construction
+/// seam in the loop, so a regression in how this repo derives `registry_did` /
+/// `key_id` from config is caught here, not merely a regression in `acdp-types`.
+///
+/// Note the encoding mismatch the goldens invite: they publish `private_seed_hex`,
+/// while `ReceiptConfig::signing_key_seed_b64` is base64. Hex-decoding and
+/// re-encoding is required, and getting it backwards yields a valid-looking signer
+/// with the wrong key and a baffling signature mismatch.
+fn golden_signer(
+    seed_hex: &str,
+    fragment: &str,
+    authority: &str,
+) -> acdp::types::receipt::ReceiptSigner {
+    use base64::Engine as _;
+    let seed = hex::decode(seed_hex).unwrap_or_else(|e| panic!("golden seed is not hex: {e}"));
+    let cfg = acdp_registry_types::config::ReceiptConfig {
+        signing_key_seed_b64: base64::engine::general_purpose::STANDARD.encode(seed),
+        signing_key_path: None,
+        key_id_fragment: fragment.to_string(),
+        ..Default::default()
+    };
+    acdp_registry_core::receipt::build_signer(&cfg, authority)
+        .unwrap_or_else(|e| panic!("build_signer rejected the golden seed: {e}"))
+}
+
+/// #130 / `rcpt-001` — the registry-receipt golden, recomputed rather than parsed.
+///
+/// **Why `Direct` and not replayed.** The fixture carries no `request`, no
+/// `scenarios` and no `input.endpoint` — it is a pure golden-vector document, so it
+/// lands in the replayer's terminal non-HTTP bucket. It is *not* profile-gated:
+/// `applies_to_profiles` is absent, which `targets_unadvertised_profile` treats as
+/// "no restriction". The family's profile-gated members (`rcpt-002/003/004`,
+/// restricted to `acdp-registry-receipts` / `acdp-consumer`) are a different
+/// population and remain deferred — see `DEFERRED`.
+///
+/// **Why this proves something.** Every pinned value is recomputed from the
+/// vector's own inputs: the JCS canonical form, the SHA-256 preimage hash, and —
+/// because the vector publishes its own Ed25519 private seed and Ed25519 is
+/// deterministic (RFC 8032) — the signature itself, re-minted through this repo's
+/// `build_signer` and compared byte-for-byte with the golden. That is the bar
+/// `sig-001` set: prove *this repo's* pipeline reproduces the spec's bytes, not
+/// merely that our dependency's own test suite passes.
+///
+/// The negative at the end is what makes the positive non-vacuous: a one-character
+/// perturbation of the golden signature must fail verification.
+#[tokio::test(flavor = "multi_thread")]
+async fn rcpt001_registry_receipt_golden_recomputed_and_remintable() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping rcpt-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "rcpt-001") else {
+        panic!("rcpt-001 fixture not found under {}", fixtures.display());
+    };
+
+    let vectors = fx["vectors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("rcpt-001: vectors missing or not an array: {fx}"));
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_RCPT001_VECTOR_COUNT,
+        "rcpt-001 must carry exactly {EXPECTED_RCPT001_VECTOR_COUNT} vector at spec pin d1f06d0: {fx}"
+    );
+    let v = &vectors[0];
+    let unsigned = &v["receipt_unsigned"];
+    let expected = &v["expected"];
+    let mut asserted = 0usize;
+
+    // 1. JCS canonical form.
+    let canonical = String::from_utf8(acdp::crypto::canonicalize_value(unsigned))
+        .unwrap_or_else(|e| panic!("rcpt-001: canonical form is not UTF-8: {e}"));
+    assert_eq!(
+        canonical,
+        expected["canonical_form"].as_str().unwrap(),
+        "rcpt-001: recomputed JCS canonical_form mismatch"
+    );
+    asserted += 1;
+
+    // 2. Preimage hash over the unsigned receipt.
+    let hash = acdp::types::receipt::RegistryReceipt::preimage_hash_of_value(unsigned)
+        .unwrap_or_else(|e| panic!("rcpt-001: preimage_hash_of_value failed: {e}"));
+    assert_eq!(
+        hash.as_str(),
+        expected["receipt_hash"].as_str().unwrap(),
+        "rcpt-001: recomputed receipt_hash mismatch"
+    );
+    asserted += 1;
+
+    // 3. The golden signature verifies offline against the golden public key.
+    let pub_hex = fx["registry_test_keypair"]["public_key_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("rcpt-001: registry_test_keypair.public_key_hex missing"));
+    let pub_bytes: [u8; 32] = hex::decode(pub_hex)
+        .expect("rcpt-001: public_key_hex is not hex")
+        .try_into()
+        .expect("rcpt-001: public key must be 32 bytes");
+    let golden_sig_b64 = expected["signature_value_base64"].as_str().unwrap();
+    acdp::crypto::verify::verify_ed25519(&pub_bytes, golden_sig_b64, hash.as_str())
+        .unwrap_or_else(|e| panic!("rcpt-001: golden signature failed offline verification: {e}"));
+    asserted += 1;
+
+    // 4. Re-mint through THIS repo's signer and reproduce the golden bytes.
+    let seed_hex = fx["registry_test_keypair"]["private_seed_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("rcpt-001: registry_test_keypair.private_seed_hex missing"));
+    let key_id = expected["registry_receipt"]["signature"]["key_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("rcpt-001: expected.registry_receipt.signature.key_id missing"));
+    assert_eq!(
+        key_id, GOLDEN_KEY_ID,
+        "rcpt-001: the golden's key_id must equal the pinned spec identity -- the signer \
+         below is built from GOLDEN_KEY_FRAGMENT/GOLDEN_KEY_AUTHORITY rather than from \
+         key_id, precisely so the key_id assertion is not a round-trip tautology"
+    );
+    asserted += 1;
+    let signer = golden_signer(seed_hex, GOLDEN_KEY_FRAGMENT, GOLDEN_KEY_AUTHORITY);
+    let reminted = signer
+        .mint(
+            &CtxId(unsigned["ctx_id"].as_str().unwrap().to_string()),
+            &acdp::types::primitives::LineageId(
+                unsigned["lineage_id"].as_str().unwrap().to_string(),
+            ),
+            unsigned["origin_registry"].as_str().unwrap(),
+            unsigned["created_at"].as_str().unwrap().parse().unwrap(),
+            &ContentHash(unsigned["content_hash"].as_str().unwrap().to_string()),
+            unsigned["key_fingerprint"].as_str().unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("rcpt-001: re-mint failed: {e}"));
+    assert_eq!(
+        reminted.signature.value, golden_sig_b64,
+        "rcpt-001: re-minted signature must reproduce the golden byte-for-byte -- Ed25519 is \
+         deterministic, so a mismatch means this repo's signing pipeline disagrees with the spec"
+    );
+    assert_eq!(
+        reminted.signature.key_id, key_id,
+        "rcpt-001: build_signer must derive the golden key_id from authority + fragment"
+    );
+    asserted += 1;
+
+    // 5. The vector's own cross-check: key_fingerprint is SHA-256 over the
+    //    producer's public key (RFC-ACDP-0010 §6).
+    let producer_pub_hex = fx["producer_key"]["public_key_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("rcpt-001: producer_key.public_key_hex missing"));
+    let producer_pub: [u8; 32] = hex::decode(producer_pub_hex)
+        .expect("rcpt-001: producer public_key_hex is not hex")
+        .try_into()
+        .expect("rcpt-001: producer public key must be 32 bytes");
+    assert_eq!(
+        acdp::crypto::fingerprint_ed25519(&producer_pub),
+        unsigned["key_fingerprint"].as_str().unwrap(),
+        "rcpt-001: recomputed producer key_fingerprint mismatch"
+    );
+    asserted += 1;
+
+    // NEGATIVE: perturbing one base64 character of the golden signature must break
+    // verification. Without this the four assertions above could all pass against a
+    // verifier that accepted anything.
+    let mut bad = golden_sig_b64.to_string();
+    let first = bad.remove(0);
+    bad.insert(0, if first == 'A' { 'B' } else { 'A' });
+    assert!(
+        acdp::crypto::verify::verify_ed25519(&pub_bytes, &bad, hash.as_str()).is_err(),
+        "rcpt-001: a perturbed signature must NOT verify -- if it does, the positive \
+         assertions above prove nothing"
+    );
+
+    assert_eq!(
+        asserted, EXPECTED_RCPT001_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_RCPT001_ASSERTION_COUNT} rcpt-001 recomputed properties at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
+    );
+}
+
+/// #130 / `lhr-001` — the lineage-head-receipt golden, recomputed rather than parsed.
+///
+/// Same shape and same honesty bar as [`rcpt001_registry_receipt_golden_recomputed_and_remintable`]:
+/// pure golden vector, no HTTP, `Direct` coverage, every pinned value recomputed
+/// and the signature re-minted through this repo's own signer. The family's
+/// profile-gated members (`lhr-002/003/004`, restricted to
+/// `acdp-registry-head-receipts` / `acdp-consumer`) are a separate population and
+/// stay deferred.
+///
+/// Two cross-checks are specific to RFC-ACDP-0011 §4 and worth pinning here rather
+/// than assuming: `lineage_id` must be the derivation of `head_ctx_id`, and a
+/// lineage-head receipt must be refusable for a non-head status. The latter is this
+/// vector's mutation negative — `Superseded` is never the head, so minting one must
+/// be rejected outright rather than silently produce a receipt.
+#[tokio::test(flavor = "multi_thread")]
+async fn lhr001_lineage_head_receipt_golden_recomputed_and_remintable() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping lhr-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "lhr-001") else {
+        panic!("lhr-001 fixture not found under {}", fixtures.display());
+    };
+
+    let vectors = fx["vectors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("lhr-001: vectors missing or not an array: {fx}"));
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_LHR001_VECTOR_COUNT,
+        "lhr-001 must carry exactly {EXPECTED_LHR001_VECTOR_COUNT} vector at spec pin d1f06d0: {fx}"
+    );
+    let v = &vectors[0];
+    let unsigned = &v["receipt_unsigned"];
+    let expected = &v["expected"];
+    let mut asserted = 0usize;
+
+    // 1. JCS canonical form.
+    let canonical = String::from_utf8(acdp::crypto::canonicalize_value(unsigned))
+        .unwrap_or_else(|e| panic!("lhr-001: canonical form is not UTF-8: {e}"));
+    assert_eq!(
+        canonical,
+        expected["canonical_form"].as_str().unwrap(),
+        "lhr-001: recomputed JCS canonical_form mismatch"
+    );
+    asserted += 1;
+
+    // 2. Preimage hash.
+    let hash = acdp::types::receipt::LineageHeadReceipt::preimage_hash_of_value(unsigned)
+        .unwrap_or_else(|e| panic!("lhr-001: preimage_hash_of_value failed: {e}"));
+    assert_eq!(
+        hash.as_str(),
+        expected["receipt_hash"].as_str().unwrap(),
+        "lhr-001: recomputed receipt_hash mismatch"
+    );
+    asserted += 1;
+
+    // 3. Offline verification of the golden signature.
+    let pub_hex = fx["registry_test_keypair"]["public_key_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("lhr-001: registry_test_keypair.public_key_hex missing"));
+    let pub_bytes: [u8; 32] = hex::decode(pub_hex)
+        .expect("lhr-001: public_key_hex is not hex")
+        .try_into()
+        .expect("lhr-001: public key must be 32 bytes");
+    let golden_sig_b64 = expected["signature_value_base64"].as_str().unwrap();
+    acdp::crypto::verify::verify_ed25519(&pub_bytes, golden_sig_b64, hash.as_str())
+        .unwrap_or_else(|e| panic!("lhr-001: golden signature failed offline verification: {e}"));
+    asserted += 1;
+
+    // 4. Re-mint through this repo's signer.
+    let seed_hex = fx["registry_test_keypair"]["private_seed_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("lhr-001: registry_test_keypair.private_seed_hex missing"));
+    let key_id = expected["lineage_head_receipt"]["signature"]["key_id"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("lhr-001: expected.lineage_head_receipt.signature.key_id missing")
+        });
+    assert_eq!(
+        key_id, GOLDEN_KEY_ID,
+        "lhr-001: the golden's key_id must equal the pinned spec identity -- see \
+         GOLDEN_KEY_ID for why this is pinned rather than split out of key_id"
+    );
+    asserted += 1;
+    let signer = golden_signer(seed_hex, GOLDEN_KEY_FRAGMENT, GOLDEN_KEY_AUTHORITY);
+    let lineage_id =
+        acdp::types::primitives::LineageId(unsigned["lineage_id"].as_str().unwrap().to_string());
+    let head_ctx = CtxId(unsigned["head_ctx_id"].as_str().unwrap().to_string());
+    let reminted = signer
+        .mint_lineage_head(
+            &lineage_id,
+            &head_ctx,
+            unsigned["head_version"].as_u64().unwrap() as u32,
+            &acdp::types::primitives::Status::Active,
+            unsigned["as_of"].as_str().unwrap().parse().unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("lhr-001: re-mint failed: {e}"));
+    assert_eq!(
+        reminted.signature.value, golden_sig_b64,
+        "lhr-001: re-minted signature must reproduce the golden byte-for-byte"
+    );
+    asserted += 1;
+
+    // 5. RFC-ACDP-0011 §4 cross-check: lineage_id is derived from head_ctx_id.
+    assert_eq!(
+        acdp::crypto::derive_lineage_id(&head_ctx).0,
+        lineage_id.0,
+        "lhr-001: lineage_id must be the derivation of head_ctx_id"
+    );
+    asserted += 1;
+
+    // NEGATIVE: a superseded version is never the head (RFC-ACDP-0011 §4), so
+    // minting a lineage-head receipt for one must be refused. If this succeeded,
+    // the re-mint above would prove only that the signer signs whatever it is given.
+    assert!(
+        signer
+            .mint_lineage_head(
+                &lineage_id,
+                &head_ctx,
+                unsigned["head_version"].as_u64().unwrap() as u32,
+                &acdp::types::primitives::Status::Superseded,
+                unsigned["as_of"].as_str().unwrap().parse().unwrap(),
+            )
+            .is_err(),
+        "lhr-001: minting a lineage-head receipt with head_status=superseded must be refused"
+    );
+
+    assert_eq!(
+        asserted, EXPECTED_LHR001_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_LHR001_ASSERTION_COUNT} lhr-001 recomputed properties at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
+    );
+}
+
+// ─── REG-11 Phase 15: `log` golden half (RFC-ACDP-0012 §5-§6) ───────────────────────
+
+const EXPECTED_LOG001_VECTOR_COUNT: usize = 1;
+const EXPECTED_LOG003_VECTOR_COUNT: usize = 1;
+/// log-001: leaf canonical forms, leaf hashes, root, empty-tree root, checkpoint
+/// canonical form, checkpoint hash, re-minted checkpoint signature, inclusion path,
+/// inclusion verification.
+const EXPECTED_LOG001_ASSERTION_COUNT: usize = 10;
+/// log-001's tree size. Pinned as a const so the leaf loop below can attest it
+/// actually ran the expected number of times, and so `verify_inclusion`'s `tree_size`
+/// argument is not a bare `5`. Without this, the two `asserted += 2` increments sit
+/// OUTSIDE the loop and a zero-leaf fixture would be caught only incidentally, by the
+/// later `root_hash` assertion -- the count ratchet itself would not notice.
+const EXPECTED_LOG001_LEAF_COUNT: usize = 5;
+/// log-003: pinned key identity, first root, second root, consistency path, both
+/// checkpoint canonical forms, both re-minted signatures, and the consistency
+/// verification itself. That last one was enumerated here but never counted -- its
+/// `verify_consistency` call carried no `asserted += 1`, unlike log-001's parallel
+/// `verify_inclusion`. Counted now, so the comment and the const agree.
+const EXPECTED_LOG003_ASSERTION_COUNT: usize = 9;
+/// log-003's two tree sizes: the consistency proof runs 3 -> 5. Pinned so a spec-pin
+/// bump that changed the leaf counts fails at a named ratchet rather than inside
+/// `verify_consistency` with a bare pair of integers.
+const EXPECTED_LOG003_FIRST_SIZE: usize = 3;
+const EXPECTED_LOG003_SECOND_SIZE: usize = 5;
+
+/// Decode a `"sha256:<hex>"` wire hash into raw bytes.
+fn sha256_wire_to_bytes(s: &str, what: &str) -> [u8; 32] {
+    let hex_part = s
+        .strip_prefix("sha256:")
+        .unwrap_or_else(|| panic!("{what}: expected a 'sha256:' wire hash, got {s}"));
+    hex::decode(hex_part)
+        .unwrap_or_else(|e| panic!("{what}: hash is not hex: {e}"))
+        .try_into()
+        .unwrap_or_else(|v: Vec<u8>| panic!("{what}: hash decoded to {} bytes, want 32", v.len()))
+}
+
+fn sha256_bytes_to_wire(b: &[u8; 32]) -> String {
+    format!("sha256:{}", hex::encode(b))
+}
+
+/// #130 / `log-001` — the transparency-log leaf/root/inclusion golden, recomputed.
+///
+/// **This is offline recomputation by necessity, not by preference.** The golden is
+/// pinned under `did:web:registry.example.com` with fixed `ctx_id`s and
+/// `created_at`s; a live harness runs as `registry.test` and assigns its own ids, so
+/// no running registry can ever reproduce these roots or signatures. Equality with
+/// the golden is only reachable offline. (The *live* half — that this registry's own
+/// log folds to its own root and serves verifiable proofs — is already covered by
+/// `http_integration.rs`'s log suite; duplicating it here would buy ratchet credit
+/// and no coverage.)
+///
+/// Every pinned value is recomputed from the vector's own inputs: five JCS leaf
+/// canonical forms, five RFC 6962 leaf hashes, the size-5 root, the empty-tree root,
+/// the checkpoint's canonical form and hash, its signature re-minted through this
+/// repo's signer, and the inclusion path for leaf 0 — then the path is actually
+/// *verified*, not merely compared.
+///
+/// The negative perturbs one element of the inclusion path: a proof that still
+/// verifies after tampering would mean the verification above proves nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn log001_leaf_root_and_inclusion_golden_recomputed() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping log-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "log-001") else {
+        panic!("log-001 fixture not found under {}", fixtures.display());
+    };
+    let vectors = fx["vectors"].as_array().unwrap();
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_LOG001_VECTOR_COUNT,
+        "log-001 must carry exactly {EXPECTED_LOG001_VECTOR_COUNT} vector at spec pin d1f06d0"
+    );
+    let v = &vectors[0];
+    let expected = &v["expected"];
+    let mut asserted = 0usize;
+
+    // 1-2. Per-leaf canonical form and leaf hash.
+    let leaves = v["leaves"].as_array().unwrap();
+    let want_forms = expected["leaf_canonical_forms"].as_array().unwrap();
+    let want_hashes = expected["leaf_hashes"].as_array().unwrap();
+    assert_eq!(
+        leaves.len(),
+        want_forms.len(),
+        "log-001: leaf/form count mismatch"
+    );
+    assert_eq!(
+        leaves.len(),
+        want_hashes.len(),
+        "log-001: leaf/hash count mismatch"
+    );
+    let mut leaf_hashes: Vec<[u8; 32]> = Vec::new();
+    let mut leaves_checked = 0usize;
+    for (i, leaf_json) in leaves.iter().enumerate() {
+        let leaf = acdp::types::log::LogLeaf::from_value(leaf_json)
+            .unwrap_or_else(|e| panic!("log-001: leaf {i} does not parse: {e}"));
+        let canonical = String::from_utf8(leaf.canonical_bytes().unwrap()).unwrap();
+        assert_eq!(
+            canonical,
+            want_forms[i].as_str().unwrap(),
+            "log-001: leaf {i} canonical form mismatch"
+        );
+        let h = leaf.leaf_hash_hex().unwrap();
+        assert_eq!(
+            h,
+            want_hashes[i].as_str().unwrap(),
+            "log-001: leaf {i} hash mismatch"
+        );
+        leaf_hashes.push(leaf.leaf_hash().unwrap());
+        leaves_checked += 1;
+    }
+    assert_eq!(
+        leaves_checked, EXPECTED_LOG001_LEAF_COUNT,
+        "log-001: the leaf loop must have verified exactly {EXPECTED_LOG001_LEAF_COUNT} \
+         leaves -- the two increments below are outside the loop, so without this check a \
+         zero-leaf fixture would still satisfy the assertion count"
+    );
+    asserted += 2;
+
+    // 3. Merkle tree hash over all five leaves.
+    let root = acdp::crypto::merkle::merkle_tree_hash(&leaf_hashes);
+    assert_eq!(
+        sha256_bytes_to_wire(&root),
+        expected["root_hash"].as_str().unwrap(),
+        "log-001: recomputed root_hash mismatch"
+    );
+    asserted += 1;
+
+    // 4. The empty tree hashes to SHA-256("") -- RFC 6962 §2.1.
+    let empty = acdp::crypto::merkle::merkle_tree_hash(&[]);
+    assert_eq!(
+        sha256_bytes_to_wire(&empty),
+        expected["empty_tree_root_hash"].as_str().unwrap(),
+        "log-001: recomputed empty_tree_root_hash mismatch"
+    );
+    asserted += 1;
+
+    // 5-6. Checkpoint canonical form and preimage hash.
+    let cp_unsigned = &v["checkpoint_unsigned"];
+    let cp_canonical = String::from_utf8(acdp::crypto::canonicalize_value(cp_unsigned)).unwrap();
+    assert_eq!(
+        cp_canonical,
+        expected["checkpoint_canonical_form"].as_str().unwrap(),
+        "log-001: recomputed checkpoint canonical form mismatch"
+    );
+    asserted += 1;
+    let cp_hash = acdp::types::log::LogCheckpoint::preimage_hash_of_value(cp_unsigned)
+        .unwrap_or_else(|e| panic!("log-001: checkpoint preimage hash failed: {e}"));
+    assert_eq!(
+        cp_hash.as_str(),
+        expected["checkpoint_hash"].as_str().unwrap(),
+        "log-001: recomputed checkpoint_hash mismatch"
+    );
+    asserted += 1;
+
+    // 7. Re-mint the checkpoint signature through this repo's signer.
+    let seed_hex = fx["registry_test_keypair"]["private_seed_hex"]
+        .as_str()
+        .unwrap();
+    let key_id = expected["log_checkpoint"]["signature"]["key_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        key_id, GOLDEN_KEY_ID,
+        "log-001: the golden's key_id must equal the pinned spec identity -- see \
+         GOLDEN_KEY_ID for why this is pinned rather than split out of key_id"
+    );
+    asserted += 1;
+    let signer = golden_signer(seed_hex, GOLDEN_KEY_FRAGMENT, GOLDEN_KEY_AUTHORITY);
+    let reminted = signer
+        .mint_log_checkpoint(
+            v["log_id"].as_str().unwrap(),
+            cp_unsigned["tree_size"].as_u64().unwrap(),
+            cp_unsigned["root_hash"].as_str().unwrap(),
+            cp_unsigned["timestamp"].as_str().unwrap().parse().unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("log-001: checkpoint re-mint failed: {e}"));
+    assert_eq!(
+        reminted.signature.value,
+        expected["signature_value_base64"].as_str().unwrap(),
+        "log-001: re-minted checkpoint signature must reproduce the golden byte-for-byte"
+    );
+    asserted += 1;
+
+    // 8. Inclusion path for leaf 0.
+    let want_path = expected["log_inclusion"]["inclusion_path"]
+        .as_array()
+        .unwrap();
+    let got_path = acdp::crypto::merkle::inclusion_path(0, &leaf_hashes)
+        .unwrap_or_else(|| panic!("log-001: inclusion_path(0) returned None"));
+    let got_wire: Vec<String> = got_path.iter().map(sha256_bytes_to_wire).collect();
+    let want_wire: Vec<String> = want_path
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        got_wire, want_wire,
+        "log-001: recomputed inclusion_path for leaf 0 mismatch"
+    );
+    asserted += 1;
+
+    // 9. The path actually verifies against the root -- comparing bytes is not the
+    //    same as proving the proof works.
+    assert!(
+        acdp::crypto::merkle::verify_inclusion(
+            &leaf_hashes[0],
+            0,
+            EXPECTED_LOG001_LEAF_COUNT as u64,
+            &got_path,
+            &root
+        ),
+        "log-001: the recomputed inclusion path must verify against the golden root"
+    );
+    asserted += 1;
+
+    // NEGATIVE: tamper one path element; verification must fail.
+    let mut tampered = got_path.clone();
+    tampered[0][0] ^= 0xff;
+    assert!(
+        !acdp::crypto::merkle::verify_inclusion(&leaf_hashes[0], 0, 5, &tampered, &root),
+        "log-001: a tampered inclusion path must NOT verify -- if it does, the verification \
+         above proves nothing"
+    );
+
+    assert_eq!(
+        asserted, EXPECTED_LOG001_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_LOG001_ASSERTION_COUNT} log-001 recomputed properties at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
+    );
+}
+
+/// #130 / `log-003` — the consistency-proof golden, recomputed.
+///
+/// This vector hands the verifier the five leaf hashes directly, so no live tree,
+/// no publish path and no `MerkleLog` state is needed: both roots, the consistency
+/// path and both checkpoint signatures are pure functions over given data. That
+/// makes it the most self-contained of the four goldens, not the hardest.
+///
+/// The negative is the vector's own `verification_steps[3]` inverted: tamper one
+/// element of the consistency path and the proof must stop verifying.
+#[tokio::test(flavor = "multi_thread")]
+async fn log003_consistency_proof_golden_recomputed() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping log-003 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "log-003") else {
+        panic!("log-003 fixture not found under {}", fixtures.display());
+    };
+    let vectors = fx["vectors"].as_array().unwrap();
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_LOG003_VECTOR_COUNT,
+        "log-003 must carry exactly {EXPECTED_LOG003_VECTOR_COUNT} vector at spec pin d1f06d0"
+    );
+    let v = &vectors[0];
+    let expected = &v["expected"];
+    let mut asserted = 0usize;
+
+    let leaf_hashes: Vec<[u8; 32]> = v["leaf_hashes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(i, h)| sha256_wire_to_bytes(h.as_str().unwrap(), &format!("log-003 leaf {i}")))
+        .collect();
+
+    // 1-2. Both roots, recomputed from the same leaf-hash list.
+    assert_eq!(
+        leaf_hashes.len(),
+        EXPECTED_LOG003_SECOND_SIZE,
+        "log-003: the golden must carry exactly {EXPECTED_LOG003_SECOND_SIZE} leaf hashes"
+    );
+    let first_root =
+        acdp::crypto::merkle::merkle_tree_hash(&leaf_hashes[..EXPECTED_LOG003_FIRST_SIZE]);
+    assert_eq!(
+        sha256_bytes_to_wire(&first_root),
+        expected["first_root_hash"].as_str().unwrap(),
+        "log-003: recomputed first_root_hash (tree_size 3) mismatch"
+    );
+    asserted += 1;
+    let second_root = acdp::crypto::merkle::merkle_tree_hash(&leaf_hashes);
+    assert_eq!(
+        sha256_bytes_to_wire(&second_root),
+        expected["second_root_hash"].as_str().unwrap(),
+        "log-003: recomputed second_root_hash (tree_size 5) mismatch"
+    );
+    asserted += 1;
+
+    // 3. The consistency path 3 -> 5.
+    let want_path: Vec<String> = expected["consistency_proof_response"]["consistency_path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    let got_path =
+        acdp::crypto::merkle::consistency_proof(EXPECTED_LOG003_FIRST_SIZE, &leaf_hashes)
+            .unwrap_or_else(|| panic!("log-003: consistency_proof(3, ..) returned None"));
+    let got_wire: Vec<String> = got_path.iter().map(sha256_bytes_to_wire).collect();
+    assert_eq!(
+        got_wire, want_path,
+        "log-003: recomputed consistency_path mismatch"
+    );
+    asserted += 1;
+
+    // 4-5. Both checkpoints' canonical forms.
+    for (key, cp_key) in [
+        (
+            "first_checkpoint_canonical_form",
+            "first_checkpoint_unsigned",
+        ),
+        (
+            "second_checkpoint_canonical_form",
+            "second_checkpoint_unsigned",
+        ),
+    ] {
+        let canonical = String::from_utf8(acdp::crypto::canonicalize_value(&v[cp_key])).unwrap();
+        assert_eq!(
+            canonical,
+            expected[key].as_str().unwrap(),
+            "log-003: recomputed {key} mismatch"
+        );
+        asserted += 1;
+    }
+
+    // 6-7. Both checkpoint signatures, re-minted through this repo's signer.
+    let seed_hex = fx["registry_test_keypair"]["private_seed_hex"]
+        .as_str()
+        .unwrap();
+    let key_id = fx["registry_test_keypair"]["key_id"].as_str().unwrap();
+    assert_eq!(
+        key_id, GOLDEN_KEY_ID,
+        "log-003: the golden's key_id must equal the pinned spec identity -- see \
+         GOLDEN_KEY_ID for why this is pinned rather than split out of key_id"
+    );
+    asserted += 1;
+    let signer = golden_signer(seed_hex, GOLDEN_KEY_FRAGMENT, GOLDEN_KEY_AUTHORITY);
+    for (cp_key, sig_key) in [
+        ("first_checkpoint_unsigned", "first_signature_value_base64"),
+        (
+            "second_checkpoint_unsigned",
+            "second_signature_value_base64",
+        ),
+    ] {
+        let cp = &v[cp_key];
+        let reminted = signer
+            .mint_log_checkpoint(
+                cp["log_id"].as_str().unwrap(),
+                cp["tree_size"].as_u64().unwrap(),
+                cp["root_hash"].as_str().unwrap(),
+                cp["timestamp"].as_str().unwrap().parse().unwrap(),
+            )
+            .unwrap_or_else(|e| panic!("log-003: {cp_key} re-mint failed: {e}"));
+        assert_eq!(
+            reminted.signature.value,
+            expected[sig_key].as_str().unwrap(),
+            "log-003: re-minted {sig_key} must reproduce the golden byte-for-byte"
+        );
+        asserted += 1;
+    }
+
+    // The proof must actually verify, not merely match bytes.
+    assert!(
+        acdp::crypto::merkle::verify_consistency(
+            EXPECTED_LOG003_FIRST_SIZE as u64,
+            EXPECTED_LOG003_SECOND_SIZE as u64,
+            &got_path,
+            &first_root,
+            &second_root
+        ),
+        "log-003: the recomputed consistency path must verify 3 -> 5"
+    );
+    asserted += 1;
+
+    // NEGATIVE: tamper one path element; the proof must stop verifying. This is the
+    // vector's own verification_steps[3], inverted.
+    let mut tampered = got_path.clone();
+    tampered[0][0] ^= 0xff;
+    assert!(
+        !acdp::crypto::merkle::verify_consistency(
+            EXPECTED_LOG003_FIRST_SIZE as u64,
+            EXPECTED_LOG003_SECOND_SIZE as u64,
+            &tampered,
+            &first_root,
+            &second_root
+        ),
+        "log-003: a tampered consistency path must NOT verify -- if it does, the verification \
+         above proves nothing"
+    );
+
+    assert_eq!(
+        asserted, EXPECTED_LOG003_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_LOG003_ASSERTION_COUNT} log-003 recomputed properties at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
     );
 }
