@@ -2176,11 +2176,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "leak why a cursor failed to parse beyond the registered code"; that is now
   satisfied rather than documented as unsatisfied.
 
-  **This is an observable change to the `message` string.** It is not a breaking
-  API change: `error.code` still discriminates `invalid_cursor` from
+  **This is an observable change to the `message` string.** The *Rust* API is
+  untouched: `error.code` still discriminates `invalid_cursor` from
   `cursor_expired` (both HTTP 400), which is the distinction clients branch on,
-  and `message` was never a stable contract. Clients string-matching on the old
-  per-arm wording will stop matching — they should read `error.code`.
+  and `message` was never a stable contract. But the *wire* string did change,
+  and a client string-matching the old per-arm wording will stop matching — it
+  should read `error.code`. Those two axes are why the commit carries a
+  conventional-commits `!` marker while this entry says the API is unbroken:
+  the marker exists to force the version bump that the wire change warrants,
+  not to claim a Rust-level signature changed. Nothing in this repo asserted
+  the old message text except the conformance tripwire retired below.
 
   Behind the wire change, `encode_cursor`/`decode_cursor` were byte-identical
   duplicates in `acdp-registry-sqlite` and `acdp-registry-pg`; there is now one
@@ -2197,7 +2202,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exactly. A structural self-inspection test in the store crate additionally
   requires every `AcdpError::InvalidCursor` construction to use the shared
   constant, so a future arm cannot reintroduce a leak past a by-example test.
-
 
 ### Fixed
 
