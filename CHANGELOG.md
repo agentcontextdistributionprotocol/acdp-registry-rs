@@ -2091,6 +2091,50 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Docs-only; no behavior change. Not compiled locally — `rustdoc` (`docs`
   CI job) is the verification signal for this phase.
 
+<!-- U-002 #179 (Lane 2) -->
+
+- **Webhook deliveries no longer emit a duplicate `event_id` JSON key**
+  (`U-002`, `#179`): `WireEnvelope`
+  (`crates/acdp-registry-webhook/src/lib.rs`) serialises a top-level
+  `event_id` and then `#[serde(flatten)]`s the event.
+  `WebhookEvent::ContextRetracted` and `::ContextRepublished`
+  (`crates/acdp-registry-types/src/event.rs`) each carry their own
+  actor-minted `event_id`, so those two deliveries — and only those two —
+  put the key on the wire **twice**. The envelope serialises first and the
+  flattened variant second, so every last-wins parser (`serde_json`,
+  JavaScript `JSON.parse`, Python `json`) resolved `event_id` to the
+  *lifecycle* UUID and silently shadowed the envelope's per-delivery dedupe
+  id; first-wins implementations saw the opposite. One of the two meanings
+  was always lost, and which one depended on the receiver's parser.
+  - **Wire change:** on `context.retracted` and `context.republished` the
+    actor-minted lifecycle id now serialises as **`lifecycle_event_id`**.
+    The envelope's `event_id` keeps its name and its meaning — the
+    per-delivery dedupe id, still echoed in `X-ACDP-Event-Id`. The other
+    three event types are byte-identical to before.
+  - **For receivers:** anything deduping on the `X-ACDP-Event-Id` header is
+    unaffected. A receiver that read the body's `event_id` on these two
+    types and relied on last-wins was reading the lifecycle id and now reads
+    the delivery id — read `lifecycle_event_id` to keep the old value.
+  - Implemented with `#[serde(rename)]` rather than a Rust field rename:
+    every construction site lives in `crates/acdp-registry-core`, and the
+    emitted JSON is byte-identical either way.
+  - **`schema_version` deliberately stays `"1.0"`.** It describes the
+    envelope, which did not change, and it is emitted on all five event
+    types — bumping it would report a change to receivers of the three types
+    that were never affected. The constant's doc comment, which previously
+    promised a bump on "any" backwards-incompatible shape change, has been
+    narrowed to match what it actually tracks.
+  - Enforced by a test that drives all five variants through the real
+    emitter and asserts on the serialized body. Duplicate detection walks
+    the raw JSON with a `MapAccess` visitor rather than parsing to
+    `serde_json::Value`, whose map silently keeps only the last of a
+    repeated key and therefore cannot observe this defect at all.
+    `context.retracted` and `context.republished` are also documented in
+    [WEBHOOKS.md](docs/WEBHOOKS.md) for the first time — the two event types
+    carrying the bug were the two that had never been written down.
+
+<!-- end U-002 #179 -->
+
 ### Security
 
 <!-- U-001 #174 (lane-1) -->

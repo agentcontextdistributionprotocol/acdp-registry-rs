@@ -9,8 +9,12 @@ delivery. Implementation: `crates/acdp-registry-webhook/src/lib.rs`; event types
 
 ## Events
 
-Three event types. Each is delivered as a flattened envelope: the variant fields
+Five event types. Each is delivered as a flattened envelope: the variant fields
 plus `event_id`, `schema_version`, and a `type` discriminator.
+
+Note the `type` value is snake_case (`context_published`), while the
+`X-ACDP-Event` header uses the dotted form (`context.published`). Both name the
+same event; the header is what you route on without parsing the body.
 
 ### `context.published`
 
@@ -21,14 +25,14 @@ plus `event_id`, `schema_version`, and a `type` discriminator.
   "type": "context_published",
   "registry_authority": "registry.example.com",
   "registry_base_url": "https://registry.example.com",
-  "ctx_id": "registry.example.com/ctx_...",
-  "lineage_id": "lin_...",
+  "ctx_id": "acdp://registry.example.com/1234...",
+  "lineage_id": "lin:sha256:9f2b...",
   "agent_id": "did:web:agents.example.com:my-agent",
   "context_type": "observation",
   "visibility": "public",
   "version": 1,
   "created_at": "2026-06-10T12:00:00Z",
-  "derived_from": ["registry.example.com/ctx_parent"],
+  "derived_from": ["acdp://registry.example.com/5678..."],
   "run_id": "run-123",
   "key_fingerprint": "sha256:139e…",
   "registry_receipt": { "registry_did": "did:web:registry.example.com", "…": "…" }
@@ -48,9 +52,11 @@ re-fetching the context.
 
 ```json
 {
+  "event_id": "e0f3...",
+  "schema_version": "1.0",
   "type": "context_retrieved",
   "registry_authority": "registry.example.com",
-  "ctx_id": "registry.example.com/ctx_...",
+  "ctx_id": "acdp://registry.example.com/1234...",
   "requester_did": "did:web:agents.example.com:reader",
   "at": "2026-06-10T12:01:00Z"
 }
@@ -58,10 +64,105 @@ re-fetching the context.
 
 `requester_did` is `null` for anonymous reads.
 
+### `context.retracted`
+
+A context was formally retracted (RFC-ACDP-0013 §6). **Mark-not-delete:** the body
+stays retrievable, `status` becomes `retracted`, and the context drops out of
+default searches and `/current`.
+
+```json
+{
+  "event_id": "e0f5...",
+  "schema_version": "1.0",
+  "type": "context_retracted",
+  "registry_authority": "registry.example.com",
+  "ctx_id": "acdp://registry.example.com/1234...",
+  "lineage_id": "lin:sha256:9f2b...",
+  "actor": "did:web:agents.example.com:my-agent",
+  "lifecycle_event_id": "0195a1c2-...",
+  "reason": "superseded by a newer context",
+  "at": "2026-06-10T12:03:00Z"
+}
+```
+
+`actor` is the DID of the party that performed the retraction, and it is **not
+always the producer**. For producer-submitted events it is the producer
+(`body.agent_id`); for a registry-initiated retraction via
+`POST /admin/contexts/:id/retract` it is the **registry's own DID**. Retract and
+republish on one context may legitimately carry *different* actors — see
+[HTTP-API.md](HTTP-API.md) on lifecycle transitions. Do not assume
+`actor == agent_id`.
+
+`lifecycle_event_id` is the **actor-minted** lifecycle event id (an RFC 9562
+UUID) taken from the signed lifecycle event. It is *not* the same thing as the
+envelope's `event_id`, which is minted per delivery and is what you dedupe on —
+see [Two ids, and why they have different names](#two-ids-and-why-they-have-different-names).
+
+`reason` is optional and is **omitted entirely** when absent, never `null`.
+
+`at` is stamped when the webhook is constructed — it is the registry's
+*delivery-side* clock, **not** the `occurred_at` of the signed lifecycle event.
+The two are close but not equal, and neither is authoritative for the other. To
+correlate a delivery with the signed event, match on `lifecycle_event_id`, never
+on `at`.
+
+### `context.republished`
+
+A prior retraction was reversed (RFC-ACDP-0013 §6). `status` re-derives as though
+the context had never been retracted; both events stay in the lineage history.
+
+```json
+{
+  "event_id": "e0f2...",
+  "schema_version": "1.0",
+  "type": "context_republished",
+  "registry_authority": "registry.example.com",
+  "ctx_id": "acdp://registry.example.com/1234...",
+  "lineage_id": "lin:sha256:9f2b...",
+  "actor": "did:web:agents.example.com:my-agent",
+  "lifecycle_event_id": "0195a1c3-...",
+  "at": "2026-06-10T12:04:00Z"
+}
+```
+
+Same fields as `context.retracted`; this example omits the optional `reason` to
+show the omitted form.
+
+#### Two ids, and why they have different names
+
+These two event types are the only ones carrying an id of their own, and until
+`#179` both ids were called `event_id` — the envelope's and the variant's. The
+envelope serialises first and the flattened variant second, so the key appeared
+**twice** in one object and receivers resolved it by parser accident: last-wins
+(`serde_json`, JavaScript `JSON.parse`, Python `json`) saw the lifecycle id,
+first-wins implementations saw the envelope id. One of the two meanings was
+always silently lost.
+
+They are now distinct on the wire:
+
+| key | minted by | stable across retries | use it for |
+|-----|-----------|----------------------|------------|
+| `event_id` | the registry, per delivery | yes | de-duplicating deliveries |
+| `lifecycle_event_id` | the actor, in the signed lifecycle event | yes | correlating with the signed event / lineage history |
+
+`event_id` is also echoed in the `X-ACDP-Event-Id` header, so a receiver that
+dedupes on the header needs no change at all.
+
+**If you consume these two event types:** a receiver that read `event_id` and
+relied on last-wins was reading the *lifecycle* id. It now reads the *delivery*
+id. Read `lifecycle_event_id` instead to keep the old value.
+
+`schema_version` deliberately stays `"1.0"`. It describes the **envelope**, which
+did not change, and it is emitted on all five event types — bumping it would
+signal a change to receivers of the three types that were never affected. Do not
+expect it to move for a per-variant field change; those are recorded here.
+
 ### `search.executed`
 
 ```json
 {
+  "event_id": "e0f4...",
+  "schema_version": "1.0",
   "type": "search_executed",
   "registry_authority": "registry.example.com",
   "query": "weather",
@@ -71,6 +172,17 @@ re-fetching the context.
 }
 ```
 
+## Wire change history
+
+`schema_version` tracks the **envelope** and moves only when the envelope shape
+changes. Per-variant field changes do not move it — it is emitted on every event
+type, so bumping it for a change affecting some of them would misreport the rest.
+Those changes are recorded here instead. Newest first.
+
+| change | affects | `schema_version` |
+|--------|---------|------------------|
+| `#179` — the actor-minted lifecycle id moved from `event_id` to `lifecycle_event_id`, ending a duplicate JSON key. See [Two ids, and why they have different names](#two-ids-and-why-they-have-different-names). | `context.retracted`, `context.republished` | unchanged, `1.0` |
+
 ## Signature scheme
 
 Matches GitHub's exactly — receivers that already verify GitHub webhooks reuse
@@ -79,7 +191,8 @@ the same code. Headers on every delivery:
 ```
 Content-Type:      application/json
 X-ACDP-Signature:  sha256=<hex of HMAC-SHA256(webhook.secret, raw_json_body)>
-X-ACDP-Event:      context.published | context.retrieved | search.executed
+X-ACDP-Event:      context.published | context.retrieved | context.retracted
+                   | context.republished | search.executed
 X-ACDP-Event-Id:   <uuid, stable across retries>
 X-Tenant-Id:       <tenant, when the event is tenant-scoped>
 ```
