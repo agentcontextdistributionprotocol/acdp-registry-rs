@@ -58,10 +58,12 @@ matter and **is** supported alongside receipts: every publish is then verified �
 a pinned `did:web` agent against its pinned key, a `did:key` agent against the
 DID itself — producing exactly the same verified `(agent_did, content_hash)`
 pair a receipt attests, regardless of how the key was resolved. Pinned-only with
-an *empty* `pinned_keys` list is refused at startup in its own right — not
-because it locks the registry down, but because it does the opposite:
-`pinned_only` has no effect while `pinned_keys` is empty, so publishes would
-fall through to the fully unverified path.
+an *empty* `pinned_keys` list is refused at startup **whether or not `[receipt]`
+is configured** — not because it locks the registry down, but because it does
+the opposite: `pinned_only` has no effect while `pinned_keys` is empty, so
+publishes would fall through to the fully unverified path. That is a playground
+rule rather than a receipts rule; see
+[CONFIGURATION.md](CONFIGURATION.md).
 
 ## Lineage-head receipts (ACDP 0.3.0 / RFC-ACDP-0011)
 

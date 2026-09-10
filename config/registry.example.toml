@@ -163,11 +163,12 @@ enabled = false
 # every publish is verified, so playground + receipts IS supported.
 enabled = false
 # Reject publishes from agents not listed in pinned_keys. Has no effect
-# while pinned_keys is empty — which is why, with [receipt] configured,
-# pinned_only = true and an EMPTY pinned_keys is refused at startup: it
+# while pinned_keys is empty — which is why pinned_only = true with an
+# EMPTY pinned_keys is refused at startup, with or without [receipt]: it
 # looks locked down but would fall through to the fully unverified
-# publish path. Uncomment all three together (playground + receipts also
-# needs enabled = true above):
+# publish path. Uncomment all three together, pinned_only FIRST (below
+# [[playground.pinned_keys]] it would parse into the array instead);
+# playground + receipts also needs enabled = true above:
 # pinned_only = true
 # [[playground.pinned_keys]]
 # agent_did      = "did:web:registry-a.playground.local:agents:alice"

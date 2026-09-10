@@ -1042,3 +1042,68 @@ this entry rather than "fix" the code. No ratchet churn —
 **Filed as #187, not fixed:** collapsing the 14 literals to a bare `"invalid cursor"` and
 deduplicating the byte-identical cursor codec between the sqlite and pg stores. Genuinely outside this unit's
 granted paths, and the test's own scope note already flags the duplication.
+
+## W2-U1 — #185: hoisting the pinned-keys guard (2026-09-10)
+
+**Decided by:** Opus (lane-1) during `/drive`, under leader direction that the behaviour
+change is lane-decidable. Keyed by unit rather than a sequential integer per CHARTER 16 —
+`main` already carries two `## 6.` from N lanes numbering against a shared base.
+
+### W2-U1-a. Hoist the startup guard; do NOT make the runtime deny-all
+
+The obvious alternative was to make `enforce_pinned_signature` reject when `pinned_keys` is
+empty and `pinned_only` is true — fixing it where the danger actually lives. Rejected:
+`crates/acdp-registry-types/src/config.rs` documents "Has no effect when `pinned_keys` is
+empty" as the contract, and `PinOutcome::Skipped` is defined as "no policy active"
+(`playground.rs`). Callers rely on both. Changing that is a semantic change to a shared
+type's behaviour; refusing a self-contradictory config at startup is not.
+
+**A justification used in the first draft and withdrawn:** that the startup bail makes the
+state "unreachable through the real binary." **False.** `POST /admin/pinned-keys/reload`
+(`handlers/admin.rs`) re-reads config and swaps `state.playground` with no validation at all,
+and the publish path reads that live cell per request. The decision stands on the contract
+argument alone; the reachability claim does not survive. Filed as **#192**.
+
+### W2-U1-b. Bail A stays inside the receipts block
+
+`playground.enabled && !pinned_only` is genuinely receipts-specific — an unverified playground
+is incompatible with *advertising receipts*, not with running a registry. Hoisting it too
+would refuse a legitimate standalone open playground, which is a declared, self-consistent
+configuration and not what #185 is about.
+
+### W2-U1-c. The error message names the fall-through and stops at two remedies
+
+The message offers "add a pinned key" or "set `playground.enabled=false`", and deliberately
+**omits a third exit that exists**: `pinned_only = false`. That would silence the error while
+leaving the registry in exactly the unverified state the guard is trying to surface. An error
+message that offers "or disable the check" undercuts the check. `docs/CONFIGURATION.md`
+documents `pinned_only`'s full semantics for an operator who genuinely wants an open
+playground; the startup error is not the place to advertise it.
+
+The message says "every **non-`did:key`** agent", not "every agent". `did:key` publishes take
+their own verified route (`handlers/context.rs`) *before* the playground gate. An unqualified
+"any agent" would be false — and it is the same `did:key` nuance a review caught in U-005,
+regressed here while drafting fresh prose and caught again. Recorded because the pattern is
+the point: precision that exists in the text being replaced can be lost by rewriting it.
+
+### W2-U1-d. Proof standard for a validator behaviour change: mutation, not coverage
+
+A test asserting the new refusal would pass whether or not the hoist happened, if the guard
+already fired for some other reason. So the standard applied was: run the new test against the
+**unhoisted** guard and record the actual failure output; confirm the failure signature is the
+right one (`expect_err` panicking on `()`, i.e. `validate_config` returned `Ok`) and not a
+compile error; then re-mutate after the fix and confirm the new test fails while the
+pre-existing receipts test stays green. That last step is what discriminates "pins the hoist"
+from "pins the guard's existence". Full transcript in `PROGRESS.md`.
+
+### W2-U1-e. Line-pins are reported, never re-pointed — and one was protected by edit shape
+
+Consistent with the prior ruling on stale pins in historical records. Recomputed from the
+final tree: bail A `:259` → `:282`, rationale `:249` → `:272`, public-bind `:475` → `:488`;
+the pins at `:267`/`:271-273` have no surviving target at all. All reported, none re-pointed.
+
+Separately, `DECISIONS.md`'s own citation of `config.rs:739-740` lands *inside* the doc
+comment this unit rewrote. It survives because the new text was **appended after** the cited
+sentence rather than inserted above it — a deliberate constraint carried from plan review into
+the edit. Worth generalising: when an edit lands inside a cited range, the edit's *shape*
+decides whether the citation survives, and that is cheaper than re-pointing afterwards.

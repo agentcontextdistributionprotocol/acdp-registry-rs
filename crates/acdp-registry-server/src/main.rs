@@ -241,6 +241,29 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
         anyhow::bail!("auth.did_methods must include 'did:web' (mandatory per RFC-ACDP-0007 §3.1)");
     }
 
+    // W2-U1 (#185): `playground.pinned_only=true` with an empty
+    // `playground.pinned_keys` is self-contradictory — it reads as a
+    // lockdown and behaves as the opposite. `enforce_pinned_signature`
+    // (crates/acdp-registry-core/src/playground.rs) returns early when the
+    // list is empty, BEFORE `pinned_only` is consulted, so every
+    // non-`did:key` agent falls through to the fully unverified publish
+    // path. (`did:key` identities are self-verifying and take their own
+    // route before the playground gate, so they are unaffected either way.)
+    //
+    // Checked unconditionally, OUTSIDE the `[receipt]` block below: a
+    // registry with no receipts configured is precisely the deployment that
+    // gets no other warning, and it was silently wide open before this.
+    if cfg.playground.enabled && cfg.playground.pinned_only && cfg.playground.pinned_keys.is_empty()
+    {
+        anyhow::bail!(
+            "playground.pinned_only=true has no effect while playground.pinned_keys is \
+             empty: this config does NOT restrict publishing — every non-did:key agent \
+             falls through to the fully unverified playground path and is accepted \
+             without a signature check. Add at least one [[playground.pinned_keys]] entry, \
+             or set playground.enabled=false."
+        );
+    }
+
     // ACDP 0.2.0: receipt signing identity (RFC-ACDP-0010). Parse the key
     // at startup — a registry must never lazily discover a bad receipt key
     // on its first publish, because advertising the receipts profile is a
@@ -262,16 +285,6 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
                  receipts-advertising registry has no unverified publish path (RFC-ACDP-0010 \
                  §7: no degraded mode). Set playground.pinned_only=true (every publish then \
                  verifies against a playground.pinned_keys entry) or disable playground.enabled."
-            );
-        }
-        if cfg.playground.enabled
-            && cfg.playground.pinned_only
-            && cfg.playground.pinned_keys.is_empty()
-        {
-            anyhow::bail!(
-                "playground.pinned_only=true with no playground.pinned_keys configured would \
-                 reject every publish outright — add at least one pinned key or disable \
-                 playground.enabled."
             );
         }
         acdp_registry_core::receipt::build_signer(&cfg.receipt, &cfg.registry.authority)
@@ -1335,9 +1348,11 @@ mod tests {
 
     #[test]
     fn receipt_with_pinned_only_and_no_pinned_keys_is_rejected() {
-        // pinned_only=true with an empty pinned_keys list would reject
-        // every single publish outright — a config footgun, not a useful
-        // receipts registry.
+        // pinned_only=true with an empty pinned_keys list does NOT lock
+        // the registry down — `pinned_only` has no effect while the list is
+        // empty, so publishes fall through to the unverified path. Refused
+        // either way; since W2-U1 the refusal comes from the unconditional
+        // guard above the [receipt] block, so this case is still covered.
         use base64::Engine as _;
         let mut cfg = RegistryConfig::defaults();
         cfg.receipt.signing_key_seed_b64 =
@@ -1346,7 +1361,70 @@ mod tests {
         cfg.playground.pinned_only = true;
         let err = validate_config(&cfg)
             .expect_err("pinned_only=true with no pinned_keys must be refused");
-        assert!(err.to_string().contains("reject every publish outright"));
+        assert!(
+            err.to_string().contains("has no effect while"),
+            "message must name the no-op, got: {err}"
+        );
+    }
+
+    // W2-U1 (#185): the empty-pinned_keys refusal must NOT depend on
+    // `[receipt]` being configured. `pinned_only=true` with an empty list
+    // reads as a lockdown but does the opposite — playground.rs's
+    // `enforce_pinned_signature` returns `Skipped` before `pinned_only` is
+    // ever consulted, so every non-`did:key` agent falls through to the
+    // fully unverified publish path. A registry with no `[receipt]` is
+    // exactly the deployment that most needs telling.
+
+    #[test]
+    fn pinned_only_with_no_pinned_keys_is_rejected_without_receipts() {
+        let mut cfg = RegistryConfig::defaults();
+        // Deliberately NO receipt.signing_key_seed_b64 — that absence is
+        // the whole point. With receipts configured this config is already
+        // refused today, for a different reason.
+        cfg.playground.enabled = true;
+        cfg.playground.pinned_only = true;
+        let err = validate_config(&cfg).expect_err(
+            "pinned_only=true with no pinned_keys must be refused even without [receipt]",
+        );
+        assert!(
+            err.to_string().contains("has no effect while"),
+            "message must name the no-op, got: {err}"
+        );
+    }
+
+    #[test]
+    fn pinned_only_with_no_pinned_keys_is_ok_when_playground_disabled() {
+        // Over-refusal guard: with the playground off nothing falls
+        // through, so the combination is inert rather than dangerous.
+        let mut cfg = RegistryConfig::defaults();
+        cfg.playground.enabled = false;
+        cfg.playground.pinned_only = true;
+        assert!(
+            validate_config(&cfg).is_ok(),
+            "pinned_only with playground disabled must still boot"
+        );
+    }
+
+    #[test]
+    fn pinned_only_with_pinned_keys_and_no_receipts_is_ok() {
+        // The ordinary strict playground: pinning is actually enforced.
+        use base64::Engine as _;
+        let mut cfg = RegistryConfig::defaults();
+        cfg.playground.enabled = true;
+        cfg.playground.pinned_only = true;
+        cfg.playground
+            .pinned_keys
+            .push(acdp_registry_types::config::PinnedAgentKey {
+                agent_did: "did:web:registry-a.playground.local:agents:alice".into(),
+                public_key_b64: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+                algorithm: "ed25519".into(),
+                valid_from: None,
+                valid_until: None,
+            });
+        assert!(
+            validate_config(&cfg).is_ok(),
+            "strict playground with a pinned key and no receipts must boot"
+        );
     }
 
     #[test]
