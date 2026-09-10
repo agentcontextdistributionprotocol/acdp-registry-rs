@@ -607,5 +607,4 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   message change in `error.rs` plus tightening this test's assertion; nothing built on top of
   the current behaviour would need to change. The risk of the current choice is only that the
   gap is forgotten — which this entry exists to prevent.
-||||||| 51d312b
 - **Status:** UNCONFIRMED
