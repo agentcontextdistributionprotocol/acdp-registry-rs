@@ -8671,35 +8671,83 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 const DEFERRED: &[(&str, &str, u32)] = &[
     (
         "rcpt",
-        "receipt verification (RFC-ACDP-0010); two causes, not one: rcpt-001 carries no \
-         applies_to_profiles and is skipped as a non-HTTP golden vector (needs a \
-         direct-vector pass); rcpt-002/003/004 are restricted to \
-         acdp-registry-receipts/acdp-consumer and the harness advertises only \
-         acdp-registry-core (HARNESS_PROFILES, conformance.rs:425). Neither is a \
-         missing seam.",
+        "receipt verification (RFC-ACDP-0010); profile-gated residue ONLY. rcpt-002/003/004 \
+         declare applies_to_profiles [acdp-registry-receipts, acdp-consumer]; this harness \
+         advertises only acdp-registry-core (see HARNESS_PROFILES), so \
+         targets_unadvertised_profile skips them. Not a missing seam, and NOT closable here: \
+         advertising a profile the registry does not implement would make this ratchet lie. \
+         The golden half is already covered -- rcpt-001 is recomputed by \
+         rcpt001_registry_receipt_golden_recomputed_and_remintable, which \
+         DEFERRED_PARTIAL_DIRECT pins so it cannot be deleted while this entry stands.",
         130,
     ),
     (
         "lhr",
-        "lineage-head receipts (RFC-ACDP-0011); two causes, not one: lhr-001 carries no \
-         applies_to_profiles and is skipped as a non-HTTP golden vector (needs a \
-         direct-vector pass); lhr-002/003/004 are restricted to \
-         acdp-registry-head-receipts/acdp-consumer and the harness advertises only \
-         acdp-registry-core (HARNESS_PROFILES, conformance.rs:425). Neither is a \
-         missing seam.",
+        "lineage-head receipts (RFC-ACDP-0011); profile-gated residue ONLY. lhr-002/003/004 \
+         declare applies_to_profiles [acdp-registry-head-receipts, acdp-consumer]; this \
+         harness advertises only acdp-registry-core (see HARNESS_PROFILES), so \
+         targets_unadvertised_profile skips them. Not a missing seam, and NOT closable here: \
+         advertising a profile the registry does not implement would make this ratchet lie. \
+         The golden half is already covered -- lhr-001 is recomputed by \
+         lhr001_lineage_head_receipt_golden_recomputed_and_remintable, which \
+         DEFERRED_PARTIAL_DIRECT pins so it cannot be deleted while this entry stands.",
         130,
     ),
     (
         "log",
-        "transparency-log verification (RFC-ACDP-0012); the emission side is implemented \
-         and always mounted (/log/checkpoint, /log/proof, /log/entries, \
-         crates/acdp-registry-core/src/lib.rs:86-88). Two causes, not one: log-001/003 \
-         carry no applies_to_profiles and are skipped as non-HTTP golden vectors (need \
-         a direct-vector pass); log-002/004 are restricted to \
-         acdp-registry-transparency-log/acdp-consumer and the harness advertises only \
-         acdp-registry-core (HARNESS_PROFILES, conformance.rs:425). Neither is a \
-         missing seam.",
+        "transparency-log verification (RFC-ACDP-0012); profile-gated residue ONLY. The \
+         emission side is implemented and always mounted (/log/checkpoint, /log/proof, \
+         /log/entries, crates/acdp-registry-core/src/lib.rs:87-89). log-002/004 declare \
+         applies_to_profiles [acdp-registry-transparency-log, acdp-consumer]; this harness \
+         advertises only acdp-registry-core (see HARNESS_PROFILES), so \
+         targets_unadvertised_profile skips them. Not a missing seam, and NOT closable here: \
+         advertising a profile the registry does not implement would make this ratchet lie. \
+         The golden half is already covered -- log-001 and log-003 are recomputed by \
+         log001_leaf_root_and_inclusion_golden_recomputed and \
+         log003_consistency_proof_golden_recomputed, which DEFERRED_PARTIAL_DIRECT pins so \
+         they cannot be deleted while this entry stands.",
         130,
+    ),
+];
+
+/// The hole the strict `COVERED`/`EXCUSED`/`DEFERRED` partition otherwise leaves,
+/// and the reason it is a separate const rather than a fourth `DEFERRED` field.
+///
+/// `rcpt`/`lhr`/`log` are each `DEFERRED` for a residue this harness legitimately
+/// cannot reach (see their reasons above), yet each ALSO has a golden half that is
+/// now fully recomputed by a direct test. The partition buckets by *family*, not by
+/// fixture, so those direct tests would otherwise be unguarded: deleting
+/// `rcpt001_registry_receipt_golden_recomputed_and_remintable` would leave every
+/// existing check green, because a `DEFERRED` family is not required to name any
+/// test function at all. This const closes that gap, and
+/// `deferred_partial_direct_test_functions_are_present` enforces it.
+///
+/// Deliberately NOT a fourth field on the `DEFERRED` tuple, which was the obvious
+/// alternative: `DEFERRED` is destructured in two other checks
+/// (`known_families_partition_into_covered_excused_or_deferred` and
+/// `core_inexcusable_families_are_never_excused_or_unclassified`) and its type is
+/// quoted in the module doc, so widening it edits five sites to gain only
+/// name-adjacency to the reason string. Deliberately NOT a fourth partition member
+/// either -- that would touch every set check in the file.
+///
+/// A family here MUST also be in `DEFERRED`. `cur` is absent on purpose: it is fully
+/// `COVERED`, not partially, so its tests are already pinned by `COVERED`'s own
+/// `Direct(...)` list.
+const DEFERRED_PARTIAL_DIRECT: &[(&str, &[&str])] = &[
+    (
+        "rcpt",
+        &["rcpt001_registry_receipt_golden_recomputed_and_remintable"],
+    ),
+    (
+        "lhr",
+        &["lhr001_lineage_head_receipt_golden_recomputed_and_remintable"],
+    ),
+    (
+        "log",
+        &[
+            "log001_leaf_root_and_inclusion_golden_recomputed",
+            "log003_consistency_proof_golden_recomputed",
+        ],
     ),
 ];
 
@@ -8771,6 +8819,44 @@ fn covered_direct_families_have_present_test_functions() {
                     );
                 }
             }
+        }
+    }
+}
+
+/// `DEFERRED_PARTIAL_DIRECT`'s enforcement, and the sibling of
+/// `covered_direct_families_have_present_test_functions` above: a family that
+/// is `DEFERRED` for its profile-gated residue while its golden half IS
+/// covered must keep naming the tests that cover that half, and those tests
+/// must still exist wearing a test attribute. Without this, the direct tests
+/// for `rcpt`/`lhr`/`log` are the only new coverage in the file that nothing
+/// guards -- the partition asks a `DEFERRED` family for a reason string, not
+/// for test functions. Also checks the containment invariant in the other
+/// direction, so a family cannot claim partial-direct coverage while sitting
+/// in `COVERED` or `EXCUSED`.
+#[test]
+fn deferred_partial_direct_test_functions_are_present() {
+    let deferred: std::collections::BTreeSet<&str> =
+        DEFERRED.iter().map(|(family, _, _)| *family).collect();
+
+    for (family, names) in DEFERRED_PARTIAL_DIRECT {
+        assert!(
+            deferred.contains(family),
+            "\"{family}\" is in DEFERRED_PARTIAL_DIRECT but not in DEFERRED -- a family \
+             whose golden half is pinned here must still be deferred for its residue; if it \
+             is now fully covered, move its tests into COVERED's Direct(...) list instead"
+        );
+        assert!(
+            !names.is_empty(),
+            "DEFERRED_PARTIAL_DIRECT family \"{family}\" names no test functions at all"
+        );
+        for name in *names {
+            assert!(
+                source_has_present_test_fn(name),
+                "DEFERRED family \"{family}\" claims its golden half is covered by \
+                 `{name}`, but that function no longer exists in this file as a present, \
+                 test-attribute-registered function -- coverage was removed without updating \
+                 DEFERRED_PARTIAL_DIRECT or the family's DEFERRED reason"
+            );
         }
     }
 }
