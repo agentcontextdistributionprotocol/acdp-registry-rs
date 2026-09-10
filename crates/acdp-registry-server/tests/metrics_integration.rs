@@ -403,7 +403,7 @@ async fn metrics_bearer_gate_enforced() {
 
 /// #166 — pins the `/metrics` row of the bearer-parser table in
 /// `docs/AUTHENTICATION.md`. Before this test, deleting `.map(str::trim)` from
-/// `metrics.rs:127` left the whole workspace suite green (measured), so the
+/// `metrics.rs:128` left the whole workspace suite green (measured), so the
 /// documented trimming behaviour rested on nothing.
 ///
 /// This matters beyond the docs: #162's startup guard is deliberately
