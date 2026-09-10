@@ -750,3 +750,30 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   the current behaviour would need to change. The risk of the current choice is only that the
   gap is forgotten — which this entry exists to prevent.
 - **Status:** CONFIRMED (2026-09-10) — and on stronger grounds than this entry claims: the leak clause has no RFC backing and `rationale` is corpus-wide never-asserted, so it is not a tolerated gap. This entry's body is WRONG about where the message literals live (they are in the two store crates, not `error.rs`) and examined only one of seven arms. Corrections and the applied tripwire: see `DECISIONS.md` entry 10.
+
+## W2-U1 — #185 pinned-keys guard hoist (lane-1, 2026-09-10)
+
+- **Verified, not assumed:** that hoisting the guard has zero collateral. Two independent
+  grounds, both checked: `acdp-registry-server` is bin-only (`[[bin]]`, no `[lib]`, no
+  `build.rs` in the repo, no `CARGO_BIN_EXE_`/`#[path]`/`include!` in its tests), so
+  `validate_config` is unreachable from `tests/**`; and every `pinned_only = true` site in the
+  repo already supplies at least one pinned key. **Status: CONFIRMED.**
+- **Corrected during plan review, both before any code was written:**
+  (a) the draft bail message said "accepts any signature from **any agent**" — false, `did:key`
+  routes to a verified path before the playground gate. Same nuance a review caught in U-005.
+  (b) the draft justified leaving runtime semantics alone on the state being "unreachable
+  through the real binary" — false, the admin reload endpoint validates nothing.
+  **Status: CONFIRMED (corrected).**
+- **UNCONFIRMED — deliberately not decided here:** whether the shared playground validation
+  that #192 and #193 both need should live in `acdp-registry-types` or `acdp-registry-core`.
+  Both issues suggest a shared validator; the placement call belongs to whoever takes them,
+  with the whole surface in view. Not blocking this unit.
+- **Known residual gaps, filed rather than fixed** (both need `acdp-registry-core`, outside
+  this unit's grant): **#192** — `POST /admin/pinned-keys/reload` applies config with no
+  validation, so this guard and every other config guard is bypassable at runtime. **#193** —
+  pinned-key entries are never validated at startup, so a typo'd `algorithm` or an all-expired
+  list boots clean and then fails every publish. #193 is notable: an all-expired list is
+  *literally* the "reject every publish outright" state #185's old message misnamed, so the
+  message described a real failure mode attached to the wrong config.
+- **Not re-litigated:** the behaviour change itself (leader-ruled lane-decidable — rejects a
+  self-contradictory config, no shipped default affected).

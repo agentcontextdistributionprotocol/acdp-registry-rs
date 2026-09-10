@@ -57,14 +57,19 @@ The binary validates config before serving and refuses to boot on a misconfig
 - **TLS** — when `tls.enabled`, `cert_path` and `key_path` must exist on disk.
 - **DID methods** — `auth.did_methods` entries must be `did:web` or `did:key`,
   and `did:web` must be present (RFC-ACDP-0007 §3.1).
+- **Playground** — `playground.enabled = true` with `playground.pinned_only =
+  true` and an *empty* `[[playground.pinned_keys]]` list is refused at startup,
+  **whether or not `[receipt]` is configured**. Not because it is too strict:
+  `pinned_only` has no effect while `pinned_keys` is empty, so the registry
+  would fall through to the fully unverified publish path, accepting unverified
+  publishes from every non-`did:key` agent (`did:key` identities are
+  self-verifying and never reach this gate). Add a pinned key, or set
+  `playground.enabled = false`.
 - **Receipts** — a configured `[receipt]` key must parse (exactly one source,
   valid base64, 32 bytes), and is incompatible with `playground.enabled = true`
   **unless** `playground.pinned_only = true` with at least one
   `[[playground.pinned_keys]]` entry (RFC-ACDP-0010 §7: a receipts registry has
-  no unverified publish path). Pinned-only with an *empty* `pinned_keys` list is
-  refused separately, and not because it would be too strict: `pinned_only` has
-  no effect while `pinned_keys` is empty, so the registry would fall through to
-  the fully unverified publish path — the very thing the first check prevents.
+  no unverified publish path).
 - **Profile allowlist (REG-5)** — every entry in `registry.profiles` must be
   one of the seven *registry* profiles the pinned ACDP spec defines
   (`REGISTRY_ADVERTISABLE_PROFILES` in `crates/acdp-registry-types/src/
