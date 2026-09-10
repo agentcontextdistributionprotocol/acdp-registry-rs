@@ -811,7 +811,7 @@ human call. Two had their *reasoning* corrected — the decisions were right, th
 arguments were not, and an argument that does not hold is worse than none because the next
 maintainer will cite it.
 
-## 6. `WEBHOOK_SCHEMA_VERSION` stays `"1.0"` across the `event_id` wire rename (2026-09-10)
+## 6-bis. `WEBHOOK_SCHEMA_VERSION` stays `"1.0"` across the `event_id` wire rename (2026-09-10)
 
 **Decided by:** Opus. **Verdict: CONFIRMED, rationale replaced.**
 
@@ -1193,3 +1193,95 @@ for someone to discover at publish time.
 **What would change my mind:** a second consumer appearing that wants a *different* cursor
 format. Then the right shape is a trait with the codec behind it, not a free function — and
 that is a bigger change than visibility.
+## W2-U3 — release-plz un-stall, docker tag pipeline, Railway auth posture (2026-09-10)
+
+Unit-scoped slug, matching the precedent lane-1 set with
+`## W2-U1 — #185: hoisting the pinned-keys guard`. Decided by Opus under `/drive`; the
+auth-posture item was ruled by the human and is recorded here as ratification, not as a
+lane call.
+
+> **On the `D-0xx` and "CHARTER rule N" identifiers used below.** They refer to a
+> multi-session coordination board that lives *outside this repository* and is deliberately
+> not in git, so they are **not resolvable from this tree**. Every one of them is therefore
+> stated with its substance inline; the identifier is provenance, never the argument. This
+> file already carried that convention before this entry (two such references predate it),
+> but it is worth naming: a citation a reader cannot follow has to carry its own content.
+
+### 1. The duplicate `## 6.` heading is disambiguated as `## 6-bis.`, not renumbered
+
+`DECISIONS.md` carried two `## 6.` entries — `U-001 — predecessor_admission …` and
+`WEBHOOK_SCHEMA_VERSION stays "1.0" …` — because two lanes numbered against the same base
+with no lock. That is the collision CHARTER rule 16 was written for.
+
+The `WEBHOOK_SCHEMA_VERSION` entry's heading becomes `## 6-bis.`. **A cascading renumber was
+forbidden and would have been wrong anyway**: entries 7-10 are cited elsewhere, including
+`ASSUMPTIONS.md`'s pointer to entry 10.
+
+A unit slug (`## U-002 — …`) was considered for the renamed entry and **rejected**: that
+entry's body carries no unit id, and neither does its neighbour, so assigning it to U-002
+would invent provenance that cannot be verified from the tree — the exact failure CHARTER
+rule 15 exists to prevent. `6-bis.` asserts only what is certainly true: a sibling of entry 6
+from the same wave, sorting between 6 and 7. New entries, whose provenance *is* known, get
+slugs.
+
+### 2. `.gitignore` gains root-anchored `/PROGRESS.md` and `/.drive.lock`
+
+The CHARTER rule-13 grant. Root-anchored on purpose: unanchored patterns would also hide a
+future `crates/*/PROGRESS.md`, which the grant does not cover.
+
+> **Tense warning.** Sections 3-6 record decisions taken for this unit and describe the
+> state *after* all of its phases land. At the moment this entry was appended, only the two
+> items above were in the tree. Where a statement below is a prediction rather than an
+> observation, it says so explicitly.
+
+### 3. release-plz is un-stalled with `git_only = true`, NOT by publishing to crates.io
+
+Root cause established from evidence, not hypothesis. release-plz resolves "what was last
+released" from the **cargo registry** even when `publish = false`; nothing is on crates.io;
+every crate reads as never-released; it proposes the current version `0.1.0`; the existing
+tag then blocks it. A self-sustaining deadlock. The DEBUG log names the path outright
+(`Processing 8 packages from registry` -> `downloading packages from cargo registry crates.io`
+-> `Package acdp-registry-types@*.*.* not found`), with zero git-tag lookups.
+
+Flipping `publish = true` would have "fixed" it by starting to publish eight crates to
+crates.io. **Rejected outright** as a one-way door and a cross-boundary publish, not a lane's
+call. The constraint was standing before the analysis began, so no escalation was needed —
+the fix below never approached it. `git_only = true` un-stalls versioning with no publish anywhere.
+
+### 4. The dead `*-v0.1.0` tags are retired by changing `git_tag_name`, not by deleting them
+
+`git_only` alone still fails: it makes release-plz `cargo package` the June tag's tree, which
+cannot resolve because at that commit `acdp` was a **git** dependency, and across the surrounding
+range it was a `path = "../acdp-rs"` dependency with a `[patch.crates-io]` — neither of which
+`cargo package` can rebuild from a tarball. (The path-dependency period runs through
+2026-07-05 and is not cleanly "after" the git-dependency one; both simply predate the current
+crates.io dependency.) The baseline must therefore be
+re-based at a modern commit. **Deleting the eight tags was rejected — it would orphan eight
+published GitHub Releases.** Changing the tag template retires them non-destructively: they
+simply stop matching.
+
+Consequence, accepted knowingly — and this is a **prediction from a local simulation, not an
+observation**: the first post-merge run is expected to mint new-shape tags and create eight
+duplicate `0.1.0` GitHub Releases, moving the "Latest release" marker. The evidence is a
+throwaway-clone run with synthetic tags planted 12 commits back, not a real CI run; a tag
+event cannot be staged before merge. Cosmetic and
+reversible by a human with `gh release delete <tag>` — which must **not** delete the tag.
+
+### 5. This is a TWO-STEP bootstrap and the first post-merge run is deliberately PR-less
+
+**Predicted, from the same local simulation.** The merge that lands this unit is expected to
+mint the tags and produce no release PR. **The merge after it is the one that produces the
+first release PR.** A green, PR-less bootstrap run is success, not failure. Recorded here because the
+obvious misreading — "still broken" — is the one a future reader is most likely to make.
+
+### 6. Only `docker/RAILWAY.md` turns authentication on; the compose stack does not
+
+Human ruling (D-016/D-018 escalation). Railway and the shipped compose stack are different
+deployment classes and only Railway was ruled on; `docker/config.docker.toml` and
+`docker/docker-compose.yml` keep `auth.enabled = false` per D-016 item 1.
+
+Enabling auth falsifies three statements the previous unit shipped, so all three move in the
+same commit: the `JWT_SECRET` row's "never validated", the note's "This recipe leaves
+authentication OFF", and the `ALLOW_PUBLIC_BIND` argument. The `ALLOW_PUBLIC_BIND` row is
+**kept and re-documented, not dropped** — removing it would change the recipe a second time
+beyond what was authorized.

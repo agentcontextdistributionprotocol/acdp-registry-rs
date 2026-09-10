@@ -46,3 +46,9 @@ temp/
 .claude/
 memory/
 CLAUDE.md
+
+# Lane scratch (untracked, never committed)
+# Root-anchored deliberately: an unanchored `PROGRESS.md` would also hide a
+# future crates/*/PROGRESS.md, which is not what this covers.
+/PROGRESS.md
+/.drive.lock
