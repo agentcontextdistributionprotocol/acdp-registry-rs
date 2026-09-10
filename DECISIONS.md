@@ -744,3 +744,58 @@ than one that doesn't.
    are **two**, not one: `crates/acdp-registry-server/src/main.rs:126` and
    `crates/acdp-registry-server/tests/metrics_integration.rs:497`. Both are comments, so the
    conclusion — no code outside `acdp-registry-core` references the helper — still holds.
+
+---
+
+## 6. U-001 — `predecessor_admission` enforcement: four settled calls (2026-09-10)
+
+Plan: `plans/u-001-acdp-0.10.0-predecessor-admission.md` (issue #174, supersedes PR #175).
+All four are Opus calls under the autonomy ladder — consequential but reversible, none a
+one-way door. Recorded because each shaped the diff.
+
+**6a. Where the admission call sits — settled by upstream, not by preference.**
+The plan initially framed this as a choice between two contract-legal slots (the "contract
+floor" right after the ownership gate, versus after `AlreadySuperseded`) and defended the
+later one on error-taxonomy grounds. The plan review found that framing wrong. The reference
+implementation's own comment (`acdp-server-0.10.0/src/registry/store.rs:773-780`) says the
+hook "Runs AFTER producer-continuity, lineage/version coherence, and AlreadySuperseded have
+all passed — never earlier", and `check_revocation_supersession` puts arm 5 (already
+superseded) explicitly out of scope. **The contract floor would violate the documented caller
+contract.** Not a judgement call; the plan was corrected and a test now guards the position.
+
+**6b. A corrupt predecessor `body_json` is `RegistryInternal`, not `SchemaViolation`.**
+Parity with `row_to_context`, which already reports every other decode failure in both stores
+that way. Rejected `SchemaViolation` — it blames the producer for the registry's own bad data.
+Accepted wart, recorded rather than hidden: `RegistryInternal` reports `is_transient() == true`
+(`acdp-primitives-0.10.0/src/error.rs:297-306`), so a *permanently* corrupt row is advertised
+as retryable. That is pre-existing and repo-wide (every `row_to_context` decode has it); fixing
+it belongs in its own unit, not smuggled into a dependency bump. Reversible in one line.
+
+**6c. Supersede PR #175 rather than rebase it.**
+#175 changed only `Cargo.toml` + `Cargo.lock` and failed 7 of 9 CI jobs — the code half was
+never written, which is what U-001 supplies. This branch carries the same pin change plus the
+code, so once it merges #175 is empty. Rejected pushing to `deps/acdp-0.10.0` from this lane's
+checkout to make it empty: identical outcome, more moving parts, and it is a bot-owned branch
+belonging to `bump-acdp.yml`.
+
+**6d. The pg `commit()` test helper was NOT widened — and the first stated reason was wrong.**
+The tests build their `PublishCommit` inline instead. The rationale originally recorded was
+that `spawn_blocking`'s `'static` bound made widening *impossible*; verification disproved that
+by compiling the alternative (an owned
+`Option<Box<dyn Fn(&Body) -> Result<(), AcdpError> + Send + Sync>>` is `Send + 'static`, and
+`.as_deref()` yields the field's type). The real reason is preference: less churn, no change
+to five existing call sites, and it matches what the sqlite tests already do. Corrected here
+because a decision record that misstates its own reasoning is worth less than one that admits
+the reasoning was thinner than claimed.
+
+### Note on evidence quality
+
+Two claims in this unit's own records were found to overstate their evidence and were
+corrected rather than quietly dropped:
+1. A `content_hash` assertion was described as proving the JSONB decode faithful. It compared
+   two values that both round-trip through the same decoder — decode-vs-decode, which a lossy
+   decode satisfies on both sides. It now compares against the hash captured from the
+   in-memory request.
+2. A mutation table recorded an observation for a test that did not yet exist when that
+   mutation was run. Re-run against the full suite; the corrected result is stronger than the
+   one first recorded.

@@ -2093,6 +2093,51 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+<!-- U-001 #174 (lane-1) -->
+
+- **Both stores now enforce the RFC-ACDP-0014 §4 `supersedes` rule** (`#174`,
+  supersedes PR `#175`): `acdp` 0.10.0 adds `predecessor_admission` to
+  `PublishCommit`, and `PgStore::commit_publish` /
+  `SqliteStore::commit_publish` invoke it on the predecessor's stored `Body`,
+  propagating its `Err`. Before this, the rule was the last unenforced row of
+  that table.
+  - **This is a behavior change affecting every deployment, not an opt-in
+    one.** The hook is live whenever the registry advertises `acdp_version >=
+    0.3.0`, and `ANCHORS_VERSION_CLAIM` (`crates/acdp-registry-server/src/main.rs`)
+    is unconditional — every configuration advertises `>= 0.5.0`, asserted for a
+    bare config by `capabilities_acdp_version_ladder`. So **every** registry now
+    rejects, with `schema_violation` (non-transient — do not retry), a publish
+    that supersedes a key-revocation context with anything but a
+    same-trust-class key-revocation. Publishes previously accepted will now be
+    refused. That is the intended effect: the registry was advertising
+    compliance it did not enforce.
+  - **The ordering is itself the security property.** The call sits after tenant
+    scoping, producer continuity, lineage/version coherence and
+    `AlreadySuperseded`, and before every write. Running it earlier would turn
+    publish into a cross-tenant, non-owner existence-and-`context_type` oracle on
+    the predecessor, leaking past the uniform `superseded_target{NotFound}` both
+    stores already return for absent / wrong-tenant / non-owner targets. Upstream
+    mandates this position ("never earlier"); the contract floor would violate it.
+  - Refusal leaves nothing behind — no successor row, no supersession of the
+    predecessor, no transparency-log leaf, no idempotency record — because the
+    call precedes every write and `Transaction::Drop` rolls back.
+  - The predecessor `Body` is read by adding `body_json` to each store's existing
+    predecessor `SELECT`: no extra round-trip, no new lock, and no change to pg's
+    `FOR UPDATE` lock mode. It is deserialized lazily, only when the hook is
+    present, so a gate-off registry pays nothing and cannot newly fail. A body
+    that will not decode fails the publish rather than silently skipping the
+    check.
+  - **17 regression tests** (8 sqlite, 9 pg) exist for one reason: the field is a
+    plain struct field, so a store that binds it and never calls it compiles
+    cleanly, warns about nothing, and silently enforces nothing — and the
+    conformance fixtures do not cover the reject path (spec issue `#57`). Each
+    test was verified by mutation: the call was deleted, hoisted above each gate,
+    defanged at the parse, made to swallow the one error variant the real closure
+    emits, pointed at the lineage-head row instead of the predecessor, and keyed
+    on the predecessor's type, the successor's type, the tenant and the receipt
+    minter — 16 mutations in all. Every one was observed failing its guard, and
+    most left all-but-one test green.
+
 <!-- REG-11 #168 (Lane B) -->
 
 - **The `/metrics` bearer gate now compares in constant time** (`#168`). It used
