@@ -591,19 +591,34 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   `WEBHOOK_SCHEMA_VERSION`.
 - **Chose:** keep `"1.0"` and instead narrow the constant's doc comment
   (`crates/acdp-registry-webhook/src/lib.rs:20-31`), which previously promised a bump on
-  "any backwards-incompatible change to the serialized event shape". The constant is emitted
-  on **all five** event types while only **two** changed shape, so bumping would report a
-  change to receivers of the three well-formed types that saw no change — the same
-  blast-radius reasoning D-002 used to reject renaming the envelope field. Corroborated: the
-  only known consumer declares `schema_version?: string`
-  (`acdp-control-plane/src/contracts/acdp.ts:38`) and never reads it, so a bump is noise, not
-  signal.
+  "any backwards-incompatible change to the serialized event shape".
+- **Rationale CORRECTED at reconcile (2026-09-10).** The original argument — "only two of
+  five variants changed, so bumping misreports the other three" — **does not hold**, and is
+  recorded here so no one cites it again. Both downstream consumers parse all five event
+  types through **one open union** (`acdp-control-plane` `AcdpWebhookEvent`
+  `src/contracts/acdp.ts:29-102`; `acdp-playground` `WebhookType_Open`
+  `acdp_client/models.py:255-288`). "Only some variants changed" is a distinction that exists
+  in this repo's Rust enum and in no receiver's model. The decision survives on a different
+  and sounder argument: `schema_version` is stamped **per delivery**, so it describes that
+  delivery's envelope, not the stream — a `search_executed` body carrying `"1.1"` would
+  assert that something about *that delivery* changed when nothing did. Bumping is not a
+  blast-radius trade-off, it is emitting a falsehood on four of five types. Independently
+  corroborated by **RFC-ACDP-0009 §2.10**, which reserves this profile's version field as the
+  schema version of the event *envelope* — the narrowed scope matches what the spec already
+  reserved, rather than being a carve-out invented to fit this case.
+- **Also corrected:** the plan said "the only known consumer". There are **two** —
+  `acdp-playground/acdp_client/models.py:282` also declares `schema_version`. Neither reads
+  it (verified by workspace-wide grep across all sibling repos), so the conclusion is
+  unchanged, but the claim as written was wrong.
 - **Alternatives:** bump to `"2.0"` (rejected — punishes the unchanged majority); bump to
   `"1.1"` (rejected — identical blast radius for no additional signal); leave the doc comment
   as-is and not bump (rejected — ships code contradicting its own stated contract).
 - **Blast radius if wrong:** a receiver that wanted to branch on the version to detect this
   rename cannot. Recovery is a one-line bump in a later release; nothing persists or migrates.
-- **Status:** UNCONFIRMED
+  The constant is read at exactly one site (`lib.rs`, envelope construction) and pinned by one
+  test assertion.
+- **Status:** CONFIRMED (2026-09-10) — decided by Opus at `/reconcile`, decision unchanged,
+  rationale corrected as above. See `DECISIONS.md`.
 
 ## `#[serde(rename)]` is symmetric, and that is deliberate
 
@@ -619,8 +634,23 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   being removed if the envelope ever gains a `Deserialize`).
 - **Blast radius if wrong:** an out-of-tree deserialiser of this type reading the old key
   breaks. None is known; the one known consumer parses structurally and tolerates unknown keys
-  via `[k: string]: unknown` (`acdp-control-plane/src/contracts/acdp.ts:102`).
-- **Status:** UNCONFIRMED
+  via `[k: string]: unknown` (`acdp-control-plane/src/contracts/acdp.ts:102`). The crate is
+  **not published** (`release-plz.toml:5` `publish = false`; absent from crates.io) and no
+  Rust consumer exists in any sibling repo, so reversal is a two-word edit.
+- **Reconcile strengthened the reasoning (2026-09-10).** Symmetric is not merely safe, it is
+  the **only correct form of the three**, and the other two fail *quietly*:
+  `rename(serialize = ...)` would read `event_id` — a key still on the wire, holding the
+  *envelope delivery id* — into the lifecycle field: no error, wrong value, which is exactly
+  the confusion #179 removes, resurrected on the read side. `alias = "event_id"` maps both
+  names to one field slot, so serde rejects **every current body** with a duplicate-field
+  error, and rejects old duplicate-key payloads too. On an old payload the shipped form fails
+  loudly with `missing field lifecycle_event_id`, which is the right outcome — and, with
+  `schema_version` deliberately frozen, is the only automatic detector an old payload has.
+- **Gap closed:** nothing asserted the read side, so this entry rested on untested behaviour.
+  `the_emitted_body_round_trips_into_the_lifecycle_field` now deserialises a real emitted body
+  and asserts the lifecycle field gets the actor-minted id and **not** the envelope id.
+- **Status:** CONFIRMED (2026-09-10) — decided by Opus at `/reconcile`, with a test added so
+  the read path is a guarantee rather than an argument. See `DECISIONS.md`.
 
 ## `acdp-control-plane` needs telling; this lane must not edit it
 
@@ -635,8 +665,34 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   plan — CHARTER rule 6 forbids cross-repo *edits* outright and a plan may not self-exempt.
 - **Alternatives:** edit `acdp.ts` directly (rejected — forbidden); say nothing (rejected —
   leaves a first-party repo carrying a comment that is now false).
-- **Blast radius if wrong:** the control plane's fallback dedup path keeps working either way
-  (the `X-ACDP-Event-Id` header wins in the normal path, and the fallback now *agrees* with
-  the header instead of diverging). The cost of not telling them is a stale comment, not an
-  outage.
-- **Status:** UNCONFIRMED
+- **Blast radius CORRECTED at reconcile (2026-09-10).** "The fallback keeps working either
+  way" was **too strong**. It holds for delivery retries — its documented purpose. It stops
+  collapsing *distinct deliveries of the same logical lifecycle event*: the SDK's lifecycle
+  commit has an idempotent-replay outcome, and this registry emits the webhook
+  unconditionally, so a producer resubmitting a byte-identical signed event yields a second
+  delivery with a new envelope id but the same actor-minted id. **With the header present
+  (the normal path) nothing changes.** With the header stripped, the old fallback keyed on the
+  actor-minted id and collapsed the pair; the new one keys on the delivery id and does not —
+  costing a duplicate ingest row, a double SSE emit and a double outbound webhook. The
+  lifecycle projection stays correct (its upsert guard makes re-applying a transition a no-op).
+  This is the fallback becoming *consistent with* the primary path rather than accidentally
+  stronger than it — defensible, but it must be stated in the issue rather than found by
+  their on-call.
+- **Authorization CONFIRMED, and the earlier challenge was half right.** Filing an issue *is*
+  a cross-repo write. But CHARTER rule 6 is a **routing** rule — it says such writes go to the
+  human and that *the leader cannot authorize them*; it does not say the permission cannot
+  exist. The human already granted exactly this mechanism in advance ("for cross-repo changes
+  file GitHub issues and ping that repo's Claude session"), so rule 6 is **satisfied, not
+  bypassed**. The reviewer was right that the earlier prose asserted the exemption without
+  naming its source; that wording has been corrected to cite the source.
+- **Two corrections to the plan:** (a) the standing instruction has two halves and the second
+  was dropped — **ping that repo's Claude session**, not just file the issue; (b) the issue
+  must **not** say the control plane "can key on `lifecycle_event_id`". Read as dedup advice
+  that would put their body fallback back into disagreement with `X-ACDP-Event-Id`, re-creating
+  the divergence #179 removes. `lifecycle_event_id` is actor provenance, **not** a dedup key.
+- **Timing:** after merge and **only** after merge. A pre-merge issue would tell another team a
+  wire format changed when it has not. If the PR never merges, nothing is owed and nothing is
+  filed.
+- **Status:** CONFIRMED (2026-09-10) — decided by Opus at `/reconcile`; disposition and
+  authorization stand, content and blast radius corrected. Issue owed **on merge**. See
+  `DECISIONS.md`.

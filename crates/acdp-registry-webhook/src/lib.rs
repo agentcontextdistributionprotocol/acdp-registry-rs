@@ -22,13 +22,24 @@ use uuid::Uuid;
 /// Bump on a backwards-incompatible change to that envelope shape so the
 /// control plane can branch on it.
 ///
-/// Deliberately does **not** move for a per-variant field change. This value
-/// is emitted on every event type, so bumping it to signal a change that
-/// affects only some of them misreports the rest — a receiver of the
-/// unaffected types would see a version change with no change behind it.
-/// Per-variant wire changes are recorded in `docs/WEBHOOKS.md` instead.
-/// Precedent: #179 renamed the `context.retracted` / `context.republished`
-/// lifecycle id to `lifecycle_event_id` and left this at `1.0`.
+/// Deliberately does **not** move for a per-variant field change — including
+/// one that touches every variant. This value is stamped on each *delivery*,
+/// so it describes that delivery's envelope, not the event stream: a
+/// `search_executed` body carrying a bumped version would assert that
+/// something about *that* delivery changed, when nothing did. Note receivers
+/// parse all five types through one shared model, so "only some variants
+/// changed" is a distinction that exists here and in no receiver — the reason
+/// not to bump is per-delivery truthfulness, not blast radius.
+///
+/// The scope is not local convention: RFC-ACDP-0009 §2.10 reserves this
+/// profile's version field as the schema version of the event *envelope*,
+/// independent of `acdp_version`. Expect the next real move to come from that
+/// promotion (reserved name `event_version`), not from a variant edit.
+///
+/// Per-variant wire changes are recorded in `docs/WEBHOOKS.md` under "Wire
+/// change history" instead. Precedent: #179 renamed the `context.retracted` /
+/// `context.republished` lifecycle id to `lifecycle_event_id` and left this
+/// at `1.0`.
 pub const WEBHOOK_SCHEMA_VERSION: &str = "1.0";
 
 #[derive(Debug, Error)]
@@ -1126,6 +1137,47 @@ mod tests {
                 value.get("reason").is_none(),
                 "{tag}: reason must be omitted, not null:\n{body}"
             );
+        }
+    }
+
+    /// `#[serde(rename)]` is symmetric — it moves the `Deserialize` side too.
+    /// That is deliberate, and this asserts it rather than arguing it, because
+    /// both alternatives fail quietly:
+    ///
+    /// - `rename(serialize = ...)` would read `event_id` — a key still present
+    ///   on the wire, holding the *envelope delivery id* — straight into the
+    ///   lifecycle field. No error, wrong value: the exact `event_id` confusion
+    ///   #179 removes, resurrected on the read side.
+    /// - `alias = "event_id"` maps both names to one field slot, so serde
+    ///   rejects every current body with a duplicate-field error.
+    ///
+    /// Nothing else in the workspace deserialises this type, so without this
+    /// the read path is an argument instead of a guarantee.
+    #[tokio::test]
+    async fn the_emitted_body_round_trips_into_the_lifecycle_field() {
+        let minted = "01950000-0000-7000-8000-0000000000aa";
+        let raw = deliver_one(retracted_event(Some("superseded"))).await;
+        let (_, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+
+        let value: serde_json::Value = serde_json::from_str(body).expect("valid json body");
+        let envelope_id = value["event_id"]
+            .as_str()
+            .expect("envelope event_id")
+            .to_owned();
+
+        let parsed: WebhookEvent = serde_json::from_str(body).expect("body must deserialise");
+        match parsed {
+            WebhookEvent::ContextRetracted { event_id, .. } => {
+                assert_eq!(
+                    event_id, minted,
+                    "the read side must pick up lifecycle_event_id, not the envelope key"
+                );
+                assert_ne!(
+                    event_id, envelope_id,
+                    "reading the envelope delivery id into the lifecycle field is the bug"
+                );
+            }
+            other => panic!("deserialised as the wrong variant: {}", variant_tag(&other)),
         }
     }
 }
