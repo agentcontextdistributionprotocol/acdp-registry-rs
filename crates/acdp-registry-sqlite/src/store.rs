@@ -2302,8 +2302,8 @@ mod tests {
         use acdp::crypto::SigningKey;
         use acdp::error::AcdpError;
         use acdp::producer::Producer;
-        use acdp::registry::store::{PublishCommit, RegistryStore};
-        use acdp::types::primitives::{AgentDid, ContextType, Visibility};
+        use acdp::registry::store::{PublishCommit, PublishCommitOutcome, RegistryStore};
+        use acdp::types::primitives::{AgentDid, ContextType, CtxId, Visibility};
         use acdp_registry_store::ExtendedRegistryStore;
         use std::sync::{Arc, Mutex};
 
@@ -2318,27 +2318,75 @@ mod tests {
             "did:web:agents.test:admitbody#key-1".to_string(),
         );
 
-        let (v1_ctx, v1_body) = publish_v1(&store, &p, "the-predecessor").await;
+        // A THREE-deep lineage on purpose. With only v1->v2 the immediate
+        // predecessor is ALSO the lineage head, so a store that decoded the
+        // lineage-head row — the `first_row` SELECT sits ~10 lines below the
+        // hook in the same transaction — would be indistinguishable from a
+        // correct one. RFC-ACDP-0014 §4 keys on the IMMEDIATE predecessor's
+        // context_type and trust_class, so handing over v1 while superseding v2
+        // would both wrongly admit and wrongly refuse.
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "the-lineage-head").await;
 
         let v2 = p
             .supersede_body(&v1_body)
+            .title("the-immediate-predecessor")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let s = store.clone();
+        let v2c = v2.clone();
+        let v2_out = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2c,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: None,
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let v2_ctx = match v2_out {
+            PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => {
+                r.ctx_id.as_str().to_string()
+            }
+        };
+        let v2_body = store.get(&CtxId(v2_ctx.clone())).unwrap().unwrap().body;
+        assert_ne!(
+            v1_ctx, v2_ctx,
+            "fixture sanity: the lineage must actually be three deep"
+        );
+
+        // v3 supersedes v2 — so the hook must be handed V2's body, not v1's.
+        let v3 = p
+            .supersede_body(&v2_body)
             .title("the-successor")
             .context_type(ContextType::DataSnapshot)
             .visibility(Visibility::Public)
             .build()
             .unwrap();
 
-        let seen: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        #[allow(clippy::type_complexity)]
+        let seen: Arc<
+            Mutex<Option<(String, String, acdp::types::primitives::ContentHash)>>,
+        > = Arc::new(Mutex::new(None));
         let seen_c = seen.clone();
         let capture = move |b: &acdp::types::body::Body| {
-            *seen_c.lock().unwrap() = Some((b.ctx_id.as_str().to_string(), b.title.clone()));
+            *seen_c.lock().unwrap() = Some((
+                b.ctx_id.as_str().to_string(),
+                b.title.clone(),
+                b.content_hash.clone(),
+            ));
             Err(AcdpError::NotAuthorized("stop here".into()))
         };
 
         let s = store.clone();
         let _ = tokio::task::spawn_blocking(move || {
             s.commit_publish(PublishCommit {
-                req: &v2,
+                req: &v3,
                 authority: "reg.test",
                 idempotency: None,
                 tenant: None,
@@ -2350,14 +2398,110 @@ mod tests {
         .unwrap();
 
         let got = seen.lock().unwrap().clone();
-        let (got_ctx, got_title) = got.expect("the admission hook must have been invoked");
+        let (got_ctx, got_title, got_hash) =
+            got.expect("the admission hook must have been invoked");
         assert_eq!(
-            got_ctx, v1_ctx,
-            "the hook must receive the PREDECESSOR's body, not the successor's"
+            got_ctx, v2_ctx,
+            "the hook must receive the IMMEDIATE predecessor (v2), not the lineage head (v1)"
         );
         assert_eq!(
-            got_title, "the-predecessor",
-            "the hook must receive the PREDECESSOR's body, not the successor's"
+            got_title, "the-immediate-predecessor",
+            "the hook must receive the IMMEDIATE predecessor (v2), not the lineage head (v1)"
+        );
+        // content_hash pins every producer-controlled field at once — including
+        // `context_type`, the FIRST field the real rule reads (arm 4 admits
+        // unconditionally when the predecessor is not a key-revocation), so a
+        // re-derived or normalized body cannot slip through.
+        assert_eq!(
+            got_hash, v2_body.content_hash,
+            "the hook's body must be v2's byte-for-byte, not re-derived or normalized"
+        );
+    }
+
+    /// Test 2b — the REAL refusal variant propagates. Every other test here
+    /// refuses with `NotAuthorized`, chosen because this store never produces
+    /// it, so those assertions cannot pass on an unrelated rejection. But the
+    /// real closure — upstream `check_revocation_supersession` — can ONLY ever
+    /// return `SchemaViolation`. Without this test, a variant-selective
+    /// swallow passes the entire suite while disabling enforcement in
+    /// production 100% of the time:
+    ///
+    /// ```ignore
+    /// if let Err(e) = admit(&prev_body) {
+    ///     if !matches!(e, AcdpError::SchemaViolation(_)) { return Err(e); }
+    /// }
+    /// ```
+    ///
+    /// That reads like error normalization rather than deletion, which makes it
+    /// more plausible than simply removing the call — and it is precisely the
+    /// refusal the RFC-ACDP-0014 §4 rule actually emits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_propagates_the_real_schema_violation_refusal() {
+        use crate::SqliteStore;
+        use acdp::crypto::SigningKey;
+        use acdp::error::AcdpError;
+        use acdp::producer::Producer;
+        use acdp::registry::store::{PublishCommit, RegistryStore};
+        use acdp::types::primitives::{AgentDid, ContextType, CtxId, Status, Visibility};
+        use acdp_registry_store::ExtendedRegistryStore;
+        use std::sync::Arc;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        store.migrate().await.unwrap();
+        let store = Arc::new(store);
+
+        let p = Producer::new(
+            SigningKey::from_bytes(&[47u8; 32]),
+            AgentDid::new("did:web:agents.test:schemaviol".to_string()),
+            "did:web:agents.test:schemaviol#key-1".to_string(),
+        );
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "v1").await;
+
+        let v2 = p
+            .supersede_body(&v1_body)
+            .title("v2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        // Exactly what `check_revocation_supersession` returns on both of its
+        // refusal arms (§4 arm 2 trust-class mismatch, arm 3 type mismatch).
+        let deny = |_: &acdp::types::body::Body| {
+            Err(AcdpError::SchemaViolation(
+                "supersedes target is a key-revocation; successor must be one too".into(),
+            ))
+        };
+        let s = store.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&deny),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(outcome, Err(AcdpError::SchemaViolation(_))),
+            "the production refusal variant MUST propagate — a store that swallows \
+             SchemaViolation specifically would pass every other test here while \
+             enforcing nothing in production. Got {outcome:?}"
+        );
+        assert_eq!(
+            store
+                .get(&CtxId(v1_ctx))
+                .unwrap()
+                .unwrap()
+                .registry_state
+                .status,
+            Status::Active,
+            "a SchemaViolation refusal must not supersede the predecessor either"
         );
     }
 
