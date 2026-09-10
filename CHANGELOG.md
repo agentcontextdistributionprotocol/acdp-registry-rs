@@ -2134,9 +2134,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     test was verified by mutation: the call was deleted, hoisted above each gate,
     defanged at the parse, made to swallow the one error variant the real closure
     emits, pointed at the lineage-head row instead of the predecessor, and keyed
-    on the predecessor's type, the successor's type, the tenant and the receipt
-    minter — 16 mutations in all. Every one was observed failing its guard, and
-    most left all-but-one test green.
+    on the predecessor's type, the successor's type, the tenant, the receipt
+    minter and the visibility. Each was observed failing its guard, and most left
+    all-but-one test green — which is the point: several plausible wrong
+    implementations pass almost the whole suite, so each needed its own test. The
+    list is not a proof of exhaustiveness; three of these mutations were found by
+    review after the suite was already written and passing.
 
 <!-- REG-11 #168 (Lane B) -->
 

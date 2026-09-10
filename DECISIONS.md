@@ -795,7 +795,10 @@ corrected rather than quietly dropped:
 1. A `content_hash` assertion was described as proving the JSONB decode faithful. It compared
    two values that both round-trip through the same decoder — decode-vs-decode, which a lossy
    decode satisfies on both sides. It now compares against the hash captured from the
-   in-memory request.
+   in-memory request. **And the first correction of it was itself incomplete:** it was applied
+   to the pg suite only, while this file and `PROGRESS.md` both claimed it was fixed outright.
+   The sqlite twin kept the circular form for two further commits. Fixed in both, and recorded
+   here rather than silently completed, because "corrected" was itself an overstatement.
 2. A mutation table recorded an observation for a test that did not yet exist when that
    mutation was run. Re-run against the full suite; the corrected result is stronger than the
    one first recorded.
