@@ -31,8 +31,10 @@ The binary validates config before serving and refuses to boot on a misconfig
 
 - **Auth** — `jwt_signing_alg` ∈ {`HS256`, `EdDSA`}. EdDSA requires a non-empty
   `jwt_private_key_pem`. HS256 with an empty `jwt_secret` requires
-  `allow_ephemeral_secret = true`, otherwise it fails. A non-empty secret is
-  rejected if it is the literal `changeme`, and must decode to ≥32 bytes.
+  `allow_ephemeral_secret = true`, otherwise it fails. With auth enabled on
+  HS256, a non-empty secret is rejected if it is the literal `changeme`
+  (case-insensitive, after trimming), and must decode to ≥32 bytes. Under
+  EdDSA `jwt_secret` is not examined at all.
 - **Admin tokens** — every entry in `auth.admin_tokens` must be non-blank and
   carry no leading or trailing whitespace. An empty *list* remains valid and
   still means "admin routes disabled"; it is a bad *entry* that is refused.
@@ -282,7 +284,7 @@ publishes from non-`did:key` agents that aren't pinned.
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Skip DID-signature verification for hands-on demos. |
-| `pinned_only` | bool | `false` | Reject publishes from agents without a pinned key. |
+| `pinned_only` | bool | `false` | Reject publishes from agents without a pinned key. Also the only playground mode compatible with a configured `[receipt]` key — and it then requires at least one pinned key. |
 
 #### `[[playground.pinned_keys]]`
 

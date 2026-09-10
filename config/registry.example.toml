@@ -49,9 +49,10 @@ did_methods          = ["did:web"]
 # Base64-encoded ≥32-byte random secret. Generate with:
 #   openssl rand -base64 32
 # Override per environment via ACDP_REGISTRY_AUTH__JWT_SECRET.
-# The startup-time validator refuses to launch with the literal `changeme`,
-# and (with auth enabled + HS256) refuses an EMPTY secret unless
-# allow_ephemeral_secret = true below.
+# With auth enabled + HS256 the startup-time validator refuses to launch
+# with the literal `changeme` (matched case-insensitively, after trimming),
+# and refuses an EMPTY secret unless allow_ephemeral_secret = true below.
+# Both branches are the same check: neither runs while auth is disabled.
 jwt_secret           = ""
 # Local dev only: boot with a random process-lifetime HS256 key when
 # jwt_secret is empty. Tokens won't survive a restart. MUST stay false in
