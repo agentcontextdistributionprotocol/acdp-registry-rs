@@ -383,7 +383,7 @@
 //! `limits.publish_rate_per_minute` (`config.rs:560-561`) is a live config knob enforced
 //! by the in-process fixed-window `AgentRateLimiter` (`rate_limit.rs`, wired at
 //! `state.rs:86-89`), already proven end-to-end for the sibling challenge limiter
-//! (`http_integration.rs:843-873`, `challenge_endpoint_is_rate_limited`). This test
+//! (`http_integration.rs:889-922`, `challenge_endpoint_is_rate_limited`). This test
 //! exercises the SAME limiter on the publish path for real: a harness configured with
 //! `publish_rate_per_minute = 1`, one publish that succeeds, a second (different content,
 //! same producer) that trips the limiter, and asserts the REAL HTTP response -- 429,
@@ -397,8 +397,10 @@
 //! `no_excused_family_is_required_by_our_profile`) fail on an *unclassified* family or an
 //! *illegitimate excuse* -- never on a *classified-but-uncovered* one. A family with a
 //! logged skip reason and no coverage at all passes all four, which is exactly how `vis`
-//! and `idem` sat uncovered before Phases 8-10, and how `cur`/`rcpt`/`lhr`/`log` still do
-//! (#130). (`caps`/`lin` closed to COVERED in Phase 7; `lc` was DEFERRED under #115 until
+//! and `idem` sat uncovered before Phases 8-10. As of Phase 15 the only families still in
+//! that position are `rcpt`/`lhr`/`log`, and only for their consumer-role residue (#130);
+//! `cur` closed to `COVERED` in Phase 15. (`caps`/`lin` closed to COVERED in Phase 7; `lc`
+//! was DEFERRED under #115 until
 //! Phase 14 declared it EXCUSED instead -- see `EXCUSED`'s own entry for `lc` -- so #115
 //! now has zero `DEFERRED` members.) Phase 11 closes that gap with a fifth, deliberately
 //! UNCONDITIONAL test,
@@ -453,13 +455,38 @@
 //! `DEFERRED` -- was moved to `EXCUSED` in Phase 14 (see `EXCUSED`'s own entry for `lc`),
 //! so #115 now has zero `DEFERRED` members; the check below tolerates that (it only
 //! requires #115 membership OF whichever of the trio still happen to sit in `DEFERRED`,
-//! never that one must). The remaining `cur`/`rcpt`/`lhr`/`log` cite **#130**, filed
+//! never that one must). The remaining `rcpt`/`lhr`/`log` cite **#130**, filed
 //! enumerating each with its own reason (`meta` and `data-ref` closed to `COVERED` in
 //! Phase 10; `body` and `status` in Phase 11; `schema` in Phase 12; `sig`/`rev`/`dk` in
-//! Phase 13; `did-ssrf`/`err`/`rate` in Phase 14, same #130 filing).
+//! Phase 13; `did-ssrf`/`err`/`rate` in Phase 14; `cur` in Phase 15, same #130 filing).
 //! `known_families_partition_into_covered_excused_or_deferred` checks both: reason
 //! non-empty, issue is one of the two known-open numbers, and that any of the
 //! `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115.
+//!
+//! ## Partial coverage: `DEFERRED_PARTIAL_DIRECT` (REG-11 Phase 15)
+//!
+//! The partition above buckets by **family**, which leaves a gap once a family is
+//! only *partly* closable. `rcpt`/`lhr`/`log` each split cleanly in two: a producer
+//! half this registry really implements and whose spec goldens are recomputed here,
+//! and a consumer-role verification half it does not implement and is not owed (see
+//! each family's `DEFERRED` reason). The family stays `DEFERRED` -- truthfully, for
+//! the residue -- but nothing in the partition asks a `DEFERRED` family to name any
+//! test, so the golden-half tests would sit unguarded: deleting one would leave every
+//! check green.
+//!
+//! `DEFERRED_PARTIAL_DIRECT` closes that, with two tests rather than one because the
+//! first attempt was itself falsifiable:
+//! `deferred_partial_direct_test_functions_are_present` checks each named test exists,
+//! still wears its attribute, and still carries its `EXPECTED_*_ASSERTION_COUNT`
+//! ratchet (existence alone pins the symbol, not the coverage -- a gutted body passed
+//! it); and `deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct` checks
+//! the const's own membership against the `DEFERRED` prose, because otherwise deleting
+//! an entry simply made the first test vacuous while the reason still claimed the test
+//! could not be deleted.
+//!
+//! Deliberately not a fourth partition bucket, and not a fourth `DEFERRED` tuple
+//! field: `DEFERRED` is destructured by two other checks and its type is quoted above,
+//! so widening it edits five sites to gain only name-adjacency to the reason string.
 //!
 //! **Required-checks status (current, re-verified 2026-09-01 per `ASSUMPTIONS.md`):**
 //! `conformance (spec fixtures)` IS among this repo's required status-check contexts --
@@ -520,7 +547,7 @@ use tower::ServiceExt;
 const AUTHORITY: &str = "registry.test";
 
 /// Profiles the conformance harness registry advertises. Mirrors `caps().profiles`
-/// (`conformance.rs:61`) and `config().registry.profiles` (`:86`) — keep all three
+/// and `config().registry.profiles` — keep all three
 /// in step; `harness_profiles_match_caps_and_config` enforces it.
 const HARNESS_PROFILES: &[&str] = &["acdp-registry-core"];
 
@@ -5258,7 +5285,7 @@ fn wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted() {
 // `anc001_well_formed_anchor_is_accepted_and_round_trips`'s own doc comment
 // above; also `CHANGELOG.md`).** This repo's `POST /contexts` returns HTTP
 // **200** on a successful publish
-// (`crates/acdp-registry-core/src/handlers/context.rs:635`,
+// (`crates/acdp-registry-core/src/handlers/context.rs:656`,
 // `Ok(Json(response))`), never the fixtures' own literal `201`. Every
 // status this section asserts is the CORRECTED value (200/200/409/200/200
 // for `idem-001`..`005`), not the fixture literal -- each test below also
@@ -5286,7 +5313,7 @@ fn wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted() {
 // this file's harness can produce. Tolerated, not required or conditional:
 // NOT owed, and deliberately out of scope for this phase. `idem-007` is in
 // `conditional_fixtures`, gated on `acdp_version >= 0.3.0`
-// (`profiles.json:128`); this harness's `caps()` (`:327` above) advertises
+// (`profiles.json:128`); this harness's `caps()` (above) advertises
 // `"0.1.0"`, so the condition never fires and the fixture is NOT owed
 // either. (Separately, even if it WERE owed: `idem-007` pins a CONSUMER-side
 // cross-field check over a capabilities document -- "a 0.3.0 document with
@@ -5374,7 +5401,7 @@ async fn idem001_004_publish_idempotency_key_lifecycle_and_restart_durability() 
     };
 
     // Sanity: every one of the four fixtures' own preconditions is exactly
-    // what this harness's caps() (`:327` above) advertises --
+    // what this harness's caps() (above) advertises --
     // supports_idempotency_key: true, limits.idempotency_key_ttl_seconds:
     // 86400 -- so this harness is a faithful stand-in for what each fixture
     // asks to be tested against.
@@ -5937,7 +5964,7 @@ async fn idem_playground_branch_writes_no_idempotency_record_when_gated_off() {
 // (Context Correction 5 in the plan): anc-001 expects a *positive* publish
 // outcome carrying a content_hash/signature its own `input.notes` calls
 // placeholders that do not recompute over the fixture's own body —
-// `extract_shapes`'s Shape A (`:389-393` above) refuses any non-400 publish
+// `extract_shapes`'s Shape A (above) refuses any non-400 publish
 // outcome by design, for exactly that reason — and anc-002/anc-003 carry
 // only an `input.anchor_under_test` fragment, no full body. So, following
 // the same precedent as
@@ -5969,9 +5996,9 @@ async fn idem_playground_branch_writes_no_idempotency_record_when_gated_off() {
 //     `conditional_fixtures`.
 
 /// Capabilities for a `0.5.0`-advertising registry, built LOCALLY for the
-/// three anc-* tests below — do NOT mutate the shared `caps()` (`:142`,
-/// `"0.1.0"`), which `replays_spec_fixtures_when_present` (and other tests)
-/// depend on. Mirrors `did_key_caps()` (`:877`)'s pattern of cloning
+/// three anc-* tests below — do NOT mutate the shared `caps()`
+/// (`"0.1.0"`), which `replays_spec_fixtures_when_present` (and other tests)
+/// depend on. Mirrors `did_key_caps()`'s pattern of cloning
 /// `caps()` and bumping the one field under test.
 fn anc_caps_050() -> CapabilitiesDocument {
     let mut c = caps();
@@ -5981,9 +6008,9 @@ fn anc_caps_050() -> CapabilitiesDocument {
 
 /// A `0.5.0`-advertising harness, playground on (so a freshly-signed
 /// synthetic producer identity can publish without a live DID resolver) —
-/// the same shape as the file's shared `harness()` (`:205`) except for the
+/// the same shape as the file's shared `harness()` except for the
 /// swapped-in capabilities document, built locally the same way
-/// `did_key_harness()` (`:887`) builds its own isolated harness rather than
+/// `did_key_harness()` builds its own isolated harness rather than
 /// touching the shared one.
 async fn anc_harness_050() -> axum::Router {
     common::build_harness_with_webhook(
@@ -6073,7 +6100,7 @@ fn find_fixture_by_id(fixtures: &Path, id: &str) -> Option<Value> {
 
 /// anc-001 (RFC-ACDP-0016 §4/§5): a publish body carrying one well-formed
 /// `anchors` entry must be accepted, served intact, and its recomputed
-/// `content_hash` must match. `extract_shapes`'s Shape A (`:389-393`)
+/// `content_hash` must match. `extract_shapes`'s Shape A
 /// refuses this fixture by design — it is a *positive* publish outcome, and
 /// anc-001's own `content_hash`/`signature` are placeholders (per its
 /// `input.notes`) that don't recompute over its own body. So this test
@@ -7806,7 +7833,7 @@ type SchemaBodyPatch = (&'static str, fn(&mut Value, &Value));
 /// way, but for the wrong reason: a naive splice-verbatim test would report
 /// coverage of "limits is a closed sub-object" that does not actually
 /// exist. So this test instead takes this registry's OWN real, already-
-/// valid capabilities document (`caps()`, `conformance.rs:431` --
+/// valid capabilities document (`caps()` --
 /// self-checked as `"accept"` first) and splices ONLY the fixture's
 /// malformed `limits` object onto it, isolating the exact field this
 /// fixture exists to exercise.
@@ -8209,7 +8236,7 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 /// coverage — a family can sit classified-but-uncovered indefinitely, which
 /// is exactly what happened to `vis`/`idem` before Phases 8-10, and to
 /// `caps`/`lin` before Phase 7, and to `meta`/`data-ref` before Phase 10 --
-/// and what still holds for `cur`/`rcpt`/`lhr`/`log` (#130) today.
+/// and what still holds for `rcpt`/`lhr`/`log`'s consumer-role residue (#130) today.
 /// Every family in this list must now ALSO appear in exactly one of
 /// `COVERED`, `EXCUSED`, or `DEFERRED` — enforced unconditionally by
 /// `known_families_partition_into_covered_excused_or_deferred`, which needs
@@ -8301,7 +8328,7 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 /// `idem` (RFC-ACDP-0003 §6 idempotency keys) was never `EXCUSED` either —
 /// `idem-001`..`idem-005` sit in `acdp-registry-core`'s own
 /// `conditional_fixtures`, gated on `supports_idempotency_key: true`, which
-/// `caps()` (`:327` above) advertises, making them live obligations. The
+/// `caps()` (above) advertises, making them live obligations. The
 /// generic replay harness still classifies all five "requires pre-seeded
 /// state" (their `preconditions` key — an existing idempotency record —
 /// isn't a shape any of A/B/C/D dispatch on), but REG-10 Phase 10 gives
@@ -8909,6 +8936,77 @@ fn deferred_partial_direct_test_functions_are_present() {
             );
         }
     }
+}
+
+/// CHARTER rule 10's durable answer for this file: **line pins rot, so forbid them.**
+///
+/// Nineteen `conformance.rs`-relative self-citations had accumulated here, each
+/// correct when written and every one of them stale by the time it was found --
+/// clustered in eras, because each was written against the file as it stood that
+/// week. Two had drifted far enough to be actively misleading, citing unrelated
+/// module-doc lines. Phase 4 replaced them all with symbol references, which cannot
+/// rot, and this test is what stops them coming back.
+///
+/// **The enforcement had to be a test.** An earlier draft of this phase claimed
+/// rustdoc would validate intra-doc links here. It does not: `cargo doc` never
+/// documents test targets (it invokes rustdoc only on this crate's `src/main.rs`),
+/// and rustc does not evaluate `rustdoc::` lints, so a broken reference in a
+/// `tests/` file produces zero warnings from both `cargo test` and
+/// `RUSTDOCFLAGS="-D warnings" cargo doc`. Any criterion resting on "rustdoc clean"
+/// would have been vacuous for every change in this unit. This test runs in the
+/// required `tests` job, needs no spec checkout and no CI change.
+///
+/// **The pattern is deliberately narrow** -- a backtick immediately followed by a
+/// colon and a digit, or this file's own name followed by a colon and a digit. It
+/// does NOT match `some_other_file.rs:NNN`, and must not be broadened to, because
+/// *cross-file* pins are legitimate and are meant to stay numeric: a reference into
+/// another file cannot be expressed as a symbol this file can resolve. Six such
+/// pins are intentionally left in place.
+///
+/// **On the two exceptions this phase was told to allow-list:** neither needs one,
+/// and it is worth recording why rather than carrying a dead allow-list. The
+/// carve-out granted to another lane cites `crates/acdp-registry-sqlite/src/store.rs`
+/// and its pg sibling, and the `err-001` leak-check payload is the bare string
+/// `src/store.rs` plus a line number -- both are cross-file forms, so the narrow
+/// pattern above skips them by construction, not by exemption. Do not "fix" the
+/// `err-001` strings: they are deliberately leak-shaped *test payload*, asserting
+/// that an internal error envelope does NOT echo them back.
+///
+/// The needles are assembled at runtime so this function's own source does not
+/// contain a literal instance of what it searches for.
+#[test]
+fn no_numeric_self_citations() {
+    let backtick_colon = format!("{}{}", '`', ':');
+    let own_file_colon = format!("conformance{}rs{}", '.', ':');
+
+    let mut offenders: Vec<String> = Vec::new();
+    for (index, line) in OWN_SOURCE.lines().enumerate() {
+        for needle in [&backtick_colon, &own_file_colon] {
+            let mut from = 0usize;
+            while let Some(found) = line[from..].find(needle.as_str()) {
+                let after = from + found + needle.len();
+                if line[after..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit())
+                {
+                    offenders.push(format!("  line {}: {}", index + 1, line.trim()));
+                    break;
+                }
+                from = after;
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "numeric self-citation(s) reintroduced into this file -- line pins rot as the \
+         file grows, and every one of the nineteen that accumulated here was stale by the \
+         time it was found. Cite the symbol instead (`caps()`, `extract_shapes`'s Shape A), \
+         which cannot drift. Cross-file pins into OTHER files are fine and are not matched \
+         here.\n{}",
+        offenders.join("\n")
+    );
 }
 
 /// The reverse-containment half of `DEFERRED_PARTIAL_DIRECT`, and the reason it
@@ -9755,7 +9853,7 @@ const EXPECTED_SIG002_VECTOR_COUNT: usize = 2;
 
 /// sig-002 (RFC-ACDP-0001 §5.4, conditional on `supported_signature_
 /// algorithms` including `"ecdsa-p256"` — live under this file's shared
-/// `caps()`, `:436`, which advertises exactly that): the ECDSA-P256 golden
+/// `caps()`, which advertises exactly that): the ECDSA-P256 golden
 /// vector, TWO vectors in one fixture:
 ///   * vector 0 — a real RFC-6979-deterministic P-256 signature over the
 ///     SAME `producer_content` as sig-001 (byte-identical, per the fixture's
@@ -9852,7 +9950,7 @@ async fn sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected() {
 }
 
 /// A `0.3.0`-advertising registry, for the rev-001 test below -- built
-/// locally so as not to touch the shared `caps()` (`:433`, `"0.1.0"`),
+/// locally so as not to touch the shared `caps()` (`"0.1.0"`),
 /// mirroring `anc_caps_050`'s / `did_key_caps`'s pattern. RFC-ACDP-0014
 /// §4/§5's key-revocation shape gate and self-signed-revocation refusal
 /// (`key_revocation_gate_applies`, `acdp-server`'s `validator.rs`) both key
@@ -10011,7 +10109,7 @@ const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
 /// dk-001/002/004 (RFC-ACDP-0001 §5.11.1, conditional -- bundled with
 /// sig-003 under "supported_did_methods includes did:key" -- live on
 /// `did_key_harness(did_key_caps())`, the same posture
-/// `did_key_golden_vector_accepted_and_gated` (above, `:4874`) already
+/// `did_key_golden_vector_accepted_and_gated` (above) already
 /// builds for sig-003/dk-003): three did:key resolution NEGATIVES.
 ///
 /// **Discovered wrong-reason trap (report this plainly, do not paper over
@@ -10259,7 +10357,7 @@ fn did_web_authority_is_ip_literal(did: &str) -> bool {
 ///     `key_resolution_failed`/400. This is a genuine, if not fully
 ///     glued-into-one-HTTP-call, proof: the registry's publish path in
 ///     THIS harness runs under `playground.enabled = true`
-///     (`config()`, `:509` above), which bypasses did:web resolution
+///     (`config()` above), which bypasses did:web resolution
 ///     entirely, so no black-box `POST /contexts` in this harness's own
 ///     configuration ever reaches `WebResolver` -- the same reason `sig-*`/
 ///     `rev-*`'s golden vectors need `pinned_producer_harness` instead of
@@ -10728,8 +10826,7 @@ fn rate_producer(seed: u8) -> Producer {
 /// 429/`rate_limited`/`Retry-After`
 /// (`acdp-registry-types/src/error.rs`) -- already proven end-to-end for
 /// the sibling `/auth/challenge` limiter by `http_integration.rs`'s
-/// `challenge_endpoint_is_rate_limited` (`:843-873` at the pin this
-/// phase's plan named). This test exercises the SAME limiter, same
+/// `challenge_endpoint_is_rate_limited`. This test exercises the SAME limiter, same
 /// mechanism, on the publish path instead: a harness configured with
 /// `publish_rate_per_minute = 1`, one publish that succeeds under budget,
 /// and a second (different content, same producer) that trips the limiter
