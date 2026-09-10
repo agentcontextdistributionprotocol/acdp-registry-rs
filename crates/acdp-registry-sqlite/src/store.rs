@@ -2186,8 +2186,8 @@ mod tests {
 
     // ── RFC-ACDP-0014 §4 `predecessor_admission` enforcement ──────────────
     //
-    // These five tests exist because nothing else in this repo would catch the
-    // admission hook being removed, defanged or hoisted. acdp 0.10.0 added the
+    // These eight tests exist because nothing else in this repo would catch the
+    // admission hook being removed, defanged, hoisted or fast-pathed. acdp 0.10.0 added the
     // hook as a plain (non-`#[non_exhaustive]`) struct field, so a store that
     // binds it and never calls it COMPILES CLEANLY and silently stops enforcing
     // a normative MUST — no failure, no warning, and the conformance fixtures
@@ -2196,10 +2196,23 @@ mod tests {
     // Each test kills a specific mutation. Do not weaken one without checking
     // which mutation it was the only guard against:
     //
-    //   delete the `admit(..)?` call          -> tests 1 and 2 fail
-    //   hoist above the `!is_owner` gate      -> test 3 fails
-    //   hoist above the AlreadySuperseded gate-> test 4 fails
-    //   swap the parse `?` for `if let Ok`    -> test 5 fails
+    //   delete the `admit(..)?` call            -> tests 1, 2, 2b fail
+    //   hoist above the `!is_owner` gate        -> test 3 fails
+    //   hoist above the AlreadySuperseded gate  -> test 4 fails
+    //   swap the parse `?` for `if let Ok`      -> test 5 fails
+    //   swallow only SchemaViolation            -> test 2b fails
+    //   read the lineage-head row instead       -> test 2 fails
+    //   skip on a key-revocation PREDECESSOR    -> test 2c fails
+    //   skip on tenant / minter / non-public /
+    //     key-revocation SUCCESSOR              -> test 2d fails
+    //
+    // Deliberately NOT guarded, because it is an equivalent mutant rather than a
+    // defect: `if prev_status == "active"`. The `status` column tracks
+    // supersession ONLY (see migrations/010_lifecycle_events.sql) and is written
+    // in exactly one shape, `SET status = 'superseded'`, so it is always either
+    // 'active' or 'superseded' — and the guard directly above returns Err on
+    // 'superseded'. At this line `prev_status` is necessarily "active", so the
+    // condition is a tautology. No test can kill it and none should try.
 
     /// Test 1 — refusal aborts the WHOLE publish. The closure's error must
     /// propagate unwrapped, and nothing may survive: no successor row, no

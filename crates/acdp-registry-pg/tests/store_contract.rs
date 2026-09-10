@@ -1285,6 +1285,12 @@ mod visibility_sql {
 /// Each test kills a specific mutation — see the sqlite mod for the full table.
 /// Every one of these mutations leaves the OTHER tests green, which is the whole
 /// reason each needs its own guard.
+///
+/// One mutation is deliberately unguarded because it is an equivalent mutant, not
+/// a defect: `if prev_status == "active"`. The `status` column tracks supersession
+/// only and is written in exactly one shape (`SET status = 'superseded'`), so the
+/// guard directly above the hook — which rejects `'superseded'` — leaves
+/// `prev_status` necessarily `"active"` at the call. The condition is a tautology.
 mod predecessor_admission {
     use super::*;
     use acdp::error::SupersessionReason;
