@@ -2184,6 +2184,495 @@ mod tests {
         );
     }
 
+    // ── RFC-ACDP-0014 §4 `predecessor_admission` enforcement ──────────────
+    //
+    // These five tests exist because nothing else in this repo would catch the
+    // admission hook being removed, defanged or hoisted. acdp 0.10.0 added the
+    // hook as a plain (non-`#[non_exhaustive]`) struct field, so a store that
+    // binds it and never calls it COMPILES CLEANLY and silently stops enforcing
+    // a normative MUST — no failure, no warning, and the conformance fixtures
+    // do not cover the reject path (spec issue #57).
+    //
+    // Each test kills a specific mutation. Do not weaken one without checking
+    // which mutation it was the only guard against:
+    //
+    //   delete the `admit(..)?` call          -> tests 1 and 2 fail
+    //   hoist above the `!is_owner` gate      -> test 3 fails
+    //   hoist above the AlreadySuperseded gate-> test 4 fails
+    //   swap the parse `?` for `if let Ok`    -> test 5 fails
+
+    /// Test 1 — refusal aborts the WHOLE publish. The closure's error must
+    /// propagate unwrapped, and nothing may survive: no successor row, no
+    /// supersession of the predecessor, no idempotency record.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_refusal_aborts_the_whole_publish() {
+        use crate::SqliteStore;
+        use acdp::crypto::SigningKey;
+        use acdp::error::AcdpError;
+        use acdp::producer::Producer;
+        use acdp::registry::store::{PendingIdempotencyCommit, PublishCommit, RegistryStore};
+        use acdp::types::primitives::{AgentDid, ContextType, CtxId, Status, Visibility};
+        use acdp_registry_store::ExtendedRegistryStore;
+        use std::sync::Arc;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        store.migrate().await.unwrap();
+        let store = Arc::new(store);
+
+        let p = Producer::new(
+            SigningKey::from_bytes(&[41u8; 32]),
+            AgentDid::new("did:web:agents.test:admitdeny".to_string()),
+            "did:web:agents.test:admitdeny#key-1".to_string(),
+        );
+
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "v1").await;
+
+        let v2 = p
+            .supersede_body(&v1_body)
+            .title("v2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        // A refusal shape the store itself never produces, so the assertion
+        // below cannot pass by accident on some unrelated rejection.
+        let deny = |_: &acdp::types::body::Body| {
+            Err(AcdpError::NotAuthorized(
+                "succession refused by policy".into(),
+            ))
+        };
+        let s = store.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: "reg.test",
+                idempotency: Some(PendingIdempotencyCommit {
+                    key: "admit-deny-key",
+                    ttl: chrono::Duration::hours(1),
+                }),
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&deny),
+            })
+        })
+        .await
+        .unwrap();
+
+        // Propagated unwrapped — NOT remapped to RegistryInternal.
+        assert!(
+            matches!(outcome, Err(AcdpError::NotAuthorized(_))),
+            "the admission closure's own error must propagate unwrapped, got {outcome:?}"
+        );
+
+        // The predecessor must NOT have been marked superseded.
+        let v1_after = store.get(&CtxId(v1_ctx.clone())).unwrap().unwrap();
+        assert_eq!(
+            v1_after.registry_state.status,
+            Status::Active,
+            "a refused succession must not supersede the predecessor"
+        );
+
+        // The successor must NOT have been inserted.
+        let page = store
+            .list_contexts(100, None, None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items.len(),
+            1,
+            "a refused succession must not insert the successor"
+        );
+
+        // No idempotency record may survive either.
+        assert_eq!(
+            store.count_idempotency_records().await.unwrap(),
+            Some(0),
+            "a refused succession must not claim its idempotency key"
+        );
+    }
+
+    /// Test 2 — the hook receives the PREDECESSOR's body, not the successor's.
+    /// A mis-wiring that passes the new body satisfies test 1 while checking
+    /// the wrong thing entirely.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_receives_the_predecessors_body() {
+        use crate::SqliteStore;
+        use acdp::crypto::SigningKey;
+        use acdp::error::AcdpError;
+        use acdp::producer::Producer;
+        use acdp::registry::store::{PublishCommit, RegistryStore};
+        use acdp::types::primitives::{AgentDid, ContextType, Visibility};
+        use acdp_registry_store::ExtendedRegistryStore;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        store.migrate().await.unwrap();
+        let store = Arc::new(store);
+
+        let p = Producer::new(
+            SigningKey::from_bytes(&[42u8; 32]),
+            AgentDid::new("did:web:agents.test:admitbody".to_string()),
+            "did:web:agents.test:admitbody#key-1".to_string(),
+        );
+
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "the-predecessor").await;
+
+        let v2 = p
+            .supersede_body(&v1_body)
+            .title("the-successor")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        let seen: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let seen_c = seen.clone();
+        let capture = move |b: &acdp::types::body::Body| {
+            *seen_c.lock().unwrap() = Some((b.ctx_id.as_str().to_string(), b.title.clone()));
+            Err(AcdpError::NotAuthorized("stop here".into()))
+        };
+
+        let s = store.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&capture),
+            })
+        })
+        .await
+        .unwrap();
+
+        let got = seen.lock().unwrap().clone();
+        let (got_ctx, got_title) = got.expect("the admission hook must have been invoked");
+        assert_eq!(
+            got_ctx, v1_ctx,
+            "the hook must receive the PREDECESSOR's body, not the successor's"
+        );
+        assert_eq!(
+            got_title, "the-predecessor",
+            "the hook must receive the PREDECESSOR's body, not the successor's"
+        );
+    }
+
+    /// Test 3 — ORDERING / anti-oracle guard. A non-owner superseding someone
+    /// else's context must be turned away as `superseded_target{NotFound}`
+    /// WITHOUT the admission hook ever firing. If the hook ran first, publish
+    /// would become a non-owner existence-and-context_type oracle on the
+    /// predecessor — the exact leak the upstream contract forbids. The error
+    /// alone does not discriminate (a correct and an oracle-leaking store both
+    /// return NotFound), so the captured flag is this test's entire point.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_does_not_fire_for_a_non_owner() {
+        use crate::SqliteStore;
+        use acdp::crypto::SigningKey;
+        use acdp::error::{AcdpError, SupersessionReason};
+        use acdp::producer::Producer;
+        use acdp::registry::store::{PublishCommit, RegistryStore};
+        use acdp::types::primitives::{AgentDid, ContextType, Visibility};
+        use acdp_registry_store::ExtendedRegistryStore;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        store.migrate().await.unwrap();
+        let store = Arc::new(store);
+
+        let owner = Producer::new(
+            SigningKey::from_bytes(&[43u8; 32]),
+            AgentDid::new("did:web:agents.test:owner".to_string()),
+            "did:web:agents.test:owner#key-1".to_string(),
+        );
+        let (_v1_ctx, v1_body) = publish_v1(&store, &owner, "owned").await;
+
+        // A DIFFERENT producer attempts the supersession.
+        let stranger = Producer::new(
+            SigningKey::from_bytes(&[44u8; 32]),
+            AgentDid::new("did:web:agents.test:stranger".to_string()),
+            "did:web:agents.test:stranger#key-1".to_string(),
+        );
+        let v2 = stranger
+            .supersede_body(&v1_body)
+            .title("hostile-v2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_c = fired.clone();
+        let tripwire = move |_: &acdp::types::body::Body| {
+            fired_c.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+
+        let s = store.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&tripwire),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(
+                outcome,
+                Err(AcdpError::SupersededTarget {
+                    reason: SupersessionReason::NotFound,
+                    ..
+                })
+            ),
+            "a non-owner must get the uniform NotFound shape, got {outcome:?}"
+        );
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "the admission hook MUST NOT run for a non-owner — doing so leaks the \
+             predecessor's existence and context_type to a caller who owns nothing"
+        );
+    }
+
+    /// Test 4 — ORDERING guard for the AlreadySuperseded gate. The upstream
+    /// contract puts admission strictly after it ("never earlier"), and arm 5
+    /// of RFC-ACDP-0014 §4 is explicitly out of the hook's scope. Without this
+    /// test, hoisting the call to the ownership gate passes tests 1-3 while
+    /// violating the documented caller contract.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_does_not_fire_for_an_already_superseded_predecessor() {
+        use crate::SqliteStore;
+        use acdp::crypto::SigningKey;
+        use acdp::error::{AcdpError, SupersessionReason};
+        use acdp::producer::Producer;
+        use acdp::registry::store::{PublishCommit, RegistryStore};
+        use acdp::types::primitives::{AgentDid, ContextType, CtxId, Visibility};
+        use acdp_registry_store::ExtendedRegistryStore;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        store.migrate().await.unwrap();
+        let store = Arc::new(store);
+
+        let p = Producer::new(
+            SigningKey::from_bytes(&[45u8; 32]),
+            AgentDid::new("did:web:agents.test:doubleseq".to_string()),
+            "did:web:agents.test:doubleseq#key-1".to_string(),
+        );
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "v1").await;
+
+        // First supersession succeeds: v1 becomes `superseded`.
+        let v2 = p
+            .supersede_body(&v1_body)
+            .title("v2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let s = store.clone();
+        let first = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: None,
+            })
+        })
+        .await
+        .unwrap();
+        assert!(
+            first.is_ok(),
+            "the first supersession must succeed: {first:?}"
+        );
+        assert_eq!(
+            store
+                .get(&CtxId(v1_ctx.clone()))
+                .unwrap()
+                .unwrap()
+                .registry_state
+                .status,
+            acdp::types::primitives::Status::Superseded,
+            "precondition: v1 must now be superseded"
+        );
+
+        // A SECOND supersession of the same, now-superseded v1.
+        let v2b = p
+            .supersede_body(&v1_body)
+            .title("v2-again")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_c = fired.clone();
+        let tripwire = move |_: &acdp::types::body::Body| {
+            fired_c.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let s = store.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2b,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&tripwire),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(
+                outcome,
+                Err(AcdpError::SupersededTarget {
+                    reason: SupersessionReason::AlreadySuperseded,
+                    ..
+                })
+            ),
+            "a second supersession must report AlreadySuperseded, got {outcome:?}"
+        );
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "the admission hook MUST NOT run once AlreadySuperseded has rejected — \
+             arm 5 of RFC-ACDP-0014 §4 is out of the hook's scope and the upstream \
+             contract says 'never earlier'"
+        );
+    }
+
+    /// Test 5 — a predecessor whose stored body will not deserialize must FAIL
+    /// the publish, never silently skip the check. Swallowing the decode (e.g.
+    /// `if let Ok(b) = ... { admit(&b)?; }`) passes every other test here,
+    /// because their fixtures all hold valid bodies — and turns a corrupt row
+    /// into a bypass of the MUST. Deliberately does not assert *which* error,
+    /// so it survives the RegistryInternal-vs-SchemaViolation decision.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_is_not_skipped_when_the_predecessor_body_is_undecodable() {
+        use crate::SqliteStore;
+        use acdp::crypto::SigningKey;
+        use acdp::producer::Producer;
+        use acdp::registry::store::{PublishCommit, RegistryStore};
+        use acdp::types::primitives::{AgentDid, ContextType, Visibility};
+        use acdp_registry_store::ExtendedRegistryStore;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        store.migrate().await.unwrap();
+        let store = Arc::new(store);
+
+        let p = Producer::new(
+            SigningKey::from_bytes(&[46u8; 32]),
+            AgentDid::new("did:web:agents.test:corrupt".to_string()),
+            "did:web:agents.test:corrupt#key-1".to_string(),
+        );
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "v1").await;
+
+        let v2 = p
+            .supersede_body(&v1_body)
+            .title("v2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        // Corrupt ONLY the predecessor's stored body, behind the store's back.
+        // Valid JSON, but not a `Body` — so the failure under test is the
+        // decode, not a malformed column.
+        sqlx::query("UPDATE contexts SET body_json = ? WHERE ctx_id = ?")
+            .bind(r#"{"not":"a body"}"#)
+            .bind(&v1_ctx)
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_c = fired.clone();
+        let admit_all = move |_: &acdp::types::body::Body| {
+            fired_c.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let s = store.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&admit_all),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            outcome.is_err(),
+            "an undecodable predecessor body must fail the publish rather than \
+             silently skipping the RFC-ACDP-0014 §4 admission check, got {outcome:?}"
+        );
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "the hook cannot have run: there was no decodable body to hand it"
+        );
+    }
+
+    /// Publish a v1 for the admission tests and return `(ctx_id, body)`.
+    async fn publish_v1(
+        store: &std::sync::Arc<crate::SqliteStore>,
+        p: &acdp::producer::Producer,
+        title: &str,
+    ) -> (String, acdp::types::body::Body) {
+        use acdp::registry::store::{PublishCommit, PublishCommitOutcome, RegistryStore};
+        use acdp::types::primitives::{ContextType, CtxId, Visibility};
+
+        let v1 = p
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let s = store.clone();
+        let resp = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v1,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: None,
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let ctx = match resp {
+            PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => {
+                r.ctx_id.as_str().to_string()
+            }
+        };
+        let body = store.get(&CtxId(ctx.clone())).unwrap().unwrap().body;
+        (ctx, body)
+    }
+
     /// Receipts persist atomically with the row and round-trip on every
     /// read path: the publish response, `get`, and `lineage`. Receipt
     /// fields minted from the assigned body equal the row's identifiers
