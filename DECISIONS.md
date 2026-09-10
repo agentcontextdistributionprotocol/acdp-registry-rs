@@ -648,3 +648,82 @@ reviewable at all.
 previously-unlogged Phase 3 assumption recorded retroactively in `ASSUMPTIONS.md`. Two
 standing rules adopted: the criterion-amendment rule (entry 4) and the ruling-extension bar
 (above).
+
+---
+
+## 5. `secure_compare::ct_eq` is `pub(crate)`, not `pub` (2026-09-10)
+
+**Plan:** `plans/u003-metrics-ct-eq.md` (U-003 — landing PR #171, `/metrics` constant-time
+bearer, #168). **Decided by:** Opus, reversible tier — not escalated.
+
+**The assumption as logged.** PR #171 extracted the private `fn ct_eq` out of
+`handlers::admin` into a new `secure_compare` module and exported it `pub`. `/implement`
+logged this UNCONFIRMED, reasoning that `acdp-registry-core` is an internal crate with no
+external consumers and that `pub` preserved the option of another workspace crate calling
+the helper later.
+
+**Analysis (fresh Opus agent, independent).** The option being preserved does not exist,
+and cannot:
+
+- **Six of the seven sibling crates could never call it.** The dependency graph is
+  `types ← store ← {pg, sqlite}`, `types ← auth`, `types ← webhook`, with
+  `core → {auth, store, types, webhook, sqlite}` and `server → core`. `acdp-registry-core`
+  sits second from the top, so `auth`, `webhook`, `store`, `types`, `pg` and `sqlite` are
+  all *below* it — calling up would be a dependency cycle. `pub` cannot serve them at any
+  point; only relocating the helper to `acdp-registry-types` would, and nothing down there
+  needs it.
+- **The one eligible crate does not need it.** `acdp-registry-server`'s only
+  credential-adjacent comparisons are `main.rs:78`/`:93` (`jwt_signing_alg` vs `"EdDSA"` —
+  not secret) and `main.rs:153` (`token != token.trim()` — startup validation of the
+  operator's own configured value, no attacker-controlled input, no request-path timing
+  channel).
+- **No latent second consumer anywhere.** `acdp-registry-webhook` only *produces*
+  `X-ACDP-Signature` (`lib.rs:249`) and never verifies one, so there is no MAC compare to
+  protect; `acdp-registry-auth` verifies via `jsonwebtoken::decode`, so the signature
+  compare is inside RustCrypto, not our code; replay protection is an atomic
+  `ChallengeStore::take(&nonce)` lookup, not a byte compare; and the `prior_hash`
+  comparisons in the pg/sqlite stores are over a public content/idempotency identifier.
+
+**Two facts that decided it.**
+
+1. **`publish = false` is weaker than the assumption treated it as.** It is a *release-plz*
+   key (`release-plz.toml:5`), not Cargo's. No `crates/*/Cargo.toml` carries Cargo's own
+   `publish = false`, so a manual `cargo publish -p acdp-registry-core` is unblocked today,
+   and that line's own comment states the flip to `true` is intended. When it flips, every
+   `pub` item silently becomes a semver commitment.
+2. **On `main` this helper was *private*.** The `pub` is a widening newly introduced by the
+   extraction, incidental to its actual purpose (deduplication) — not a posture being
+   preserved. Framing it as "keep what #171 chose" obscured that the refactor itself
+   created the exposure.
+
+`ct_eq` is also a poor thing to commit to publicly: `secure_compare.rs:14-16` documents that
+it deliberately does **not** hide token length, so an external caller taking it for a
+general-purpose constant-time compare would be misled.
+
+**Decision: narrowed to `pub(crate)`.** Two lines —
+`crates/acdp-registry-core/src/secure_compare.rs:17` and
+`crates/acdp-registry-core/src/lib.rs:13`. No `Cargo.toml`/`Cargo.lock` change. Compiler-
+verified safe: both call sites are `crate::`-rooted, the unit tests are an in-file
+`mod tests` on `super::*`, and the only other mention of `ct_eq` outside the crate is a
+comment. Docs cite the module by **file path**, never by Rust import path, so no doc edit
+was needed.
+
+**Rejected middle options.** `#[doc(hidden)]` on a still-`pub` item (hides it from docs
+while leaving it callable and semver-relevant — the worst of both); moving the helper to
+`acdp-registry-types` (the only change that would genuinely unlock the six lower crates,
+but speculative restructuring for a need that does not exist, and it would require a
+Cargo edit that is out of scope for this unit).
+
+**Why this is not a violation of the "land #171 as written" constraint.** The merge commit
+`a1af331` is untouched and its tree remains bit-identical to the pre-merge trial — that
+property was always a property *of that commit* and stays true permanently. The constraint
+forbade smuggling a tidy-up *inside* the landing; this is a separate, analyzed, reviewed
+follow-up, which is exactly what the UNCONFIRMED entry was logged to produce. The approach
+#171 chose — one shared helper, both gates calling it, same implementation, same location —
+is unchanged. Acceptance criterion 1 ("exactly one constant-time helper, both gates calling
+it") holds identically under `pub(crate)`.
+
+---
+
+5 entries: **4 confirmed, 1 changed, 0 deferred.** The change is applied in full, not
+deferred — no code follow-up blocks `/ship`.

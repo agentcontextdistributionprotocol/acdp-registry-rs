@@ -546,4 +546,4 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   internal workspace crate with no external consumers, so this is not a published API
   commitment; narrowing to `pub(crate)` later is a one-line mechanical change that the
   compiler fully verifies. Nothing is foreclosed.
-- **Status:** UNCONFIRMED
+- **Status:** CHANGED -> CONFIRMED (2026-09-10). Reconciled to `pub(crate)`; see `DECISIONS.md` entry 5. The kept-`pub` rationale did not survive analysis.

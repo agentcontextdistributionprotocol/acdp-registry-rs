@@ -10,7 +10,7 @@ pub mod metrics;
 pub mod playground;
 pub mod rate_limit;
 pub mod receipt;
-pub mod secure_compare;
+pub(crate) mod secure_compare;
 pub mod state;
 pub mod witness;
 

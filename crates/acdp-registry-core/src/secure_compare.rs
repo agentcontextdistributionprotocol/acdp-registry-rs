@@ -14,7 +14,7 @@
 /// Note the length guard is itself an early return, so token length remains
 /// observable at both call sites. That is accepted in the existing design —
 /// what this protects is the token *contents*.
-pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
