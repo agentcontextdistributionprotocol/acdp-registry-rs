@@ -547,6 +547,42 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   commitment; narrowing to `pub(crate)` later is a one-line mechanical change that the
   compiler fully verifies. Nothing is foreclosed.
 - **Status:** CHANGED -> CONFIRMED (2026-09-10). Reconciled to `pub(crate)`; see `DECISIONS.md` entry 5. The kept-`pub` rationale did not survive analysis.
+## `predecessor_admission` enforcement: store-level coverage, not end-to-end wiring
+
+- **Plan:** `plans/u-001-acdp-0.10.0-predecessor-admission.md` (U-001)
+- **Assumed:** proving that each store *invokes* the admission closure and propagates its
+  `Err` is the right scope for this unit, and that no test here needs to prove the closure is
+  actually threaded in on a real HTTP publish.
+- **Chose:** store-level tests only. Both regression suites call `commit_publish` directly
+  with a hand-built closure. The `Some(..)` construction lives entirely in upstream
+  `RegistryServer::commit_via_store` (`acdp-server-0.10.0/src/registry/server.rs:716-727`),
+  which this repo does not own and cannot meaningfully re-test; and the conformance fixtures
+  do not cover the RFC-ACDP-0014 §4 reject path at all (spec issue #57, upstream).
+- **Alternatives:** an end-to-end HTTP test superseding a key-revocation context. Rejected
+  for this unit: it would live in `crates/acdp-registry-server/tests/conformance.rs`, which
+  is held by U-004, and it would be testing upstream's wiring rather than ours.
+- **Blast radius if wrong:** if upstream ever stopped passing `Some(..)`, our stores would
+  silently never be asked to enforce, and nothing in this repo would notice. Low likelihood
+  (upstream has its own tests), but the residual is real and is recorded here rather than
+  left implicit.
+- **Status:** UNCONFIRMED
+
+## Corrupt predecessor `body_json` is reported as `RegistryInternal`, not `SchemaViolation`
+
+- **Plan:** `plans/u-001-acdp-0.10.0-predecessor-admission.md` (U-001)
+- **Assumed:** a predecessor row whose `body_json` will not deserialize is a registry-side
+  integrity fault, not a malformed client request.
+- **Chose:** `AcdpError::RegistryInternal(format!("decode body: {e}"))`, exact parity with
+  how `row_to_context` already reports the same failure in both stores (pg `:1469-1470`,
+  sqlite `:1545-1546`).
+- **Alternatives:** `SchemaViolation`, which is non-transient and would avoid the wart below.
+  Rejected: it blames the producer for the registry's own bad data and diverges from every
+  other decode failure in these stores.
+- **Blast radius if wrong:** `RegistryInternal` reports `is_transient() == true`
+  (`acdp-primitives-0.10.0/src/error.rs:297-306`), so a *permanently* corrupt predecessor row
+  is advertised to producers as retryable and invites a retry loop. The wart is pre-existing
+  and repo-wide (every `row_to_context` decode has it); fixing it is its own unit, not
+  something to smuggle into a dependency bump. Reversible in one line.
 
 ## `cur-002`'s message-leak rationale is documented, not satisfied
 
@@ -571,4 +607,5 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   message change in `error.rs` plus tightening this test's assertion; nothing built on top of
   the current behaviour would need to change. The risk of the current choice is only that the
   gap is forgotten — which this entry exists to prevent.
+||||||| 51d312b
 - **Status:** UNCONFIRMED

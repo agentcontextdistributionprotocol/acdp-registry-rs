@@ -87,6 +87,7 @@ fn commit(
             }),
             tenant: None,
             receipt_minter: None,
+            predecessor_admission: None,
         })
     })
 }
@@ -561,6 +562,7 @@ mod transparency_log {
                 idempotency: None,
                 tenant: None,
                 receipt_minter: Some(&mint),
+                predecessor_admission: None,
             })
         })
         .expect("logged publish succeeds");
@@ -619,6 +621,7 @@ mod transparency_log {
                 idempotency: None,
                 tenant: None,
                 receipt_minter: None,
+                predecessor_admission: None,
             })
         })
         .expect_err("log-enabled publish without a receipt must fail");
@@ -649,6 +652,7 @@ mod transparency_log {
                 idempotency: None,
                 tenant: None,
                 receipt_minter: Some(&failing),
+                predecessor_admission: None,
             })
         })
         .expect_err("failing minter must abort the publish");
@@ -686,6 +690,7 @@ mod transparency_log {
                         idempotency: None,
                         tenant: None,
                         receipt_minter: Some(&mint),
+                        predecessor_admission: None,
                     })
                 })
             })
@@ -1048,6 +1053,7 @@ mod visibility_sql {
                 idempotency: None,
                 tenant: Some(&tenant),
                 receipt_minter: None,
+                predecessor_admission: None,
             })
         })
         .await
@@ -1264,5 +1270,700 @@ mod visibility_sql {
             seen, public_ids,
             "pagination drains exactly the visible public set"
         );
+    }
+}
+
+/// RFC-ACDP-0014 §4 `predecessor_admission` enforcement — Postgres.
+///
+/// The sqlite backend has the same suite; these are duplicated on purpose. pg
+/// and sqlite are independent implementations of one contract, pg is the
+/// production backend, and a guard proven only on sqlite protects nothing here.
+/// pg additionally has a type-specific failure mode sqlite does not: its
+/// `body_json` is JSONB, read as `serde_json::Value` and decoded with
+/// `from_value`, where sqlite's is TEXT decoded with `from_str`.
+///
+/// Each test kills a specific mutation — see the sqlite mod for the full table.
+/// Every one of these mutations leaves the OTHER tests green, which is the whole
+/// reason each needs its own guard.
+///
+/// One mutation is deliberately unguarded because it is an equivalent mutant, not
+/// a defect: `if prev_status == "active"`. The `status` column tracks supersession
+/// only and is written in exactly one shape (`SET status = 'superseded'`), so the
+/// guard directly above the hook — which rejects `'superseded'` — leaves
+/// `prev_status` necessarily `"active"` at the call. The condition is a tautology.
+mod predecessor_admission {
+    use super::*;
+    use acdp::error::SupersessionReason;
+    use acdp::types::primitives::{CtxId, Status};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    /// Publish a v1 for these tests and return `(ctx_id, body)`.
+    async fn publish_v1(
+        store: &Arc<PgStore>,
+        p: &Producer,
+        title: &str,
+    ) -> (CtxId, acdp::types::body::Body) {
+        let out = commit(Arc::clone(store), request(p, title), None)
+            .await
+            .unwrap()
+            .expect("v1 publish");
+        let ctx = response(&out).ctx_id.clone();
+        let body = store
+            .get(&ctx)
+            .expect("retrieve ok")
+            .expect("v1 present")
+            .body;
+        (ctx, body)
+    }
+
+    fn supersede(p: &Producer, prev: &acdp::types::body::Body, title: &str) -> PublishRequest {
+        supersede_as(p, prev, title, ContextType::DataSnapshot)
+    }
+
+    fn supersede_as(
+        p: &Producer,
+        prev: &acdp::types::body::Body,
+        title: &str,
+        ct: ContextType,
+    ) -> PublishRequest {
+        p.supersede_body(prev)
+            .title(title)
+            .context_type(ct)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid successor request")
+    }
+
+    /// Test 1 — refusal aborts the whole publish: error propagates unwrapped,
+    /// predecessor stays active, successor is absent, no idempotency record.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admission_refusal_aborts_the_whole_publish() {
+        let Some(url) = pg_url_or_skip() else { return };
+        let store = store(&url).await;
+        let p = producer(91);
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "v1").await;
+        let v2 = supersede(&p, &v1_body, "v2");
+        let idem_key = format!("admit-deny-{}", uuid_key());
+
+        // A variant this store never produces, so the assertion cannot pass on
+        // an unrelated rejection.
+        let deny = |_: &acdp::types::body::Body| {
+            Err(AcdpError::NotAuthorized(
+                "succession refused by policy".into(),
+            ))
+        };
+        let s = Arc::clone(&store);
+        let key = idem_key.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: AUTHORITY,
+                idempotency: Some(PendingIdempotencyCommit {
+                    key: &key,
+                    ttl: chrono::Duration::hours(1),
+                }),
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&deny),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(outcome, Err(AcdpError::NotAuthorized(_))),
+            "the closure's own error must propagate unwrapped, got {outcome:?}"
+        );
+        assert_eq!(
+            store.get(&v1_ctx).unwrap().unwrap().registry_state.status,
+            Status::Active,
+            "a refused succession must not supersede the predecessor"
+        );
+        assert!(
+            no_row_for_idem_key(&store, &idem_key).await,
+            "a refused succession must not claim its idempotency key"
+        );
+    }
+
+    /// Test 2b — the REAL refusal variant. Upstream `check_revocation_supersession`
+    /// can only ever return `SchemaViolation`; without this, a store swallowing
+    /// exactly that variant passes every other test while enforcing nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admission_propagates_the_real_schema_violation_refusal() {
+        let Some(url) = pg_url_or_skip() else { return };
+        let store = store(&url).await;
+        let p = producer(92);
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "v1").await;
+        let v2 = supersede(&p, &v1_body, "v2");
+
+        let deny = |_: &acdp::types::body::Body| {
+            Err(AcdpError::SchemaViolation(
+                "supersedes target is a key-revocation; successor must be one too".into(),
+            ))
+        };
+        let s = Arc::clone(&store);
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: AUTHORITY,
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&deny),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(outcome, Err(AcdpError::SchemaViolation(_))),
+            "the production refusal variant MUST propagate, got {outcome:?}"
+        );
+        assert_eq!(
+            store.get(&v1_ctx).unwrap().unwrap().registry_state.status,
+            Status::Active,
+            "a SchemaViolation refusal must not supersede the predecessor either"
+        );
+    }
+
+    /// Test 2 — the hook receives the IMMEDIATE predecessor, not the lineage
+    /// head. Three-deep on purpose: with only v1->v2 the two coincide and a
+    /// store reading the first-version row would be indistinguishable.
+    /// Also pins `content_hash`, which covers every producer-controlled field
+    /// including `context_type` (the first field the real rule reads).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admission_receives_the_immediate_predecessors_body() {
+        let Some(url) = pg_url_or_skip() else { return };
+        let store = store(&url).await;
+        let p = producer(93);
+
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "the-lineage-head").await;
+        let v2_req = supersede(&p, &v1_body, "the-immediate-predecessor");
+        let v2_req_hash = v2_req.content_hash.clone();
+        let v2_out = commit(Arc::clone(&store), v2_req, None)
+            .await
+            .unwrap()
+            .expect("v2 publish");
+        let v2_ctx = response(&v2_out).ctx_id.clone();
+        let v2_body = store.get(&v2_ctx).unwrap().unwrap().body;
+        // Captured from the in-memory REQUEST, never from a decoded row. The
+        // stored body round-trips through the same `from_value::<Body>` the hook
+        // uses, so comparing the hook's body to `store.get(..).body` would be
+        // decode-vs-decode: a lossy decode corrupts both sides identically and
+        // still passes. This is the independent side of the comparison.
+        let v2_expected_hash = v2_body.content_hash.clone();
+        assert_eq!(
+            v2_expected_hash.as_str(),
+            v2_req_hash.as_str(),
+            "fixture sanity: the stored hash must equal the one the producer signed, \
+             which is what makes the assertion below independent of the decode path"
+        );
+        assert_ne!(
+            v1_ctx.as_str(),
+            v2_ctx.as_str(),
+            "fixture sanity: the lineage must really be three deep"
+        );
+        let v3 = supersede(&p, &v2_body, "the-successor");
+
+        #[allow(clippy::type_complexity)]
+        let seen: Arc<
+            Mutex<Option<(String, String, acdp::types::primitives::ContentHash)>>,
+        > = Arc::new(Mutex::new(None));
+        let seen_c = Arc::clone(&seen);
+        let capture = move |b: &acdp::types::body::Body| {
+            *seen_c.lock().unwrap() = Some((
+                b.ctx_id.as_str().to_string(),
+                b.title.clone(),
+                b.content_hash.clone(),
+            ));
+            Err(AcdpError::NotAuthorized("stop here".into()))
+        };
+        let s = Arc::clone(&store);
+        let _ = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v3,
+                authority: AUTHORITY,
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&capture),
+            })
+        })
+        .await
+        .unwrap();
+
+        let got = seen.lock().unwrap().clone();
+        let (got_ctx, got_title, got_hash) = got.expect("the hook must have been invoked");
+        assert_eq!(
+            got_ctx,
+            v2_ctx.as_str(),
+            "the hook must receive the IMMEDIATE predecessor (v2), not the lineage head (v1)"
+        );
+        assert_eq!(got_title, "the-immediate-predecessor");
+        assert_eq!(
+            got_hash, v2_req_hash,
+            "the hook's body must carry the hash the PRODUCER signed — compared against the \
+             request, not against another decode of the same row, so this genuinely proves \
+             the JSONB -> serde_json::Value -> from_value path is faithful"
+        );
+    }
+
+    /// Test 2c — the hook fires for a KEY-REVOCATION predecessor: the one type
+    /// §4 constrains, and absent from every other fixture, so a type-keyed fast
+    /// path would survive the rest of the suite.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admission_fires_for_a_key_revocation_predecessor() {
+        let Some(url) = pg_url_or_skip() else { return };
+        let store = store(&url).await;
+        let p = producer(94);
+
+        let v1 = p
+            .publish_request()
+            .title("revocation-of-key-1")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid revocation request");
+        let out = commit(Arc::clone(&store), v1, None)
+            .await
+            .unwrap()
+            .expect("revocation v1 publish");
+        let v1_ctx = response(&out).ctx_id.clone();
+        let v1_body = store.get(&v1_ctx).unwrap().unwrap().body;
+        assert_eq!(
+            v1_body.context_type,
+            ContextType::KeyRevocation,
+            "fixture sanity: the predecessor must really be a key-revocation"
+        );
+        let v2 = supersede(&p, &v1_body, "successor-of-a-revocation");
+
+        let seen: Arc<Mutex<Option<ContextType>>> = Arc::new(Mutex::new(None));
+        let seen_c = Arc::clone(&seen);
+        let capture = move |b: &acdp::types::body::Body| {
+            *seen_c.lock().unwrap() = Some(b.context_type.clone());
+            Ok(())
+        };
+        let s = Arc::clone(&store);
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: AUTHORITY,
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&capture),
+            })
+        })
+        .await
+        .unwrap();
+        assert!(outcome.is_ok(), "the closure admitted: {outcome:?}");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(ContextType::KeyRevocation),
+            "the hook MUST run when the predecessor is a key-revocation — the only case \
+             RFC-ACDP-0014 §4 constrains"
+        );
+    }
+
+    /// Test 3 — anti-oracle ordering guard. A non-owner must be turned away as
+    /// `superseded_target{NotFound}` WITHOUT the hook firing; running it first
+    /// leaks the predecessor's existence and type to a caller who owns nothing.
+    /// The error alone does not discriminate, so the captured flag is the point.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admission_does_not_fire_for_a_non_owner() {
+        let Some(url) = pg_url_or_skip() else { return };
+        let store = store(&url).await;
+        let owner = producer(95);
+        let (_v1_ctx, v1_body) = publish_v1(&store, &owner, "owned").await;
+
+        let stranger = producer(96);
+        let v2 = supersede(&stranger, &v1_body, "hostile-v2");
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_c = Arc::clone(&fired);
+        let tripwire = move |_: &acdp::types::body::Body| {
+            fired_c.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let s = Arc::clone(&store);
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: AUTHORITY,
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&tripwire),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(
+                outcome,
+                Err(AcdpError::SupersededTarget {
+                    reason: SupersessionReason::NotFound,
+                    ..
+                })
+            ),
+            "a non-owner must get the uniform NotFound shape, got {outcome:?}"
+        );
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "the hook MUST NOT run for a non-owner — doing so leaks the predecessor's \
+             existence and context_type to a caller who owns nothing"
+        );
+    }
+
+    /// Test 4 — ordering guard for the AlreadySuperseded gate. Upstream puts
+    /// admission strictly after it ("never earlier"); arm 5 of §4 is out of the
+    /// hook's scope. Without this, hoisting to the ownership gate passes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admission_does_not_fire_for_an_already_superseded_predecessor() {
+        let Some(url) = pg_url_or_skip() else { return };
+        let store = store(&url).await;
+        let p = producer(97);
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "v1").await;
+
+        let first = commit(Arc::clone(&store), supersede(&p, &v1_body, "v2"), None)
+            .await
+            .unwrap();
+        assert!(
+            first.is_ok(),
+            "the first supersession must succeed: {first:?}"
+        );
+        assert_eq!(
+            store.get(&v1_ctx).unwrap().unwrap().registry_state.status,
+            Status::Superseded,
+            "precondition: v1 must now be superseded"
+        );
+
+        let v2b = supersede(&p, &v1_body, "v2-again");
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_c = Arc::clone(&fired);
+        let tripwire = move |_: &acdp::types::body::Body| {
+            fired_c.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let s = Arc::clone(&store);
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2b,
+                authority: AUTHORITY,
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&tripwire),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(
+                outcome,
+                Err(AcdpError::SupersededTarget {
+                    reason: SupersessionReason::AlreadySuperseded,
+                    ..
+                })
+            ),
+            "a second supersession must be rejected as AlreadySuperseded — pinning the \
+             reason matters because the tripwire alone cannot tell which gate rejected, \
+             got {outcome:?}"
+        );
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "the hook MUST NOT run once AlreadySuperseded has rejected"
+        );
+    }
+
+    /// Test 5 — an undecodable predecessor body must FAIL the publish, never
+    /// silently skip the check. pg's body_json is JSONB, so the corruption must
+    /// be VALID JSON that is not a `Body`; a non-JSON string would be rejected
+    /// by the UPDATE itself and the test would pass for the wrong reason.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admission_is_not_skipped_when_the_predecessor_body_is_undecodable() {
+        let Some(url) = pg_url_or_skip() else { return };
+        let store = store(&url).await;
+        let p = producer(98);
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "v1").await;
+        let v2 = supersede(&p, &v1_body, "v2");
+
+        // Capture the real body first so the corruption can be undone below.
+        let (original_body_json,): (serde_json::Value,) =
+            sqlx::query_as("SELECT body_json FROM contexts WHERE ctx_id = $1")
+                .bind(v1_ctx.as_str())
+                .fetch_one(store.pool())
+                .await
+                .expect("read the predecessor body before corrupting it");
+
+        let updated = sqlx::query("UPDATE contexts SET body_json = $1::jsonb WHERE ctx_id = $2")
+            .bind(r#"{"not":"a body"}"#)
+            .bind(v1_ctx.as_str())
+            .execute(store.pool())
+            .await
+            .expect("corrupting UPDATE must succeed — valid JSON, just not a Body");
+        assert_eq!(
+            updated.rows_affected(),
+            1,
+            "the corrupting UPDATE must actually have hit the predecessor row"
+        );
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_c = Arc::clone(&fired);
+        let admit_all = move |_: &acdp::types::body::Body| {
+            fired_c.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let s = Arc::clone(&store);
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: AUTHORITY,
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: Some(&admit_all),
+            })
+        })
+        .await
+        .unwrap();
+
+        // Pin the DECODE specifically. `is_err()` alone would also be satisfied
+        // by the ownership / lineage / version / AlreadySuperseded gates, all of
+        // which run before the hook — so it would not prove the decode is what
+        // failed.
+        match &outcome {
+            Err(AcdpError::RegistryInternal(msg)) => assert!(
+                msg.contains("decode body"),
+                "the failure must be the predecessor-body decode, got RegistryInternal({msg})"
+            ),
+            other => panic!(
+                "an undecodable predecessor body must fail the publish with the decode \
+                 error rather than silently skipping the RFC-ACDP-0014 §4 admission \
+                 check, got {other:?}"
+            ),
+        }
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "the hook cannot have run: there was no decodable body to hand it"
+        );
+
+        // Undo the corruption. The suite shares a database and this row is
+        // otherwise permanently undecodable — leaving it behind would break any
+        // future untenanted list/search test in this file, which would then fail
+        // far from its cause. Restoring (rather than deleting) is what the schema
+        // allows: `lineages.first_version_ctx` has a FK onto this row.
+        sqlx::query("UPDATE contexts SET body_json = $1 WHERE ctx_id = $2")
+            .bind(&original_body_json)
+            .bind(v1_ctx.as_str())
+            .execute(store.pool())
+            .await
+            .expect("restore the deliberately corrupted row");
+        assert!(
+            store.get(&v1_ctx).is_ok(),
+            "the restored row must decode again, so the shared database is left clean"
+        );
+    }
+
+    /// Test 6 — concurrency, MIXED race. The plan's shape: N racing successors
+    /// over one predecessor where ONE contender's admission closure refuses and
+    /// the rest admit. Exactly one must win, the winner must never be the
+    /// refused contender, and the refusal must leave nothing behind.
+    ///
+    /// An all-refuse race would be strictly weaker: with no winner, parallel and
+    /// serialized execution are indistinguishable and the test would pass with
+    /// THREADS = 1. Mixing an admitting winner in is what actually exercises the
+    /// hook against the store's `FOR UPDATE` serialization.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admission_refusal_loses_a_race_without_disturbing_the_winner() {
+        let Some(url) = pg_url_or_skip() else { return };
+        let store = store(&url).await;
+        let p = producer(99);
+        let (v1_ctx, v1_body) = publish_v1(&store, &p, "v1").await;
+
+        // Contender 0 refuses; contenders 1..N admit. All target the same v1.
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let req = supersede(&p, &v1_body, &format!("contender-{i}"));
+                let s = Arc::clone(&store);
+                tokio::task::spawn_blocking(move || {
+                    let deny = |_: &acdp::types::body::Body| {
+                        Err(AcdpError::NotAuthorized("refused".into()))
+                    };
+                    let admit = |_: &acdp::types::body::Body| Ok(());
+                    let hook: &(dyn Fn(&acdp::types::body::Body) -> Result<(), AcdpError>
+                          + Send
+                          + Sync) = if i == 0 { &deny } else { &admit };
+                    (
+                        i,
+                        s.commit_publish(PublishCommit {
+                            req: &req,
+                            authority: AUTHORITY,
+                            idempotency: None,
+                            tenant: None,
+                            receipt_minter: None,
+                            predecessor_admission: Some(hook),
+                        }),
+                    )
+                })
+            })
+            .collect();
+
+        let mut winners = Vec::new();
+        let mut refused_contender_won = false;
+        for h in handles {
+            let (i, r) = h.await.unwrap();
+            match r {
+                Ok(_) => {
+                    winners.push(i);
+                    if i == 0 {
+                        refused_contender_won = true;
+                    }
+                }
+                Err(AcdpError::NotAuthorized(_)) => assert_eq!(
+                    i, 0,
+                    "only the refused contender may fail with the closure's own error"
+                ),
+                Err(AcdpError::SupersededTarget { .. }) => {}
+                Err(other) => panic!("unexpected failure from contender {i}: {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            winners.len(),
+            1,
+            "exactly one supersession must win the race, got winners {winners:?}"
+        );
+        assert!(
+            !refused_contender_won,
+            "the contender whose admission closure refused must never win"
+        );
+        assert_eq!(
+            store.get(&v1_ctx).unwrap().unwrap().registry_state.status,
+            Status::Superseded,
+            "the single winner must have superseded the predecessor"
+        );
+        // v1 plus exactly one successor — the refusal and the losers persisted
+        // nothing, and the winner's rollback-free path left exactly one row.
+        assert_eq!(
+            store.lineage(&v1_body.lineage_id).unwrap().len(),
+            2,
+            "the lineage must hold v1 and exactly one successor"
+        );
+    }
+
+    /// Test 7 — the hook fires across the axes every other test holds constant.
+    /// The rest of this suite always passes `tenant: None`, `receipt_minter:
+    /// None`, and a `DataSnapshot` successor, so any fast path keyed on one of
+    /// those survives the whole suite while disabling the rule in production:
+    ///
+    /// ```ignore
+    /// predecessor_admission.filter(|_| tenant.is_none())
+    /// predecessor_admission.filter(|_| receipt_minter.is_none())
+    /// predecessor_admission.filter(|_| !matches!(req.context_type, ContextType::KeyRevocation))
+    /// ```
+    ///
+    /// All three are production configurations, and the successor-keyed one is
+    /// exactly the "optimization" §4's own wording ("successor must be one too")
+    /// invites. One test covering all three axes at once kills all three.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admission_fires_with_tenant_receipts_and_a_key_revocation_successor() {
+        let Some(url) = pg_url_or_skip() else { return };
+        let store = store(&url).await;
+        let p = producer(90);
+        let tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
+
+        // v1 under a real tenant, with a real receipt minter.
+        let minter = |_: &acdp::types::body::Body| Ok(serde_json::json!({"kind": "test-receipt"}));
+        // Restricted, not Public: every other test in this suite is Public, so a
+        // visibility-keyed fast path would otherwise survive the whole suite.
+        let v1 = p
+            .publish_request()
+            .title("v1-tenanted")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Restricted)
+            .audience(vec![AgentDid::new(
+                "did:web:agents.test:audience".to_string(),
+            )])
+            .build()
+            .expect("valid restricted request");
+        let s = Arc::clone(&store);
+        let t = tenant.clone();
+        let v1_out = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v1,
+                authority: AUTHORITY,
+                idempotency: None,
+                tenant: Some(&t),
+                receipt_minter: Some(&minter),
+                predecessor_admission: None,
+            })
+        })
+        .await
+        .unwrap()
+        .expect("tenanted v1 publish");
+        let v1_ctx = response(&v1_out).ctx_id.clone();
+        let v1_body = store.get(&v1_ctx).unwrap().unwrap().body;
+
+        // Successor is a KEY-REVOCATION, under the same tenant, with a minter.
+        let v2 = p
+            .supersede_body(&v1_body)
+            .title("revocation-successor")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Restricted)
+            .audience(vec![AgentDid::new(
+                "did:web:agents.test:audience".to_string(),
+            )])
+            .build()
+            .expect("valid restricted revocation successor");
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_c = Arc::clone(&fired);
+        let tripwire = move |_: &acdp::types::body::Body| {
+            fired_c.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let s = Arc::clone(&store);
+        let t = tenant.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: AUTHORITY,
+                idempotency: None,
+                tenant: Some(&t),
+                receipt_minter: Some(&minter),
+                predecessor_admission: Some(&tripwire),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(outcome.is_ok(), "the closure admitted: {outcome:?}");
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "the hook MUST fire with a tenant set, a receipt minter present, and a \
+             key-revocation successor under RESTRICTED visibility — four axes every other \
+             test in this suite holds constant, so a fast path keyed on any of them would \
+             otherwise ship silently"
+        );
+    }
+
+    /// Distinct idempotency key per run, so these tests never collide with a
+    /// prior run's rows in a shared database. A real UUID, matching the rest of
+    /// this file — a nanosecond clock is not a uniqueness guarantee.
+    fn uuid_key() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    async fn no_row_for_idem_key(store: &Arc<PgStore>, key: &str) -> bool {
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT count(*) FROM idempotency_records WHERE key = $1")
+                .bind(key)
+                .fetch_optional(store.pool())
+                .await
+                .expect("count query");
+        row.map(|(n,)| n == 0).unwrap_or(true)
     }
 }
