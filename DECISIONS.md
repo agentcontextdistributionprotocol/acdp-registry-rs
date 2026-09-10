@@ -1154,3 +1154,42 @@ re-pointed.**
    single `CURSOR_MALFORMED` constant named above. This is the failure mode CHARTER rule 10
    exists to surface, and it is a genuine argument against citing line ranges in an
    append-only file at all — a follow-up worth taking up separately from this unit.
+
+## 12. W2-U2 — the shared cursor codec is plainly `pub`, not hidden (2026-09-10)
+
+**Decided by:** Opus. The lane assignment named this call explicitly as mine and explicitly
+NOT an escalation. Recorded because entry 5 sets the opposite-looking precedent and a future
+reader would otherwise read the two as inconsistent.
+
+**The apparent conflict.** Entry 5 narrowed `secure_compare::ct_eq` from `pub` to
+`pub(crate)`. This unit makes `encode_cursor`/`decode_cursor` `pub`. Those look contradictory
+and are not, for one material reason: **`ct_eq`'s callers were all inside
+`acdp-registry-core`, so narrowing it compiled. This codec's callers are in two *different*
+crates** — `acdp-registry-sqlite` and `acdp-registry-pg` — so `pub(crate)` in
+`acdp-registry-store` does not compile at all. `pub` here is forced by the crate boundary,
+not chosen over a narrower alternative. Deduplicating across crates and keeping the item
+crate-private are mutually exclusive; #187 asked for the former.
+
+**The live choice was therefore only whether to hide it**, via `#[doc(hidden)]` or a
+deliberately-internal module name. Kept plainly `pub` and documented:
+
+- Entry 5 already considered and rejected `#[doc(hidden)]` on a still-`pub` item as a middle
+  option — it hides from docs but not from the type system, so it buys undiscoverability
+  rather than encapsulation. That reasoning applies unchanged here, and adopting it now would
+  be the real inconsistency with entry 5, not this.
+- A cursor codec is a coherent thing for this crate to expose. `acdp-registry-store` is where
+  the store contract lives; a third backend would need exactly this and should find it.
+- The wire format is documented at the module level, which matters more than visibility: the
+  format is what any future backend must agree on, and an undocumented-but-reachable item is
+  how two implementations silently diverge — which is the very failure #187 exists to end.
+
+**Blast radius, and when this stops being reversible.** `release-plz.toml:5` currently sets
+`publish = false`, with the comment "flip to true once crates are ready for crates.io". So
+today this is an internal workspace detail and narrowing it later costs one commit. **When
+that flag flips, this becomes a public API commitment.** That is the moment to revisit — not
+because the decision is wrong, but because its cost changes. Flagged here rather than left
+for someone to discover at publish time.
+
+**What would change my mind:** a second consumer appearing that wants a *different* cursor
+format. Then the right shape is a trait with the codec behind it, not a free function — and
+that is a bigger change than visibility.
