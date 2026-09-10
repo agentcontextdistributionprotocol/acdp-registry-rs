@@ -33,8 +33,12 @@ use uuid::Uuid;
 ///
 /// The scope is not local convention: RFC-ACDP-0009 §2.10 reserves this
 /// profile's version field as the schema version of the event *envelope*,
-/// independent of `acdp_version`. Expect the next real move to come from that
-/// promotion (reserved name `event_version`), not from a variant edit.
+/// independent of `acdp_version`. That section is **reserved, not normative** —
+/// it says implementations must not depend on its sketch for interoperability,
+/// and this envelope already diverges from it (`schema_version` vs the reserved
+/// `event_version`, `type` vs `event_type`). It corroborates the *scope* chosen
+/// here rather than mandating it. Expect the next real move to come from that
+/// section's promotion, not from a variant edit.
 ///
 /// Per-variant wire changes are recorded in `docs/WEBHOOKS.md` under "Wire
 /// change history" instead. Precedent: #179 renamed the `context.retracted` /
@@ -1049,6 +1053,7 @@ mod tests {
 
         for event in every_wire_event() {
             let tag = variant_tag(&event);
+            let dotted = event.name();
             let raw = deliver_one(event).await;
             let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
 
@@ -1066,6 +1071,15 @@ mod tests {
 
             // The envelope's id is the delivery dedupe key, and it is what
             // the receiver must see in both places.
+            // The dotted header name is a documented wire contract
+            // (docs/WEBHOOKS.md) and is deliberately NOT the snake_case `type`
+            // carried in the body. Nothing else asserts it.
+            assert_eq!(
+                header_value(head, "x-acdp-event").as_deref(),
+                Some(dotted),
+                "{tag}: X-ACDP-Event must carry the dotted event name"
+            );
+
             let body_id = value["event_id"].as_str().expect("event_id in body");
             let header_id = header_value(head, "x-acdp-event-id").expect("X-ACDP-Event-Id header");
             assert_eq!(

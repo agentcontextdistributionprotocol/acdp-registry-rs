@@ -2119,11 +2119,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     every construction site lives in `crates/acdp-registry-core`, and the
     emitted JSON is byte-identical either way.
   - **`schema_version` deliberately stays `"1.0"`.** It describes the
-    envelope, which did not change, and it is emitted on all five event
-    types — bumping it would report a change to receivers of the three types
-    that were never affected. The constant's doc comment, which previously
-    promised a bump on "any" backwards-incompatible shape change, has been
-    narrowed to match what it actually tracks.
+    envelope, which did not change, and it is stamped per *delivery* — so a
+    `search.executed` body carrying a bumped version would assert that
+    something about that delivery changed when nothing did. That holds however
+    many variants a future change touches. The constant's doc comment, which
+    previously promised a bump on "any" backwards-incompatible shape change,
+    has been narrowed to match what it actually tracks.
   - Enforced by a test that drives all five variants through the real
     emitter and asserts on the serialized body. Duplicate detection walks
     the raw JSON with a `MapAccess` visitor rather than parsing to

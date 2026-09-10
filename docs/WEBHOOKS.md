@@ -153,9 +153,11 @@ relied on last-wins was reading the *lifecycle* id. It now reads the *delivery*
 id. Read `lifecycle_event_id` instead to keep the old value.
 
 `schema_version` deliberately stays `"1.0"`. It describes the **envelope**, which
-did not change, and it is emitted on all five event types — bumping it would
-signal a change to receivers of the three types that were never affected. Do not
-expect it to move for a per-variant field change; those are recorded here.
+did not change. It is also stamped on each *delivery*, so it says something about
+that delivery rather than about the event stream — a `search.executed` body
+carrying a bumped version would assert that something about *that* delivery
+changed, when nothing did. Do not expect it to move for a per-variant field
+change, however many variants that change touches; those are recorded here.
 
 ### `search.executed`
 
@@ -175,9 +177,10 @@ expect it to move for a per-variant field change; those are recorded here.
 ## Wire change history
 
 `schema_version` tracks the **envelope** and moves only when the envelope shape
-changes. Per-variant field changes do not move it — it is emitted on every event
-type, so bumping it for a change affecting some of them would misreport the rest.
-Those changes are recorded here instead. Newest first.
+changes. Per-variant field changes do not move it, no matter how many variants
+they touch: the value is stamped per *delivery*, so bumping it would assert that
+something about every delivery changed — including the four event types that were
+never affected. Those changes are recorded here instead. Newest first.
 
 | change | affects | `schema_version` |
 |--------|---------|------------------|

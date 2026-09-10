@@ -590,7 +590,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   `event_id` to `lifecycle_event_id` does not warrant bumping the envelope's
   `WEBHOOK_SCHEMA_VERSION`.
 - **Chose:** keep `"1.0"` and instead narrow the constant's doc comment
-  (`crates/acdp-registry-webhook/src/lib.rs:20-31`), which previously promised a bump on
+  (`crates/acdp-registry-webhook/src/lib.rs:20-46`), which previously promised a bump on
   "any backwards-incompatible change to the serialized event shape".
 - **Rationale CORRECTED at reconcile (2026-09-10).** The original argument — "only two of
   five variants changed, so bumping misreports the other three" — **does not hold**, and is
