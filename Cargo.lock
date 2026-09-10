@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "acdp"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a6820ea250edc4645091e86c3d53d3f738c469a4c471bb76433d8f4048f6873"
+checksum = "9749e0470d25046c52fdb9194783f2e553033d05474114cbe3a258c2df714593"
 dependencies = [
  "acdp-client",
  "acdp-crypto",
@@ -23,9 +23,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-client"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4483ffe39546a364d0f2acf7d3bf2a48a2173925a0cd9bf485999b7bdbcfe733"
+checksum = "c77558b175a09cae58f0609c274d4d1182a20aca18208e0966c356d28c2acf54"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -49,9 +49,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-crypto"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2c70a8b4033333386bd94bba79c22dc977656c6a687a14018d1e7656c146f7d"
+checksum = "06fb094e33c06850b1703de5ebd1551102a0539d412ba977432acdaea147203a"
 dependencies = [
  "acdp-did",
  "acdp-jcs",
@@ -72,9 +72,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-did"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3469313fda6d283c904e841a5cd3bc50e72c53852ac4a4283b0a42f2e422407d"
+checksum = "42c6ee64c7bbf901d1032035e6990fc048324de77487ba2f688f04ce0b370f31"
 dependencies = [
  "acdp-primitives",
  "acdp-safe-http",
@@ -91,9 +91,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-jcs"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ede304be126a5f31b01502107372d4a9c7bba18d7880c6921dc42859dc265d2"
+checksum = "30fad5c413df04ff98cd9f2ba1e17a659e630618d9e56516ca57aa2db50f74c1"
 dependencies = [
  "acdp-primitives",
  "serde",
@@ -102,9 +102,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-primitives"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccf22a05890876e6d1c08318a9a6f39575d6c52ad9e2aacf6db6de3f154e9e33"
+checksum = "c7980f9d538540efc32f2f0b56824c32f4bca12cb7967e482c29e1b21d5367f5"
 dependencies = [
  "chrono",
  "reqwest",
@@ -116,9 +116,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-producer"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42ab010a1c00c9605001e9623212c7bd5ae846be4d79933cd31201abcd56a7f2"
+checksum = "3f852b28ab16452d6b6b54c633ae39bcb898115288ff09583fd0252678c02d04"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -306,9 +306,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-safe-http"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "603d61c7a97cca344c6fe0181b56347f8fb7dcdf14dcd1d01eb38c9bbea1480a"
+checksum = "6065fb5277ff47613308eaad6d7351d4846054f361e0b594038abcae50415b62"
 dependencies = [
  "acdp-primitives",
  "reqwest",
@@ -318,9 +318,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-server"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "789468b80da91a8dcc8dd169eb69c86a3d367112da6294a5c0e3c45c91bffcf5"
+checksum = "957ad95bf3cc65acf122a7cb07ae01118cdb43081e42f4ba5361e0656342faa1"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -339,9 +339,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-types"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f7b15535dc9772ccf3acba45644d6843358d324085de690a37fa274f2579094"
+checksum = "793f076339b6920b173cc3f3c35288947333fecf8a371215a58c3bb231b1701b"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -357,9 +357,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-validation"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81ecd8d6f21b5e2ecc91f54b37dc27bbd7e1f9481dbc7afe08731f491abeb7dc"
+checksum = "81914d3882353d757afeb614cc925425c354c7f1f2aafe09b8968270137f4d1d"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -375,9 +375,9 @@ dependencies = [
 
 [[package]]
 name = "acdp-verify"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a4b12229962747763b442a00a54096fbc39214d581154c180f8230d05263bf1"
+checksum = "0b596b00dd226c8c229894dbe923a62b008df98ee844c14863915a15d5aabb20"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
