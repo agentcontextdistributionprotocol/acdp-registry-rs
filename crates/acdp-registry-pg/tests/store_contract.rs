@@ -87,6 +87,7 @@ fn commit(
             }),
             tenant: None,
             receipt_minter: None,
+            predecessor_admission: None,
         })
     })
 }
@@ -561,6 +562,7 @@ mod transparency_log {
                 idempotency: None,
                 tenant: None,
                 receipt_minter: Some(&mint),
+                predecessor_admission: None,
             })
         })
         .expect("logged publish succeeds");
@@ -619,6 +621,7 @@ mod transparency_log {
                 idempotency: None,
                 tenant: None,
                 receipt_minter: None,
+                predecessor_admission: None,
             })
         })
         .expect_err("log-enabled publish without a receipt must fail");
@@ -649,6 +652,7 @@ mod transparency_log {
                 idempotency: None,
                 tenant: None,
                 receipt_minter: Some(&failing),
+                predecessor_admission: None,
             })
         })
         .expect_err("failing minter must abort the publish");
@@ -686,6 +690,7 @@ mod transparency_log {
                         idempotency: None,
                         tenant: None,
                         receipt_minter: Some(&mint),
+                        predecessor_admission: None,
                     })
                 })
             })
@@ -1048,6 +1053,7 @@ mod visibility_sql {
                 idempotency: None,
                 tenant: Some(&tenant),
                 receipt_minter: None,
+                predecessor_admission: None,
             })
         })
         .await

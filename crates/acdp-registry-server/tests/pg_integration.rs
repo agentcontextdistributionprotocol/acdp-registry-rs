@@ -504,6 +504,7 @@ async fn pg_concurrent_duplicate_publishes_yield_one_context() {
                 }),
                 tenant: None,
                 receipt_minter: None,
+                predecessor_admission: None,
             })
         }));
     }
@@ -578,6 +579,7 @@ async fn pg_receipt_atomicity_and_round_trip() {
             }),
             tenant: None,
             receipt_minter: Some(&failing),
+            predecessor_admission: None,
         })
     })
     .await
@@ -612,6 +614,7 @@ async fn pg_receipt_atomicity_and_round_trip() {
             idempotency: None,
             tenant: None,
             receipt_minter: Some(&minter),
+            predecessor_admission: None,
         })
     })
     .await

@@ -803,6 +803,7 @@ impl RegistryStore for SqliteStore {
             idempotency,
             tenant,
             receipt_minter,
+            predecessor_admission,
         } = commit;
         let now = Utc::now();
         let req = req.clone();
@@ -885,7 +886,8 @@ impl RegistryStore for SqliteStore {
             // 2. Supersession coherence checks (mirrors InMemoryStore).
             let first_v1 = if let Some(prev) = &req.supersedes {
                 let row = sqlx::query(
-                    "SELECT lineage_id, version, status, agent_id, contributors, tenant_id \
+                    "SELECT lineage_id, version, status, agent_id, contributors, tenant_id, \
+                     body_json \
                      FROM contexts WHERE ctx_id = ?",
                 )
                 .bind(prev.as_str())
@@ -980,6 +982,32 @@ impl RegistryStore for SqliteStore {
                         ),
                     });
                 }
+
+                // RFC-ACDP-0014 §4 `supersedes`-row admission. Runs AFTER
+                // tenant scoping, producer-continuity, lineage/version
+                // coherence and AlreadySuperseded have all passed — never
+                // earlier — so a non-owner or cross-tenant probe has already
+                // been turned away as `SupersededTarget::NotFound` above and
+                // never reaches this line. Checking first would make publish a
+                // cross-tenant, non-owner existence-and-`context_type` oracle
+                // on the predecessor. Mirrors the reference
+                // `InMemoryStore::commit_publish` ordering.
+                //
+                // Refusal aborts the whole publish: this sits before every
+                // write (insert, log leaf, supersession UPDATE, idempotency
+                // claim), so `?` here leaves no side effect (tx drop =
+                // rollback).
+                if let Some(admit) = predecessor_admission {
+                    // Deserialized lazily: only a gated supersession pays for
+                    // it. The `?` is load-bearing — swallowing a decode failure
+                    // here would silently skip an RFC-ACDP-0014 §4 MUST.
+                    let prev_body_json: String =
+                        row.try_get("body_json").map_err(map_sqlx_err)?;
+                    let prev_body: Body = serde_json::from_str(&prev_body_json)
+                        .map_err(|e| AcdpError::RegistryInternal(format!("decode body: {e}")))?;
+                    admit(&prev_body)?;
+                }
+
                 // First-version ctx_id derivation.
                 let first_row = sqlx::query(
                     "SELECT ctx_id FROM contexts WHERE lineage_id = ? \
@@ -1876,6 +1904,7 @@ mod tests {
                     }),
                     tenant: None,
                     receipt_minter: None,
+                    predecessor_admission: None,
                 })
             })
         };
@@ -1954,6 +1983,7 @@ mod tests {
                 idempotency: None,
                 tenant: Some("tenant-x"),
                 receipt_minter: None,
+                predecessor_admission: None,
             })
         })
         .await
@@ -2015,6 +2045,7 @@ mod tests {
                 idempotency: None,
                 tenant: Some("tenant-a"),
                 receipt_minter: None,
+                predecessor_admission: None,
             })
         })
         .await
@@ -2048,6 +2079,7 @@ mod tests {
                 idempotency: None,
                 tenant: Some("tenant-b"),
                 receipt_minter: None,
+                predecessor_admission: None,
             })
         })
         .await
@@ -2072,6 +2104,7 @@ mod tests {
                 idempotency: None,
                 tenant: Some("tenant-a"),
                 receipt_minter: None,
+                predecessor_admission: None,
             })
         })
         .await
@@ -2129,6 +2162,7 @@ mod tests {
                 }),
                 tenant: None,
                 receipt_minter: Some(&failing_minter),
+                predecessor_admission: None,
             })
         })
         .await
@@ -2194,6 +2228,7 @@ mod tests {
                     idempotency: None,
                     tenant: None,
                     receipt_minter: Some(&minter),
+                    predecessor_admission: None,
                 })
             })
         };
