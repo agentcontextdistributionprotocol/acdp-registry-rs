@@ -574,6 +574,92 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- end REG-11 Phase 14 -->
 
+<!-- REG-11 Phase 15 -->
+
+- **`cur` moves from `DEFERRED` to `COVERED`, and `rcpt`/`lhr`/`log` are
+  narrowed to their consumer-role residue** (`REG-11` Phase 15, `#130`):
+  five new direct tests in
+  `crates/acdp-registry-server/tests/conformance.rs`, plus a new
+  `DEFERRED_PARTIAL_DIRECT` registry and three new ratchet self-checks.
+  - `cur001_002_expired_and_malformed_cursors_are_distinguished` drives
+    both `cur-*` fixtures over real HTTP. It publishes three contexts,
+    takes a cursor the registry actually minted, and **first proves the
+    un-aged cursor both returns 200 and advances past page 1** — without
+    that control, a registry that silently ignored the cursor entirely
+    would satisfy the test. It then ages only the plaintext mint stamp
+    (`CURSOR_TTL_SECS = 3600`, so a 3,605,000 ms offset) and asserts
+    status, `error.code` and content-type, every expected value read from
+    the fixture rather than hardcoded, plus `cursor_expired` and
+    `invalid_cursor` remaining distinct.
+  - `rcpt001_registry_receipt_golden_recomputed_and_remintable`,
+    `lhr001_lineage_head_receipt_golden_recomputed_and_remintable`,
+    `log001_leaf_root_and_inclusion_golden_recomputed` and
+    `log003_consistency_proof_golden_recomputed` **recompute rather than
+    parse**: JCS canonicalization, SHA-256 preimage/leaf hashing, RFC 6962
+    root and consistency verification, offline Ed25519 verification, and
+    an Ed25519 **re-mint through this repo's own
+    `acdp_registry_core::receipt::build_signer`** reproducing the pinned
+    signature byte-for-byte. Each carries a mutation negative. The
+    goldens publish `private_seed_hex` while `ReceiptConfig` wants
+    base64, so the seed is hex-decoded and re-encoded; getting that
+    backwards yields a valid-looking signer with the wrong key.
+  - **The signer identity is pinned as literals, not split out of the
+    golden's own `key_id`.** Deriving authority and fragment from the
+    `key_id` then asserting the re-minted `key_id` matches is a
+    round-trip tautology — `build_signer` reassembles
+    `did:web:{authority}#{fragment}` from the very string it was handed,
+    so it passes for *any* fragment. Confirmed by mutation: with the
+    derived form, rewriting every golden's fragment to `BOGUS-FRAGMENT`
+    left all four tests green.
+  - **`rcpt`/`lhr`/`log` stay `DEFERRED`, and their reasons now name only
+    what is genuinely uncovered.** Each previously claimed two causes, the
+    first of which stopped being true once the goldens landed. Two
+    independent grounds remain, both verified against spec pin `d1f06d0`:
+    `rcpt-002/003/004`, `lhr-002/003/004` and `log-002/004` declare
+    profiles this harness does not advertise, and advertising one the
+    registry does not implement would make the ratchet lie; and
+    `acdp-registry-core` implements only the **producer** side of receipts
+    (`load_signing_key`, `build_signer`, `build_did_document` — there is no
+    verify fn), while those fixtures carry no `endpoint` and no `vectors`
+    array, so a "direct pass" over them would assert something about
+    `acdp-types`/`acdp-crypto` rather than about this registry.
+  - **`DEFERRED_PARTIAL_DIRECT`** closes the hole that creates: the
+    partition buckets by *family*, not fixture, so a family legitimately
+    deferred for its residue had no way to pin the golden-half tests —
+    deleting one left every existing check green. Two tests rather than
+    one, because the first was itself falsifiable:
+    `deferred_partial_direct_test_functions_are_present` checks each named
+    test exists, still wears its attribute and still carries its
+    assertion-count ratchet, and
+    `deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct`
+    ties the const's own membership to the `DEFERRED` prose that claims
+    those tests cannot be deleted.
+  - **Seventeen stale `conformance.rs`-relative line pins replaced with
+    symbol references**, which cannot rot, and `no_numeric_self_citations`
+    added to keep them out. Four stale *cross-file* pins repaired — three
+    invalidated by the `acdp` 0.10.0 bump, one by spec-pin drift. That
+    test deliberately does **not** match cross-file pins, since a
+    reference into another file cannot be a symbol this file resolves, so
+    that class stays rot-prone; the limitation is stated in the test's own
+    doc rather than glossed.
+  - **The anti-vacuity guards' claims are deliberately conservative.**
+    Three verification rounds established that a substring test over
+    `include_str!` cannot distinguish an assertion from the letters
+    `a-s-s-e-r-t` in a comment: `{ /* assert */ }` defeats the generic
+    check and `// EXPECTED_ asserted` defeats the stricter-looking one,
+    and `assert!(true)` survives any tightening. The guards therefore
+    document that they catch **wholesale gutting and deletion, and that is
+    all** — proving a test asserts something real needs a mutation oracle
+    (`cargo-mutants` or fault injection over `src/`), not a text oracle.
+    Recorded on `#130` rather than overclaimed in the file.
+  - `HARNESS_PROFILES`, `caps()`, `config()`, `KNOWN_FAMILIES`,
+    `CORE_INEXCUSABLE_FAMILIES`, `EXCUSED` and `MIN_REPLAYED_EXCHANGES`
+    are byte-identical to their prior contents — the ratchet was closed on
+    real behaviour, never widened to manufacture coverage. `#130` stays
+    **open**: the residue above is real and is not owed.
+
+<!-- end REG-11 Phase 15 -->
+
 - **A coverage-completeness ratchet closes the gap Phases 7-10 left open**
   (`REG-10` Phase 11): the existing four `KNOWN_FAMILIES`/`EXCUSED` ratchet
   tests fail only on an *unclassified* family or an *illegitimate excuse* —
