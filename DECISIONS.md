@@ -678,7 +678,7 @@ and cannot:
   operator's own configured value, no attacker-controlled input, no request-path timing
   channel).
 - **No latent second consumer anywhere.** `acdp-registry-webhook` only *produces*
-  `X-ACDP-Signature` (`lib.rs:249`) and never verifies one, so there is no MAC compare to
+  `X-ACDP-Signature` (`lib.rs:273`) and never verifies one, so there is no MAC compare to
   protect; `acdp-registry-auth` verifies via `jsonwebtoken::decode`, so the signature
   compare is inside RustCrypto, not our code; replay protection is an atomic
   `ChallengeStore::take(&nonce)` lookup, not a byte compare; and the `prior_hash`
@@ -802,3 +802,117 @@ corrected rather than quietly dropped:
 2. A mutation table recorded an observation for a test that did not yet exist when that
    mutation was run. Re-run against the full suite; the corrected result is stronger than the
    one first recorded.
+# RECONCILED (2026-09-10) — `u-002-webhook-duplicate-event-id` (#179)
+
+Three `UNCONFIRMED` entries from `plans/u-002-webhook-duplicate-event-id.md`. All three
+**decided by Opus** at `/reconcile`, each from an independent fresh-agent analysis given the
+entry plus the code it is baked into. All three confirmed; none is a one-way door needing a
+human call. Two had their *reasoning* corrected — the decisions were right, the recorded
+arguments were not, and an argument that does not hold is worse than none because the next
+maintainer will cite it.
+
+## 6. `WEBHOOK_SCHEMA_VERSION` stays `"1.0"` across the `event_id` wire rename (2026-09-10)
+
+**Decided by:** Opus. **Verdict: CONFIRMED, rationale replaced.**
+
+The original argument was that the constant is emitted on all five event types while only two
+changed shape, so bumping would misreport the other three. **That argument is wrong.** Both
+downstream consumers parse all five types through a single open union
+(`acdp-control-plane/src/contracts/acdp.ts:29-102`; `acdp-playground/acdp_client/models.py:255-288`),
+so "only some variants changed" is a distinction that exists in this repo's Rust enum and in
+no receiver's model.
+
+The decision stands on a sounder argument: **`schema_version` is stamped per delivery**, so it
+describes that delivery's envelope, not the stream. A `search_executed` body carrying `"1.1"`
+would assert that something about *that delivery* changed when nothing did — bumping is not a
+blast-radius trade-off, it is emitting a falsehood on every delivery, since the envelope it
+describes changed for none of them. Independently
+corroborated by **RFC-ACDP-0009 §2.10**, which reserves this profile's version field as the
+schema version of the event *envelope*, independent of `acdp_version`: the narrowed scope
+matches what the spec already reserved rather than being a carve-out invented to fit this case.
+The next real move is expected to come from §2.10 promotion (reserved name `event_version`),
+not from a variant edit.
+
+Also corrected: the plan claimed "the only known consumer". There are **two**; neither reads
+the field (verified by a grep across all sibling repos), so the conclusion is unchanged.
+
+The doc comment at `crates/acdp-registry-webhook/src/lib.rs` now carries the corrected
+argument and resolves the edge the original left open — a change touching *every* variant is
+still not an envelope change and still does not bump.
+
+## 7. `#[serde(rename)]` is symmetric on the two lifecycle fields (2026-09-10)
+
+**Decided by:** Opus. **Verdict: CONFIRMED, reasoning strengthened, test added.**
+
+The entry argued symmetry avoids read/write skew. True, and **understated**: symmetric is the
+only *correct* form of the three, and both alternatives fail silently or totally.
+
+- `#[serde(rename(serialize = ...))]` would read `event_id` — a key still present on the wire,
+  holding the **envelope delivery id** — straight into the lifecycle field. No error, wrong
+  value: precisely the `event_id` confusion #179 removes, resurrected on the read side.
+- `#[serde(alias = "event_id")]` maps both names to one field slot, so serde rejects **every
+  current body** with a duplicate-field error — and rejects old duplicate-key payloads too.
+
+On an old payload the shipped form fails loudly with `missing field lifecycle_event_id`, which
+is the correct outcome: that payload's `event_id` is genuinely ambiguous, and last-wins
+recovery is exactly what #179 declared unsafe. With `schema_version` deliberately frozen
+(entry 6), this error is also the only automatic detector an old payload has.
+
+**Gap closed.** Nothing asserted the read side, so the entry rested on behaviour no test
+exercised — the argument was unfalsifiable. `the_emitted_body_round_trips_into_the_lifecycle_field`
+now deserialises a real emitted body and asserts the lifecycle field receives the actor-minted
+id and **not** the envelope id. Reversal remains a two-word edit: the crate is unpublished
+(`release-plz.toml:5`) and no Rust consumer exists in any sibling repo.
+
+## 8. Notifying `acdp-control-plane`: issue on merge, never an edit (2026-09-10)
+
+**Decided by:** Opus. **Verdict: CONFIRMED disposition and authorization; content and blast
+radius corrected.**
+
+**Authorization.** Filing an issue in a sibling repo *is* a cross-repo write — a plan review
+was right about that taxonomy. But CHARTER rule 6 is a **routing** rule: cross-repo writes go
+to the human, and *the leader cannot authorize them*. It does not say the permission cannot
+exist. The human granted exactly this mechanism in advance ("only this repo changes; for
+cross-repo changes file GitHub issues and ping that repo's Claude session"), so rule 6 is
+**satisfied, not bypassed**. The reviewer was right that the earlier plan prose asserted the
+exemption without naming its source; that wording now cites the source. Editing that repo
+remains forbidden outright.
+
+**Two corrections to the planned action.**
+
+1. The standing instruction has two halves and the second was dropped: **ping that repo's
+   Claude session**, not merely file the issue.
+2. The issue must **not** say the control plane "can key on `lifecycle_event_id`". Read as
+   dedup advice, that would put their body fallback back into disagreement with
+   `X-ACDP-Event-Id` — re-creating the divergence #179 removes. `lifecycle_event_id` is actor
+   provenance, **not** a dedup key. The correct ask is narrow: update the stale comment at
+   `acdp-control-plane/src/contracts/acdp.ts:81-85`; no code change required.
+
+**Blast radius corrected.** "The fallback keeps working either way" was too strong. It holds
+for delivery retries — its documented purpose. It stops collapsing *distinct deliveries of the
+same logical lifecycle event*: the SDK's lifecycle commit has an idempotent-replay outcome and
+this registry emits the webhook unconditionally, so a producer resubmitting a byte-identical
+signed event produces a second delivery with a new envelope id and the same actor-minted id.
+**With the `X-ACDP-Event-Id` header present — the normal path — nothing changes.** With the
+header stripped, the old fallback keyed on the actor-minted id and collapsed the pair; the new
+one keys on the delivery id and does not, costing a duplicate ingest row, a double SSE emit and
+a double outbound webhook. The lifecycle projection stays correct (its upsert guard makes
+re-applying a transition a no-op). This is the fallback becoming *consistent with* the primary
+path rather than accidentally stronger than it — defensible, but it belongs in the issue rather
+than in their on-call's lap.
+
+**Timing.** After merge and **only** after merge: a pre-merge issue would tell another team a
+wire format changed when it has not, and if they act and the PR is reverted they have made a
+wrong change on our word. If the PR never merges, nothing is owed and nothing is filed.
+
+## Found while reconciling — not this lane's to fix
+
+Both are cross-repo and outside this unit; recorded so they are not lost.
+
+- **`acdp-playground/acdp_client/models.py:248-252`** types webhooks as a closed `Literal` of
+  **three** event types, so `context_retracted` / `context_republished` fail `model_validate`
+  and are logged-and-dropped at `playground/api/webhooks.py:50-56` — before the control-plane
+  forward. Pre-existing and unrelated to this rename, but it means one hop in the chain
+  currently discards exactly the two event types #179 is about.
+- **`acdp-website/content/registry-server/webhooks.mdx`** documents three event types and no
+  lifecycle events, so the public docs now lag this repo's `docs/WEBHOOKS.md`.
