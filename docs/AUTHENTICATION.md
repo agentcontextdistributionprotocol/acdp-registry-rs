@@ -248,7 +248,7 @@ works on some routes and not others.
 
 `GET /metrics` does not go through the ACDP auth pipeline at all. It is mounted
 on the un-authenticated, un-rate-limited `aux` router
-(`crates/acdp-registry-core/src/lib.rs:153-155`), so no bearer it receives is
+(`crates/acdp-registry-core/src/lib.rs:154-156`), so no bearer it receives is
 ever validated as an ACDP token — no signature check, no `exp`, no revocation
 lookup, no tenant resolution. The handler applies its own gate instead: a
 constant-time comparison against a configured shared secret, via the same

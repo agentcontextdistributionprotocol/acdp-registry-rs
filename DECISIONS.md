@@ -727,3 +727,20 @@ it") holds identically under `pub(crate)`.
 
 5 entries: **4 confirmed, 1 changed, 0 deferred.** The change is applied in full, not
 deferred — no code follow-up blocks `/ship`.
+
+### Entry 5 — two corrections from the pre-merge gate (2026-09-10)
+
+Appended rather than edited in place, so the original reasoning stays auditable. Neither
+correction changes entry 5's conclusion; both are inaccuracies in its supporting statements
+and are recorded because a decision record that overstates its own evidence is worth less
+than one that doesn't.
+
+1. Entry 5 says *"Docs cite the module by file path, never by Rust import path."* Not quite:
+   `CHANGELOG.md:2107` writes `acdp_registry_core::secure_compare`, which is import-path
+   form. It reads there as a statement of where the module lives rather than a claim that
+   external crates may import it, so nothing in that entry is falsified by the narrowing —
+   but "never" was too strong.
+2. Entry 5 says *"the only other mention of `ct_eq` outside the crate is a comment."* There
+   are **two**, not one: `crates/acdp-registry-server/src/main.rs:126` and
+   `crates/acdp-registry-server/tests/metrics_integration.rs:497`. Both are comments, so the
+   conclusion — no code outside `acdp-registry-core` references the helper — still holds.
