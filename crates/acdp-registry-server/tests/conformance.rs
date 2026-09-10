@@ -10975,3 +10975,686 @@ async fn cur001_002_expired_and_malformed_cursors_are_distinguished() {
          this ratchet exists to prevent"
     );
 }
+
+// ─── REG-11 Phase 15: `rcpt` / `lhr` golden halves (RFC-ACDP-0010 §6, RFC-ACDP-0011 §4) ───
+
+/// `rcpt-001` and `lhr-001` each carry exactly one vector.
+const EXPECTED_RCPT001_VECTOR_COUNT: usize = 1;
+const EXPECTED_LHR001_VECTOR_COUNT: usize = 1;
+/// Five recomputed properties per receipt golden: canonical form, preimage hash,
+/// offline signature verification, a re-mint through THIS repo's own signer, and
+/// the vector's own cross-check (producer-key fingerprint / lineage derivation).
+const EXPECTED_RCPT001_ASSERTION_COUNT: usize = 5;
+const EXPECTED_LHR001_ASSERTION_COUNT: usize = 5;
+
+/// Build a [`ReceiptSigner`] from a golden vector's published seed, through this
+/// repo's own `acdp_registry_core::receipt::build_signer` rather than the
+/// dependency's constructor.
+///
+/// That indirection is the point: it puts the registry's *own* signer-construction
+/// seam in the loop, so a regression in how this repo derives `registry_did` /
+/// `key_id` from config is caught here, not merely a regression in `acdp-types`.
+///
+/// Note the encoding mismatch the goldens invite: they publish `private_seed_hex`,
+/// while `ReceiptConfig::signing_key_seed_b64` is base64. Hex-decoding and
+/// re-encoding is required, and getting it backwards yields a valid-looking signer
+/// with the wrong key and a baffling signature mismatch.
+fn golden_signer(
+    seed_hex: &str,
+    fragment: &str,
+    authority: &str,
+) -> acdp::types::receipt::ReceiptSigner {
+    use base64::Engine as _;
+    let seed = hex::decode(seed_hex).unwrap_or_else(|e| panic!("golden seed is not hex: {e}"));
+    let cfg = acdp_registry_types::config::ReceiptConfig {
+        signing_key_seed_b64: base64::engine::general_purpose::STANDARD.encode(seed),
+        signing_key_path: None,
+        key_id_fragment: fragment.to_string(),
+        ..Default::default()
+    };
+    acdp_registry_core::receipt::build_signer(&cfg, authority)
+        .unwrap_or_else(|e| panic!("build_signer rejected the golden seed: {e}"))
+}
+
+/// #130 / `rcpt-001` — the registry-receipt golden, recomputed rather than parsed.
+///
+/// **Why `Direct` and not replayed.** The fixture carries no `request`, no
+/// `scenarios` and no `input.endpoint` — it is a pure golden-vector document, so it
+/// lands in the replayer's terminal non-HTTP bucket. It is *not* profile-gated:
+/// `applies_to_profiles` is absent, which `targets_unadvertised_profile` treats as
+/// "no restriction". The family's profile-gated members (`rcpt-002/003/004`,
+/// restricted to `acdp-registry-receipts` / `acdp-consumer`) are a different
+/// population and remain deferred — see `DEFERRED`.
+///
+/// **Why this proves something.** Every pinned value is recomputed from the
+/// vector's own inputs: the JCS canonical form, the SHA-256 preimage hash, and —
+/// because the vector publishes its own Ed25519 private seed and Ed25519 is
+/// deterministic (RFC 8032) — the signature itself, re-minted through this repo's
+/// `build_signer` and compared byte-for-byte with the golden. That is the bar
+/// `sig-001` set: prove *this repo's* pipeline reproduces the spec's bytes, not
+/// merely that our dependency's own test suite passes.
+///
+/// The negative at the end is what makes the positive non-vacuous: a one-character
+/// perturbation of the golden signature must fail verification.
+#[tokio::test(flavor = "multi_thread")]
+async fn rcpt001_registry_receipt_golden_recomputed_and_remintable() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping rcpt-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "rcpt-001") else {
+        panic!("rcpt-001 fixture not found under {}", fixtures.display());
+    };
+
+    let vectors = fx["vectors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("rcpt-001: vectors missing or not an array: {fx}"));
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_RCPT001_VECTOR_COUNT,
+        "rcpt-001 must carry exactly {EXPECTED_RCPT001_VECTOR_COUNT} vector at spec pin d1f06d0: {fx}"
+    );
+    let v = &vectors[0];
+    let unsigned = &v["receipt_unsigned"];
+    let expected = &v["expected"];
+    let mut asserted = 0usize;
+
+    // 1. JCS canonical form.
+    let canonical = String::from_utf8(acdp::crypto::canonicalize_value(unsigned))
+        .unwrap_or_else(|e| panic!("rcpt-001: canonical form is not UTF-8: {e}"));
+    assert_eq!(
+        canonical,
+        expected["canonical_form"].as_str().unwrap(),
+        "rcpt-001: recomputed JCS canonical_form mismatch"
+    );
+    asserted += 1;
+
+    // 2. Preimage hash over the unsigned receipt.
+    let hash = acdp::types::receipt::RegistryReceipt::preimage_hash_of_value(unsigned)
+        .unwrap_or_else(|e| panic!("rcpt-001: preimage_hash_of_value failed: {e}"));
+    assert_eq!(
+        hash.as_str(),
+        expected["receipt_hash"].as_str().unwrap(),
+        "rcpt-001: recomputed receipt_hash mismatch"
+    );
+    asserted += 1;
+
+    // 3. The golden signature verifies offline against the golden public key.
+    let pub_hex = fx["registry_test_keypair"]["public_key_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("rcpt-001: registry_test_keypair.public_key_hex missing"));
+    let pub_bytes: [u8; 32] = hex::decode(pub_hex)
+        .expect("rcpt-001: public_key_hex is not hex")
+        .try_into()
+        .expect("rcpt-001: public key must be 32 bytes");
+    let golden_sig_b64 = expected["signature_value_base64"].as_str().unwrap();
+    acdp::crypto::verify::verify_ed25519(&pub_bytes, golden_sig_b64, hash.as_str())
+        .unwrap_or_else(|e| panic!("rcpt-001: golden signature failed offline verification: {e}"));
+    asserted += 1;
+
+    // 4. Re-mint through THIS repo's signer and reproduce the golden bytes.
+    let seed_hex = fx["registry_test_keypair"]["private_seed_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("rcpt-001: registry_test_keypair.private_seed_hex missing"));
+    let key_id = expected["registry_receipt"]["signature"]["key_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("rcpt-001: expected.registry_receipt.signature.key_id missing"));
+    let (did_part, fragment) = key_id
+        .split_once('#')
+        .unwrap_or_else(|| panic!("rcpt-001: key_id must carry a fragment: {key_id}"));
+    let authority = did_part
+        .strip_prefix("did:web:")
+        .unwrap_or_else(|| panic!("rcpt-001: key_id must be a did:web: {key_id}"));
+    let signer = golden_signer(seed_hex, fragment, authority);
+    let reminted = signer
+        .mint(
+            &CtxId(unsigned["ctx_id"].as_str().unwrap().to_string()),
+            &acdp::types::primitives::LineageId(
+                unsigned["lineage_id"].as_str().unwrap().to_string(),
+            ),
+            unsigned["origin_registry"].as_str().unwrap(),
+            unsigned["created_at"].as_str().unwrap().parse().unwrap(),
+            &ContentHash(unsigned["content_hash"].as_str().unwrap().to_string()),
+            unsigned["key_fingerprint"].as_str().unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("rcpt-001: re-mint failed: {e}"));
+    assert_eq!(
+        reminted.signature.value, golden_sig_b64,
+        "rcpt-001: re-minted signature must reproduce the golden byte-for-byte -- Ed25519 is \
+         deterministic, so a mismatch means this repo's signing pipeline disagrees with the spec"
+    );
+    assert_eq!(
+        reminted.signature.key_id, key_id,
+        "rcpt-001: build_signer must derive the golden key_id from authority + fragment"
+    );
+    asserted += 1;
+
+    // 5. The vector's own cross-check: key_fingerprint is SHA-256 over the
+    //    producer's public key (RFC-ACDP-0010 §6).
+    let producer_pub_hex = fx["producer_key"]["public_key_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("rcpt-001: producer_key.public_key_hex missing"));
+    let producer_pub: [u8; 32] = hex::decode(producer_pub_hex)
+        .expect("rcpt-001: producer public_key_hex is not hex")
+        .try_into()
+        .expect("rcpt-001: producer public key must be 32 bytes");
+    assert_eq!(
+        acdp::crypto::fingerprint_ed25519(&producer_pub),
+        unsigned["key_fingerprint"].as_str().unwrap(),
+        "rcpt-001: recomputed producer key_fingerprint mismatch"
+    );
+    asserted += 1;
+
+    // NEGATIVE: perturbing one base64 character of the golden signature must break
+    // verification. Without this the four assertions above could all pass against a
+    // verifier that accepted anything.
+    let mut bad = golden_sig_b64.to_string();
+    let first = bad.remove(0);
+    bad.insert(0, if first == 'A' { 'B' } else { 'A' });
+    assert!(
+        acdp::crypto::verify::verify_ed25519(&pub_bytes, &bad, hash.as_str()).is_err(),
+        "rcpt-001: a perturbed signature must NOT verify -- if it does, the positive \
+         assertions above prove nothing"
+    );
+
+    assert_eq!(
+        asserted, EXPECTED_RCPT001_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_RCPT001_ASSERTION_COUNT} rcpt-001 recomputed properties at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
+    );
+}
+
+/// #130 / `lhr-001` — the lineage-head-receipt golden, recomputed rather than parsed.
+///
+/// Same shape and same honesty bar as [`rcpt001_registry_receipt_golden_recomputed_and_remintable`]:
+/// pure golden vector, no HTTP, `Direct` coverage, every pinned value recomputed
+/// and the signature re-minted through this repo's own signer. The family's
+/// profile-gated members (`lhr-002/003/004`, restricted to
+/// `acdp-registry-head-receipts` / `acdp-consumer`) are a separate population and
+/// stay deferred.
+///
+/// Two cross-checks are specific to RFC-ACDP-0011 §4 and worth pinning here rather
+/// than assuming: `lineage_id` must be the derivation of `head_ctx_id`, and a
+/// lineage-head receipt must be refusable for a non-head status. The latter is this
+/// vector's mutation negative — `Superseded` is never the head, so minting one must
+/// be rejected outright rather than silently produce a receipt.
+#[tokio::test(flavor = "multi_thread")]
+async fn lhr001_lineage_head_receipt_golden_recomputed_and_remintable() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping lhr-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "lhr-001") else {
+        panic!("lhr-001 fixture not found under {}", fixtures.display());
+    };
+
+    let vectors = fx["vectors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("lhr-001: vectors missing or not an array: {fx}"));
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_LHR001_VECTOR_COUNT,
+        "lhr-001 must carry exactly {EXPECTED_LHR001_VECTOR_COUNT} vector at spec pin d1f06d0: {fx}"
+    );
+    let v = &vectors[0];
+    let unsigned = &v["receipt_unsigned"];
+    let expected = &v["expected"];
+    let mut asserted = 0usize;
+
+    // 1. JCS canonical form.
+    let canonical = String::from_utf8(acdp::crypto::canonicalize_value(unsigned))
+        .unwrap_or_else(|e| panic!("lhr-001: canonical form is not UTF-8: {e}"));
+    assert_eq!(
+        canonical,
+        expected["canonical_form"].as_str().unwrap(),
+        "lhr-001: recomputed JCS canonical_form mismatch"
+    );
+    asserted += 1;
+
+    // 2. Preimage hash.
+    let hash = acdp::types::receipt::LineageHeadReceipt::preimage_hash_of_value(unsigned)
+        .unwrap_or_else(|e| panic!("lhr-001: preimage_hash_of_value failed: {e}"));
+    assert_eq!(
+        hash.as_str(),
+        expected["receipt_hash"].as_str().unwrap(),
+        "lhr-001: recomputed receipt_hash mismatch"
+    );
+    asserted += 1;
+
+    // 3. Offline verification of the golden signature.
+    let pub_hex = fx["registry_test_keypair"]["public_key_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("lhr-001: registry_test_keypair.public_key_hex missing"));
+    let pub_bytes: [u8; 32] = hex::decode(pub_hex)
+        .expect("lhr-001: public_key_hex is not hex")
+        .try_into()
+        .expect("lhr-001: public key must be 32 bytes");
+    let golden_sig_b64 = expected["signature_value_base64"].as_str().unwrap();
+    acdp::crypto::verify::verify_ed25519(&pub_bytes, golden_sig_b64, hash.as_str())
+        .unwrap_or_else(|e| panic!("lhr-001: golden signature failed offline verification: {e}"));
+    asserted += 1;
+
+    // 4. Re-mint through this repo's signer.
+    let seed_hex = fx["registry_test_keypair"]["private_seed_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("lhr-001: registry_test_keypair.private_seed_hex missing"));
+    let key_id = expected["lineage_head_receipt"]["signature"]["key_id"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("lhr-001: expected.lineage_head_receipt.signature.key_id missing")
+        });
+    let (did_part, fragment) = key_id
+        .split_once('#')
+        .unwrap_or_else(|| panic!("lhr-001: key_id must carry a fragment: {key_id}"));
+    let authority = did_part
+        .strip_prefix("did:web:")
+        .unwrap_or_else(|| panic!("lhr-001: key_id must be a did:web: {key_id}"));
+    let signer = golden_signer(seed_hex, fragment, authority);
+    let lineage_id =
+        acdp::types::primitives::LineageId(unsigned["lineage_id"].as_str().unwrap().to_string());
+    let head_ctx = CtxId(unsigned["head_ctx_id"].as_str().unwrap().to_string());
+    let reminted = signer
+        .mint_lineage_head(
+            &lineage_id,
+            &head_ctx,
+            unsigned["head_version"].as_u64().unwrap() as u32,
+            &acdp::types::primitives::Status::Active,
+            unsigned["as_of"].as_str().unwrap().parse().unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("lhr-001: re-mint failed: {e}"));
+    assert_eq!(
+        reminted.signature.value, golden_sig_b64,
+        "lhr-001: re-minted signature must reproduce the golden byte-for-byte"
+    );
+    asserted += 1;
+
+    // 5. RFC-ACDP-0011 §4 cross-check: lineage_id is derived from head_ctx_id.
+    assert_eq!(
+        acdp::crypto::derive_lineage_id(&head_ctx).0,
+        lineage_id.0,
+        "lhr-001: lineage_id must be the derivation of head_ctx_id"
+    );
+    asserted += 1;
+
+    // NEGATIVE: a superseded version is never the head (RFC-ACDP-0011 §4), so
+    // minting a lineage-head receipt for one must be refused. If this succeeded,
+    // the re-mint above would prove only that the signer signs whatever it is given.
+    assert!(
+        signer
+            .mint_lineage_head(
+                &lineage_id,
+                &head_ctx,
+                unsigned["head_version"].as_u64().unwrap() as u32,
+                &acdp::types::primitives::Status::Superseded,
+                unsigned["as_of"].as_str().unwrap().parse().unwrap(),
+            )
+            .is_err(),
+        "lhr-001: minting a lineage-head receipt with head_status=superseded must be refused"
+    );
+
+    assert_eq!(
+        asserted, EXPECTED_LHR001_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_LHR001_ASSERTION_COUNT} lhr-001 recomputed properties at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
+    );
+}
+
+// ─── REG-11 Phase 15: `log` golden half (RFC-ACDP-0012 §5-§6) ───────────────────────
+
+const EXPECTED_LOG001_VECTOR_COUNT: usize = 1;
+const EXPECTED_LOG003_VECTOR_COUNT: usize = 1;
+/// log-001: leaf canonical forms, leaf hashes, root, empty-tree root, checkpoint
+/// canonical form, checkpoint hash, re-minted checkpoint signature, inclusion path,
+/// inclusion verification.
+const EXPECTED_LOG001_ASSERTION_COUNT: usize = 9;
+/// log-003: first root, second root, consistency path, both checkpoint canonical
+/// forms, both re-minted signatures, consistency verification.
+const EXPECTED_LOG003_ASSERTION_COUNT: usize = 7;
+
+/// Decode a `"sha256:<hex>"` wire hash into raw bytes.
+fn sha256_wire_to_bytes(s: &str, what: &str) -> [u8; 32] {
+    let hex_part = s
+        .strip_prefix("sha256:")
+        .unwrap_or_else(|| panic!("{what}: expected a 'sha256:' wire hash, got {s}"));
+    hex::decode(hex_part)
+        .unwrap_or_else(|e| panic!("{what}: hash is not hex: {e}"))
+        .try_into()
+        .unwrap_or_else(|v: Vec<u8>| panic!("{what}: hash decoded to {} bytes, want 32", v.len()))
+}
+
+fn sha256_bytes_to_wire(b: &[u8; 32]) -> String {
+    format!("sha256:{}", hex::encode(b))
+}
+
+/// #130 / `log-001` — the transparency-log leaf/root/inclusion golden, recomputed.
+///
+/// **This is offline recomputation by necessity, not by preference.** The golden is
+/// pinned under `did:web:registry.example.com` with fixed `ctx_id`s and
+/// `created_at`s; a live harness runs as `registry.test` and assigns its own ids, so
+/// no running registry can ever reproduce these roots or signatures. Equality with
+/// the golden is only reachable offline. (The *live* half — that this registry's own
+/// log folds to its own root and serves verifiable proofs — is already covered by
+/// `http_integration.rs`'s log suite; duplicating it here would buy ratchet credit
+/// and no coverage.)
+///
+/// Every pinned value is recomputed from the vector's own inputs: five JCS leaf
+/// canonical forms, five RFC 6962 leaf hashes, the size-5 root, the empty-tree root,
+/// the checkpoint's canonical form and hash, its signature re-minted through this
+/// repo's signer, and the inclusion path for leaf 0 — then the path is actually
+/// *verified*, not merely compared.
+///
+/// The negative perturbs one element of the inclusion path: a proof that still
+/// verifies after tampering would mean the verification above proves nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn log001_leaf_root_and_inclusion_golden_recomputed() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping log-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "log-001") else {
+        panic!("log-001 fixture not found under {}", fixtures.display());
+    };
+    let vectors = fx["vectors"].as_array().unwrap();
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_LOG001_VECTOR_COUNT,
+        "log-001 must carry exactly {EXPECTED_LOG001_VECTOR_COUNT} vector at spec pin d1f06d0"
+    );
+    let v = &vectors[0];
+    let expected = &v["expected"];
+    let mut asserted = 0usize;
+
+    // 1-2. Per-leaf canonical form and leaf hash.
+    let leaves = v["leaves"].as_array().unwrap();
+    let want_forms = expected["leaf_canonical_forms"].as_array().unwrap();
+    let want_hashes = expected["leaf_hashes"].as_array().unwrap();
+    assert_eq!(
+        leaves.len(),
+        want_forms.len(),
+        "log-001: leaf/form count mismatch"
+    );
+    assert_eq!(
+        leaves.len(),
+        want_hashes.len(),
+        "log-001: leaf/hash count mismatch"
+    );
+    let mut leaf_hashes: Vec<[u8; 32]> = Vec::new();
+    for (i, leaf_json) in leaves.iter().enumerate() {
+        let leaf = acdp::types::log::LogLeaf::from_value(leaf_json)
+            .unwrap_or_else(|e| panic!("log-001: leaf {i} does not parse: {e}"));
+        let canonical = String::from_utf8(leaf.canonical_bytes().unwrap()).unwrap();
+        assert_eq!(
+            canonical,
+            want_forms[i].as_str().unwrap(),
+            "log-001: leaf {i} canonical form mismatch"
+        );
+        let h = leaf.leaf_hash_hex().unwrap();
+        assert_eq!(
+            h,
+            want_hashes[i].as_str().unwrap(),
+            "log-001: leaf {i} hash mismatch"
+        );
+        leaf_hashes.push(leaf.leaf_hash().unwrap());
+    }
+    asserted += 2;
+
+    // 3. Merkle tree hash over all five leaves.
+    let root = acdp::crypto::merkle::merkle_tree_hash(&leaf_hashes);
+    assert_eq!(
+        sha256_bytes_to_wire(&root),
+        expected["root_hash"].as_str().unwrap(),
+        "log-001: recomputed root_hash mismatch"
+    );
+    asserted += 1;
+
+    // 4. The empty tree hashes to SHA-256("") -- RFC 6962 §2.1.
+    let empty = acdp::crypto::merkle::merkle_tree_hash(&[]);
+    assert_eq!(
+        sha256_bytes_to_wire(&empty),
+        expected["empty_tree_root_hash"].as_str().unwrap(),
+        "log-001: recomputed empty_tree_root_hash mismatch"
+    );
+    asserted += 1;
+
+    // 5-6. Checkpoint canonical form and preimage hash.
+    let cp_unsigned = &v["checkpoint_unsigned"];
+    let cp_canonical = String::from_utf8(acdp::crypto::canonicalize_value(cp_unsigned)).unwrap();
+    assert_eq!(
+        cp_canonical,
+        expected["checkpoint_canonical_form"].as_str().unwrap(),
+        "log-001: recomputed checkpoint canonical form mismatch"
+    );
+    asserted += 1;
+    let cp_hash = acdp::types::log::LogCheckpoint::preimage_hash_of_value(cp_unsigned)
+        .unwrap_or_else(|e| panic!("log-001: checkpoint preimage hash failed: {e}"));
+    assert_eq!(
+        cp_hash.as_str(),
+        expected["checkpoint_hash"].as_str().unwrap(),
+        "log-001: recomputed checkpoint_hash mismatch"
+    );
+    asserted += 1;
+
+    // 7. Re-mint the checkpoint signature through this repo's signer.
+    let seed_hex = fx["registry_test_keypair"]["private_seed_hex"]
+        .as_str()
+        .unwrap();
+    let key_id = expected["log_checkpoint"]["signature"]["key_id"]
+        .as_str()
+        .unwrap();
+    let (did_part, fragment) = key_id.split_once('#').unwrap();
+    let authority = did_part.strip_prefix("did:web:").unwrap();
+    let signer = golden_signer(seed_hex, fragment, authority);
+    let reminted = signer
+        .mint_log_checkpoint(
+            v["log_id"].as_str().unwrap(),
+            cp_unsigned["tree_size"].as_u64().unwrap(),
+            cp_unsigned["root_hash"].as_str().unwrap(),
+            cp_unsigned["timestamp"].as_str().unwrap().parse().unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("log-001: checkpoint re-mint failed: {e}"));
+    assert_eq!(
+        reminted.signature.value,
+        expected["signature_value_base64"].as_str().unwrap(),
+        "log-001: re-minted checkpoint signature must reproduce the golden byte-for-byte"
+    );
+    asserted += 1;
+
+    // 8. Inclusion path for leaf 0.
+    let want_path = expected["log_inclusion"]["inclusion_path"]
+        .as_array()
+        .unwrap();
+    let got_path = acdp::crypto::merkle::inclusion_path(0, &leaf_hashes)
+        .unwrap_or_else(|| panic!("log-001: inclusion_path(0) returned None"));
+    let got_wire: Vec<String> = got_path.iter().map(sha256_bytes_to_wire).collect();
+    let want_wire: Vec<String> = want_path
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        got_wire, want_wire,
+        "log-001: recomputed inclusion_path for leaf 0 mismatch"
+    );
+    asserted += 1;
+
+    // 9. The path actually verifies against the root -- comparing bytes is not the
+    //    same as proving the proof works.
+    assert!(
+        acdp::crypto::merkle::verify_inclusion(&leaf_hashes[0], 0, 5, &got_path, &root),
+        "log-001: the recomputed inclusion path must verify against the golden root"
+    );
+    asserted += 1;
+
+    // NEGATIVE: tamper one path element; verification must fail.
+    let mut tampered = got_path.clone();
+    tampered[0][0] ^= 0xff;
+    assert!(
+        !acdp::crypto::merkle::verify_inclusion(&leaf_hashes[0], 0, 5, &tampered, &root),
+        "log-001: a tampered inclusion path must NOT verify -- if it does, the verification \
+         above proves nothing"
+    );
+
+    assert_eq!(
+        asserted, EXPECTED_LOG001_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_LOG001_ASSERTION_COUNT} log-001 recomputed properties at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
+    );
+}
+
+/// #130 / `log-003` — the consistency-proof golden, recomputed.
+///
+/// This vector hands the verifier the five leaf hashes directly, so no live tree,
+/// no publish path and no `MerkleLog` state is needed: both roots, the consistency
+/// path and both checkpoint signatures are pure functions over given data. That
+/// makes it the most self-contained of the four goldens, not the hardest.
+///
+/// The negative is the vector's own `verification_steps[3]` inverted: tamper one
+/// element of the consistency path and the proof must stop verifying.
+#[tokio::test(flavor = "multi_thread")]
+async fn log003_consistency_proof_golden_recomputed() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping log-003 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "log-003") else {
+        panic!("log-003 fixture not found under {}", fixtures.display());
+    };
+    let vectors = fx["vectors"].as_array().unwrap();
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_LOG003_VECTOR_COUNT,
+        "log-003 must carry exactly {EXPECTED_LOG003_VECTOR_COUNT} vector at spec pin d1f06d0"
+    );
+    let v = &vectors[0];
+    let expected = &v["expected"];
+    let mut asserted = 0usize;
+
+    let leaf_hashes: Vec<[u8; 32]> = v["leaf_hashes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(i, h)| sha256_wire_to_bytes(h.as_str().unwrap(), &format!("log-003 leaf {i}")))
+        .collect();
+
+    // 1-2. Both roots, recomputed from the same leaf-hash list.
+    let first_root = acdp::crypto::merkle::merkle_tree_hash(&leaf_hashes[..3]);
+    assert_eq!(
+        sha256_bytes_to_wire(&first_root),
+        expected["first_root_hash"].as_str().unwrap(),
+        "log-003: recomputed first_root_hash (tree_size 3) mismatch"
+    );
+    asserted += 1;
+    let second_root = acdp::crypto::merkle::merkle_tree_hash(&leaf_hashes);
+    assert_eq!(
+        sha256_bytes_to_wire(&second_root),
+        expected["second_root_hash"].as_str().unwrap(),
+        "log-003: recomputed second_root_hash (tree_size 5) mismatch"
+    );
+    asserted += 1;
+
+    // 3. The consistency path 3 -> 5.
+    let want_path: Vec<String> = expected["consistency_proof_response"]["consistency_path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    let got_path = acdp::crypto::merkle::consistency_proof(3, &leaf_hashes)
+        .unwrap_or_else(|| panic!("log-003: consistency_proof(3, ..) returned None"));
+    let got_wire: Vec<String> = got_path.iter().map(sha256_bytes_to_wire).collect();
+    assert_eq!(
+        got_wire, want_path,
+        "log-003: recomputed consistency_path mismatch"
+    );
+    asserted += 1;
+
+    // 4-5. Both checkpoints' canonical forms.
+    for (key, cp_key) in [
+        (
+            "first_checkpoint_canonical_form",
+            "first_checkpoint_unsigned",
+        ),
+        (
+            "second_checkpoint_canonical_form",
+            "second_checkpoint_unsigned",
+        ),
+    ] {
+        let canonical = String::from_utf8(acdp::crypto::canonicalize_value(&v[cp_key])).unwrap();
+        assert_eq!(
+            canonical,
+            expected[key].as_str().unwrap(),
+            "log-003: recomputed {key} mismatch"
+        );
+        asserted += 1;
+    }
+
+    // 6-7. Both checkpoint signatures, re-minted through this repo's signer.
+    let seed_hex = fx["registry_test_keypair"]["private_seed_hex"]
+        .as_str()
+        .unwrap();
+    let key_id = fx["registry_test_keypair"]["key_id"].as_str().unwrap();
+    let (did_part, fragment) = key_id.split_once('#').unwrap();
+    let authority = did_part.strip_prefix("did:web:").unwrap();
+    let signer = golden_signer(seed_hex, fragment, authority);
+    for (cp_key, sig_key) in [
+        ("first_checkpoint_unsigned", "first_signature_value_base64"),
+        (
+            "second_checkpoint_unsigned",
+            "second_signature_value_base64",
+        ),
+    ] {
+        let cp = &v[cp_key];
+        let reminted = signer
+            .mint_log_checkpoint(
+                cp["log_id"].as_str().unwrap(),
+                cp["tree_size"].as_u64().unwrap(),
+                cp["root_hash"].as_str().unwrap(),
+                cp["timestamp"].as_str().unwrap().parse().unwrap(),
+            )
+            .unwrap_or_else(|e| panic!("log-003: {cp_key} re-mint failed: {e}"));
+        assert_eq!(
+            reminted.signature.value,
+            expected[sig_key].as_str().unwrap(),
+            "log-003: re-minted {sig_key} must reproduce the golden byte-for-byte"
+        );
+        asserted += 1;
+    }
+
+    // The proof must actually verify, not merely match bytes.
+    assert!(
+        acdp::crypto::merkle::verify_consistency(3, 5, &got_path, &first_root, &second_root),
+        "log-003: the recomputed consistency path must verify 3 -> 5"
+    );
+
+    // NEGATIVE: tamper one path element; the proof must stop verifying. This is the
+    // vector's own verification_steps[3], inverted.
+    let mut tampered = got_path.clone();
+    tampered[0][0] ^= 0xff;
+    assert!(
+        !acdp::crypto::merkle::verify_consistency(3, 5, &tampered, &first_root, &second_root),
+        "log-003: a tampered consistency path must NOT verify -- if it does, the verification \
+         above proves nothing"
+    );
+
+    assert_eq!(
+        asserted, EXPECTED_LOG003_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_LOG003_ASSERTION_COUNT} log-003 recomputed properties at \
+         spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
+         failure mode this ratchet exists to prevent"
+    );
+}
