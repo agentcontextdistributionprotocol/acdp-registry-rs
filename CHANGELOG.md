@@ -2203,6 +2203,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requires every `AcdpError::InvalidCursor` construction to use the shared
   constant, so a future arm cannot reintroduce a leak past a by-example test.
 
+<!-- W3-U4 / #195 -->
+
+- **`base64` removed from the `acdp-registry-sqlite` and `acdp-registry-pg`
+  manifests** (`W3-U4`, `#195`): both declared it and neither used it. The
+  dependency became unused when `#187` lifted the cursor codec — the only
+  `base64` caller in either crate — into `acdp-registry-store`, which declares
+  it correctly.
+
+  Scoped precisely: the `base64` **package is not dropped from the workspace**,
+  since ten other crates still use it, `acdp-registry-store` among them.
+  `Cargo.lock` loses exactly the two dependency edges. What this improves is the
+  graph resolved by a consumer that depends on `acdp-registry-sqlite` or
+  `acdp-registry-pg` specifically — which is what matters once those crates
+  publish — not the workspace's total dependency set.
+
+  Safe under every feature combination, and provably so rather than by
+  sampling: neither crate defines a `[features]` block or a single optional
+  dependency, so `cargo metadata` reports `features={}` for both and there is no
+  gated path that could reference the crate. `grep` across each crate's entire
+  directory — `src/`, `tests/`, `migrations/` — returns zero occurrences.
+
+
 ### Fixed
 
 - **The playground publish branch now honors `supports_idempotency_key`**
