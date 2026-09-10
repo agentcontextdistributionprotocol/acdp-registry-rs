@@ -1392,6 +1392,72 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+<!-- W2-U1 #185 (lane-1) -->
+
+- **BEHAVIOUR CHANGE — a registry that boots today may refuse to start after
+  this.** A config with `playground.enabled = true`, `playground.pinned_only =
+  true` and **no** `[[playground.pinned_keys]]` entries is now refused at
+  startup, **whether or not `[receipt]` is configured** (`#185`). Previously the
+  check was nested inside the receipts block, so a registry with no `[receipt]`
+  got no check at all.
+
+  **If this stops your registry booting, it was not enforcing pinning.** That
+  combination reads as a lockdown and does the opposite: `enforce_pinned_signature`
+  (`playground.rs`) returns `PinOutcome::Skipped` when `pinned_keys` is empty,
+  *before* `pinned_only` is consulted, and `Skipped` falls through to the fully
+  unverified publish path. So every non-`did:key` agent was publishing without a
+  signature check. (`did:key` identities take their own verified route before the
+  playground gate and were never affected.) No deployment loses a working security
+  property here; some discover they never had one.
+
+  **Remedies**, in the message and in `docs/CONFIGURATION.md`: add at least one
+  `[[playground.pinned_keys]]` entry, or set `playground.enabled = false`. If you
+  intended to populate keys at runtime via `POST /admin/pinned-keys/reload`, boot
+  with `pinned_only = false`, write both settings to disk, then reload — that
+  endpoint swaps the whole `[playground]` section.
+
+  **No shipped default is affected** — neither the compose stack nor the Railway
+  recipe configures pinning at all.
+
+  The startup message is rewritten, which was `#185`'s original point: it claimed
+  the config *"would reject every publish outright"*, false in the dangerous
+  direction — it reads as deny-all when the truth is the opposite. It now names
+  the fall-through, explicitly negates the deny-all reading, and gives the
+  remedies. Note the state it misnamed is real, just attached to the wrong config:
+  a `pinned_keys` list whose entries have all expired *does* deny every publish —
+  filed as `#193`.
+
+  Because the guard now runs earlier in `validate_config`, a config that is both
+  this *and* separately invalid (bad receipt seed, unknown profile, missing TLS
+  path) reports the playground diagnosis first.
+
+  Proven by mutation rather than coverage: the new test was run against the
+  unhoisted guard and observed to **fail** — `expect_err` panicking on `()`, i.e.
+  the validator returning `Ok` — then to pass after the hoist; re-scoping the
+  guard back to receipts-only makes it fail again while the pre-existing receipts
+  test stays green, which is what proves the test pins the hoist rather than the
+  guard's existence.
+
+  Runtime semantics are deliberately unchanged: `Skipped` = "no policy active"
+  remains the contract `config.rs` documents and callers rely on. Two residual
+  gaps found and filed rather than fixed, both outside this change's scope:
+  `POST /admin/pinned-keys/reload` applies config with **no** validation, so this
+  guard and every other config guard can be bypassed at runtime (`#192`); and
+  pinned-key *entries* are never validated at startup (`#193`).
+
+  *Line-pin sweep (CHARTER rule 10), recomputed from the final tree.* The hoist
+  moves code, so pins into `main.rs` in the append-only records drift: bail A
+  `:259` → `:282`, its rationale comment `:249` → `:272`, the public-bind guard
+  `:475` → `:488`. The pins at `:267`/`:271-273` do not merely drift — **their
+  target text no longer exists**, having been replaced. The `changeme` guard
+  (`:92-104`, `:102-103`) sits above the edit and is unmoved. **Reported, not
+  re-pointed:** re-pointing means editing existing lines in files this change
+  treats as additive-only, and rewrites records that were true when written.
+  `config.rs`'s `"Has no effect when pinned_keys is empty"` stayed at `:739`
+  because the new doc text was appended *after* it rather than inserted above,
+  deliberately, so `DECISIONS.md`'s citation of `config.rs:739-740` is still
+  exactly valid.
+
 <!-- REG-11 #144 + #139 (Lane C) -->
 
 - **Both bump workflows pass the bot secrets explicitly instead of
