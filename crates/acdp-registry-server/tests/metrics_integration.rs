@@ -403,7 +403,7 @@ async fn metrics_bearer_gate_enforced() {
 
 /// #166 — pins the `/metrics` row of the bearer-parser table in
 /// `docs/AUTHENTICATION.md`. Before this test, deleting `.map(str::trim)` from
-/// `metrics.rs:127` left the whole workspace suite green (measured), so the
+/// `metrics.rs:128` left the whole workspace suite green (measured), so the
 /// documented trimming behaviour rested on nothing.
 ///
 /// This matters beyond the docs: #162's startup guard is deliberately
@@ -481,6 +481,58 @@ async fn metrics_bearer_parser_shape_is_pinned() {
     let (status, challenge) = get(&h.router, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(challenge.as_deref(), Some("Bearer realm=\"metrics\""));
+}
+
+/// #168 — the gate's actual AUTHORIZATION decision, which nothing pinned.
+///
+/// Found by mutation while implementing #168: replacing the comparison with a
+/// literal `true` left the entire workspace suite green. Every "refused" case
+/// in `metrics_bearer_gate_enforced` and `metrics_bearer_parser_shape_is_pinned`
+/// is refused at the `"Bearer "` PREFIX — none of them presents a well-formed
+/// header carrying the WRONG token, so the comparison itself was untested and
+/// `/metrics` could have been made to accept any token with CI staying green.
+///
+/// The near-miss cases matter for #168 specifically: a token sharing a long
+/// prefix with the real one is exactly what a timing oracle would exploit, and
+/// it is the case a short-circuiting `!=` treats differently from `ct_eq`.
+#[tokio::test]
+async fn metrics_wrong_bearer_token_is_refused() {
+    let mut cfg = metrics_config();
+    cfg.metrics.bearer_token = "scrape-secret".into();
+    let h = harness(cfg).await;
+
+    for wrong in [
+        "Bearer wrong-token",
+        // Correct prefix, one byte short — the timing-oracle shape.
+        "Bearer scrape-secre",
+        // Correct token plus a trailing byte (not whitespace, so not trimmed).
+        "Bearer scrape-secretX",
+        // Same bytes, different case: the token compare is case-SENSITIVE.
+        "Bearer SCRAPE-SECRET",
+        // Differs only in the final byte.
+        "Bearer scrape-secreT",
+        // Well-formed scheme, empty token.
+        "Bearer ",
+    ] {
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .header("authorization", wrong)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{wrong:?} must not authorize"
+        );
+    }
 }
 
 /// #162 — an EMPTY `metrics.bearer_token` must keep meaning "gate disabled".

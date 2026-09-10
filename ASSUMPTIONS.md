@@ -524,3 +524,26 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Status:** CONFIRMED (2026-09-06) — user asked for Fable to take the call and stated a
   preference for `rust_crypto`; Fable tested that preference rather than deferring to it and
   independently reached the same answer. Crux claims re-verified against source.
+
+## `secure_compare::ct_eq` visibility: `pub` rather than `pub(crate)`
+
+- **Plan:** `plans/u003-metrics-ct-eq.md` (U-003 — landing PR #171, #168)
+- **Assumed:** exporting `ct_eq` as `pub` from `acdp-registry-core` — rather than
+  `pub(crate)` — is acceptable, even though both of today's callers
+  (`handlers::admin::require_admin_bearer` and `metrics::metrics_endpoint`) are inside the
+  crate and `pub(crate)` would therefore compile.
+- **Chose:** kept `pub`, exactly as PR #171 wrote it. This unit is a **landing job** for a
+  branch that was already written and reviewed; narrowing the visibility would be a
+  gratuitous divergence from the reviewed diff, and would have broken the property that
+  makes this landing verifiable — that the merge commit's tree hash
+  (`cde552125d3c3e3be2b05c1c31b82afbce8226f4`) is bit-identical to the pre-merge trial, so
+  nothing was smuggled in under cover of a "small tidy-up".
+- **Alternatives:** `pub(crate)` (rejected for this unit — correct-looking, but it is a
+  rewrite of reviewed code for no behavioural gain, and it can be done at any time);
+  re-exporting at the crate root as `acdp_registry_core::ct_eq` (rejected — widens the
+  surface further, and the module path already reads well at both call sites).
+- **Blast radius if wrong:** minimal and cheaply reversible. `acdp-registry-core` is an
+  internal workspace crate with no external consumers, so this is not a published API
+  commitment; narrowing to `pub(crate)` later is a one-line mechanical change that the
+  compiler fully verifies. Nothing is foreclosed.
+- **Status:** CHANGED -> CONFIRMED (2026-09-10). Reconciled to `pub(crate)`; see `DECISIONS.md` entry 5. The kept-`pub` rationale did not survive analysis.

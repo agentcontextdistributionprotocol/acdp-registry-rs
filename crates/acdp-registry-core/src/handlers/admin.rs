@@ -20,6 +20,7 @@ use axum::Json;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::secure_compare::ct_eq;
 use crate::state::AppState;
 
 #[cfg(feature = "playground")]
@@ -706,21 +707,6 @@ fn require_admin_bearer(
     Ok(())
 }
 
-/// Constant-time byte-slice equality. Unequal lengths return `false` (the
-/// token *length* is not the secret); equal-length inputs are compared with an
-/// XOR fold that never short-circuits, so timing does not reveal the
-/// matching-prefix length.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 /// Admin-endpoint auth error. Kept separate from `RegistryError`
 /// because admin failures are policy-level (403) rather than
 /// protocol-level — `RegistryError::AuthChallenge` carries a 401
@@ -880,15 +866,5 @@ mod admin_auth_tests {
             require_admin_bearer(&cfg, &headers_with(Some("Bearer "))),
             Err(AdminAuthError::Forbidden)
         ));
-    }
-
-    #[test]
-    fn ct_eq_matches_only_identical_byte_slices() {
-        assert!(ct_eq(b"secret-token", b"secret-token"));
-        assert!(!ct_eq(b"secret-token", b"secret-toleN"));
-        // Differing lengths are unequal (and don't panic on the zip).
-        assert!(!ct_eq(b"short", b"longer-token"));
-        // Two empty slices are trivially equal (length guard passes, fold is 0).
-        assert!(ct_eq(b"", b""));
     }
 }

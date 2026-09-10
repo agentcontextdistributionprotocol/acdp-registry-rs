@@ -494,7 +494,7 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
     }
     if cfg.metrics.enabled {
         // #162: the `/metrics` gate applies only when the TRIMMED token is
-        // non-empty (`crates/acdp-registry-core/src/metrics.rs:121-122`), so a
+        // non-empty (`crates/acdp-registry-core/src/metrics.rs:122-123`), so a
         // whitespace-only value skips the bearer check entirely and serves the
         // endpoint to anyone who can reach the port — with no failed-auth
         // signal in the logs, because no auth was attempted.

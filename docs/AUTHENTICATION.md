@@ -110,7 +110,7 @@ rejected with `403 not_authorized`.
 **Three** bearer parsers coexist and no two of them agree. Each is deliberate,
 and the differences below are pinned by tests — `extract_bearer_accepts_two_casings_and_trims`
 (`crates/acdp-registry-auth/src/service.rs`), `bearer_scheme_is_case_sensitive`
-and `rejects_token_with_extra_whitespace` (`handlers/admin.rs:854-873`), and
+and `rejects_token_with_extra_whitespace` (`handlers/admin.rs:840-859`), and
 `metrics_bearer_parser_shape_is_pinned`
 (`crates/acdp-registry-server/tests/metrics_integration.rs`). The differences
 were undocumented rather than accidental, and stating them is what this section
@@ -125,8 +125,8 @@ differences in the same commit that documents them.
 | Route group | Parser | Scheme prefixes accepted | Trims the token? | Unrecognised header shape |
 |---|---|---|---|---|
 | `/contexts/*`, `/lineages/*`, and the other ordinary read/publish routes | `extract_bearer` (`crates/acdp-registry-auth/src/service.rs:400-405`) | `Bearer ` **and** `bearer ` | yes | treated as **anonymous** |
-| `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs:679-693`) | `Bearer ` only | **no** | rejected with **403** `{"error": "admin-only"}` (`admin.rs:741-745`) |
-| `/metrics` | inline in `metrics_endpoint` (`crates/acdp-registry-core/src/metrics.rs:124-128`) | `Bearer ` only | yes | rejected with **401** + a `WWW-Authenticate` challenge (`metrics.rs:130-134`) |
+| `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs:680-694`) | `Bearer ` only | **no** | rejected with **403** `{"error": "admin-only"}` (`admin.rs:727-731`) |
+| `/metrics` | inline in `metrics_endpoint` (`crates/acdp-registry-core/src/metrics.rs:124-128`) | `Bearer ` only | yes | rejected with **401** + a `WWW-Authenticate` challenge (`metrics.rs:141-148`) |
 
 The `/metrics` parser is a hybrid of the other two: case-sensitive on the scheme
 like the admin one, trimming like the lax one. It is also the only one of the
@@ -184,7 +184,7 @@ suspecting the token.
 
 On `/admin/*` the same inputs return `403` — absent, non-UTF-8, and unrecognised
 headers are all refused, and an empty `auth.admin_tokens` list disables the routes
-outright (`admin.rs:684`).
+outright (`admin.rs:685`).
 
 ### What each parser accepts
 
@@ -218,7 +218,7 @@ response status itself.
 
 Both behaviours on the admin side are pinned by tests, so loosening either is a
 deliberate reviewed change rather than a refactor: `bearer_scheme_is_case_sensitive`
-(`admin.rs:854-863`) and `rejects_token_with_extra_whitespace` (`admin.rs:866-873`).
+(`admin.rs:840-849`) and `rejects_token_with_extra_whitespace` (`admin.rs:852-859`).
 
 #### Trailing whitespace depends on the HTTP version
 
@@ -248,14 +248,16 @@ works on some routes and not others.
 
 `GET /metrics` does not go through the ACDP auth pipeline at all. It is mounted
 on the un-authenticated, un-rate-limited `aux` router
-(`crates/acdp-registry-core/src/lib.rs:153-155`), so no bearer it receives is
+(`crates/acdp-registry-core/src/lib.rs:154-156`), so no bearer it receives is
 ever validated as an ACDP token — no signature check, no `exp`, no revocation
-lookup, no tenant resolution. The handler applies its own gate instead, and that
-gate is a plain string comparison against a configured value.
+lookup, no tenant resolution. The handler applies its own gate instead: a
+constant-time comparison against a configured shared secret, via the same
+`ct_eq` helper the `/admin/*` allowlist uses
+(`crates/acdp-registry-core/src/secure_compare.rs`).
 
 The gate is applied only when `metrics.bearer_token` is non-blank
-(`crates/acdp-registry-core/src/metrics.rs:121-122`); the configured value and
-the presented one are both trimmed before comparison (`:121`, `:128`). Three
+(`crates/acdp-registry-core/src/metrics.rs:122-123`); the configured value and
+the presented one are both trimmed before comparison (`:122`, `:128`). Three
 consequences follow, and they are the ones that surprise people:
 
 - **An empty `metrics.bearer_token` leaves `/metrics` open**, to anyone who can
@@ -277,8 +279,20 @@ consequences follow, and they are the ones that surprise people:
   against, so the guard is deliberately narrower than the admin-token one.
 
 Failures on this endpoint answer `401` with
-`WWW-Authenticate: Bearer realm="metrics"` (`metrics.rs:130-134`) — the one place
+`WWW-Authenticate: Bearer realm="metrics"` (`metrics.rs:141-148`) — the one place
 in the registry that does. Everything else authenticated answers `403`.
+
+The presented token is compared to the configured one in **constant time**,
+using the same `ct_eq` helper as the `/admin/*` allowlist
+(`crates/acdp-registry-core/src/secure_compare.rs`) — one implementation shared
+by both gates rather than a copy each, so they cannot drift
+([#168](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/issues/168)).
+Two limits worth stating rather than leaving implied: the helper returns early
+when lengths differ, so token *length* stays observable at both gates (accepted
+in the existing design — what is protected is the token's contents); and
+constant-timeness is a property no unit test in this repo can demonstrate. The
+tests pin the authorization *behaviour*; the timing property rests on there
+being a single reviewed implementation.
 
 What `/metrics` exposes is operational rather than secret — request counts,
 latency histograms, publish outcomes — but an operator who sets
