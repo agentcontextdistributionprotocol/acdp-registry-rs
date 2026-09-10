@@ -2329,6 +2329,81 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Documentation
 
+<!-- U-005 #180 (lane-1) -->
+
+- **Corrected two false claims replicated across eleven operator-facing sites**
+  (`#180`). Both would have led an operator to configure the registry
+  incorrectly, and they failed in opposite directions.
+
+  **1. `[receipt]` and the playground were documented as flatly incompatible.
+  They are not.** `main.rs:259` refuses only `playground.enabled &&
+  !pinned_only` — the fully unverified sub-mode. Pinned-only playground
+  alongside receipts is deliberately supported (rationale at
+  `main.rs:249-258`; `receipt_with_pinned_only_playground_is_accepted`). The
+  harm was **foreclosure**: an operator who wanted receipts was told to disable
+  the playground outright when pinned-only would have served them.
+  `docs/RECEIPTS.md` was doubly wrong — its rationale ("the playground path
+  never resolves the producer key") is false in pinned mode, which is the point
+  of pinned mode. Corrected at `docs/CONFIGURATION.md`, `docs/RECEIPTS.md`,
+  `config/registry.example.toml`, each now also carrying the **second**
+  precondition (`main.rs:267` refuses `pinned_only = true` with an empty
+  `pinned_keys`) so the corrected docs cannot strand an operator at startup.
+  `config/registry.example.toml` gains a commented, copyable `pinned_only` +
+  `[[playground.pinned_keys]]` stanza; it previously contained no mention of
+  pinning at all.
+
+  **2. "`changeme` is always rejected" never held for either stack that ships
+  it.** The only such check (`main.rs:92-104`) is nested inside `auth.enabled
+  && jwt_signing_alg != "EdDSA" && !jwt_secret.is_empty()`, and
+  `docker/config.docker.toml:24` sets `auth.enabled = false`. **`docker compose
+  up` with the shipped `changeme` default boots cleanly** — the guard never
+  fires in the one setup where a placeholder secret is likeliest to survive
+  into production. **Operators auditing whether they were affected should note
+  this: if you relied on that documented check with auth disabled, it never
+  ran.** Corrected at `SECURITY.md`, `docker/docker-compose.yml` (×2),
+  `docker/RAILWAY.md`, `config/registry.example.toml`,
+  `docs/CONFIGURATION.md`, `docs/OPERATIONS.md`, `docs/AUTHENTICATION.md`. The
+  check is also case-insensitive after trimming (`main.rs:102-103`), not a
+  literal match, and does not apply under EdDSA — both now stated.
+
+  **`docker/RAILWAY.md` was the worst instance.** Its required-env-var table
+  never sets `ACDP_REGISTRY_AUTH__ENABLED`, `AuthConfig::default()` is
+  `enabled: false`, and the GHCR image mounts no config file there — so the
+  documented *production* recipe runs unauthenticated while its only mention of
+  auth was a false guarantee. It also instructs `ALLOW_PUBLIC_BIND = true`,
+  waiving the guard at `main.rs:465-478` whose own bail text names its
+  precondition as a proxy that terminates TLS **and authenticates**; Railway's
+  edge does only the first. A note under the table now states all of this.
+  Scoped deliberately: publishes and lifecycle events remain bound to
+  DID-signature verification, so this is **not** "anyone can publish anything."
+
+  **Deliberately not changed:** `auth.enabled` anywhere (including the compose
+  stack), the `${ACDP_REGISTRY_JWT_SECRET:-changeme}` default, and the addition
+  of `ACDP_REGISTRY_AUTH__ENABLED = true` to `RAILWAY.md`'s required env vars.
+  The last is a change to what a deployment recipe *instructs*, which is an
+  operator-visible posture change rather than a docs fix; `#180` says posture
+  must not change silently in a docs pass, so it is raised for a ruling
+  instead. Documentation only — no logic, signature, or behaviour changed.
+
+  Two further corrections found by the pre-merge verifier, both in text this
+  change itself introduced: `pinned_only = true` with an empty `pinned_keys`
+  does **not** "reject every publish" — `playground.rs:109-111` short-circuits
+  to `PinOutcome::Skipped` before `pinned_only` is read, so publishes fall
+  through to the *unverified* path. That rationale had been copied from the
+  startup guard's own bail message (`main.rs:271-273`), which is itself wrong;
+  the message is filed separately. And `playground.pinned_keys.algorithm`
+  accepts `ecdsa-p256` as well as `ed25519` (`playground.rs:58-64`), which the
+  reference table had listed as ed25519-only.
+
+  *Line-pin sweep (CHARTER rule 10):* two live pins point into
+  `docs/CONFIGURATION.md` — `DECISIONS.md:267` → `:112` and
+  `CHANGELOG.md:2054` → `:242` — both below both edit points, both drifting
+  `+5`. **Reported, not re-pointed:** re-pointing means editing existing lines
+  in files this change treats as additive-only. The three `changeme` mentions
+  in CHANGELOG history (`:1274`, `:1966`, `:2287`) are left stale by the same
+  historical-record principle. No test or workflow asserts on any changed
+  string (verified across `crates/` and `.github/`).
+
 <!-- REG-11 #164 (Lane C) -->
 
 - **Corrected a class of stale `401` doc comments in the ACDP request path**

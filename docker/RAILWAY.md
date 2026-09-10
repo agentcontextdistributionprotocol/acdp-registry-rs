@@ -42,12 +42,27 @@ Railway needs to pull from GHCR. Either:
 |----------|-------|
 | `ACDP_REGISTRY_STORAGE__BACKEND` | `postgres` — the GHCR image is compiled Postgres-only and mounts no config file on Railway, so the backend must be selected here (the default is `sqlite`, which the image refuses to run) |
 | `ACDP_REGISTRY_STORAGE__POSTGRES_URL` | `${{ Postgres.DATABASE_URL }}` (Railway reference) |
-| `ACDP_REGISTRY_AUTH__JWT_SECRET` | a real secret — `openssl rand -base64 32` (the binary refuses to start on the literal `changeme`) |
+| `ACDP_REGISTRY_AUTH__JWT_SECRET` | a real secret — `openssl rand -base64 32`. The binary rejects the literal `changeme` only once auth is enabled on HS256; this recipe does not enable auth, so the value is never validated — see the note below |
 | `ACDP_REGISTRY_REGISTRY__BIND` | `0.0.0.0` |
 | `ACDP_REGISTRY_REGISTRY__ALLOW_PUBLIC_BIND` | `true` (non-loopback bind opt-in) |
 | `ACDP_REGISTRY_REGISTRY__PORT` | `${{ PORT }}` — Railway injects `$PORT`; the registry config key is `registry.port`, so map it explicitly |
 | `ACDP_REGISTRY_REGISTRY__AUTHORITY` | your public hostname (e.g. `acdp-registry.up.railway.app`) |
 | `RUST_LOG` | `info,acdp=info,acdp_registry=info` |
+
+> **This recipe leaves authentication OFF.** It does not set
+> `ACDP_REGISTRY_AUTH__ENABLED`, `auth.enabled` defaults to `false`
+> (`AuthConfig::default()`), and the GHCR image mounts no config file on Railway
+> — so `config.docker.toml` does not apply either. Two consequences worth being
+> explicit about: the `JWT_SECRET` above is never validated (the `changeme`
+> check is gated on auth being enabled), and the `ALLOW_PUBLIC_BIND = true` in
+> the table waives a startup guard that otherwise refuses a non-loopback bind with TLS
+> *and* auth both disabled. That guard's stated precondition is a trusted proxy
+> that terminates TLS **and authenticates** in front of the registry; Railway's
+> edge does the former, not the latter. Requests reaching the registry are
+> therefore unauthenticated. Publishes and lifecycle events remain bound to
+> DID-signature verification; nothing else is. Authentication is turned on with
+> `ACDP_REGISTRY_AUTH__ENABLED = true`; run this recipe as written only where
+> something in front of Railway is genuinely doing the authenticating.
 
 > **TLS:** terminate TLS at Railway's edge and run the container with
 > `registry.tls.enabled = false` (as in `config.docker.toml`). The

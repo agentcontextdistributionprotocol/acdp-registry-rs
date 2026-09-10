@@ -697,3 +697,31 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Status:** CONFIRMED (2026-09-10) — decided by Opus at `/reconcile`; disposition and
   authorization stand, content and blast radius corrected. Issue owed **on merge**. See
   `DECISIONS.md`.
+
+## U-005 — operator-facing docs sweep (`#180`, lane-1, 2026-09-10)
+
+- **Assumed then verified:** that `crates/acdp-registry-server/src/main.rs` is the sole
+  enforcement point for both documented claims. Confirmed — exactly one `changeme` check
+  exists tree-wide, and the playground/receipt interaction is two adjacent bails in one
+  block. **Status: CONFIRMED.**
+- **Corrected mid-unit, twice, both caught before shipping:**
+  (a) the plan asserted a *single* playground guard; there are **two** (`main.rs:259`,
+  `:267`), and the second — `pinned_only = true` with an empty `pinned_keys` — would have
+  made the corrected documentation strand an operator at startup. Issue `#180` had stated
+  this correctly and the plan dropped it.
+  (b) the plan asserted "Railway deployments do enable auth" as the basis for ranking
+  `docker/RAILWAY.md:45` the *least* severe site. **False** — no `AUTH__ENABLED` exists
+  anywhere in `docker/` or `.github/`, `AuthConfig::default()` is `enabled: false`, and no
+  config file is mounted on Railway. It is the **most** severe site. **Status: CONFIRMED
+  (corrected).**
+- **Deliberately bounded, not assumed away:** with auth disabled every caller is anonymous
+  (`handlers/context.rs:1354-1358`) and `/auth/*` is not mounted (`core/src/lib.rs:42`), but
+  publishes remain bound to DID-signature verification. This unit therefore does **not**
+  claim unauthenticated publish is possible. Overstating it would have made the finding
+  easier to dismiss. **Status: CONFIRMED.**
+- **UNCONFIRMED — awaiting human ruling:** whether `docker/RAILWAY.md` should require
+  `ACDP_REGISTRY_AUTH__ENABLED = true`. Raised as `blocked`, forwarded by the leader, not
+  acted on. The documentation of the gap ships regardless; only the recipe change waits.
+- **Not re-litigated:** `auth.enabled = false` in the compose stack stays (leader-confirmed;
+  the demo must boot). Renaming the `changeme` placeholder was rejected — the guard already
+  matches case-insensitively after trimming, so the literal was never the fragile part.
