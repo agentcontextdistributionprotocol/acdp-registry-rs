@@ -1872,7 +1872,18 @@ mod predecessor_admission {
 
         // v1 under a real tenant, with a real receipt minter.
         let minter = |_: &acdp::types::body::Body| Ok(serde_json::json!({"kind": "test-receipt"}));
-        let v1 = request(&p, "v1-tenanted");
+        // Restricted, not Public: every other test in this suite is Public, so a
+        // visibility-keyed fast path would otherwise survive the whole suite.
+        let v1 = p
+            .publish_request()
+            .title("v1-tenanted")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Restricted)
+            .audience(vec![AgentDid::new(
+                "did:web:agents.test:audience".to_string(),
+            )])
+            .build()
+            .expect("valid restricted request");
         let s = Arc::clone(&store);
         let t = tenant.clone();
         let v1_out = tokio::task::spawn_blocking(move || {
@@ -1892,12 +1903,16 @@ mod predecessor_admission {
         let v1_body = store.get(&v1_ctx).unwrap().unwrap().body;
 
         // Successor is a KEY-REVOCATION, under the same tenant, with a minter.
-        let v2 = supersede_as(
-            &p,
-            &v1_body,
-            "revocation-successor",
-            ContextType::KeyRevocation,
-        );
+        let v2 = p
+            .supersede_body(&v1_body)
+            .title("revocation-successor")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Restricted)
+            .audience(vec![AgentDid::new(
+                "did:web:agents.test:audience".to_string(),
+            )])
+            .build()
+            .expect("valid restricted revocation successor");
         let fired = Arc::new(AtomicBool::new(false));
         let fired_c = Arc::clone(&fired);
         let tripwire = move |_: &acdp::types::body::Body| {
@@ -1923,8 +1938,9 @@ mod predecessor_admission {
         assert!(
             fired.load(Ordering::SeqCst),
             "the hook MUST fire with a tenant set, a receipt minter present, and a \
-             key-revocation successor — three axes every other test in this suite holds \
-             constant, so a fast path keyed on any of them would otherwise ship silently"
+             key-revocation successor under RESTRICTED visibility — four axes every other \
+             test in this suite holds constant, so a fast path keyed on any of them would \
+             otherwise ship silently"
         );
     }
 

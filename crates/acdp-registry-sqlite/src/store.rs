@@ -2334,6 +2334,11 @@ mod tests {
             .visibility(Visibility::Public)
             .build()
             .unwrap();
+        // Captured from the in-memory REQUEST. Comparing the hook's body against
+        // `store.get(..).body` instead would be decode-vs-decode: that value
+        // round-trips through the same `from_str::<Body>` the hook uses, so a
+        // lossy decode would corrupt both sides identically and still pass.
+        let v2_req_hash = v2.content_hash.clone();
         let s = store.clone();
         let v2c = v2.clone();
         let v2_out = tokio::task::spawn_blocking(move || {
@@ -2413,8 +2418,16 @@ mod tests {
         // unconditionally when the predecessor is not a key-revocation), so a
         // re-derived or normalized body cannot slip through.
         assert_eq!(
-            got_hash, v2_body.content_hash,
-            "the hook's body must be v2's byte-for-byte, not re-derived or normalized"
+            v2_body.content_hash.as_str(),
+            v2_req_hash.as_str(),
+            "fixture sanity: the stored hash equals the one the producer signed, which is \
+             what makes the assertion below independent of the decode path"
+        );
+        assert_eq!(
+            got_hash, v2_req_hash,
+            "the hook's body must carry the hash the PRODUCER signed — compared against the \
+             request, not another decode of the same row, so this genuinely proves the \
+             stored-body decode is faithful"
         );
     }
 
@@ -2622,20 +2635,24 @@ mod tests {
 
     /// Test 2d — the hook fires across the axes every other test holds
     /// constant. The rest of this suite always passes `tenant: None`,
-    /// `receipt_minter: None`, and a `DataSnapshot` successor, so a fast path
-    /// keyed on any of those survives the whole suite while disabling the rule
-    /// in production:
+    /// `receipt_minter: None`, a `DataSnapshot` successor and
+    /// `Visibility::Public`, so a fast path keyed on any of those survives the
+    /// whole suite while disabling the rule in production:
     ///
     /// ```ignore
     /// predecessor_admission.filter(|_| tenant.is_none())
     /// predecessor_admission.filter(|_| receipt_minter.is_none())
     /// predecessor_admission.filter(|_| !matches!(req.context_type, ContextType::KeyRevocation))
+    /// predecessor_admission.filter(|_| matches!(req.visibility, Visibility::Public))
     /// ```
     ///
-    /// All three are production configurations, and the successor-keyed one is
+    /// All four are production configurations, and the successor-keyed one is
     /// the "optimization" §4's own wording ("successor must be one too")
     /// invites. Note this is the SUCCESSOR's type — test 2c covers the
-    /// predecessor's, and the two are independent fast paths.
+    /// predecessor's, and the two are independent fast paths. The real gate
+    /// (`key_revocation_gate_applies(acdp_version) && req.supersedes.is_some()`)
+    /// has no visibility term at all, so a visibility-keyed skip would disable
+    /// the MUST for every non-public supersession.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admission_fires_with_tenant_receipts_and_a_key_revocation_successor() {
         use crate::SqliteStore;
@@ -2664,7 +2681,10 @@ mod tests {
             .publish_request()
             .title("v1-tenanted")
             .context_type(ContextType::DataSnapshot)
-            .visibility(Visibility::Public)
+            .visibility(Visibility::Restricted)
+            .audience(vec![AgentDid::new(
+                "did:web:agents.test:audience".to_string(),
+            )])
             .build()
             .unwrap();
         let s = store.clone();
@@ -2693,7 +2713,10 @@ mod tests {
             .supersede_body(&v1_body)
             .title("revocation-successor")
             .context_type(ContextType::KeyRevocation)
-            .visibility(Visibility::Public)
+            .visibility(Visibility::Restricted)
+            .audience(vec![AgentDid::new(
+                "did:web:agents.test:audience".to_string(),
+            )])
             .build()
             .unwrap();
 
@@ -2721,8 +2744,9 @@ mod tests {
         assert!(
             fired.load(Ordering::SeqCst),
             "the hook MUST fire with a tenant set, a receipt minter present, and a \
-             key-revocation SUCCESSOR — three axes every other test here holds constant, \
-             so a fast path keyed on any of them would otherwise ship silently"
+             key-revocation SUCCESSOR under RESTRICTED visibility — four axes every other \
+             test here holds constant, so a fast path keyed on any of them would otherwise \
+             ship silently"
         );
     }
 
