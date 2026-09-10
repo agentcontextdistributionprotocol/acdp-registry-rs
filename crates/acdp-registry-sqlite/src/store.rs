@@ -13,10 +13,10 @@ use acdp::types::lifecycle::{retraction_state, LifecycleEvent, LifecycleEventTyp
 use acdp::types::primitives::{AgentDid, ContentHash, CtxId, LineageId, Status, Visibility};
 use acdp::types::publish::PublishResponse;
 use acdp::types::search::{SearchParams, SearchResponse, SearchResult};
-use acdp_registry_store::{ExtendedRegistryStore, LogEntryRecord, Page};
+use acdp_registry_store::{
+    decode_cursor, encode_cursor, ExtendedRegistryStore, LogEntryRecord, Page,
+};
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -1727,44 +1727,6 @@ fn fts5_escape(q: &str) -> String {
     }
 }
 
-const CURSOR_TTL_SECS: i64 = 3600;
-
-fn encode_cursor(created_at_ms: i64, ctx_id: &str) -> String {
-    let mint_ms = Utc::now().timestamp_millis();
-    B64.encode(format!("{mint_ms}:{created_at_ms}:{ctx_id}"))
-}
-
-fn decode_cursor(s: &str) -> Result<Option<(DateTime<Utc>, String)>, AcdpError> {
-    let bytes = B64
-        .decode(s)
-        .map_err(|_| AcdpError::InvalidCursor("cursor is not valid base64".into()))?;
-    let decoded = String::from_utf8(bytes)
-        .map_err(|_| AcdpError::InvalidCursor("cursor is not utf-8".into()))?;
-    let mut parts = decoded.splitn(3, ':');
-    let mint = parts
-        .next()
-        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing mint".into()))?;
-    let anchor = parts
-        .next()
-        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing anchor".into()))?;
-    let ctx_id = parts
-        .next()
-        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing ctx_id".into()))?;
-    let mint_ms: i64 = mint
-        .parse()
-        .map_err(|_| AcdpError::InvalidCursor("cursor mint not int".into()))?;
-    let anchor_ms: i64 = anchor
-        .parse()
-        .map_err(|_| AcdpError::InvalidCursor("cursor anchor not int".into()))?;
-    let now = Utc::now().timestamp_millis();
-    if now.saturating_sub(mint_ms) > CURSOR_TTL_SECS * 1000 {
-        return Err(AcdpError::CursorExpired);
-    }
-    let anchor_ts = DateTime::<Utc>::from_timestamp_millis(anchor_ms)
-        .ok_or_else(|| AcdpError::InvalidCursor("cursor anchor out of range".into()))?;
-    Ok(Some((anchor_ts, ctx_id.to_string())))
-}
-
 fn map_sqlx_err(e: sqlx::Error) -> AcdpError {
     AcdpError::RegistryInternal(format!("sqlite: {e}"))
 }
@@ -1772,7 +1734,6 @@ fn map_sqlx_err(e: sqlx::Error) -> AcdpError {
 #[cfg(test)]
 mod tests {
     use super::fts5_escape;
-    use base64::Engine as _;
 
     #[test]
     fn fts5_escape_single_token() {
@@ -1787,51 +1748,6 @@ mod tests {
         assert_eq!(super::fts5_escape("café"), "\"café\"");
         // A column-filter injection attempt (`title:`) is neutralized by quoting.
         assert_eq!(super::fts5_escape("title:secret"), "\"title:secret\"");
-    }
-
-    // ── pagination cursor (encode/decode) ────────────────────────────
-
-    #[test]
-    fn cursor_round_trips_anchor_and_ctx_id() {
-        use super::{decode_cursor, encode_cursor};
-        let anchor_ms = 1_700_000_123_456_i64;
-        let cur = encode_cursor(anchor_ms, "acdp://reg/ctx-1");
-        let (ts, ctx_id) = decode_cursor(&cur)
-            .expect("decode ok")
-            .expect("cursor present");
-        assert_eq!(ts.timestamp_millis(), anchor_ms);
-        assert_eq!(ctx_id, "acdp://reg/ctx-1");
-    }
-
-    #[test]
-    fn cursor_rejects_malformed_input() {
-        use super::decode_cursor;
-        use acdp::error::AcdpError;
-        // Not base64.
-        assert!(matches!(
-            decode_cursor("!!!not-base64!!!"),
-            Err(AcdpError::InvalidCursor(_))
-        ));
-        // Valid base64 but missing the ctx_id field.
-        let truncated = super::B64.encode("123:456");
-        assert!(matches!(
-            decode_cursor(&truncated),
-            Err(AcdpError::InvalidCursor(_))
-        ));
-    }
-
-    #[test]
-    fn expired_cursor_is_rejected() {
-        use super::{decode_cursor, B64, CURSOR_TTL_SECS};
-        use acdp::error::AcdpError;
-        // Craft a cursor minted just past the TTL window.
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let stale_mint = now_ms - (CURSOR_TTL_SECS * 1000 + 5_000);
-        let raw = B64.encode(format!("{stale_mint}:{now_ms}:acdp://reg/ctx-1"));
-        assert!(
-            matches!(decode_cursor(&raw), Err(AcdpError::CursorExpired)),
-            "a cursor older than the TTL must be rejected so stale pages can't be replayed"
-        );
     }
 
     #[test]
