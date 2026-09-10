@@ -2620,6 +2620,112 @@ mod tests {
         );
     }
 
+    /// Test 2d — the hook fires across the axes every other test holds
+    /// constant. The rest of this suite always passes `tenant: None`,
+    /// `receipt_minter: None`, and a `DataSnapshot` successor, so a fast path
+    /// keyed on any of those survives the whole suite while disabling the rule
+    /// in production:
+    ///
+    /// ```ignore
+    /// predecessor_admission.filter(|_| tenant.is_none())
+    /// predecessor_admission.filter(|_| receipt_minter.is_none())
+    /// predecessor_admission.filter(|_| !matches!(req.context_type, ContextType::KeyRevocation))
+    /// ```
+    ///
+    /// All three are production configurations, and the successor-keyed one is
+    /// the "optimization" §4's own wording ("successor must be one too")
+    /// invites. Note this is the SUCCESSOR's type — test 2c covers the
+    /// predecessor's, and the two are independent fast paths.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_fires_with_tenant_receipts_and_a_key_revocation_successor() {
+        use crate::SqliteStore;
+        use acdp::crypto::SigningKey;
+        use acdp::producer::Producer;
+        use acdp::registry::store::{PublishCommit, PublishCommitOutcome, RegistryStore};
+        use acdp::types::primitives::{AgentDid, ContextType, CtxId, Visibility};
+        use acdp_registry_store::ExtendedRegistryStore;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        store.migrate().await.unwrap();
+        let store = Arc::new(store);
+
+        let p = Producer::new(
+            SigningKey::from_bytes(&[49u8; 32]),
+            AgentDid::new("did:web:agents.test:axes".to_string()),
+            "did:web:agents.test:axes#key-1".to_string(),
+        );
+
+        // v1 under a real tenant, with a real receipt minter.
+        let minter = |_: &acdp::types::body::Body| Ok(serde_json::json!({"kind": "test-receipt"}));
+        let v1 = p
+            .publish_request()
+            .title("v1-tenanted")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let s = store.clone();
+        let v1_out = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v1,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: Some("tenant-axes"),
+                receipt_minter: Some(&minter),
+                predecessor_admission: None,
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let v1_ctx = match v1_out {
+            PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => {
+                r.ctx_id.as_str().to_string()
+            }
+        };
+        let v1_body = store.get(&CtxId(v1_ctx)).unwrap().unwrap().body;
+
+        // Successor is a KEY-REVOCATION, same tenant, minter present.
+        let v2 = p
+            .supersede_body(&v1_body)
+            .title("revocation-successor")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_c = fired.clone();
+        let tripwire = move |_: &acdp::types::body::Body| {
+            fired_c.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let s = store.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &v2,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: Some("tenant-axes"),
+                receipt_minter: Some(&minter),
+                predecessor_admission: Some(&tripwire),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(outcome.is_ok(), "the closure admitted: {outcome:?}");
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "the hook MUST fire with a tenant set, a receipt minter present, and a \
+             key-revocation SUCCESSOR — three axes every other test here holds constant, \
+             so a fast path keyed on any of them would otherwise ship silently"
+        );
+    }
+
     /// Test 3 — ORDERING / anti-oracle guard. A non-owner superseding someone
     /// else's context must be turned away as `superseded_target{NotFound}`
     /// WITHOUT the admission hook ever firing. If the hook ran first, publish
@@ -2825,6 +2931,7 @@ mod tests {
     async fn admission_is_not_skipped_when_the_predecessor_body_is_undecodable() {
         use crate::SqliteStore;
         use acdp::crypto::SigningKey;
+        use acdp::error::AcdpError;
         use acdp::producer::Producer;
         use acdp::registry::store::{PublishCommit, RegistryStore};
         use acdp::types::primitives::{AgentDid, ContextType, Visibility};
@@ -2882,11 +2989,20 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
-            outcome.is_err(),
-            "an undecodable predecessor body must fail the publish rather than \
-             silently skipping the RFC-ACDP-0014 §4 admission check, got {outcome:?}"
-        );
+        // Pin the DECODE specifically: `is_err()` alone is also satisfied by the
+        // ownership / lineage / version / AlreadySuperseded gates, all of which
+        // run before the hook, so it would not prove the decode is what failed.
+        match &outcome {
+            Err(AcdpError::RegistryInternal(msg)) => assert!(
+                msg.contains("decode body"),
+                "the failure must be the predecessor-body decode, got RegistryInternal({msg})"
+            ),
+            other => panic!(
+                "an undecodable predecessor body must fail the publish with the decode \
+                 error rather than silently skipping the RFC-ACDP-0014 §4 admission \
+                 check, got {other:?}"
+            ),
+        }
         assert!(
             !fired.load(Ordering::SeqCst),
             "the hook cannot have run: there was no decodable body to hand it"
