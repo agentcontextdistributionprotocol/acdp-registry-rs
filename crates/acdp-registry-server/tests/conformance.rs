@@ -11382,6 +11382,29 @@ async fn cur001_002_expired_and_malformed_cursors_are_distinguished() {
         Some(inv_ctype.as_str()),
         "cur-002: content-type must match the fixture"
     );
+    // TRIPWIRE, not a requirement. cur-002's prose `rationale` says a registry
+    // "MUST NOT leak why a cursor failed to parse beyond the registered code", and
+    // this registry's message does name the reason. That clause has NO normative
+    // backing -- RFC-ACDP-0005 2.5.4's cursor MUSTs cover validity, re-scoping, and
+    // client-decodable VISIBILITY information (a property of the cursor payload, not
+    // of the message); none of them concerns parse-failure detail. And `rationale` is
+    // corpus-wide descriptive here, never asserted, for all 74 fixtures that carry one.
+    // So this is not a gap being tolerated; it is fixture prose with no force.
+    //
+    // What this pins is the CURRENT behaviour, so the claim above cannot quietly become
+    // false. The message literals live in the two store crates, outside this unit's
+    // granted paths, duplicated byte-for-byte -- so nothing else binds them to the
+    // sentence you just read.
+    assert!(
+        v_bad["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("base64")),
+        "cur-002: the invalid_cursor message no longer names the parse reason. If the \
+         store crates' cursor messages were deliberately tightened, that is an \
+         IMPROVEMENT, not a regression -- retire this tripwire, the note above it, and \
+         the corresponding ASSUMPTIONS.md entry, which all describe behaviour that has \
+         now changed (see #187): {v_bad}"
+    );
     asserted += 1;
 
     // The two codes must stay distinct -- the whole point of both fixtures'

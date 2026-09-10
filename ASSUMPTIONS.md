@@ -607,4 +607,4 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   message change in `error.rs` plus tightening this test's assertion; nothing built on top of
   the current behaviour would need to change. The risk of the current choice is only that the
   gap is forgotten — which this entry exists to prevent.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-10) — and on stronger grounds than this entry claims: the leak clause has no RFC backing and `rationale` is corpus-wide never-asserted, so it is not a tolerated gap. This entry's body is WRONG about where the message literals live (they are in the two store crates, not `error.rs`) and examined only one of seven arms. Corrections and the applied tripwire: see `DECISIONS.md` entry 7.

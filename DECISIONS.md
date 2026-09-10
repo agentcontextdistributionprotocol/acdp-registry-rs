@@ -802,3 +802,63 @@ corrected rather than quietly dropped:
 2. A mutation table recorded an observation for a test that did not yet exist when that
    mutation was run. Re-run against the full suite; the corrected result is stronger than the
    one first recorded.
+
+## 7. U-004 — `cur-002`'s message-leak "gap" is not a gap (2026-09-10)
+
+**Decided by:** Opus, via an independent reconcile analysis. Low blast radius, reversible,
+no one-way door — so settled without escalating, per the Autonomy ladder.
+
+**The assumption** (`ASSUMPTIONS.md`, "`cur-002`'s message-leak rationale is documented, not
+satisfied"): that asserting only `cur-002`'s machine-checkable `expected` block is sufficient,
+even though its prose `rationale` says a registry "MUST NOT leak why a cursor failed to parse
+beyond the registered code" — this registry answers `"invalid cursor: cursor is not valid
+base64"`, which names the reason.
+
+**Verdict: CONFIRMED, on stronger grounds than the entry itself claimed.** The entry logged
+this as a tolerated gap. It is not a gap at all:
+
+1. **The clause has no normative backing.** `RFC-ACDP-0005-discovery.md:153-161` (§2.5.4, the
+   section `cur-002` cites) lists the cursor MUSTs: 1-hour validity; no *client-decodable
+   visibility information*; `cursor_expired` on result-set change; `invalid_cursor` for
+   unparseable; re-scope to the current requester every page. **None concerns parse-failure
+   detail.** The visibility MUST is about the cursor *payload*, not the error message. Verified
+   by reading the section, not inferred.
+2. **`rationale` is corpus-wide descriptive and never asserted** — stated at
+   `conformance.rs:1178-1180` and listed in `RECOGNIZED` at `:1206`. 74 of 143 fixtures carry
+   one; `cur-002` gets no special treatment. Asserting this one would be inventing a
+   requirement.
+3. **No disclosure in substance.** All the message literals are static; none echoes caller
+   input. The cursor is unsigned plaintext base64 of `mint:anchor:ctx_id`, so one `base64 -d`
+   on any legitimately issued cursor reveals more about the format than the messages do.
+
+**Two corrections to the original entry's body.** `ASSUMPTIONS.md` is append-only (board rule
+D-005), so they are recorded here rather than edited in place:
+
+- **The entry named the wrong file.** It says the fix would be "a one-line message change in
+  `error.rs`". The message literals are not in `crates/acdp-registry-types/src/error.rs` at
+  all — that file maps the *variant* to a wire code (`:190`) and status (`:210`). The strings
+  live in the two store crates, duplicated byte-for-byte:
+  `crates/acdp-registry-sqlite/src/store.rs:1740-1764` and
+  `crates/acdp-registry-pg/src/store.rs:1644-1668` — **14 literals across two crates**, not one
+  line in one. The scope conclusion (don't touch `src/`) was right; the reasoning behind it was
+  asserted rather than verified.
+- **The entry examined only the base64 arm.** Six others name internal cursor fields —
+  `"cursor missing mint"`, `"cursor missing anchor"`, `"cursor missing ctx_id"`,
+  `"cursor mint not int"`, `"cursor anchor not int"`, `"cursor anchor out of range"`. They
+  disclose the cursor's field structure, which is more than the entry's analysis considered.
+  It does not change the verdict — that structure is already recoverable from any issued
+  cursor — but the entry overstated how narrow the behaviour was.
+
+**One change applied**, in-scope, in `conformance.rs`: a self-invalidating **tripwire** now
+pins the current behaviour. The doc note quotes a string literal owned by another crate with
+nothing binding them, so tightening that message would leave the test green while the note
+silently became a false claim that a gap still exists — a truthful file made to lie. That
+hazard is already on the books one boundary out: `DECISIONS.md` entry 4's rule prefers a
+citation to a quotation whenever the source is outside this repo. Same hazard, crate boundary
+instead of repo boundary. The tripwire fails loudly and tells the reader to retire the note and
+this entry rather than "fix" the code. No ratchet churn —
+`EXPECTED_CUR_ASSERTION_COUNT` counts one increment per vector, not per assertion.
+
+**Filed as #187, not fixed:** collapsing the 14 literals to a bare `"invalid cursor"` and
+deduplicating the byte-identical cursor codec between the sqlite and pg stores. Genuinely outside this unit's
+granted paths, and the test's own scope note already flags the duplication.
