@@ -6645,8 +6645,8 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
 /// note above this section), this one genuinely exercises code THIS repo
 /// owns and calls on the publish path: `acdp::time::trunc_ms`, the exact
 /// function `acdp-registry-sqlite`/`acdp-registry-pg`'s stores call when
-/// minting `created_at` (`crates/acdp-registry-sqlite/src/store.rs:1001`,
-/// `crates/acdp-registry-pg/src/store.rs:897`) -- reachable here as a pure
+/// minting `created_at` (`crates/acdp-registry-sqlite/src/store.rs:1040`,
+/// `crates/acdp-registry-pg/src/store.rs:933`) -- reachable here as a pure
 /// function of a `DateTime<Utc>`, with no server/store/auth needed.
 ///
 /// Per vector: truncate `registry_clock_at_acceptance` (or, when absent,
