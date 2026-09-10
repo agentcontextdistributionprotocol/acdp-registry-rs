@@ -738,6 +738,11 @@ pub struct PlaygroundConfig {
     /// agents not listed in `pinned_keys`. When false (the default),
     /// unpinned agents are still accepted. Has no effect when
     /// `pinned_keys` is empty.
+    ///
+    /// That last clause is why `acdp-registry-server`'s startup validator
+    /// refuses `playground.enabled` + `pinned_only` with an empty
+    /// `pinned_keys` (#185): the combination reads as a lockdown but
+    /// falls through to the unverified publish path.
     #[serde(default)]
     pub pinned_only: bool,
 }
