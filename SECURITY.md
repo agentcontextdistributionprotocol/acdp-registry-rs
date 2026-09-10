@@ -16,8 +16,11 @@ issue. We aim to acknowledge reports within 72 hours.
   base64-encoded random material). With auth enabled and HS256, the startup
   validator refuses to boot on an empty secret — the random process-lifetime
   fallback requires an explicit `auth.allow_ephemeral_secret = true` and is for
-  local development only (its tokens do not survive a restart). The literal
-  `changeme` is always rejected.
+  local development only (its tokens do not survive a restart). A companion
+  check, gated the same way, rejects a non-empty secret that is `changeme`, matched
+  case-insensitively after trimming. Neither branch runs when
+  `auth.enabled = false` — as in the shipped docker compose stack — so a
+  placeholder secret can survive there unnoticed.
 - For federated deployments, prefer EdDSA (`auth.jwt_signing_alg = "EdDSA"`) so
   peers verify your tokens against the public key at `/.well-known/jwks.json`
   instead of a shared secret. See [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md).

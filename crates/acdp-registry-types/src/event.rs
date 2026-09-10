@@ -72,6 +72,14 @@ pub enum WebhookEvent {
         /// (`body.agent_id`) for endpoint-submitted events.
         actor: String,
         /// The actor-minted lifecycle `event_id` (RFC 9562 UUID).
+        ///
+        /// Goes on the wire as `lifecycle_event_id`, not `event_id`. Webhook
+        /// deliveries flatten this event under an envelope that carries its
+        /// own `event_id` — the per-delivery dedupe id — and two fields of
+        /// that name serialise a duplicate JSON key, which parsers resolve
+        /// inconsistently. The Rust name stays `event_id` to match the
+        /// upstream lifecycle event this is copied from. See #179.
+        #[serde(rename = "lifecycle_event_id")]
         event_id: String,
         /// Optional human-readable explanation from the signed event.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,6 +96,14 @@ pub enum WebhookEvent {
         /// The DID of the party performing the republication.
         actor: String,
         /// The actor-minted lifecycle `event_id` (RFC 9562 UUID).
+        ///
+        /// Goes on the wire as `lifecycle_event_id`, not `event_id`. Webhook
+        /// deliveries flatten this event under an envelope that carries its
+        /// own `event_id` — the per-delivery dedupe id — and two fields of
+        /// that name serialise a duplicate JSON key, which parsers resolve
+        /// inconsistently. The Rust name stays `event_id` to match the
+        /// upstream lifecycle event this is copied from. See #179.
+        #[serde(rename = "lifecycle_event_id")]
         event_id: String,
         /// Optional human-readable explanation from the signed event.
         #[serde(default, skip_serializing_if = "Option::is_none")]

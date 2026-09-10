@@ -317,8 +317,9 @@ OKP/Ed25519 JWK, with `kid` derived from the key fingerprint unless
 > **Dev convenience:** with HS256 and an empty `jwt_secret`, set
 > `auth.allow_ephemeral_secret = true` to boot with a random process-lifetime
 > key. Tokens won't survive a restart. Never use this in production — set a real
-> `jwt_secret`. The startup validator refuses the literal `changeme` and refuses
-> an empty secret unless `allow_ephemeral_secret` is set.
+> `jwt_secret`. The startup validator refuses `changeme` (case-insensitively,
+> after trimming) and refuses an empty secret unless `allow_ephemeral_secret` is
+> set — both checks only when `auth.enabled = true`.
 
 ## Token revocation
 

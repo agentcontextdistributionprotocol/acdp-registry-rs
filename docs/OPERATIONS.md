@@ -19,8 +19,11 @@ crates.io, so the build context is just this repo.
 
 **Secrets** are sourced from the environment or a sibling `.env` file via
 `${VAR:-default}` substitution. The placeholder default for the JWT secret is
-`changeme` — the startup validator **refuses to launch** with that literal, so
-set a real one before promoting beyond a disposable demo:
+`changeme`. The startup validator rejects that literal (case-insensitively,
+after trimming) **only when auth is enabled on HS256** — and the shipped compose
+stack sets `auth.enabled = false`, so it starts cleanly with the placeholder and
+the check never runs. Set a real secret before enabling auth or promoting beyond
+a disposable demo:
 
 ```bash
 echo "ACDP_REGISTRY_JWT_SECRET=$(openssl rand -base64 32)" >> docker/.env

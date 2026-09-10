@@ -2091,6 +2091,51 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Docs-only; no behavior change. Not compiled locally — `rustdoc` (`docs`
   CI job) is the verification signal for this phase.
 
+<!-- U-002 #179 (Lane 2) -->
+
+- **Webhook deliveries no longer emit a duplicate `event_id` JSON key**
+  (`U-002`, `#179`): `WireEnvelope`
+  (`crates/acdp-registry-webhook/src/lib.rs`) serialises a top-level
+  `event_id` and then `#[serde(flatten)]`s the event.
+  `WebhookEvent::ContextRetracted` and `::ContextRepublished`
+  (`crates/acdp-registry-types/src/event.rs`) each carry their own
+  actor-minted `event_id`, so those two deliveries — and only those two —
+  put the key on the wire **twice**. The envelope serialises first and the
+  flattened variant second, so every last-wins parser (`serde_json`,
+  JavaScript `JSON.parse`, Python `json`) resolved `event_id` to the
+  *lifecycle* UUID and silently shadowed the envelope's per-delivery dedupe
+  id; first-wins implementations saw the opposite. One of the two meanings
+  was always lost, and which one depended on the receiver's parser.
+  - **Wire change:** on `context.retracted` and `context.republished` the
+    actor-minted lifecycle id now serialises as **`lifecycle_event_id`**.
+    The envelope's `event_id` keeps its name and its meaning — the
+    per-delivery dedupe id, still echoed in `X-ACDP-Event-Id`. The other
+    three event types are byte-identical to before.
+  - **For receivers:** anything deduping on the `X-ACDP-Event-Id` header is
+    unaffected. A receiver that read the body's `event_id` on these two
+    types and relied on last-wins was reading the lifecycle id and now reads
+    the delivery id — read `lifecycle_event_id` to keep the old value.
+  - Implemented with `#[serde(rename)]` rather than a Rust field rename:
+    every construction site lives in `crates/acdp-registry-core`, and the
+    emitted JSON is byte-identical either way.
+  - **`schema_version` deliberately stays `"1.0"`.** It describes the
+    envelope, which did not change, and it is stamped per *delivery* — so a
+    `search.executed` body carrying a bumped version would assert that
+    something about that delivery changed when nothing did. That holds however
+    many variants a future change touches. The constant's doc comment, which
+    previously promised a bump on "any" backwards-incompatible shape change,
+    has been narrowed to match what it actually tracks.
+  - Enforced by a test that drives all five variants through the real
+    emitter and asserts on the serialized body. Duplicate detection walks
+    the raw JSON with a `MapAccess` visitor rather than parsing to
+    `serde_json::Value`, whose map silently keeps only the last of a
+    repeated key and therefore cannot observe this defect at all.
+    `context.retracted` and `context.republished` are also documented in
+    [WEBHOOKS.md](docs/WEBHOOKS.md) for the first time — the two event types
+    carrying the bug were the two that had never been written down.
+
+<!-- end U-002 #179 -->
+
 ### Security
 
 <!-- U-001 #174 (lane-1) -->
@@ -2283,6 +2328,81 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tls-rustls` still resolves to `rustls/aws-lc-rs`.
 
 ### Documentation
+
+<!-- U-005 #180 (lane-1) -->
+
+- **Corrected two false claims replicated across eleven operator-facing sites**
+  (`#180`). Both would have led an operator to configure the registry
+  incorrectly, and they failed in opposite directions.
+
+  **1. `[receipt]` and the playground were documented as flatly incompatible.
+  They are not.** `main.rs:259` refuses only `playground.enabled &&
+  !pinned_only` — the fully unverified sub-mode. Pinned-only playground
+  alongside receipts is deliberately supported (rationale at
+  `main.rs:249-258`; `receipt_with_pinned_only_playground_is_accepted`). The
+  harm was **foreclosure**: an operator who wanted receipts was told to disable
+  the playground outright when pinned-only would have served them.
+  `docs/RECEIPTS.md` was doubly wrong — its rationale ("the playground path
+  never resolves the producer key") is false in pinned mode, which is the point
+  of pinned mode. Corrected at `docs/CONFIGURATION.md`, `docs/RECEIPTS.md`,
+  `config/registry.example.toml`, each now also carrying the **second**
+  precondition (`main.rs:267` refuses `pinned_only = true` with an empty
+  `pinned_keys`) so the corrected docs cannot strand an operator at startup.
+  `config/registry.example.toml` gains a commented, copyable `pinned_only` +
+  `[[playground.pinned_keys]]` stanza; it previously contained no mention of
+  pinning at all.
+
+  **2. "`changeme` is always rejected" never held for either stack that ships
+  it.** The only such check (`main.rs:92-104`) is nested inside `auth.enabled
+  && jwt_signing_alg != "EdDSA" && !jwt_secret.is_empty()`, and
+  `docker/config.docker.toml:24` sets `auth.enabled = false`. **`docker compose
+  up` with the shipped `changeme` default boots cleanly** — the guard never
+  fires in the one setup where a placeholder secret is likeliest to survive
+  into production. **Operators auditing whether they were affected should note
+  this: if you relied on that documented check with auth disabled, it never
+  ran.** Corrected at `SECURITY.md`, `docker/docker-compose.yml` (×2),
+  `docker/RAILWAY.md`, `config/registry.example.toml`,
+  `docs/CONFIGURATION.md`, `docs/OPERATIONS.md`, `docs/AUTHENTICATION.md`. The
+  check is also case-insensitive after trimming (`main.rs:102-103`), not a
+  literal match, and does not apply under EdDSA — both now stated.
+
+  **`docker/RAILWAY.md` was the worst instance.** Its required-env-var table
+  never sets `ACDP_REGISTRY_AUTH__ENABLED`, `AuthConfig::default()` is
+  `enabled: false`, and the GHCR image mounts no config file there — so the
+  documented *production* recipe runs unauthenticated while its only mention of
+  auth was a false guarantee. It also instructs `ALLOW_PUBLIC_BIND = true`,
+  waiving the guard at `main.rs:465-478` whose own bail text names its
+  precondition as a proxy that terminates TLS **and authenticates**; Railway's
+  edge does only the first. A note under the table now states all of this.
+  Scoped deliberately: publishes and lifecycle events remain bound to
+  DID-signature verification, so this is **not** "anyone can publish anything."
+
+  **Deliberately not changed:** `auth.enabled` anywhere (including the compose
+  stack), the `${ACDP_REGISTRY_JWT_SECRET:-changeme}` default, and the addition
+  of `ACDP_REGISTRY_AUTH__ENABLED = true` to `RAILWAY.md`'s required env vars.
+  The last is a change to what a deployment recipe *instructs*, which is an
+  operator-visible posture change rather than a docs fix; `#180` says posture
+  must not change silently in a docs pass, so it is raised for a ruling
+  instead. Documentation only — no logic, signature, or behaviour changed.
+
+  Two further corrections found by the pre-merge verifier, both in text this
+  change itself introduced: `pinned_only = true` with an empty `pinned_keys`
+  does **not** "reject every publish" — `playground.rs:109-111` short-circuits
+  to `PinOutcome::Skipped` before `pinned_only` is read, so publishes fall
+  through to the *unverified* path. That rationale had been copied from the
+  startup guard's own bail message (`main.rs:271-273`), which is itself wrong;
+  the message is filed separately. And `playground.pinned_keys.algorithm`
+  accepts `ecdsa-p256` as well as `ed25519` (`playground.rs:58-64`), which the
+  reference table had listed as ed25519-only.
+
+  *Line-pin sweep (CHARTER rule 10):* two live pins point into
+  `docs/CONFIGURATION.md` — `DECISIONS.md:267` → `:112` and
+  `CHANGELOG.md:2054` → `:242` — both below both edit points, both drifting
+  `+5`. **Reported, not re-pointed:** re-pointing means editing existing lines
+  in files this change treats as additive-only. The three `changeme` mentions
+  in CHANGELOG history (`:1274`, `:1966`, `:2287`) are left stale by the same
+  historical-record principle. No test or workflow asserts on any changed
+  string (verified across `crates/` and `.github/`).
 
 <!-- REG-11 #164 (Lane C) -->
 

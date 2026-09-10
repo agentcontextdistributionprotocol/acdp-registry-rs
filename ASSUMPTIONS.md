@@ -583,6 +583,148 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   is advertised to producers as retryable and invites a retry loop. The wart is pre-existing
   and repo-wide (every `row_to_context` decode has it); fixing it is its own unit, not
   something to smuggle into a dependency bump. Reversible in one line.
+## `WEBHOOK_SCHEMA_VERSION` stays `"1.0"` across the `event_id` wire rename
+
+- **Plan:** `plans/u-002-webhook-duplicate-event-id.md`
+- **Assumed:** renaming the `context.retracted` / `context.republished` lifecycle id from
+  `event_id` to `lifecycle_event_id` does not warrant bumping the envelope's
+  `WEBHOOK_SCHEMA_VERSION`.
+- **Chose:** keep `"1.0"` and instead narrow the constant's doc comment
+  (`crates/acdp-registry-webhook/src/lib.rs:20-46`), which previously promised a bump on
+  "any backwards-incompatible change to the serialized event shape".
+- **Rationale CORRECTED at reconcile (2026-09-10).** The original argument — "only two of
+  five variants changed, so bumping misreports the other three" — **does not hold**, and is
+  recorded here so no one cites it again. Both downstream consumers parse all five event
+  types through **one open union** (`acdp-control-plane` `AcdpWebhookEvent`
+  `src/contracts/acdp.ts:29-102`; `acdp-playground` `WebhookType_Open`
+  `acdp_client/models.py:255-288`). "Only some variants changed" is a distinction that exists
+  in this repo's Rust enum and in no receiver's model. The decision survives on a different
+  and sounder argument: `schema_version` is stamped **per delivery**, so it describes that
+  delivery's envelope, not the stream — a `search_executed` body carrying `"1.1"` would
+  assert that something about *that delivery* changed when nothing did. Bumping is not a
+  blast-radius trade-off, it is emitting a falsehood on every delivery — the envelope, which
+  is what the value describes, changed for none of them. Independently
+  corroborated by **RFC-ACDP-0009 §2.10**, which reserves this profile's version field as the
+  schema version of the event *envelope* — the narrowed scope matches what the spec already
+  reserved, rather than being a carve-out invented to fit this case.
+- **Also corrected:** the plan said "the only known consumer". There are **two** —
+  `acdp-playground/acdp_client/models.py:282` also declares `schema_version`. Neither reads
+  it (verified by workspace-wide grep across all sibling repos), so the conclusion is
+  unchanged, but the claim as written was wrong.
+- **Alternatives:** bump to `"2.0"` (rejected — punishes the unchanged majority); bump to
+  `"1.1"` (rejected — identical blast radius for no additional signal); leave the doc comment
+  as-is and not bump (rejected — ships code contradicting its own stated contract).
+- **Blast radius if wrong:** a receiver that wanted to branch on the version to detect this
+  rename cannot. Recovery is a one-line bump in a later release; nothing persists or migrates.
+  The constant is read at exactly one site (`lib.rs`, envelope construction) and pinned by one
+  test assertion.
+- **Status:** CONFIRMED (2026-09-10) — decided by Opus at `/reconcile`, decision unchanged,
+  rationale corrected as above. See `DECISIONS.md`.
+
+## `#[serde(rename)]` is symmetric, and that is deliberate
+
+- **Plan:** `plans/u-002-webhook-duplicate-event-id.md`
+- **Assumed:** changing the field's name for `Deserialize` as well as `Serialize` is safe.
+- **Chose:** the symmetric `#[serde(rename = "lifecycle_event_id")]` rather than the
+  asymmetric `#[serde(rename(serialize = ...))]`. `WebhookEvent` does derive `Deserialize`
+  (`crates/acdp-registry-types/src/event.rs:8`), but nothing in this workspace deserialises it
+  — verified by grep across all crates. Asymmetry would leave the type able to *read* a key it
+  will never *write*, which is exactly the read/write skew that rots a wire format.
+- **Alternatives:** asymmetric rename (rejected, above); adding `#[serde(alias = "event_id")]`
+  for read compat (rejected — buys nothing in-repo, and would reintroduce the very ambiguity
+  being removed if the envelope ever gains a `Deserialize`).
+- **Blast radius if wrong:** an out-of-tree deserialiser of this type reading the old key
+  breaks. None is known; the one known consumer parses structurally and tolerates unknown keys
+  via `[k: string]: unknown` (`acdp-control-plane/src/contracts/acdp.ts:102`). The crate is
+  **not published** (`release-plz.toml:5` `publish = false`; absent from crates.io) and no
+  Rust consumer exists in any sibling repo, so reversal is a two-word edit.
+- **Reconcile strengthened the reasoning (2026-09-10).** Symmetric is not merely safe, it is
+  the **only correct form of the three**, and the other two fail *quietly*:
+  `rename(serialize = ...)` would read `event_id` — a key still on the wire, holding the
+  *envelope delivery id* — into the lifecycle field: no error, wrong value, which is exactly
+  the confusion #179 removes, resurrected on the read side. `alias = "event_id"` maps both
+  names to one field slot, so serde rejects **every current body** with a duplicate-field
+  error, and rejects old duplicate-key payloads too. On an old payload the shipped form fails
+  loudly with `missing field lifecycle_event_id`, which is the right outcome — and, with
+  `schema_version` deliberately frozen, is the only automatic detector an old payload has.
+- **Gap closed:** nothing asserted the read side, so this entry rested on untested behaviour.
+  `the_emitted_body_round_trips_into_the_lifecycle_field` now deserialises a real emitted body
+  and asserts the lifecycle field gets the actor-minted id and **not** the envelope id.
+- **Status:** CONFIRMED (2026-09-10) — decided by Opus at `/reconcile`, with a test added so
+  the read path is a guarantee rather than an argument. See `DECISIONS.md`.
+
+## `acdp-control-plane` needs telling; this lane must not edit it
+
+- **Plan:** `plans/u-002-webhook-duplicate-event-id.md`
+- **Assumed:** the downstream control plane should learn that `lifecycle_event_id` now exists
+  and that its own note at `acdp-control-plane/src/contracts/acdp.ts:81-85` — which documents
+  the old last-wins behaviour as a deliberate dedup fallback — goes stale on merge.
+- **Chose:** file a **GitHub issue** in `agentcontextdistributionprotocol/acdp-control-plane`
+  from `/ship` after merge, so it can cite the merged PR. **No edit to that repo's files.**
+  Authorised by the user's standing instruction for this workspace ("only this repo changes;
+  for cross-repo changes file GitHub issues and ping that repo's Claude session"), not by this
+  plan — CHARTER rule 6 forbids cross-repo *edits* outright and a plan may not self-exempt.
+- **Alternatives:** edit `acdp.ts` directly (rejected — forbidden); say nothing (rejected —
+  leaves a first-party repo carrying a comment that is now false).
+- **Blast radius CORRECTED at reconcile (2026-09-10).** "The fallback keeps working either
+  way" was **too strong**. It holds for delivery retries — its documented purpose. It stops
+  collapsing *distinct deliveries of the same logical lifecycle event*: the SDK's lifecycle
+  commit has an idempotent-replay outcome, and this registry emits the webhook
+  unconditionally, so a producer resubmitting a byte-identical signed event yields a second
+  delivery with a new envelope id but the same actor-minted id. **With the header present
+  (the normal path) nothing changes.** With the header stripped, the old fallback keyed on the
+  actor-minted id and collapsed the pair; the new one keys on the delivery id and does not —
+  costing a duplicate ingest row, a double SSE emit and a double outbound webhook. The
+  lifecycle projection stays correct (its upsert guard makes re-applying a transition a no-op).
+  This is the fallback becoming *consistent with* the primary path rather than accidentally
+  stronger than it — defensible, but it must be stated in the issue rather than found by
+  their on-call.
+- **Authorization CONFIRMED, and the earlier challenge was half right.** Filing an issue *is*
+  a cross-repo write. But CHARTER rule 6 is a **routing** rule — it says such writes go to the
+  human and that *the leader cannot authorize them*; it does not say the permission cannot
+  exist. The human already granted exactly this mechanism in advance ("for cross-repo changes
+  file GitHub issues and ping that repo's Claude session"), so rule 6 is **satisfied, not
+  bypassed**. The reviewer was right that the earlier prose asserted the exemption without
+  naming its source; that wording has been corrected to cite the source.
+- **Two corrections to the plan:** (a) the standing instruction has two halves and the second
+  was dropped — **ping that repo's Claude session**, not just file the issue; (b) the issue
+  must **not** say the control plane "can key on `lifecycle_event_id`". Read as dedup advice
+  that would put their body fallback back into disagreement with `X-ACDP-Event-Id`, re-creating
+  the divergence #179 removes. `lifecycle_event_id` is actor provenance, **not** a dedup key.
+- **Timing:** after merge and **only** after merge. A pre-merge issue would tell another team a
+  wire format changed when it has not. If the PR never merges, nothing is owed and nothing is
+  filed.
+- **Status:** CONFIRMED (2026-09-10) — decided by Opus at `/reconcile`; disposition and
+  authorization stand, content and blast radius corrected. Issue owed **on merge**. See
+  `DECISIONS.md`.
+
+## U-005 — operator-facing docs sweep (`#180`, lane-1, 2026-09-10)
+
+- **Assumed then verified:** that `crates/acdp-registry-server/src/main.rs` is the sole
+  enforcement point for both documented claims. Confirmed — exactly one `changeme` check
+  exists tree-wide, and the playground/receipt interaction is two adjacent bails in one
+  block. **Status: CONFIRMED.**
+- **Corrected mid-unit, twice, both caught before shipping:**
+  (a) the plan asserted a *single* playground guard; there are **two** (`main.rs:259`,
+  `:267`), and the second — `pinned_only = true` with an empty `pinned_keys` — would have
+  made the corrected documentation strand an operator at startup. Issue `#180` had stated
+  this correctly and the plan dropped it.
+  (b) the plan asserted "Railway deployments do enable auth" as the basis for ranking
+  `docker/RAILWAY.md:45` the *least* severe site. **False** — no `AUTH__ENABLED` exists
+  anywhere in `docker/` or `.github/`, `AuthConfig::default()` is `enabled: false`, and no
+  config file is mounted on Railway. It is the **most** severe site. **Status: CONFIRMED
+  (corrected).**
+- **Deliberately bounded, not assumed away:** with auth disabled every caller is anonymous
+  (`handlers/context.rs:1354-1358`) and `/auth/*` is not mounted (`core/src/lib.rs:42`), but
+  publishes remain bound to DID-signature verification. This unit therefore does **not**
+  claim unauthenticated publish is possible. Overstating it would have made the finding
+  easier to dismiss. **Status: CONFIRMED.**
+- **UNCONFIRMED — awaiting human ruling:** whether `docker/RAILWAY.md` should require
+  `ACDP_REGISTRY_AUTH__ENABLED = true`. Raised as `blocked`, forwarded by the leader, not
+  acted on. The documentation of the gap ships regardless; only the recipe change waits.
+- **Not re-litigated:** `auth.enabled = false` in the compose stack stays (leader-confirmed;
+  the demo must boot). Renaming the `changeme` placeholder was rejected — the guard already
+  matches case-insensitively after trimming, so the literal was never the fragile part.
 
 ## `cur-002`'s message-leak rationale is documented, not satisfied
 
@@ -607,4 +749,4 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   message change in `error.rs` plus tightening this test's assertion; nothing built on top of
   the current behaviour would need to change. The risk of the current choice is only that the
   gap is forgotten — which this entry exists to prevent.
-- **Status:** CONFIRMED (2026-09-10) — and on stronger grounds than this entry claims: the leak clause has no RFC backing and `rationale` is corpus-wide never-asserted, so it is not a tolerated gap. This entry's body is WRONG about where the message literals live (they are in the two store crates, not `error.rs`) and examined only one of seven arms. Corrections and the applied tripwire: see `DECISIONS.md` entry 7.
+- **Status:** CONFIRMED (2026-09-10) — and on stronger grounds than this entry claims: the leak clause has no RFC backing and `rationale` is corpus-wide never-asserted, so it is not a tolerated gap. This entry's body is WRONG about where the message literals live (they are in the two store crates, not `error.rs`) and examined only one of seven arms. Corrections and the applied tripwire: see `DECISIONS.md` entry 10.

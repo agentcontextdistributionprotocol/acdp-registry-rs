@@ -39,7 +39,7 @@ see [docs/HTTP-API.md](docs/HTTP-API.md).
   checkpoints, inclusion/consistency proofs, and RFC-ACDP-0015 witness
   cosignature aggregation.
 - **HMAC-signed webhooks** — `context.published`, `context.retrieved`,
-  `search.executed`.
+  `context.retracted`, `context.republished`, `search.executed`.
 - **Abuse controls & observability** — per-IP and global `/auth/*` rate
   limiting, and an optional Prometheus `/metrics` endpoint.
 - **Playground mode** — a runtime config flag (`[playground] enabled = true`,

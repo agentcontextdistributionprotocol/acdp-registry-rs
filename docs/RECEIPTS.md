@@ -47,10 +47,21 @@ With a key configured the registry:
 - serves its own DID document at `GET /.well-known/did.json` (below).
 
 Advertising the profile is a **hard commitment** — there is no
-`receipt_unavailable` error and no degraded mode. That is also why
-`playground.enabled` and `[receipt]` are mutually exclusive at startup: the
-playground path never resolves the producer key, so any fingerprint it
-attested would be false.
+`receipt_unavailable` error and no degraded mode. That is also why a **fully
+unverified** playground and `[receipt]` are mutually exclusive at startup: with
+`playground.pinned_only = false` the publish path accepts any signature from a
+non-pinned agent without checking it, so any fingerprint it attested would be
+false.
+
+`playground.pinned_only = true` **with at least one pinned key** is a different
+matter and **is** supported alongside receipts: every publish is then verified —
+a pinned `did:web` agent against its pinned key, a `did:key` agent against the
+DID itself — producing exactly the same verified `(agent_did, content_hash)`
+pair a receipt attests, regardless of how the key was resolved. Pinned-only with
+an *empty* `pinned_keys` list is refused at startup in its own right — not
+because it locks the registry down, but because it does the opposite:
+`pinned_only` has no effect while `pinned_keys` is empty, so publishes would
+fall through to the fully unverified path.
 
 ## Lineage-head receipts (ACDP 0.3.0 / RFC-ACDP-0011)
 

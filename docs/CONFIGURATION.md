@@ -31,8 +31,10 @@ The binary validates config before serving and refuses to boot on a misconfig
 
 - **Auth** — `jwt_signing_alg` ∈ {`HS256`, `EdDSA`}. EdDSA requires a non-empty
   `jwt_private_key_pem`. HS256 with an empty `jwt_secret` requires
-  `allow_ephemeral_secret = true`, otherwise it fails. A non-empty secret is
-  rejected if it is the literal `changeme`, and must decode to ≥32 bytes.
+  `allow_ephemeral_secret = true`, otherwise it fails. With auth enabled on
+  HS256, a non-empty secret is rejected if it is the literal `changeme`
+  (case-insensitive, after trimming), and must decode to ≥32 bytes. Under
+  EdDSA `jwt_secret` is not examined at all.
 - **Admin tokens** — every entry in `auth.admin_tokens` must be non-blank and
   carry no leading or trailing whitespace. An empty *list* remains valid and
   still means "admin routes disabled"; it is a bad *entry* that is refused.
@@ -56,8 +58,13 @@ The binary validates config before serving and refuses to boot on a misconfig
 - **DID methods** — `auth.did_methods` entries must be `did:web` or `did:key`,
   and `did:web` must be present (RFC-ACDP-0007 §3.1).
 - **Receipts** — a configured `[receipt]` key must parse (exactly one source,
-  valid base64, 32 bytes), and is incompatible with `playground.enabled`
-  (RFC-ACDP-0010 §7: a receipts registry has no unverified publish path).
+  valid base64, 32 bytes), and is incompatible with `playground.enabled = true`
+  **unless** `playground.pinned_only = true` with at least one
+  `[[playground.pinned_keys]]` entry (RFC-ACDP-0010 §7: a receipts registry has
+  no unverified publish path). Pinned-only with an *empty* `pinned_keys` list is
+  refused separately, and not because it would be too strict: `pinned_only` has
+  no effect while `pinned_keys` is empty, so the registry would fall through to
+  the fully unverified publish path — the very thing the first check prevents.
 - **Profile allowlist (REG-5)** — every entry in `registry.profiles` must be
   one of the seven *registry* profiles the pinned ACDP spec defines
   (`REGISTRY_ADVERTISABLE_PROFILES` in `crates/acdp-registry-types/src/
@@ -279,7 +286,7 @@ publishes from non-`did:key` agents that aren't pinned.
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Skip DID-signature verification for hands-on demos. |
-| `pinned_only` | bool | `false` | Reject publishes from agents without a pinned key. |
+| `pinned_only` | bool | `false` | Reject publishes from agents without a pinned key. **No effect while `pinned_keys` is empty.** Also the only playground mode compatible with a configured `[receipt]` key — and it then requires at least one pinned key. |
 
 #### `[[playground.pinned_keys]]`
 
@@ -289,7 +296,7 @@ Repeatable.
 |-----|------|---------|-------|
 | `agent_did` | string | — | Full DID. |
 | `public_key_b64` | string | — | Standard base64 of the raw 32-byte key. |
-| `algorithm` | string | `ed25519` | Only `ed25519` today. |
+| `algorithm` | string | `ed25519` | `ed25519` or `ecdsa-p256`. |
 | `valid_from` | i64 | — | Unix seconds, inclusive; open-ended if omitted. |
 | `valid_until` | i64 | — | Unix seconds, exclusive; open-ended if omitted. |
 

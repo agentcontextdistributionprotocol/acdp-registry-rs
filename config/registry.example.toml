@@ -49,9 +49,10 @@ did_methods          = ["did:web"]
 # Base64-encoded ≥32-byte random secret. Generate with:
 #   openssl rand -base64 32
 # Override per environment via ACDP_REGISTRY_AUTH__JWT_SECRET.
-# The startup-time validator refuses to launch with the literal `changeme`,
-# and (with auth enabled + HS256) refuses an EMPTY secret unless
-# allow_ephemeral_secret = true below.
+# With auth enabled + HS256 the startup-time validator refuses to launch
+# with the literal `changeme` (matched case-insensitively, after trimming),
+# and refuses an EMPTY secret unless allow_ephemeral_secret = true below.
+# Two checks, gated the same way: neither runs while auth is disabled.
 jwt_secret           = ""
 # Local dev only: boot with a random process-lifetime HS256 key when
 # jwt_secret is empty. Tokens won't survive a restart. MUST stay false in
@@ -156,9 +157,22 @@ enabled = false
 [playground]
 # When true, the publish handler skips DID-signature verification. NEVER
 # enable in production — the registry will accept any forged signature.
-# Incompatible with [receipt]: a receipts-advertising registry has no
-# unverified publish path (RFC-ACDP-0010 §7), so startup refuses the combo.
+# Incompatible with [receipt] ONLY when pinned_only = false: a
+# receipts-advertising registry has no unverified publish path
+# (RFC-ACDP-0010 §7). With pinned_only = true AND at least one pinned key
+# every publish is verified, so playground + receipts IS supported.
 enabled = false
+# Reject publishes from agents not listed in pinned_keys. Has no effect
+# while pinned_keys is empty — which is why, with [receipt] configured,
+# pinned_only = true and an EMPTY pinned_keys is refused at startup: it
+# looks locked down but would fall through to the fully unverified
+# publish path. Uncomment all three together (playground + receipts also
+# needs enabled = true above):
+# pinned_only = true
+# [[playground.pinned_keys]]
+# agent_did      = "did:web:registry-a.playground.local:agents:alice"
+# public_key_b64 = "<standard base64 of the raw 32-byte Ed25519 key>"
+# algorithm      = "ed25519"
 
 [receipt]
 # Registry-receipt signing identity (RFC-ACDP-0010, ACDP 0.2.0). When a
