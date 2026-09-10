@@ -17,6 +17,16 @@ concurrency:
 jobs:
   release-plz:
     runs-on: ubuntu-latest
+    # git_only re-derives each package from `cargo package` at candidate commits
+    # instead of downloading one tarball from crates.io. Measured at 10.7 min for
+    # eight crates — but that was macOS/Apple Silicon with a warm ~/.cargo. This
+    # runner is a slower 4-core box with a cold registry and no cargo cache step,
+    # so budget 25-35 min: 60 is a real bound with roughly 2x headroom, not 6x.
+    # Note the *bootstrap* run is the fast path (tag lookups only, no
+    # `cargo package`); the slow path starts on the second post-merge run.
+    # This job holds the `concurrency: release-plz` group, so a hung run blocks
+    # every later push to main until cancelled by hand. GitHub's default is 360.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -26,6 +36,29 @@ jobs:
           toolchain: stable
       - name: release-plz
         uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+        with:
+          # Explicit intent, not a behaviour change: action.yml at the SHA
+          # pinned above already declares `default: "0.3.160"`, so this is a
+          # no-op *today*. It is stated anyway because the floor is real
+          # (`git_only` needs >= 0.3.151) and 0.3.165 behaves differently from
+          # 0.3.160 on the failure path this config depends on — so a future
+          # action-SHA bump must not move the binary version silently. Bump this
+          # together with the SHA above, never on its own.
+          version: "0.3.160"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          # CARGO_REGISTRY_TOKEN is deliberately NOT passed.
+          #
+          # In git_only mode nothing here publishes to crates.io, so the
+          # credential has no legitimate use. Withholding it converts the worst
+          # case of upstream release-plz#2693 — `git_only = true` with
+          # `publish = false` still attempting a publish, open since 2026-02-27
+          # against 0.3.156, one minor below our pin, with a config near-identical
+          # to this one — from "eight crates irreversibly published to crates.io"
+          # into "one loud authentication failure". crates.io publishes cannot be
+          # undone, only yanked, and the `release` code path where that bug lives
+          # is the one path that cannot be exercised locally.
+          #
+          # The secret still exists on the repo; restoring this line is a
+          # one-line change if a deliberate publish is ever wanted. Do not
+          # restore it merely to silence a failure.

@@ -1,8 +1,39 @@
 [workspace]
-changelog_update = true
+changelog_update  = true
 git_release_enable = true
-git_tag_enable = true
-publish = false  # flip to true once crates are ready for crates.io
+git_tag_enable    = true
+
+# Determine the previous release from git tags, not from crates.io.
+# Without this, release-plz looks the crates up on crates.io, finds nothing
+# (nothing here is published), treats every crate as a first release, proposes
+# the CURRENT version, writes no diff — and then `release` refuses because the
+# tag for that version already exists. That deadlock froze this repo at 0.1.0
+# from 2026-06-13 to 2026-09-10. Requires release-plz >= 0.3.151.
+# https://release-plz.dev/docs/config#the-git_only-field
+git_only = true
+
+# NOT a stale TODO: git_only skips `cargo publish` on its own, and this states
+# the intent independently. Do NOT flip this flag — doing so would begin
+# publishing eight crates to crates.io, a one-way door, and the docs forbid
+# enabling it alongside git_only.
+#
+# (Deliberately phrased without the literal enabled-form of this assignment:
+# an acceptance check greps for it, and a comment containing the string is
+# indistinguishable from the setting itself to any line-based tool.)
+publish = false
+
+# The default template is `{{ package }}-v{{ version }}`, which is the shape of
+# the eight dead 2026-06-13 tags. Those tags sit on a commit whose `acdp`
+# dependency was a git dependency (and, across the surrounding range, a path
+# dependency with a `[patch.crates-io]`), so `cargo package` cannot rebuild it
+# and git_only cannot diff against it. Changing the template makes those tags
+# stop matching, so release-plz re-bases its own tag namespace at the current
+# main on the first run and diffs normally from the second run onward. The old
+# tags and their eight GitHub Releases are left untouched.
+#
+# Changing this again is not a casual edit: every change re-bases the tag
+# namespace and re-triggers a one-off bootstrap run that produces no release PR.
+git_tag_name = "{{ package }}/v{{ version }}"
 
 [changelog]
 header = ""
