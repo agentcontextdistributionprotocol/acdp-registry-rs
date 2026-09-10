@@ -674,7 +674,7 @@ no agent DID, so under the RFC-ACDP-0008 §4.5 predicate it reaches the
 **public arm only**: `visibility = 'public'` rows are always included, and
 restricted/private rows are never disclosed to this listing — because
 `admin_list` passes `anonymous_public_reads = true` unconditionally
-(`crates/acdp-registry-core/src/handlers/admin.rs:86`), independent of the
+(`crates/acdp-registry-core/src/handlers/admin.rs:87`), independent of the
 configured `auth.anonymous_public_reads`, which instead governs whether an
 anonymous (no-bearer) caller of `GET /contexts/search` sees public rows. That
 flag is carried on the `CapabilitiesDocument`, and `RegistryServer::search`

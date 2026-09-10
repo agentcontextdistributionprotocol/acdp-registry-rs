@@ -99,7 +99,7 @@ out of band and distribute them to operators / monitoring.
   the `playground` Cargo feature. Both are admin-bearer gated. `GET
   /admin/contexts` authenticates the caller but names no agent DID, and
   `admin_list` passes `anonymous_public_reads = true` unconditionally
-  (`crates/acdp-registry-core/src/handlers/admin.rs:86`), so it
+  (`crates/acdp-registry-core/src/handlers/admin.rs:87`), so it
   reaches the RFC-ACDP-0008 §4.5 public arm only — restricted and private
   contexts are never disclosed to it.
 
