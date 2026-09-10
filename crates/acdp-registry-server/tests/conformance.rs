@@ -322,7 +322,7 @@
 //! both families. `dk-001`/`dk-002`/`dk-004` get DIRECT coverage via
 //! `dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver`, which
 //! documents a discovered wrong-reason trap (see that test's own doc comment): this
-//! repo's `acdp` v0.9.1 dependency rejects all three with `schema_violation`, not the
+//! repo's `acdp` dependency rejects all three with `schema_violation`, not the
 //! fixtures' pinned `key_resolution_failed` -- spec-sanctioned for `dk-002` only, a
 //! genuine (unfixable from this file) conformance gap for `dk-001`/`dk-004`. `rev-002`
 //! stays out of scope: it applies only to `acdp-consumer`, never `acdp-registry-core`
@@ -1380,7 +1380,7 @@ fn parse_scenarios_array(scenarios: &[Value]) -> Option<Vec<ShapeDScenario>> {
             // "May be approximate; not guaranteed to be exact"
             // (`schemas/json/acdp-search-response.schema.json`), "SHOULD
             // NOT be relied upon for exact counts"
-            // (`rfcs/RFC-ACDP-0005-discovery.md:219`), and the spec's own
+            // (`rfcs/RFC-ACDP-0005-discovery.md:221`), and the spec's own
             // `examples/search/empty-page-post-filter-response.json` ships
             // the identical shape (`{"matches": [], "total_estimate": 12}`)
             // -- an empty post-filtered page with a non-zero estimate.
@@ -3641,7 +3641,7 @@ async fn vis005_private_audience_search_excluded_via_derived_from() {
     // divergence: the spec itself now agrees -- `total_estimate` "May be
     // approximate; not guaranteed to be exact"
     // (`acdp-search-response.schema.json`), "SHOULD NOT be relied upon for
-    // exact counts" (`rfcs/RFC-ACDP-0005-discovery.md:219`), and the
+    // exact counts" (`rfcs/RFC-ACDP-0005-discovery.md:221`), and the
     // spec's own `examples/search/empty-page-post-filter-response.json`
     // ships the identical shape (empty `matches[]`, non-zero
     // `total_estimate`). `1` is one of `total_estimate_constraints`'s own
@@ -5661,9 +5661,10 @@ async fn idem001_004_publish_idempotency_key_lifecycle_and_restart_durability() 
 /// did:key producer (offline-verifiable, no network resolver needed)
 /// against a NON-playground harness, routed through
 /// `RegistryServer::publish_verified_did_key_in_tenant` ->
-/// `commit_via_store` (`registry/server.rs:666`,
-/// `let idempotency = if self.caps.supports_idempotency_key { ... } else
-/// { None }`), which every SDK-routed publish path (verified did:web,
+/// `commit_via_store` (in the external `acdp-server` crate's
+/// `registry/server.rs`; the gate reads `let idempotency = if
+/// self.caps.supports_idempotency_key { ... } else { None }`), which every
+/// SDK-routed publish path (verified did:web,
 /// did:key, pinned-verified) shares and which gates correctly.
 ///
 /// That leaves a second, independent enforcement point for the SAME rule:
@@ -5672,9 +5673,9 @@ async fn idem001_004_publish_idempotency_key_lifecycle_and_restart_durability() 
 /// idempotency lookup/record dance around `publish_unverified_for_tests`)
 /// DOES reach `commit_via_store` -- `publish_unverified_for_tests` ends
 /// with an unconditional `self.commit_via_store(req, None, None, None)`
-/// (`server.rs:557`) -- but that call hardcodes `None` for the idempotency
-/// key, so `commit_via_store`'s `supports_idempotency_key` gate
-/// (`server.rs:666`) is a no-op for this path. The playground branch must
+/// -- but that call hardcodes `None` for the idempotency key, so
+/// `commit_via_store`'s `supports_idempotency_key` gate is a no-op for this
+/// path. The playground branch must
 /// therefore consult
 /// `state.server.capabilities().supports_idempotency_key` itself. Before
 /// REG-11 Phase 5 (#128) it did not: a first attempt at this test, built
@@ -7203,7 +7204,7 @@ async fn publish_with_data_ref(
 ///     round-trip that it clears the fixture's own declared boundary (one
 ///     byte past the 65536-byte cap) before ever sending it.
 ///   * data-ref-007: at spec pin d1f06d0 the schema nests `content_hash`
-///     inside `embedded` (a field the `acdp` 0.9.1 dependency's
+///     inside `embedded` (a field the `acdp` dependency's
 ///     `EmbeddedContent` type does not have -- deserializing the fixture's
 ///     JSON verbatim fails with "unknown field", not the
 ///     `data_ref_hash_mismatch` this fixture pins), so this test moves the
@@ -7276,7 +7277,7 @@ async fn data_ref001_007_publish_path_rejections_enforced() {
             // names this exact fixture) nests `content_hash` INSIDE
             // `embedded`, alongside the historical DataRef-top-level
             // `content_hash` (same schema file, :47-50) -- but the `acdp`
-            // 0.9.1 dependency this registry actually runs (this crate's
+            // dependency this registry actually runs (this crate's
             // Cargo.lock) has not caught up to that addition: its
             // `EmbeddedContent` type is `#[serde(deny_unknown_fields)]`
             // with only `encoding`/`content` (no `content_hash` field at
@@ -7812,7 +7813,7 @@ type SchemaBodyPatch = (&'static str, fn(&mut Value, &Value));
 /// for why the typed builder cannot produce these shapes at all) and
 /// POSTing it directly via [`anc_publish_raw`]. None of the 5 needs a
 /// data-ref-007-style substitution: each fixture's own fragment already
-/// targets a field this registry's real `acdp-types` 0.9.1 dependency
+/// targets a field this registry's real `acdp-types` dependency
 /// actually has (unlike data-ref-007's schema-only `embedded.content_hash`
 /// nesting -- see `data_ref001_007_publish_path_rejections_enforced`'s doc
 /// comment), so splicing it verbatim exercises the exact intended rejection
@@ -8687,10 +8688,13 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 /// (`schema_vectors_openness_and_absent_vs_null_enforced`), Phase 13 closed
 /// `sig`, `rev`, and `dk`, and Phase 14 closed the last three
 /// `CORE_INEXCUSABLE_FAMILIES` stragglers, `did-ssrf`/`err`/`rate` (see
-/// `COVERED` above for all of these). The remaining `cur`/`rcpt`/`lhr`/`log`
-/// cite **#130** (filed for Phase 6, enumerating each with its own reason);
-/// none of the four is in `CORE_INEXCUSABLE_FAMILIES`, so none is under the
-/// same closure pressure `did-ssrf`/`err`/`rate` were.
+/// `COVERED` above for all of these), and Phase 15 closed `cur`. The
+/// remaining `rcpt`/`lhr`/`log` cite **#130** (filed for Phase 6,
+/// enumerating each with its own reason); none of the three is in
+/// `CORE_INEXCUSABLE_FAMILIES`, so none is under the same closure pressure
+/// `did-ssrf`/`err`/`rate` were. Each is deferred only for its consumer-role
+/// residue; the producer half each one DOES owe is covered and pinned by
+/// `DEFERRED_PARTIAL_DIRECT`.
 /// `known_families_partition_into_covered_excused_or_deferred` checks: the
 /// reason is non-empty, the issue is one of the two known-open numbers, and
 /// any of the `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115
@@ -8877,6 +8881,28 @@ fn covered_direct_families_have_present_test_functions() {
                          test-attribute-registered function -- coverage was removed without \
                          updating COVERED"
                     );
+                    // Existence pins the SYMBOL, not the coverage. The Phase 15
+                    // verification rounds proved this twice by gutting a named
+                    // function's body while leaving its name and attribute in place:
+                    // every check stayed green, for `rcpt001` here and again for
+                    // `cur001_002_...`, the newest COVERED family in the file. A
+                    // `Direct` claim is a claim that a test ASSERTS something, so
+                    // require at least one assertion to survive in the body. Kept
+                    // deliberately generic (any `assert`) rather than the stricter
+                    // EXPECTED_*/`asserted` ratchet used by
+                    // `deferred_partial_direct_test_functions_are_present`, because
+                    // that counting convention is a Phase 15 idiom and most of the
+                    // 21 COVERED families predate it.
+                    let body = source_test_fn_body(name)
+                        .unwrap_or_else(|| panic!("could not locate the body of `{name}`"));
+                    assert!(
+                        body.contains("assert"),
+                        "COVERED family \"{family}\"'s direct test `{name}` contains no \
+                         assertion at all. The function still exists and still wears its test \
+                         attribute, so the existence check above cannot see this -- but a \
+                         test that asserts nothing passes unconditionally, and a `Direct` \
+                         coverage claim resting on it is false"
+                    );
                 }
             }
         }
@@ -8940,8 +8966,9 @@ fn deferred_partial_direct_test_functions_are_present() {
 
 /// CHARTER rule 10's durable answer for this file: **line pins rot, so forbid them.**
 ///
-/// Nineteen `conformance.rs`-relative self-citations had accumulated here, each
-/// correct when written and every one of them stale by the time it was found --
+/// Seventeen `conformance.rs`-relative self-citations had accumulated here across
+/// sixteen lines (one line carried two), each correct when written and every one of
+/// them stale by the time it was found --
 /// clustered in eras, because each was written against the file as it stood that
 /// week. Two had drifted far enough to be actively misleading, citing unrelated
 /// module-doc lines. Phase 4 replaced them all with symbol references, which cannot
@@ -8960,8 +8987,29 @@ fn deferred_partial_direct_test_functions_are_present() {
 /// colon and a digit, or this file's own name followed by a colon and a digit. It
 /// does NOT match `some_other_file.rs:NNN`, and must not be broadened to, because
 /// *cross-file* pins are legitimate and are meant to stay numeric: a reference into
-/// another file cannot be expressed as a symbol this file can resolve. Six such
-/// pins are intentionally left in place.
+/// another file cannot be expressed as a symbol this file can resolve. Roughly two
+/// dozen such pins are intentionally left in place -- deliberately not stated as an
+/// exact number, because a count in prose is itself a pin that rots, which is the
+/// whole point of this test.
+///
+/// **Known limitation, stated rather than hidden.** Those surviving cross-file pins
+/// are exactly the class this guard CANNOT check, and they do rot: the acdp 0.10.0
+/// bump inside this unit silently invalidated three pins into `acdp-server` and the
+/// spec pin moved a fourth, all four found by review rather than by any test. They
+/// are repaired, and the ones pointing into crates this repo does not vendor are now
+/// symbol references for the same reason self-citations are. A companion check that
+/// resolved each in-repo cross-file pin against a quoted snippet would close the
+/// rest; it is not built here, and pretending otherwise would be the kind of
+/// overclaim this file exists to prevent.
+///
+/// Two further limitations, both deliberate. A backticked colon-number that is NOT
+/// a citation -- a port, say -- would be flagged; unbacktick it. And the digit must
+/// follow the colon IMMEDIATELY: prose spellings like "(line NNNN)", and a space
+/// after the colon, are not caught. Tolerating that space was tried and reverted,
+/// because it instantly false-positived on ordinary prose in this very file
+/// (`` `total_estimate`: 2 ``, a backticked term followed by a count). A guard that
+/// reddens the required `tests` job on innocent prose is worse than one with a known
+/// gap, so the gap is documented instead of closed.
 ///
 /// **On the two exceptions this phase was told to allow-list:** neither needs one,
 /// and it is worth recording why rather than carrying a dead allow-list. The
@@ -9001,8 +9049,8 @@ fn no_numeric_self_citations() {
     assert!(
         offenders.is_empty(),
         "numeric self-citation(s) reintroduced into this file -- line pins rot as the \
-         file grows, and every one of the nineteen that accumulated here was stale by the \
-         time it was found. Cite the symbol instead (`caps()`, `extract_shapes`'s Shape A), \
+         file grows, and every one of the seventeen that had accumulated here was stale \
+         by the time it was found. Cite the symbol instead (`caps()`, `extract_shapes`'s Shape A), \
          which cannot drift. Cross-file pins into OTHER files are fine and are not matched \
          here.\n{}",
         offenders.join("\n")
@@ -10113,7 +10161,7 @@ const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
 /// builds for sig-003/dk-003): three did:key resolution NEGATIVES.
 ///
 /// **Discovered wrong-reason trap (report this plainly, do not paper over
-/// it):** this repo's `acdp` v0.9.1 dependency does NOT reach
+/// it):** this repo's `acdp` dependency does NOT reach
 /// `acdp_verify::verify_publish_request_signature_offline` (the resolver
 /// path RFC-ACDP-0001 §5.11.1 describes, and that emits
 /// `key_resolution_failed`) for any of these three fixtures. Two SEPARATE
@@ -10124,7 +10172,8 @@ const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
 /// validation (`validate_publish_request`, before `validate_post_schema`'s
 /// registry-limit/crypto steps), and BOTH wrap any resolution failure as
 /// `AcdpError::SchemaViolation`, not `AcdpError::KeyResolution`. Verified
-/// empirically against this exact dependency version (`acdp = "0.9.1"`,
+/// empirically against the `acdp` dependency this crate locks (see
+/// `Cargo.lock`; the assertion below re-verifies it on every run,
 /// this crate's `Cargo.toml`) before writing these assertions -- see this
 /// phase's report for the raw probe output.
 ///
@@ -10132,7 +10181,7 @@ const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
 ///     NOT the fixture's pinned `key_resolution_failed`. The fixture's own
 ///     `expected.behavior` text states this MUST be `key_resolution_failed`
 ///     with no schema-validation carve-out -- this is a genuine conformance
-///     gap in the `acdp` v0.9.1 dependency, not something this crate (which
+///     gap in the `acdp` dependency, not something this crate (which
 ///     may only edit this test file) can fix. The HTTP status (400,
 ///     permanent) and the overall security property (never falls back to a
 ///     raw key, never mis-reports `unsupported_algorithm`) both still hold.
@@ -10299,7 +10348,7 @@ const EXPECTED_DID_SSRF_ASSERTION_COUNT: usize = 5;
 /// here. The hostname cases are real RFC-ACDP-0008 §4.8 obligations too
 /// (DNS-rebinding protection), just not ones this test can exercise without
 /// a live resolver; `acdp-did`'s own test suite
-/// (`did_resolver_rejects_hostname_resolving_to_loopback`, `acdp-did-0.9.1/
+/// (`did_resolver_rejects_hostname_resolving_to_loopback`, `acdp-did`'s
 /// src/web.rs`) covers that shape against real `localhost` DNS.
 fn did_web_authority_is_ip_literal(did: &str) -> bool {
     let Ok(url) = acdp::did::did_web_to_url(did) else {
@@ -10334,7 +10383,7 @@ fn did_web_authority_is_ip_literal(did: &str) -> bool {
 /// one of these fixtures falls to the same `"non-HTTP fixture (vectors /
 /// schema / informative)"` catch-all `can`/`sig` also land in -- confirmed,
 /// not assumed. The seam claim also held up: `acdp::did::WebResolver`
-/// (`acdp-did` 0.9.1, re-exported by the `acdp` facade this crate already
+/// (`acdp-did`, re-exported by the `acdp` facade this crate already
 /// depends on) applies `SsrfPolicy::default()` unconditionally, and
 /// `acdp::safe_http` (the crate `WebResolver` itself is built over, also
 /// re-exported by the facade, `url` an unconditional dependency of it) is
@@ -10371,7 +10420,7 @@ fn did_web_authority_is_ip_literal(did: &str) -> bool {
 ///     stood up here), so this test does NOT assert a final `key_
 ///     resolution_failed`/400 for either -- only that the enforcement point
 ///     itself rejects. DERIVED (by reading, not running,
-///     `classify_reqwest_error` in `acdp-did-0.9.1/src/web.rs`): a DNS
+///     `classify_reqwest_error` in `acdp-did`'s `src/web.rs`): a DNS
 ///     answer failing `reject_if_any_forbidden` surfaces to reqwest as a
 ///     connect-shaped error, which `classify_reqwest_error` would normally
 ///     re-tag `KeyResolutionUnreachable` (502, retryable) -- EXCEPT it
