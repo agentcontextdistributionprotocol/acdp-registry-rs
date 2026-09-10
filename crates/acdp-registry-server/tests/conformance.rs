@@ -11380,9 +11380,9 @@ async fn cur001_002_expired_and_malformed_cursors_are_distinguished() {
     );
     // This was a TRIPWIRE until #187, pinning the opposite of what it now asserts.
     // cur-002's prose `rationale` says a registry "MUST NOT leak why a cursor failed to
-    // parse beyond the registered code"; the registry's message used to name the parse
-    // step (`invalid cursor: cursor is not valid base64`), so the tripwire pinned that
-    // wording and instructed whoever tightened it to retire the tripwire. #187 tightened
+    // parse beyond the registered code"; the registry's message used to append the failing
+    // parse step to that prefix, so the tripwire pinned that wording and instructed whoever
+    // tightened it to retire the tripwire. #187 tightened
     // it -- the codec now lives once in `acdp-registry-store` and every parse failure
     // carries the single payload `malformed` -- and the tripwire was observed going red
     // on exactly this body before being rewritten into the assertion below.

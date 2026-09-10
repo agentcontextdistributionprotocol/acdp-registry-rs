@@ -44,9 +44,8 @@ const CURSOR_TTL_SECS: i64 = 3600;
 /// `AcdpError::InvalidCursor` renders as `#[error("invalid cursor: {0}")]`, so the wire
 /// message is exactly **`invalid cursor: malformed`** — it names no parse step. That is the
 /// point: `cur-002`'s fixture rationale asks a registry not to "leak why a cursor failed to
-/// parse beyond the registered code", and the previous per-arm strings
-/// (`cursor missing anchor`, `cursor mint not int`, …) described the cursor's internal field
-/// layout. Nothing is lost operationally — `error.code` still discriminates
+/// parse beyond the registered code", and the previous per-arm strings named the cursor's
+/// internal field layout — which field was absent, which one failed to parse as an integer. Nothing is lost operationally — `error.code` still discriminates
 /// `invalid_cursor` from `cursor_expired`, which is the distinction callers actually branch
 /// on, and a client already knows the cursor it sent.
 const CURSOR_MALFORMED: &str = "malformed";
@@ -78,9 +77,9 @@ pub fn decode_cursor(s: &str) -> Result<Option<(DateTime<Utc>, String)>, AcdpErr
     let decoded = String::from_utf8(bytes).map_err(|_| malformed())?;
     let mut parts = decoded.splitn(3, ':');
     // `splitn` always yields at least one element -- even for the empty string -- so the
-    // first `next()` cannot be `None`. It previously carried its own "cursor missing mint"
-    // arm, which was therefore unreachable; an empty first field falls through to the parse
-    // below instead. `unwrap_or("")` states that rather than pretending the branch exists.
+    // first `next()` cannot be `None`. It previously carried its own missing-mint arm, which
+    // was therefore unreachable; an empty first field falls through to the parse below
+    // instead. `unwrap_or("")` states that rather than pretending the branch exists.
     let mint = parts.next().unwrap_or("");
     let anchor = parts.next().ok_or_else(malformed)?;
     let ctx_id = parts.next().ok_or_else(malformed)?;
@@ -255,9 +254,6 @@ mod tests {
     /// bare payload is not achievable and `"malformed"` is the chosen filler.
     #[test]
     fn malformed_cursor_message_names_no_parse_step() {
-        let leaky = [
-            "base64", "utf-8", "utf8", "mint", "anchor", "ctx_id", "int", "range",
-        ];
         // The out-of-range-anchor arm needs a FRESH mint: `decode_cursor` checks the TTL
         // before it converts the anchor, so a stale mint short-circuits to `CursorExpired`
         // and never reaches the arm under test. Observed, not assumed -- a hardcoded 2023
@@ -277,16 +273,58 @@ mod tests {
                     assert_eq!(payload, "malformed", "payload must be the single constant");
                     let rendered = AcdpError::InvalidCursor(payload).to_string();
                     assert_eq!(rendered, "invalid cursor: malformed");
-                    for word in leaky {
-                        assert!(
-                            !rendered.contains(word),
-                            "wire message leaked the parse step {word:?}: {rendered}"
-                        );
-                    }
                 }
                 other => panic!("expected InvalidCursor for {bad:?}, got {other:?}"),
             }
         }
+    }
+
+    /// Every `InvalidCursor` this module can construct must carry `CURSOR_MALFORMED`.
+    ///
+    /// The by-example test above enumerates the seven arms that exist *today*, so it cannot
+    /// see a NEW arm added later. A verification pass demonstrated the hole concretely: an
+    /// eighth arm added at the top of `decode_cursor` --
+    /// `if s.len() > 512 { return Err(AcdpError::InvalidCursor("cursor too long".into())) }`
+    /// -- leaks a parse step while every by-example input stays short and BOTH the unit
+    /// suite and the conformance suite stay green.
+    ///
+    /// So this checks the property structurally instead of by example: it reads this file's
+    /// own source and requires every `AcdpError::InvalidCursor(` construction outside the
+    /// test module to be `CURSOR_MALFORMED`. Writing the new arm the idiomatic way (reusing
+    /// the local `malformed` closure) satisfies it; spelling out a bespoke string does not.
+    #[test]
+    fn every_invalid_cursor_construction_uses_the_shared_payload() {
+        const SRC: &str = include_str!("cursor.rs");
+        const NEEDLE: &str = "AcdpError::InvalidCursor(";
+
+        // Scan production code only. The test module legitimately names the variant in
+        // match patterns and in one `to_string()` round-trip.
+        let prod = SRC
+            .split_once("\n#[cfg(test)]")
+            .expect("cursor.rs must contain a `#[cfg(test)]` module for this test to scope itself")
+            .0;
+
+        let mut found = 0;
+        for (i, _) in prod.match_indices(NEEDLE) {
+            let arg = &prod[i + NEEDLE.len()..];
+            assert!(
+                arg.starts_with("CURSOR_MALFORMED"),
+                "cursor.rs constructs an InvalidCursor with something other than \
+                 CURSOR_MALFORMED, which leaks a parse step onto the wire (see #187). \
+                 Offending construction begins: {:?}",
+                &arg[..arg.len().min(60)]
+            );
+            found += 1;
+        }
+
+        // Anti-vacuity: if the needle stopped matching -- renamed variant, reformatted call
+        // -- the loop above would pass while checking nothing at all.
+        assert_eq!(
+            found, 1,
+            "expected exactly one InvalidCursor construction in production code (the \
+             `malformed` closure); found {found}. If an arm was legitimately added, it \
+             should reuse that closure rather than construct the error itself."
+        );
     }
 
     #[test]
