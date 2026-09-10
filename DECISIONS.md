@@ -1107,3 +1107,89 @@ comment this unit rewrote. It survives because the new text was **appended after
 sentence rather than inserted above it — a deliberate constraint carried from plan review into
 the edit. Worth generalising: when an edit lands inside a cited range, the edit's *shape*
 decides whether the citation survives, and that is cheaper than re-pointing afterwards.
+
+## 11. W2-U2 — #187: one payload for every cursor parse failure (2026-09-10)
+
+**Decided by:** Opus, under the lane's "approach choices are not escalations" rule. Recorded
+here because it changes an observable wire string, and because it corrects entry 10.
+
+**The decision.** Every `InvalidCursor` arm in the now-shared codec
+(`crates/acdp-registry-store/src/cursor.rs`) carries one payload, the module-level constant
+`CURSOR_MALFORMED = "malformed"`. `AcdpError::InvalidCursor` renders as
+`#[error("invalid cursor: {0}")]`, so the wire message is exactly
+**`invalid cursor: malformed`**. A bare `invalid cursor` was considered and is not
+reachable without editing the `thiserror` attribute in `acdp-registry-types`, which is
+outside this unit's granted paths and would change every other caller of that variant.
+
+**Why one payload rather than a tidied set.** `cur-002`'s rationale asks a registry not to
+"leak why a cursor failed to parse beyond the registered code". Any per-arm string describes
+the cursor's internal field layout (`missing anchor`, `mint not int`), which is precisely
+what the clause names. Nothing operational is lost: `error.code` still separates
+`invalid_cursor` from `cursor_expired`, which is the distinction callers actually branch on,
+and a client already holds the cursor it sent. The two codes were verified to stay distinct
+by the conformance run, not assumed.
+
+**Corrections to entry 10 — appended, per the entry 9c rule that pins are reported and never
+re-pointed.**
+
+1. **Entry 10's count is superseded.** It says **14 literals across two crates** and "six
+   others" beyond the base64 arm. The tree had **8 arms per store, 16 total** — entry 10 and
+   #187 both missed `"cursor is not utf-8"`. Of the 8, one (`"cursor missing mint"`) was
+   **unreachable**: `splitn` always yields a first element, so its `ok_or_else` could never
+   fire. It is deleted rather than collapsed, and the code now says so at the call site. So
+   the true accounting is 16 literals → 1 constant, with one dead branch removed.
+
+2. **Entry 10's two line-pins are DANGLING as of this commit, and are reported, not
+   re-pointed.** `DECISIONS.md:1021-1022` cites
+   `crates/acdp-registry-pg/src/store.rs:1644-1668` and
+   `crates/acdp-registry-sqlite/src/store.rs:1740-1764`. This unit deleted exactly those
+   ranges, so:
+   - `pg/src/store.rs:1644-1668` is now **past end of file** — the file is 1636 lines.
+   - `sqlite/src/store.rs:1740` now lands on `assert_eq!(fts5_escape("hello"), "\"hello\"");`,
+     an unrelated full-text-search assertion.
+
+   Both were verified by reading the files at this commit, not inferred from the diff. Entry
+   10 is left byte-for-byte intact: the correct reading of it is "the literals that were at
+   those lines when entry 10 was written", and the content-addressed replacement is the
+   single `CURSOR_MALFORMED` constant named above. This is the failure mode CHARTER rule 10
+   exists to surface, and it is a genuine argument against citing line ranges in an
+   append-only file at all — a follow-up worth taking up separately from this unit.
+
+## 12. W2-U2 — the shared cursor codec is plainly `pub`, not hidden (2026-09-10)
+
+**Decided by:** Opus. The lane assignment named this call explicitly as mine and explicitly
+NOT an escalation. Recorded because entry 5 sets the opposite-looking precedent and a future
+reader would otherwise read the two as inconsistent.
+
+**The apparent conflict.** Entry 5 narrowed `secure_compare::ct_eq` from `pub` to
+`pub(crate)`. This unit makes `encode_cursor`/`decode_cursor` `pub`. Those look contradictory
+and are not, for one material reason: **`ct_eq`'s callers were all inside
+`acdp-registry-core`, so narrowing it compiled. This codec's callers are in two *different*
+crates** — `acdp-registry-sqlite` and `acdp-registry-pg` — so `pub(crate)` in
+`acdp-registry-store` does not compile at all. `pub` here is forced by the crate boundary,
+not chosen over a narrower alternative. Deduplicating across crates and keeping the item
+crate-private are mutually exclusive; #187 asked for the former.
+
+**The live choice was therefore only whether to hide it**, via `#[doc(hidden)]` or a
+deliberately-internal module name. Kept plainly `pub` and documented:
+
+- Entry 5 already considered and rejected `#[doc(hidden)]` on a still-`pub` item as a middle
+  option — it hides from docs but not from the type system, so it buys undiscoverability
+  rather than encapsulation. That reasoning applies unchanged here, and adopting it now would
+  be the real inconsistency with entry 5, not this.
+- A cursor codec is a coherent thing for this crate to expose. `acdp-registry-store` is where
+  the store contract lives; a third backend would need exactly this and should find it.
+- The wire format is documented at the module level, which matters more than visibility: the
+  format is what any future backend must agree on, and an undocumented-but-reachable item is
+  how two implementations silently diverge — which is the very failure #187 exists to end.
+
+**Blast radius, and when this stops being reversible.** `release-plz.toml:5` currently sets
+`publish = false`, with the comment "flip to true once crates are ready for crates.io". So
+today this is an internal workspace detail and narrowing it later costs one commit. **When
+that flag flips, this becomes a public API commitment.** That is the moment to revisit — not
+because the decision is wrong, but because its cost changes. Flagged here rather than left
+for someone to discover at publish time.
+
+**What would change my mind:** a second consumer appearing that wants a *different* cursor
+format. Then the right shape is a trait with the codec behind it, not a free function — and
+that is a bigger change than visibility.

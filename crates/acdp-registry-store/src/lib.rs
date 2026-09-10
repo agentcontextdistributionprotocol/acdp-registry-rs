@@ -4,6 +4,7 @@
 //! protocol-level store contract — paginated listing, a backend health
 //! check, and migration runner.
 
+pub mod cursor;
 pub mod log;
 
 use acdp::error::AcdpError;
@@ -13,6 +14,7 @@ use acdp::types::lifecycle::LifecycleEvent;
 use acdp::types::primitives::AgentDid;
 use async_trait::async_trait;
 
+pub use cursor::{decode_cursor, encode_cursor};
 pub use log::{build_leaf_record, LogEntryRecord};
 
 /// Cursor-keyed page returned by [`ExtendedRegistryStore::list_contexts`].

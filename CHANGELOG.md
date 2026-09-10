@@ -2163,6 +2163,46 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `dtolnay/rust-toolchain` pins; the `# v2.9.2`, `# v2.1.1`, and `# v2.87.2` pins will be
   kept current.
 
+<!-- W2-U2 / #187 -->
+
+- **Cursor parse failures no longer name the parse step** (`W2-U2`, `#187`): the
+  keyset-pagination cursor codec is lifted out of both store backends into
+  `acdp_registry_store::cursor` and every `InvalidCursor` arm now carries one
+  payload, so the wire message is exactly
+  `{"error":{"code":"invalid_cursor","message":"invalid cursor: malformed"}}`.
+  It previously appended the failing parse step —
+  which field was missing, which failed to parse as an integer — describing the
+  cursor's internal layout. `cur-002`'s fixture rationale asks a registry not to
+  "leak why a cursor failed to parse beyond the registered code"; that is now
+  satisfied rather than documented as unsatisfied.
+
+  **This is an observable change to the `message` string.** The *Rust* API is
+  untouched: `error.code` still discriminates `invalid_cursor` from
+  `cursor_expired` (both HTTP 400), which is the distinction clients branch on,
+  and `message` was never a stable contract. But the *wire* string did change,
+  and a client string-matching the old per-arm wording will stop matching — it
+  should read `error.code`. Those two axes are why the commit carries a
+  conventional-commits `!` marker while this entry says the API is unbroken:
+  the marker exists to force the version bump that the wire change warrants,
+  not to claim a Rust-level signature changed. Nothing in this repo asserted
+  the old message text except the conformance tripwire retired below.
+
+  Behind the wire change, `encode_cursor`/`decode_cursor` were byte-identical
+  duplicates in `acdp-registry-sqlite` and `acdp-registry-pg`; there is now one
+  copy and both stores call it. The count in `#187` was low: the tree held **8
+  arms per store, 16 literals**, not 7/14 — neither the issue nor
+  `DECISIONS.md` entry 10 counted `"cursor is not utf-8"`. One of the eight was
+  unreachable (`splitn` always yields a first element) and is deleted rather
+  than collapsed, so the accounting is 16 literals to 1 constant plus one dead
+  branch removed.
+
+  The conformance tripwire that existed solely to detect this change is retired
+  with its explanatory note and its `ASSUMPTIONS.md` entry, and replaced by the
+  inverse assertion — the message must equal `invalid cursor: malformed`
+  exactly. A structural self-inspection test in the store crate additionally
+  requires every `AcdpError::InvalidCursor` construction to use the shared
+  constant, so a future arm cannot reintroduce a leak past a by-example test.
+
 ### Fixed
 
 - **The playground publish branch now honors `supports_idempotency_key`**

@@ -265,6 +265,7 @@ dependencies = [
  "acdp",
  "acdp-registry-types",
  "async-trait",
+ "base64 0.23.1",
  "chrono",
  "serde",
  "serde_json",

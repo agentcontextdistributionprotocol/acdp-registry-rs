@@ -11187,23 +11187,19 @@ async fn cur_get(app: &axum::Router, uri: &str) -> (StatusCode, Option<String>, 
 /// reason. Verified by mutation: with the mint stamp left unaged, the expiry
 /// assertion fails against a real `200` + `next_cursor` body.
 ///
-/// **Two things this test deliberately does not assert.** (1) `cur-002`'s
-/// `rationale` says a registry "MUST NOT leak why a cursor failed to parse beyond
-/// the registered code"; this registry's message names the parse reason
-/// (`"invalid cursor: cursor is not valid base64"`). It echoes no caller input and
-/// exposes no registry state, and every field of the machine-checkable `expected`
-/// block passes — but the prose is not fully satisfied. Changing the message is a
-/// `src/` change, out of scope for a test-only unit; logged in `ASSUMPTIONS.md`.
-/// (2) `cur-001`'s "or the underlying result set changed" arm is not implemented —
+/// **One thing this test deliberately does not assert.** `cur-001`'s
+/// "or the underlying result set changed" arm is not implemented —
 /// keyset pagination carries no result-set fingerprint — and the fixture reads
 /// "either ... or", so the TTL arm satisfies it.
 ///
-/// **Scope note.** The cursor codec is duplicated byte-for-byte between the sqlite
-/// and postgres stores rather than shared. This harness is sqlite-backed, so the
-/// postgres path is covered only *incidentally* — a future divergence between the
-/// two would not be caught here. Deduplicating them is a `src/` change in crates
-/// this unit does not hold; recorded so the coverage claim is not read as broader
-/// than it is.
+/// **Scope note.** This harness is sqlite-backed, so it exercises the postgres store's
+/// HTTP path not at all. Until #187 that was a real coverage hole: the cursor codec was
+/// duplicated byte-for-byte between the two stores, and a divergence between the copies
+/// could not be caught here. #187 removed the duplication — both stores now call the one
+/// codec in `acdp-registry-store`, so there is no longer a second copy to diverge, and
+/// what this test proves about cursor parsing holds for the postgres store because it is
+/// the same function. That reasoning covers the codec only; everything else in the
+/// postgres store is still genuinely untested by this harness.
 #[tokio::test(flavor = "multi_thread")]
 async fn cur001_002_expired_and_malformed_cursors_are_distinguished() {
     use base64::Engine as _;
@@ -11382,28 +11378,26 @@ async fn cur001_002_expired_and_malformed_cursors_are_distinguished() {
         Some(inv_ctype.as_str()),
         "cur-002: content-type must match the fixture"
     );
-    // TRIPWIRE, not a requirement. cur-002's prose `rationale` says a registry
-    // "MUST NOT leak why a cursor failed to parse beyond the registered code", and
-    // this registry's message does name the reason. That clause has NO normative
-    // backing -- RFC-ACDP-0005 2.5.4's cursor MUSTs cover validity, re-scoping, and
-    // client-decodable VISIBILITY information (a property of the cursor payload, not
-    // of the message); none of them concerns parse-failure detail. And `rationale` is
-    // corpus-wide descriptive here, never asserted, for all 74 fixtures that carry one.
-    // So this is not a gap being tolerated; it is fixture prose with no force.
+    // This was a TRIPWIRE until #187, pinning the opposite of what it now asserts.
+    // cur-002's prose `rationale` says a registry "MUST NOT leak why a cursor failed to
+    // parse beyond the registered code"; the registry's message used to append the failing
+    // parse step to that prefix, so the tripwire pinned that wording and instructed whoever
+    // tightened it to retire the tripwire. #187 tightened
+    // it -- the codec now lives once in `acdp-registry-store` and every parse failure
+    // carries the single payload `malformed` -- and the tripwire was observed going red
+    // on exactly this body before being rewritten into the assertion below.
     //
-    // What this pins is the CURRENT behaviour, so the claim above cannot quietly become
-    // false. The message literals live in the two store crates, outside this unit's
-    // granted paths, duplicated byte-for-byte -- so nothing else binds them to the
-    // sentence you just read.
-    assert!(
-        v_bad["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("base64")),
-        "cur-002: the invalid_cursor message no longer names the parse reason. If the \
-         store crates' cursor messages were deliberately tightened, that is an \
-         IMPROVEMENT, not a regression -- retire this tripwire, the note above it, and \
-         the corresponding ASSUMPTIONS.md entry, which all describe behaviour that has \
-         now changed (see #187): {v_bad}"
+    // It is now a requirement, and stated as an ABSENCE: the message must not name any
+    // parse step. Asserted as an exact string rather than a `!contains(...)` blocklist,
+    // because a blocklist only rejects the words someone thought to list -- a new arm
+    // saying "bad padding" would pass one and fail the other. The store crate carries
+    // the same assertion at the unit level (`malformed_cursor_message_names_no_parse_step`
+    // in `crates/acdp-registry-store/src/cursor.rs`); this is the end-to-end half, proving
+    // the payload survives serialization to the wire rather than only the codec's return.
+    assert_eq!(
+        v_bad["error"]["message"].as_str(),
+        Some("invalid cursor: malformed"),
+        "cur-002: the invalid_cursor message must name no parse step (#187): {v_bad}"
     );
     asserted += 1;
 

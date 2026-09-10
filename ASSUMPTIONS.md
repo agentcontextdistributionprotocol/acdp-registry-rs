@@ -750,6 +750,19 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   the current behaviour would need to change. The risk of the current choice is only that the
   gap is forgotten — which this entry exists to prevent.
 - **Status:** CONFIRMED (2026-09-10) — and on stronger grounds than this entry claims: the leak clause has no RFC backing and `rationale` is corpus-wide never-asserted, so it is not a tolerated gap. This entry's body is WRONG about where the message literals live (they are in the two store crates, not `error.rs`) and examined only one of seven arms. Corrections and the applied tripwire: see `DECISIONS.md` entry 10.
+- **Status:** RETIRED — OBSOLETE (2026-09-10, W2-U2 / #187). The assumption no longer
+  describes the code. `#187` lifted the codec into `acdp-registry-store::cursor` and
+  collapsed every parse-failure arm to one payload, so the wire message is now exactly
+  `{"error":{"code":"invalid_cursor","message":"invalid cursor: malformed"}}` — it names no
+  parse step, and `cur-002`'s rationale is satisfied rather than documented-as-unsatisfied.
+  The tripwire this entry was paired with was observed going red on that exact body and has
+  been rewritten into a positive assertion of the absence; the two doc paragraphs that
+  described the gap are rewritten in the same commit. Retired here rather than struck: the
+  entry is the record of why the gap was tolerated for one unit, and deleting it would erase
+  the reasoning that `#187` acted on. Its two factual errors stand corrected above and in
+  `DECISIONS.md` entry 10 — note the arm count in that correction is itself superseded: the
+  tree had EIGHT arms per store, one of which (`cursor missing mint`) was unreachable and is
+  deleted, not collapsed. See `DECISIONS.md` entry 11.
 
 ## W2-U1 — #185 pinned-keys guard hoist (lane-1, 2026-09-10)
 
