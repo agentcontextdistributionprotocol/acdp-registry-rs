@@ -453,6 +453,17 @@
 //! check can do; genuinely re-executing every direct test's assertions as part of this
 //! ratchet would just be running the suite, not ratcheting it.
 //!
+//! Phase 15 tested that limit rather than assuming it, across three verification rounds,
+//! and the conclusion is worth stating once at the top: **these guards catch wholesale
+//! gutting and deletion, and that is all they can ever catch.** A substring test over
+//! `include_str!` cannot distinguish an assertion from the letters `a-s-s-e-r-t` in a
+//! comment, and tightening the substring only moves the goalposts one mutation further
+//! out. Proving a test asserts something REAL needs a mutation oracle -- break the code
+//! under test, observe the test go red (`cargo-mutants`, or a fault-injection harness
+//! over `src/`) -- which is a different mechanism, not a stricter regex. Recorded on
+//! #130. Do not read a passing ratchet as evidence that the tests it names prove
+//! anything; read it as evidence they have not been deleted.
+//!
 //! `DEFERRED` is `&[(&str, &str, u32)]` -- family, a non-empty written reason, and an
 //! open GitHub issue number. **#115** was filed for `caps`/`lin`/`lc`: the first two
 //! closed to `COVERED` in Phase 7, and `lc` -- the only one of the three ever left in
@@ -8850,8 +8861,28 @@ fn source_has_present_test_fn(name: &str) -> bool {
 /// this by trying the cheaper mutation after the obvious one was fixed.
 ///
 /// The counter skips braces inside string literals, line comments, and the `'{'` /
-/// `'}'` char literals this file genuinely contains, so it does not terminate early
-/// on them.
+/// `'}'` char literals this file genuinely contains (at two sites), so it does not
+/// terminate early on them. It does **NOT** handle `/* ... */` block comments or raw
+/// strings (`r"..."`, `r#"..."#`); a body using either is mis-extracted, and the
+/// callers below will report a confusing failure about a body that is in fact fine.
+/// Handling them correctly means writing a real Rust lexer, which is deliberately not
+/// done here -- see the ceiling note below.
+///
+/// **The ceiling, stated plainly, because three verification rounds hit it.** This
+/// helper feeds substring checks, and a substring check cannot tell an assertion from
+/// the letters `a-s-s-e-r-t` in a comment. Round 1 patched where the check was wired;
+/// round 2 patched this span finder; round 3 confirmed the span finder is now sound
+/// and the *predicate* is the hole -- a body of `{ /* assert */ }` or
+/// `{ let _ = "EXPECTED_ asserted"; }` defeats both guards while proving nothing, and
+/// tightening the substring only moves the goalposts (`assert!(true)` survives any
+/// tightening). Every ratchet expressible as "this text appears in this span" is
+/// satisfiable by text that computes nothing.
+///
+/// So these guards catch WHOLESALE GUTTING and deletion. They are not, and cannot be
+/// made into, proof that a test asserts something real. That property needs a mutation
+/// oracle -- break the code under test and observe the test go red (`cargo-mutants` or
+/// a fault-injection harness over `src/`) -- not a text oracle. Tracked on #130 rather
+/// than patched a fourth time.
 fn source_test_fn_body(name: &str) -> Option<&'static str> {
     let def_needle = format!("fn {name}(");
     let start = OWN_SOURCE.find(&def_needle)?;
@@ -8928,20 +8959,34 @@ fn covered_direct_families_have_present_test_functions() {
                          test-attribute-registered function -- coverage was removed without \
                          updating COVERED"
                     );
-                    // Existence pins the SYMBOL, not the coverage. The Phase 15
-                    // verification rounds proved this twice by gutting a named
-                    // function's body while leaving its name and attribute in place:
-                    // every check stayed green, for `rcpt001` here and again for
-                    // `cur001_002_...`, the newest COVERED family in the file. A
-                    // `Direct` claim is a claim that a test ASSERTS something, so
-                    // require at least one assertion to survive in the body. Kept
-                    // deliberately generic (any `assert`) rather than the stricter
+                    // Existence pins the SYMBOL, not the coverage, so also require
+                    // that some assertion survives in the body. READ THE LIMIT
+                    // HONESTLY: this catches WHOLESALE GUTTING and nothing finer. It
+                    // is a substring test, so the seven letters of `assert` inside a
+                    // comment or a string satisfy it, as does `assert!(true)`. Three
+                    // verification rounds established that no version of this check
+                    // can do better -- see `source_test_fn_body` for why the mechanism
+                    // itself is the ceiling. It is kept because wholesale gutting is a
+                    // real, cheap mistake and this catches it for free; it is NOT
+                    // evidence that the test proves anything. Kept deliberately
+                    // generic (any `assert`) rather than the stricter
                     // EXPECTED_*/`asserted` ratchet used by
-                    // `deferred_partial_direct_test_functions_are_present`, because
-                    // that counting convention is a Phase 15 idiom and most of the
-                    // nineteen COVERED families predate it.
-                    let body = source_test_fn_body(name)
-                        .unwrap_or_else(|| panic!("could not locate the body of `{name}`"));
+                    // `deferred_partial_direct_test_functions_are_present` (which is
+                    // in practice WEAKER -- both its tokens fit in one comment), because
+                    // that counting convention is a Phase 15 idiom that most
+                    // COVERED families predate. (No count here on purpose: this
+                    // one was written as 21, "corrected" to 19, and is 21 --
+                    // COVERED holds 21 families, 19 of them carrying a Direct
+                    // mechanism, and `pub`/`ret` use a one-line tuple form that
+                    // a line-oriented grep misses. A number in prose is a pin.)
+                    let body = source_test_fn_body(name).unwrap_or_else(|| {
+                        panic!(
+                            "could not locate the body of `{name}`. The brace counter in \
+                             source_test_fn_body does not handle `/* ... */` block comments \
+                             or raw strings; if `{name}` now uses either, that is the cause \
+                             and the test function itself is probably fine"
+                        )
+                    });
                     assert!(
                         body.contains("assert"),
                         "COVERED family \"{family}\"'s direct test `{name}` contains no \
@@ -8990,14 +9035,23 @@ fn deferred_partial_direct_test_functions_are_present() {
                  test-attribute-registered function -- coverage was removed without updating \
                  DEFERRED_PARTIAL_DIRECT or the family's DEFERRED reason"
             );
-            // Existence alone pins the SYMBOL, not the coverage: the Phase 3
-            // verification round gutted rcpt001's body while keeping its name and
-            // attribute, and every test stayed green. These goldens have no external
-            // `ran`-tally counterpart the way COVERED's `Replayed` families do -- their
-            // only anti-vacuity ratchet is the EXPECTED_*_ASSERTION_COUNT check at each
-            // body's tail, so require that the body still carries it.
-            let body = source_test_fn_body(name)
-                .unwrap_or_else(|| panic!("could not locate the body of `{name}`"));
+            // Existence alone pins the SYMBOL, not the coverage: a verification round
+            // gutted rcpt001's body while keeping its name and attribute, and every
+            // test stayed green. These goldens have no external `ran`-tally counterpart
+            // the way COVERED's `Replayed` families do, so require that the body still
+            // carries its EXPECTED_*_ASSERTION_COUNT ratchet. SAME CEILING as the
+            // COVERED check, and in practice this one is WEAKER despite looking
+            // stricter: both tokens are matched anywhere in the span, so the single
+            // comment line `// EXPECTED_ asserted` satisfies it. Catches wholesale
+            // gutting; proves nothing beyond that. See `source_test_fn_body`.
+            let body = source_test_fn_body(name).unwrap_or_else(|| {
+                panic!(
+                    "could not locate the body of `{name}`. The brace counter in \
+                     source_test_fn_body does not handle `/* ... */` block comments or raw \
+                     strings; if `{name}` now uses either, that is the cause and the test \
+                     function itself is probably fine"
+                )
+            });
             assert!(
                 body.contains("EXPECTED_") && body.contains("asserted"),
                 "DEFERRED family \"{family}\"'s golden test `{name}` no longer carries its \
