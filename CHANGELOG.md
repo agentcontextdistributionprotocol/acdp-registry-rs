@@ -2203,6 +2203,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requires every `AcdpError::InvalidCursor` construction to use the shared
   constant, so a future arm cannot reintroduce a leak past a by-example test.
 
+<!-- W3-U4 / #195 -->
+
+- **`base64` removed from the `acdp-registry-sqlite` and `acdp-registry-pg`
+  manifests** (`W3-U4`, `#195`): both declared it and neither used it. The
+  dependency became unused when `#187` lifted the cursor codec — the only
+  `base64` caller in either crate — into `acdp-registry-store`, which declares
+  it correctly.
+
+  **No resolved dependency graph changes at all — not the workspace's, and not
+  a downstream consumer's.** The `base64` package is not dropped: ten other
+  crates still use it, `acdp-registry-store` among them, and `Cargo.lock` loses
+  exactly the two dependency edges. It also stays reachable *from these two
+  crates* through mandatory, non-optional paths — `acdp-registry-sqlite` and
+  `acdp-registry-pg` each depend unconditionally on `acdp-registry-store` and on
+  `acdp`, both of which pull `base64`. `cargo tree -p acdp-registry-sqlite`
+  still reports the same 13 `base64` entries it did before.
+
+  So the gain is **manifest hygiene, not dependency reduction**: the two
+  manifests no longer declare something their code does not use, they stop
+  misrepresenting what the crate needs, and they stay clean under a future
+  `cargo-udeps` or `cargo-machete` gate — of which this repo currently has
+  none, which is why nothing flagged it.
+
+  Safe under every feature combination, and provably so rather than by
+  sampling: neither crate defines a `[features]` block or a single optional
+  dependency, so `cargo metadata` reports `features={}` for both and there is no
+  gated path that could reference the crate. `grep` across each crate's entire
+  directory — `src/`, `tests/`, `migrations/` — returns zero occurrences.
+
 ### Fixed
 
 - **The playground publish branch now honors `supports_idempotency_key`**
