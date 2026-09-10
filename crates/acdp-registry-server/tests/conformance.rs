@@ -8625,6 +8625,17 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
             "rate001_publish_rate_limit_trips_429_with_retry_after",
         ])],
     ),
+    // REG-11 Phase 15 (#130). `Direct` and never `Replayed`: neither cur-* fixture
+    // carries an `input.request`, so both land in the replayer's terminal non-HTTP
+    // bucket and the family produces zero replayed exchanges -- a `Replayed` claim
+    // here would fail the per-family `ran` oracle inside
+    // `replays_spec_fixtures_when_present`.
+    (
+        "cur",
+        &[CoverageMechanism::Direct(&[
+            "cur001_002_expired_and_malformed_cursors_are_distinguished",
+        ])],
+    ),
 ];
 
 /// Families with no coverage yet, each with a non-empty written reason and
@@ -8658,11 +8669,6 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 /// any of the `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115
 /// (vacuously true today, since none of the three is).
 const DEFERRED: &[(&str, &str, u32)] = &[
-    (
-        "cur",
-        "cursor/pagination semantics; no direct or replayed coverage yet.",
-        130,
-    ),
     (
         "rcpt",
         "receipt verification (RFC-ACDP-0010); two causes, not one: rcpt-001 carries no \
@@ -10681,6 +10687,276 @@ async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
     assert_eq!(
         asserted, EXPECTED_RATE_ASSERTION_COUNT,
         "expected exactly {EXPECTED_RATE_ASSERTION_COUNT} rate-* outcome assertions at spec pin \
+         d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
+         this ratchet exists to prevent"
+    );
+}
+
+// ─── REG-11 Phase 15: `cur` (RFC-ACDP-0005 §2.5.4 "Cursor stability") ───────────────
+
+/// Both `cur-*` fixtures at spec pin `d1f06d0`: `cur-001` (expired) and
+/// `cur-002` (malformed).
+const EXPECTED_CUR_FIXTURE_COUNT: usize = 2;
+/// One outcome assertion per fixture. Deliberately NOT counting the
+/// unaged-cursor control below: the control proves the *test* is honest, not
+/// that a *fixture* was satisfied, and conflating the two would let a dropped
+/// fixture hide behind a passing control.
+const EXPECTED_CUR_ASSERTION_COUNT: usize = 2;
+
+fn cur_producer(seed: u8) -> Producer {
+    common::producer("cur", seed)
+}
+
+/// `GET`, returning the status, the `content-type`, and the parsed body.
+///
+/// `anc_get` discards headers, but both `cur-*` fixtures pin
+/// `expected.content_type`, so the header has to survive to the assertion.
+async fn cur_get(app: &axum::Router, uri: &str) -> (StatusCode, Option<String>, Value) {
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let v = body_to_json(resp).await;
+    (status, content_type, v)
+}
+
+/// #130 / `cur-001` + `cur-002` — the two pagination-cursor failure modes, driven
+/// over real HTTP and kept distinct from each other.
+///
+/// **Why this is a `Direct` test and not a replayed exchange.** Neither fixture
+/// carries an `input.request` object — `cur-001`'s input is prose plus
+/// `cursor_state: "expired"`, and its endpoint names a
+/// `<previously-issued-cursor>` placeholder no static replay could ever fill.
+/// Both therefore land in the generic replayer's terminal
+/// `"non-HTTP fixture (vectors / schema / informative)"` bucket. Note they are
+/// **not** profile-gated: `applies_to_profiles` is absent, and
+/// `targets_unadvertised_profile` returns `false` for absent, so they pass that
+/// gate and fail to match any of Shapes A-D instead.
+///
+/// **Why ageing the mint stamp is honest and not a forgery.** Cursors are
+/// unsigned plaintext — `STANDARD_BASE64("{mint_ms}:{anchor_ms}:{ctx_id}")` — with
+/// a one-hour TTL enforced at decode. The cursor this test replays is a *real*
+/// one the registry just minted; only its mint stamp is rewritten, so the bytes
+/// submitted are exactly what the registry itself would have produced for the
+/// same `(anchor, ctx_id)` an hour earlier. There is no signature to forge and no
+/// state to fabricate, and the real `decode_cursor`, the real TTL comparison and
+/// the real error mapping all run untouched. The store's own unit test
+/// `expired_cursor_is_rejected` uses the identical technique one layer down; this
+/// is that property lifted to the HTTP boundary, which is where the fixture
+/// specifies it.
+///
+/// **The control is load-bearing.** Replaying the *unaged* cursor must still
+/// return `200` and a second page. Without it, a test that broke pagination
+/// outright would still see `400` on the aged cursor and pass for the wrong
+/// reason. Verified by mutation: with the mint stamp left unaged, the expiry
+/// assertion fails against a real `200` + `next_cursor` body.
+///
+/// **Two things this test deliberately does not assert.** (1) `cur-002`'s
+/// `rationale` says a registry "MUST NOT leak why a cursor failed to parse beyond
+/// the registered code"; this registry's message names the parse reason
+/// (`"invalid cursor: cursor is not valid base64"`). It echoes no caller input and
+/// exposes no registry state, and every field of the machine-checkable `expected`
+/// block passes — but the prose is not fully satisfied. Changing the message is a
+/// `src/` change, out of scope for a test-only unit; logged in `ASSUMPTIONS.md`.
+/// (2) `cur-001`'s "or the underlying result set changed" arm is not implemented —
+/// keyset pagination carries no result-set fingerprint — and the fixture reads
+/// "either ... or", so the TTL arm satisfies it.
+#[tokio::test(flavor = "multi_thread")]
+async fn cur001_002_expired_and_malformed_cursors_are_distinguished() {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping cur-001..002 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    let mut found_ids: Vec<&str> = Vec::new();
+    let mut asserted = 0usize;
+
+    // Both fixtures use a FLAT `expected` block (`error_code` / `http_status` /
+    // `content_type`), unlike rate-001's nested `response_body.error.code`.
+    let Some(fx_expired) = find_fixture_by_id(&fixtures, "cur-001") else {
+        panic!("cur-001 fixture not found under {}", fixtures.display());
+    };
+    found_ids.push("cur-001");
+    let Some(fx_invalid) = find_fixture_by_id(&fixtures, "cur-002") else {
+        panic!("cur-002 fixture not found under {}", fixtures.display());
+    };
+    found_ids.push("cur-002");
+
+    let want = |fx: &Value, id: &str| -> (u16, String, String) {
+        assert_eq!(
+            fx["expected"]["outcome"].as_str(),
+            Some("failure"),
+            "{id}: expected.outcome missing/changed: {fx}"
+        );
+        let status = fx["expected"]["http_status"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{id}: expected.http_status missing: {fx}"))
+            as u16;
+        let code = fx["expected"]["error_code"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{id}: expected.error_code missing: {fx}"))
+            .to_string();
+        let ctype = fx["expected"]["content_type"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{id}: expected.content_type missing: {fx}"))
+            .to_string();
+        (status, code, ctype)
+    };
+    let (exp_status, exp_code, exp_ctype) = want(&fx_expired, "cur-001");
+    let (inv_status, inv_code, inv_ctype) = want(&fx_invalid, "cur-002");
+
+    let app = common::build_harness_with_webhook(
+        config(),
+        caps(),
+        AUTHORITY,
+        common::StoreMode::Memory,
+        None,
+        None,
+    )
+    .await
+    .router;
+
+    // Three public rows so `limit=1` leaves a real second page. Search orders by
+    // `created_at DESC, ctx_id ASC` at millisecond resolution, so publishes must be
+    // separated in time or page identity is nondeterministic -- the same reason
+    // `search_paginates_past_fully_hidden_pages` sleeps between publishes.
+    for i in 0..3u8 {
+        let req = cur_producer(150 + i)
+            .publish_request()
+            .title(format!("market data snapshot {i}"))
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let (status, v) = anc_publish(&app, &req).await;
+        assert_eq!(status, StatusCode::OK, "cur: publish {i} failed: {v}");
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+
+    // ── cur-001: a cursor the registry really issued, replayed past its TTL ──
+    let (s1, _, page1) = cur_get(&app, "/contexts/search?q=market+data&limit=1").await;
+    assert_eq!(
+        s1,
+        StatusCode::OK,
+        "cur-001: first page must succeed: {page1}"
+    );
+    let issued = page1["next_cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("cur-001: first page must yield a next_cursor: {page1}"))
+        .to_string();
+
+    // Control FIRST: the unaged cursor must still page. If this fails, the aged
+    // assertion below would be meaningless.
+    let (s_ctl, _, ctl) = cur_get(
+        &app,
+        &format!(
+            "/contexts/search?q=market+data&limit=1&cursor={}",
+            pct_encode_path_segment(&issued)
+        ),
+    )
+    .await;
+    assert_eq!(
+        s_ctl,
+        StatusCode::OK,
+        "cur-001 control: the unaged cursor must still page, else the expiry assertion \
+         proves nothing: {ctl}"
+    );
+
+    // Age ONLY the mint stamp; anchor and ctx_id stay exactly as minted.
+    let raw = String::from_utf8(
+        b64.decode(issued.as_bytes())
+            .expect("cur-001: a registry-minted cursor must be STANDARD base64"),
+    )
+    .expect("cur-001: a registry-minted cursor must be UTF-8");
+    let mut parts = raw.splitn(3, ':');
+    let _mint = parts
+        .next()
+        .expect("cur-001: cursor must carry a mint stamp");
+    let anchor = parts.next().expect("cur-001: cursor must carry an anchor");
+    let ctx_id = parts.next().expect("cur-001: cursor must carry a ctx_id");
+    let stale_mint = chrono::Utc::now().timestamp_millis() - 3_605_000;
+    let aged = b64.encode(format!("{stale_mint}:{anchor}:{ctx_id}"));
+
+    let (s_aged, ct_aged, v_aged) = cur_get(
+        &app,
+        &format!(
+            "/contexts/search?q=market+data&limit=1&cursor={}",
+            pct_encode_path_segment(&aged)
+        ),
+    )
+    .await;
+    assert_eq!(
+        s_aged.as_u16(),
+        exp_status,
+        "cur-001: an expired cursor must be refused, not silently treated as a first-page \
+         request: {v_aged}"
+    );
+    assert_eq!(
+        v_aged["error"]["code"].as_str(),
+        Some(exp_code.as_str()),
+        "cur-001: wire error.code must match the fixture: {v_aged}"
+    );
+    assert_eq!(
+        ct_aged.as_deref(),
+        Some(exp_ctype.as_str()),
+        "cur-001: content-type must match the fixture"
+    );
+    asserted += 1;
+
+    // ── cur-002: a cursor that was never parseable ──
+    // The fixture's own endpoint carries this exact percent-encoded value.
+    let (s_bad, ct_bad, v_bad) = cur_get(
+        &app,
+        "/contexts/search?q=market+data&cursor=not-a-real-cursor-%21%21%21",
+    )
+    .await;
+    assert_eq!(
+        s_bad.as_u16(),
+        inv_status,
+        "cur-002: a malformed cursor must be rejected outright, never best-effort \
+         interpreted: {v_bad}"
+    );
+    assert_eq!(
+        v_bad["error"]["code"].as_str(),
+        Some(inv_code.as_str()),
+        "cur-002: wire error.code must match the fixture: {v_bad}"
+    );
+    assert_eq!(
+        ct_bad.as_deref(),
+        Some(inv_ctype.as_str()),
+        "cur-002: content-type must match the fixture"
+    );
+    asserted += 1;
+
+    // The two codes must stay distinct -- the whole point of both fixtures'
+    // rationale sections.
+    assert_ne!(
+        exp_code, inv_code,
+        "cur: cursor_expired and invalid_cursor must remain distinct wire codes"
+    );
+
+    assert_eq!(
+        found_ids.len(),
+        EXPECTED_CUR_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_CUR_FIXTURE_COUNT} cur-* fixtures at spec pin d1f06d0: \
+         found {found_ids:?}"
+    );
+    assert_eq!(
+        asserted, EXPECTED_CUR_ASSERTION_COUNT,
+        "expected exactly {EXPECTED_CUR_ASSERTION_COUNT} cur-* outcome assertions at spec pin \
          d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass failure mode \
          this ratchet exists to prevent"
     );
