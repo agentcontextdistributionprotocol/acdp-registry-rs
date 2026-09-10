@@ -17,9 +17,18 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-/// Wire schema version of the webhook envelope. Bump on any
-/// backwards-incompatible change to the serialized event shape so the control
-/// plane can branch on it.
+/// Wire schema version of the webhook *envelope* — the `event_id` +
+/// `schema_version` wrapper itself, not the flattened per-variant payloads.
+/// Bump on a backwards-incompatible change to that envelope shape so the
+/// control plane can branch on it.
+///
+/// Deliberately does **not** move for a per-variant field change. This value
+/// is emitted on every event type, so bumping it to signal a change that
+/// affects only some of them misreports the rest — a receiver of the
+/// unaffected types would see a version change with no change behind it.
+/// Per-variant wire changes are recorded in `docs/WEBHOOKS.md` instead.
+/// Precedent: #179 renamed the `context.retracted` / `context.republished`
+/// lifecycle id to `lifecycle_event_id` and left this at `1.0`.
 pub const WEBHOOK_SCHEMA_VERSION: &str = "1.0";
 
 #[derive(Debug, Error)]
@@ -753,5 +762,370 @@ mod tests {
         let clamped =
             WebhookEmitter::spawn_with_policy(zero_cap, SsrfPolicy::allow_test_loopback());
         assert_eq!(clamped.queue_status(), (0, 1));
+    }
+
+    // ── wire-format invariants (#179) ────────────────────────────────────
+
+    /// Every duplicated object key in `json`, as a dotted path
+    /// (`"event_id"`, `"nested.a"`, `"arr[0].b"`).
+    ///
+    /// Deliberately not built on `serde_json::Value`: its map keeps only the
+    /// last of a repeated key, so parsing into it cannot observe the very
+    /// defect this looks for. Driving `MapAccess` directly sees each key as
+    /// it appears in the byte stream. Substring counting is no good either —
+    /// it would fire on any string *value* that happens to contain the text.
+    fn duplicate_json_keys(json: &str) -> Vec<String> {
+        use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+        use std::fmt;
+
+        struct Scan<'a> {
+            path: String,
+            out: &'a mut Vec<String>,
+        }
+
+        impl<'de> DeserializeSeed<'de> for Scan<'_> {
+            type Value = ();
+            fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                deserializer.deserialize_any(self)
+            }
+        }
+
+        impl<'de> Visitor<'de> for Scan<'_> {
+            type Value = ();
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let base = self.path;
+                let out = self.out;
+                let mut seen: Vec<String> = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    let path = if base.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{base}.{key}")
+                    };
+                    if seen.contains(&key) {
+                        out.push(path.clone());
+                    } else {
+                        seen.push(key);
+                    }
+                    // Required: `next_value_seed` is what consumes the `:`
+                    // and the value. Skipping it desynchronises the parser.
+                    map.next_value_seed(Scan {
+                        path,
+                        out: &mut *out,
+                    })?;
+                }
+                Ok(())
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<(), A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let base = self.path;
+                let out = self.out;
+                let mut idx = 0usize;
+                while seq
+                    .next_element_seed(Scan {
+                        path: format!("{base}[{idx}]"),
+                        out: &mut *out,
+                    })?
+                    .is_some()
+                {
+                    idx += 1;
+                }
+                Ok(())
+            }
+
+            // `deserialize_any` dispatches scalars to these; the trait
+            // defaults return `invalid_type` errors. JSON `null` arrives as
+            // `visit_unit`, not `visit_none`.
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
+                Ok(())
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
+                Ok(())
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
+                Ok(())
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
+                Ok(())
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
+                Ok(())
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+                Ok(())
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut de = serde_json::Deserializer::from_str(json);
+        Scan {
+            path: String::new(),
+            out: &mut out,
+        }
+        .deserialize(&mut de)
+        .expect("payload must be valid JSON");
+        out
+    }
+
+    /// The detector is the whole basis of the duplicate-key guarantee, so it
+    /// is itself under test — including the `serde_json::Value` blind spot
+    /// that makes it necessary.
+    #[test]
+    fn duplicate_key_detector_sees_what_a_value_parse_hides() {
+        let dup = r#"{"event_id":"envelope","type":"context_retracted",
+                      "event_id":"lifecycle","nested":{"a":1,"a":2},
+                      "arr":[{"b":1,"b":2}]}"#;
+
+        let mut found = duplicate_json_keys(dup);
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                "arr[0].b".to_string(),
+                "event_id".to_string(),
+                "nested.a".to_string()
+            ],
+            "detector must report top-level, nested and in-array duplicates"
+        );
+
+        // Why the detector exists: a Value parse silently collapses all three.
+        let value: serde_json::Value = serde_json::from_str(dup).expect("valid json");
+        assert_eq!(
+            value.as_object().expect("object").len(),
+            4,
+            "serde_json::Value is expected to drop the duplicate — if this \
+             ever fails, Value could detect duplicates and the hand-rolled \
+             scanner above could be replaced"
+        );
+
+        assert!(
+            duplicate_json_keys(r#"{"event_id":"e","nested":{"a":1},"arr":[{"b":1}]}"#).is_empty(),
+            "a clean payload must report no duplicates"
+        );
+    }
+
+    /// Maps each variant to the snake_case `type` it serialises as.
+    ///
+    /// Wildcard-free on purpose: a sixth `WebhookEvent` variant must fail to
+    /// compile here rather than silently escape the coverage below.
+    fn variant_tag(event: &WebhookEvent) -> &'static str {
+        match event {
+            WebhookEvent::ContextPublished { .. } => "context_published",
+            WebhookEvent::ContextRetrieved { .. } => "context_retrieved",
+            WebhookEvent::ContextRetracted { .. } => "context_retracted",
+            WebhookEvent::ContextRepublished { .. } => "context_republished",
+            WebhookEvent::SearchExecuted { .. } => "search_executed",
+        }
+    }
+
+    fn retrieved_event() -> WebhookEvent {
+        WebhookEvent::ContextRetrieved {
+            registry_authority: "registry.example.com".into(),
+            ctx_id: "acdp://registry.example.com/abc".into(),
+            requester_did: Some("did:web:reader.example.com".into()),
+            at: Utc::now(),
+        }
+    }
+
+    fn retracted_event(reason: Option<&str>) -> WebhookEvent {
+        WebhookEvent::ContextRetracted {
+            registry_authority: "registry.example.com".into(),
+            ctx_id: "acdp://registry.example.com/abc".into(),
+            lineage_id: "lin-1".into(),
+            actor: "did:web:agent.example.com".into(),
+            event_id: "01950000-0000-7000-8000-0000000000aa".into(),
+            reason: reason.map(Into::into),
+            at: Utc::now(),
+        }
+    }
+
+    fn republished_event(reason: Option<&str>) -> WebhookEvent {
+        WebhookEvent::ContextRepublished {
+            registry_authority: "registry.example.com".into(),
+            ctx_id: "acdp://registry.example.com/abc".into(),
+            lineage_id: "lin-1".into(),
+            actor: "did:web:agent.example.com".into(),
+            event_id: "01950000-0000-7000-8000-0000000000bb".into(),
+            reason: reason.map(Into::into),
+            at: Utc::now(),
+        }
+    }
+
+    fn search_event() -> WebhookEvent {
+        WebhookEvent::SearchExecuted {
+            registry_authority: "registry.example.com".into(),
+            query: Some("weather".into()),
+            result_count: 12,
+            requester_did: None,
+            at: Utc::now(),
+        }
+    }
+
+    /// Every variant, with both `reason` states for the two that have one —
+    /// `reason` is `skip_serializing_if`, so present and absent are different
+    /// serialised shapes and both must be checked.
+    fn every_wire_event() -> Vec<WebhookEvent> {
+        vec![
+            published_event(),
+            retrieved_event(),
+            retracted_event(Some("superseded by ctx_def")),
+            retracted_event(None),
+            republished_event(Some("retraction reversed")),
+            republished_event(None),
+            search_event(),
+        ]
+    }
+
+    /// Emit one event through the real emitter and return the raw request.
+    ///
+    /// A fresh listener and a fresh emitter per call, rather than rebinding
+    /// one address: `capture_one_request` answers without `Connection:
+    /// close`, so the client may pool a socket the probe server has already
+    /// dropped, and a reused ephemeral port can be taken in the gap. Both
+    /// turn into a hang, and cargo has no per-test timeout — hence the
+    /// explicit one here.
+    async fn deliver_one(event: WebhookEvent) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let capture = tokio::spawn(capture_one_request(listener));
+
+        let config = WebhookConfig {
+            enabled: true,
+            url: format!("http://{addr}/hook"),
+            secret: "shhh".into(),
+            timeout_seconds: 5,
+            max_retries: 1,
+            queue_capacity: 8,
+        };
+        let emitter = WebhookEmitter::spawn_with_policy(config, SsrfPolicy::allow_test_loopback());
+        emitter.emit(event);
+
+        tokio::time::timeout(Duration::from_secs(10), capture)
+            .await
+            .expect("webhook delivery timed out")
+            .expect("join")
+    }
+
+    /// Case-insensitive lookup of one header value in a raw request head.
+    fn header_value(head: &str, name: &str) -> Option<String> {
+        head.lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim().to_string())
+    }
+
+    /// #179 — the envelope serialises `event_id` and flattens the event, so a
+    /// variant field of the same name emitted a second `event_id`. Receivers
+    /// took last-wins or first-wins and one meaning was lost. No delivery may
+    /// carry a repeated key, for any variant.
+    #[tokio::test]
+    async fn no_delivery_emits_a_duplicate_json_key() {
+        let mut covered: Vec<&'static str> = Vec::new();
+
+        for event in every_wire_event() {
+            let tag = variant_tag(&event);
+            let raw = deliver_one(event).await;
+            let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+
+            let dups = duplicate_json_keys(body);
+            assert!(
+                dups.is_empty(),
+                "{tag}: duplicate JSON key(s) {dups:?} on the wire:\n{body}"
+            );
+
+            let value: serde_json::Value = serde_json::from_str(body).expect("valid json body");
+            assert_eq!(
+                value["type"], tag,
+                "{tag}: wrong type discriminator:\n{body}"
+            );
+
+            // The envelope's id is the delivery dedupe key, and it is what
+            // the receiver must see in both places.
+            let body_id = value["event_id"].as_str().expect("event_id in body");
+            let header_id = header_value(head, "x-acdp-event-id").expect("X-ACDP-Event-Id header");
+            assert_eq!(
+                body_id, header_id,
+                "{tag}: body event_id must be the envelope id from X-ACDP-Event-Id"
+            );
+
+            if !covered.contains(&tag) {
+                covered.push(tag);
+            }
+        }
+
+        covered.sort_unstable();
+        assert_eq!(
+            covered,
+            vec![
+                "context_published",
+                "context_republished",
+                "context_retracted",
+                "context_retrieved",
+                "search_executed"
+            ],
+            "all five variants must actually reach the wire in this test"
+        );
+    }
+
+    /// The retract/republish lifecycle id still ships — under its own key, so
+    /// both it and the envelope's dedupe id survive independently.
+    #[tokio::test]
+    async fn lifecycle_variants_carry_a_distinct_lifecycle_event_id() {
+        for (event, minted) in [
+            (
+                retracted_event(Some("superseded")),
+                "01950000-0000-7000-8000-0000000000aa",
+            ),
+            (
+                republished_event(None),
+                "01950000-0000-7000-8000-0000000000bb",
+            ),
+        ] {
+            let tag = variant_tag(&event);
+            let raw = deliver_one(event).await;
+            let (_, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+            let value: serde_json::Value = serde_json::from_str(body).expect("valid json body");
+
+            assert_eq!(
+                value["lifecycle_event_id"].as_str(),
+                Some(minted),
+                "{tag}: actor-minted lifecycle id must ship as lifecycle_event_id:\n{body}"
+            );
+            assert_ne!(
+                value["lifecycle_event_id"].as_str(),
+                value["event_id"].as_str(),
+                "{tag}: lifecycle id and envelope dedupe id must stay distinct"
+            );
+        }
+    }
+
+    /// `reason` is `skip_serializing_if = "Option::is_none"` — absent means
+    /// the key is omitted, never `null`.
+    #[tokio::test]
+    async fn omitted_reason_is_absent_not_null() {
+        for event in [retracted_event(None), republished_event(None)] {
+            let tag = variant_tag(&event);
+            let raw = deliver_one(event).await;
+            let (_, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+            let value: serde_json::Value = serde_json::from_str(body).expect("valid json body");
+            assert!(
+                value.get("reason").is_none(),
+                "{tag}: reason must be omitted, not null:\n{body}"
+            );
+        }
     }
 }

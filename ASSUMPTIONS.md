@@ -583,4 +583,60 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   is advertised to producers as retryable and invites a retry loop. The wart is pre-existing
   and repo-wide (every `row_to_context` decode has it); fixing it is its own unit, not
   something to smuggle into a dependency bump. Reversible in one line.
+## `WEBHOOK_SCHEMA_VERSION` stays `"1.0"` across the `event_id` wire rename
+
+- **Plan:** `plans/u-002-webhook-duplicate-event-id.md`
+- **Assumed:** renaming the `context.retracted` / `context.republished` lifecycle id from
+  `event_id` to `lifecycle_event_id` does not warrant bumping the envelope's
+  `WEBHOOK_SCHEMA_VERSION`.
+- **Chose:** keep `"1.0"` and instead narrow the constant's doc comment
+  (`crates/acdp-registry-webhook/src/lib.rs:20-31`), which previously promised a bump on
+  "any backwards-incompatible change to the serialized event shape". The constant is emitted
+  on **all five** event types while only **two** changed shape, so bumping would report a
+  change to receivers of the three well-formed types that saw no change — the same
+  blast-radius reasoning D-002 used to reject renaming the envelope field. Corroborated: the
+  only known consumer declares `schema_version?: string`
+  (`acdp-control-plane/src/contracts/acdp.ts:38`) and never reads it, so a bump is noise, not
+  signal.
+- **Alternatives:** bump to `"2.0"` (rejected — punishes the unchanged majority); bump to
+  `"1.1"` (rejected — identical blast radius for no additional signal); leave the doc comment
+  as-is and not bump (rejected — ships code contradicting its own stated contract).
+- **Blast radius if wrong:** a receiver that wanted to branch on the version to detect this
+  rename cannot. Recovery is a one-line bump in a later release; nothing persists or migrates.
+- **Status:** UNCONFIRMED
+
+## `#[serde(rename)]` is symmetric, and that is deliberate
+
+- **Plan:** `plans/u-002-webhook-duplicate-event-id.md`
+- **Assumed:** changing the field's name for `Deserialize` as well as `Serialize` is safe.
+- **Chose:** the symmetric `#[serde(rename = "lifecycle_event_id")]` rather than the
+  asymmetric `#[serde(rename(serialize = ...))]`. `WebhookEvent` does derive `Deserialize`
+  (`crates/acdp-registry-types/src/event.rs:8`), but nothing in this workspace deserialises it
+  — verified by grep across all crates. Asymmetry would leave the type able to *read* a key it
+  will never *write*, which is exactly the read/write skew that rots a wire format.
+- **Alternatives:** asymmetric rename (rejected, above); adding `#[serde(alias = "event_id")]`
+  for read compat (rejected — buys nothing in-repo, and would reintroduce the very ambiguity
+  being removed if the envelope ever gains a `Deserialize`).
+- **Blast radius if wrong:** an out-of-tree deserialiser of this type reading the old key
+  breaks. None is known; the one known consumer parses structurally and tolerates unknown keys
+  via `[k: string]: unknown` (`acdp-control-plane/src/contracts/acdp.ts:102`).
+- **Status:** UNCONFIRMED
+
+## `acdp-control-plane` needs telling; this lane must not edit it
+
+- **Plan:** `plans/u-002-webhook-duplicate-event-id.md`
+- **Assumed:** the downstream control plane should learn that `lifecycle_event_id` now exists
+  and that its own note at `acdp-control-plane/src/contracts/acdp.ts:81-85` — which documents
+  the old last-wins behaviour as a deliberate dedup fallback — goes stale on merge.
+- **Chose:** file a **GitHub issue** in `agentcontextdistributionprotocol/acdp-control-plane`
+  from `/ship` after merge, so it can cite the merged PR. **No edit to that repo's files.**
+  Authorised by the user's standing instruction for this workspace ("only this repo changes;
+  for cross-repo changes file GitHub issues and ping that repo's Claude session"), not by this
+  plan — CHARTER rule 6 forbids cross-repo *edits* outright and a plan may not self-exempt.
+- **Alternatives:** edit `acdp.ts` directly (rejected — forbidden); say nothing (rejected —
+  leaves a first-party repo carrying a comment that is now false).
+- **Blast radius if wrong:** the control plane's fallback dedup path keeps working either way
+  (the `X-ACDP-Event-Id` header wins in the normal path, and the fallback now *agrees* with
+  the header instead of diverging). The cost of not telling them is a stale comment, not an
+  outage.
 - **Status:** UNCONFIRMED
