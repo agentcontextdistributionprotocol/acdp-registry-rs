@@ -438,13 +438,17 @@
 //! `covered_direct_families_have_present_test_functions` scanning this file's own
 //! compiled-in source (`include_str!`) for each named function, confirming it still
 //! exists with a test attribute directly above it. Be honest about what that check CAN
-//! and CANNOT detect: it is an EXISTENCE check, not a correctness check. It proves a
-//! named test has not been deleted or silently de-registered (attribute stripped,
-//! renamed away from `COVERED`'s literal string) -- exactly the mutation this phase must
-//! catch -- but it cannot prove the test's assertions still say anything meaningful; a
-//! gutted `assert!(true)` body would still read as "present," and so would `#[ignore]`
-//! written above `#[test]` (the reverse, idiomatic order is caught) or the whole function
-//! wrapped in a `/* ... */` block comment. A const naming test functions and re-deriving
+//! and CANNOT detect. It proves a named test has not been deleted or silently
+//! de-registered (attribute stripped, renamed away from `COVERED`'s literal string) --
+//! exactly the mutation this phase must catch -- and, since Phase 15, that the body still
+//! contains at least one assertion, because existence alone pins the SYMBOL rather than
+//! the coverage: two separate verification rounds gutted a named function's body while
+//! leaving its name and attribute in place, and every check stayed green. What it still
+//! CANNOT do is judge whether those assertions say anything meaningful: `assert!(true)`
+//! satisfies it, as does the token `assert` inside a comment or a string. `#[ignore]`
+//! written above `#[test]` (the reverse, idiomatic order is caught) and a function wrapped
+//! in a `/* ... */` block comment also still read as "present". A const naming test
+//! functions and re-deriving
 //! "present + still a test" from source is the best a self-contained, spec-independent
 //! check can do; genuinely re-executing every direct test's assertions as part of this
 //! ratchet would just be running the suite, not ratcheting it.
@@ -8833,22 +8837,65 @@ fn source_has_present_test_fn(name: &str) -> bool {
     false
 }
 
-/// The source text of `name`'s function body, from its `fn` line to the first
-/// closing brace at column 0. Used by
-/// `deferred_partial_direct_test_functions_are_present` to check a pinned golden
-/// test still *contains* its assertion-count ratchet, not merely that its name
-/// exists -- the gap a pure existence check leaves, and one the Phase 3
-/// verification round demonstrated by gutting 5,895 bytes out of `rcpt001`'s body
-/// while leaving the name and attribute in place: every test stayed green.
+/// The source text of `name`'s function body: from its `fn` line to the brace that
+/// actually closes it, found by counting.
 ///
-/// Deliberately crude. It is a text scan, not a parser, and it only has to be good
-/// enough to notice that a body has been emptied.
+/// **This used to stop at the first `\n}\n`, and that was a real hole.** A body
+/// gutted to a single line -- `async fn foo() {}` -- has no closing brace at column 0
+/// of its own, so the scan ran on into the NEXT function and returned a span
+/// containing the *neighbour's* assertions. Both anti-vacuity guards that depend on
+/// this helper were satisfied by them: gutting `cur001_002_...` or `rcpt001_...` to
+/// `() {}` left all 66 tests green, and `cargo fmt` keeps `{}` on one line, so
+/// formatting did not rescue it either. The round-2 verification of Phase 4 found
+/// this by trying the cheaper mutation after the obvious one was fixed.
+///
+/// The counter skips braces inside string literals, line comments, and the `'{'` /
+/// `'}'` char literals this file genuinely contains, so it does not terminate early
+/// on them.
 fn source_test_fn_body(name: &str) -> Option<&'static str> {
     let def_needle = format!("fn {name}(");
     let start = OWN_SOURCE.find(&def_needle)?;
     let rest = &OWN_SOURCE[start..];
-    let end = rest.find("\n}\n").map_or(rest.len(), |i| i + 2);
-    Some(&rest[..end])
+    let bytes = rest.as_bytes();
+    let open = rest.find('{')?;
+
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut in_string = false;
+    let mut in_line_comment = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_line_comment {
+            if byte == b'\n' {
+                in_line_comment = false;
+            }
+        } else if in_string {
+            match byte {
+                b'\\' => index += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'/' if bytes.get(index + 1) == Some(&b'/') => in_line_comment = true,
+                // `'{'` / `'}'` -- a char literal, not a delimiter. Lifetimes
+                // (`'a`) fall through harmlessly, having no closing quote here.
+                b'\'' if bytes.get(index + 2) == Some(&b'\'') => index += 2,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&rest[..=index]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Unconditional (no spec needed) half of Phase 11's mutation proof: every
@@ -8892,7 +8939,7 @@ fn covered_direct_families_have_present_test_functions() {
                     // EXPECTED_*/`asserted` ratchet used by
                     // `deferred_partial_direct_test_functions_are_present`, because
                     // that counting convention is a Phase 15 idiom and most of the
-                    // 21 COVERED families predate it.
+                    // nineteen COVERED families predate it.
                     let body = source_test_fn_body(name)
                         .unwrap_or_else(|| panic!("could not locate the body of `{name}`"));
                     assert!(
@@ -10172,10 +10219,10 @@ const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
 /// validation (`validate_publish_request`, before `validate_post_schema`'s
 /// registry-limit/crypto steps), and BOTH wrap any resolution failure as
 /// `AcdpError::SchemaViolation`, not `AcdpError::KeyResolution`. Verified
-/// empirically against the `acdp` dependency this crate locks (see
-/// `Cargo.lock`; the assertion below re-verifies it on every run,
-/// this crate's `Cargo.toml`) before writing these assertions -- see this
-/// phase's report for the raw probe output.
+/// empirically against the `acdp` dependency this workspace locks (see
+/// `Cargo.lock` -- this crate's own `Cargo.toml` says
+/// `acdp = { workspace = true }` and carries no version) before writing
+/// these assertions, and the assertion below re-verifies it on every run.
 ///
 ///   * dk-001 (wrong multicodec prefix) -> observed `schema_violation`/400,
 ///     NOT the fixture's pinned `key_resolution_failed`. The fixture's own
@@ -10349,7 +10396,7 @@ const EXPECTED_DID_SSRF_ASSERTION_COUNT: usize = 5;
 /// (DNS-rebinding protection), just not ones this test can exercise without
 /// a live resolver; `acdp-did`'s own test suite
 /// (`did_resolver_rejects_hostname_resolving_to_loopback`, `acdp-did`'s
-/// src/web.rs`) covers that shape against real `localhost` DNS.
+/// `src/web.rs`) covers that shape against real `localhost` DNS.
 fn did_web_authority_is_ip_literal(did: &str) -> bool {
     let Ok(url) = acdp::did::did_web_to_url(did) else {
         return false;
