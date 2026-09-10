@@ -1107,3 +1107,50 @@ comment this unit rewrote. It survives because the new text was **appended after
 sentence rather than inserted above it — a deliberate constraint carried from plan review into
 the edit. Worth generalising: when an edit lands inside a cited range, the edit's *shape*
 decides whether the citation survives, and that is cheaper than re-pointing afterwards.
+
+## 11. W2-U2 — #187: one payload for every cursor parse failure (2026-09-10)
+
+**Decided by:** Opus, under the lane's "approach choices are not escalations" rule. Recorded
+here because it changes an observable wire string, and because it corrects entry 10.
+
+**The decision.** Every `InvalidCursor` arm in the now-shared codec
+(`crates/acdp-registry-store/src/cursor.rs`) carries one payload, the module-level constant
+`CURSOR_MALFORMED = "malformed"`. `AcdpError::InvalidCursor` renders as
+`#[error("invalid cursor: {0}")]`, so the wire message is exactly
+**`invalid cursor: malformed`**. A bare `invalid cursor` was considered and is not
+reachable without editing the `thiserror` attribute in `acdp-registry-types`, which is
+outside this unit's granted paths and would change every other caller of that variant.
+
+**Why one payload rather than a tidied set.** `cur-002`'s rationale asks a registry not to
+"leak why a cursor failed to parse beyond the registered code". Any per-arm string describes
+the cursor's internal field layout (`missing anchor`, `mint not int`), which is precisely
+what the clause names. Nothing operational is lost: `error.code` still separates
+`invalid_cursor` from `cursor_expired`, which is the distinction callers actually branch on,
+and a client already holds the cursor it sent. The two codes were verified to stay distinct
+by the conformance run, not assumed.
+
+**Corrections to entry 10 — appended, per the entry 9c rule that pins are reported and never
+re-pointed.**
+
+1. **Entry 10's count is superseded.** It says **14 literals across two crates** and "six
+   others" beyond the base64 arm. The tree had **8 arms per store, 16 total** — entry 10 and
+   #187 both missed `"cursor is not utf-8"`. Of the 8, one (`"cursor missing mint"`) was
+   **unreachable**: `splitn` always yields a first element, so its `ok_or_else` could never
+   fire. It is deleted rather than collapsed, and the code now says so at the call site. So
+   the true accounting is 16 literals → 1 constant, with one dead branch removed.
+
+2. **Entry 10's two line-pins are DANGLING as of this commit, and are reported, not
+   re-pointed.** `DECISIONS.md:1021-1022` cites
+   `crates/acdp-registry-pg/src/store.rs:1644-1668` and
+   `crates/acdp-registry-sqlite/src/store.rs:1740-1764`. This unit deleted exactly those
+   ranges, so:
+   - `pg/src/store.rs:1644-1668` is now **past end of file** — the file is 1636 lines.
+   - `sqlite/src/store.rs:1740` now lands on `assert_eq!(fts5_escape("hello"), "\"hello\"");`,
+     an unrelated full-text-search assertion.
+
+   Both were verified by reading the files at this commit, not inferred from the diff. Entry
+   10 is left byte-for-byte intact: the correct reading of it is "the literals that were at
+   those lines when entry 10 was written", and the content-addressed replacement is the
+   single `CURSOR_MALFORMED` constant named above. This is the failure mode CHARTER rule 10
+   exists to surface, and it is a genuine argument against citing line ranges in an
+   append-only file at all — a follow-up worth taking up separately from this unit.

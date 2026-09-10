@@ -39,6 +39,18 @@ use chrono::{DateTime, Utc};
 /// How long an issued cursor stays usable, per RFC-ACDP-0005 §2.5.4.
 const CURSOR_TTL_SECS: i64 = 3600;
 
+/// The single payload every parse failure carries.
+///
+/// `AcdpError::InvalidCursor` renders as `#[error("invalid cursor: {0}")]`, so the wire
+/// message is exactly **`invalid cursor: malformed`** — it names no parse step. That is the
+/// point: `cur-002`'s fixture rationale asks a registry not to "leak why a cursor failed to
+/// parse beyond the registered code", and the previous per-arm strings
+/// (`cursor missing anchor`, `cursor mint not int`, …) described the cursor's internal field
+/// layout. Nothing is lost operationally — `error.code` still discriminates
+/// `invalid_cursor` from `cursor_expired`, which is the distinction callers actually branch
+/// on, and a client already knows the cursor it sent.
+const CURSOR_MALFORMED: &str = "malformed";
+
 /// Mint a cursor for the last row of a page.
 ///
 /// `created_at_ms` is that row's `created_at`; the mint stamp is taken from the clock here,
@@ -60,33 +72,25 @@ pub fn encode_cursor(created_at_ms: i64, ctx_id: &str) -> String {
 /// level there is cheaper than a wrapper. Do not write code that branches on `Ok(None)`
 /// expecting it to mean anything.
 pub fn decode_cursor(s: &str) -> Result<Option<(DateTime<Utc>, String)>, AcdpError> {
-    let bytes = B64
-        .decode(s)
-        .map_err(|_| AcdpError::InvalidCursor("cursor is not valid base64".into()))?;
-    let decoded = String::from_utf8(bytes)
-        .map_err(|_| AcdpError::InvalidCursor("cursor is not utf-8".into()))?;
+    let malformed = || AcdpError::InvalidCursor(CURSOR_MALFORMED.into());
+
+    let bytes = B64.decode(s).map_err(|_| malformed())?;
+    let decoded = String::from_utf8(bytes).map_err(|_| malformed())?;
     let mut parts = decoded.splitn(3, ':');
-    let mint = parts
-        .next()
-        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing mint".into()))?;
-    let anchor = parts
-        .next()
-        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing anchor".into()))?;
-    let ctx_id = parts
-        .next()
-        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing ctx_id".into()))?;
-    let mint_ms: i64 = mint
-        .parse()
-        .map_err(|_| AcdpError::InvalidCursor("cursor mint not int".into()))?;
-    let anchor_ms: i64 = anchor
-        .parse()
-        .map_err(|_| AcdpError::InvalidCursor("cursor anchor not int".into()))?;
+    // `splitn` always yields at least one element -- even for the empty string -- so the
+    // first `next()` cannot be `None`. It previously carried its own "cursor missing mint"
+    // arm, which was therefore unreachable; an empty first field falls through to the parse
+    // below instead. `unwrap_or("")` states that rather than pretending the branch exists.
+    let mint = parts.next().unwrap_or("");
+    let anchor = parts.next().ok_or_else(malformed)?;
+    let ctx_id = parts.next().ok_or_else(malformed)?;
+    let mint_ms: i64 = mint.parse().map_err(|_| malformed())?;
+    let anchor_ms: i64 = anchor.parse().map_err(|_| malformed())?;
     let now = Utc::now().timestamp_millis();
     if now.saturating_sub(mint_ms) > CURSOR_TTL_SECS * 1000 {
         return Err(AcdpError::CursorExpired);
     }
-    let anchor_ts = DateTime::<Utc>::from_timestamp_millis(anchor_ms)
-        .ok_or_else(|| AcdpError::InvalidCursor("cursor anchor out of range".into()))?;
+    let anchor_ts = DateTime::<Utc>::from_timestamp_millis(anchor_ms).ok_or_else(malformed)?;
     Ok(Some((anchor_ts, ctx_id.to_string())))
 }
 
@@ -241,6 +245,48 @@ mod tests {
             !cur.contains('-') && !cur.contains('_'),
             "'-' and '_' belong to the URL-safe alphabet, not STANDARD: {cur:?}"
         );
+    }
+
+    /// The wire message must name no parse step.
+    ///
+    /// Asserts the exact rendered string rather than a `contains`, because the whole point is
+    /// what is *absent*: a `contains("invalid cursor")` would still pass if a parse reason
+    /// were appended. `AcdpError::InvalidCursor` renders as `invalid cursor: {payload}`, so a
+    /// bare payload is not achievable and `"malformed"` is the chosen filler.
+    #[test]
+    fn malformed_cursor_message_names_no_parse_step() {
+        let leaky = [
+            "base64", "utf-8", "utf8", "mint", "anchor", "ctx_id", "int", "range",
+        ];
+        // The out-of-range-anchor arm needs a FRESH mint: `decode_cursor` checks the TTL
+        // before it converts the anchor, so a stale mint short-circuits to `CursorExpired`
+        // and never reaches the arm under test. Observed, not assumed -- a hardcoded 2023
+        // mint failed here with `got Err(CursorExpired)`.
+        let fresh = Utc::now().timestamp_millis();
+        for bad in [
+            "!!!not-base64!!!",
+            &B64.encode([0xff, 0xfe, 0xfd]),
+            &B64.encode("abc"),
+            &B64.encode("123:456"),
+            &B64.encode("notanint:456:acdp://reg/ctx-1"),
+            &B64.encode(format!("{fresh}:notanint:acdp://reg/ctx-1")),
+            &B64.encode(format!("{fresh}:{}:acdp://reg/ctx-1", i64::MAX)),
+        ] {
+            match decode_cursor(bad) {
+                Err(AcdpError::InvalidCursor(payload)) => {
+                    assert_eq!(payload, "malformed", "payload must be the single constant");
+                    let rendered = AcdpError::InvalidCursor(payload).to_string();
+                    assert_eq!(rendered, "invalid cursor: malformed");
+                    for word in leaky {
+                        assert!(
+                            !rendered.contains(word),
+                            "wire message leaked the parse step {word:?}: {rendered}"
+                        );
+                    }
+                }
+                other => panic!("expected InvalidCursor for {bad:?}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
