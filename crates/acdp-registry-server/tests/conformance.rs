@@ -10984,8 +10984,29 @@ const EXPECTED_LHR001_VECTOR_COUNT: usize = 1;
 /// Five recomputed properties per receipt golden: canonical form, preimage hash,
 /// offline signature verification, a re-mint through THIS repo's own signer, and
 /// the vector's own cross-check (producer-key fingerprint / lineage derivation).
-const EXPECTED_RCPT001_ASSERTION_COUNT: usize = 5;
-const EXPECTED_LHR001_ASSERTION_COUNT: usize = 5;
+const EXPECTED_RCPT001_ASSERTION_COUNT: usize = 6;
+const EXPECTED_LHR001_ASSERTION_COUNT: usize = 6;
+
+/// The receipt-key identity every #130 golden pins:
+/// `did:web:registry.example.com#receipt-key-1`.
+///
+/// These are literals ON PURPOSE, and the reason is a bug that was here until the
+/// Phase 2 verification round found it. The obvious shortcut is to split the golden's
+/// own `key_id` into authority + fragment and hand those to [`golden_signer`] -- but
+/// then `reminted.signature.key_id == key_id` is a round-trip tautology, because
+/// `build_signer` simply reassembles `did:web:{authority}#{fragment}` from the very
+/// string it was given. It passes for ANY fragment. That was confirmed by mutation:
+/// with the split-derived form, rewriting every golden's fragment to `BOGUS-FRAGMENT`
+/// left all four tests green.
+///
+/// Pinning the identity here and asserting the golden equals it is what gives the
+/// `key_id` assertion content. Note the authority half was never laundered -- it is
+/// constrained through the signed preimage (`registry_did` in rcpt-001/lhr-001) and
+/// through the RFC-ACDP-0012 §6 `log_id`-vs-`registry_did` rule (log-001/log-003) --
+/// but the fragment half was, and only a pinned literal catches it.
+const GOLDEN_KEY_AUTHORITY: &str = "registry.example.com";
+const GOLDEN_KEY_FRAGMENT: &str = "receipt-key-1";
+const GOLDEN_KEY_ID: &str = "did:web:registry.example.com#receipt-key-1";
 
 /// Build a [`ReceiptSigner`] from a golden vector's published seed, through this
 /// repo's own `acdp_registry_core::receipt::build_signer` rather than the
@@ -11102,13 +11123,14 @@ async fn rcpt001_registry_receipt_golden_recomputed_and_remintable() {
     let key_id = expected["registry_receipt"]["signature"]["key_id"]
         .as_str()
         .unwrap_or_else(|| panic!("rcpt-001: expected.registry_receipt.signature.key_id missing"));
-    let (did_part, fragment) = key_id
-        .split_once('#')
-        .unwrap_or_else(|| panic!("rcpt-001: key_id must carry a fragment: {key_id}"));
-    let authority = did_part
-        .strip_prefix("did:web:")
-        .unwrap_or_else(|| panic!("rcpt-001: key_id must be a did:web: {key_id}"));
-    let signer = golden_signer(seed_hex, fragment, authority);
+    assert_eq!(
+        key_id, GOLDEN_KEY_ID,
+        "rcpt-001: the golden's key_id must equal the pinned spec identity -- the signer \
+         below is built from GOLDEN_KEY_FRAGMENT/GOLDEN_KEY_AUTHORITY rather than from \
+         key_id, precisely so the key_id assertion is not a round-trip tautology"
+    );
+    asserted += 1;
+    let signer = golden_signer(seed_hex, GOLDEN_KEY_FRAGMENT, GOLDEN_KEY_AUTHORITY);
     let reminted = signer
         .mint(
             &CtxId(unsigned["ctx_id"].as_str().unwrap().to_string()),
@@ -11250,13 +11272,13 @@ async fn lhr001_lineage_head_receipt_golden_recomputed_and_remintable() {
         .unwrap_or_else(|| {
             panic!("lhr-001: expected.lineage_head_receipt.signature.key_id missing")
         });
-    let (did_part, fragment) = key_id
-        .split_once('#')
-        .unwrap_or_else(|| panic!("lhr-001: key_id must carry a fragment: {key_id}"));
-    let authority = did_part
-        .strip_prefix("did:web:")
-        .unwrap_or_else(|| panic!("lhr-001: key_id must be a did:web: {key_id}"));
-    let signer = golden_signer(seed_hex, fragment, authority);
+    assert_eq!(
+        key_id, GOLDEN_KEY_ID,
+        "lhr-001: the golden's key_id must equal the pinned spec identity -- see \
+         GOLDEN_KEY_ID for why this is pinned rather than split out of key_id"
+    );
+    asserted += 1;
+    let signer = golden_signer(seed_hex, GOLDEN_KEY_FRAGMENT, GOLDEN_KEY_AUTHORITY);
     let lineage_id =
         acdp::types::primitives::LineageId(unsigned["lineage_id"].as_str().unwrap().to_string());
     let head_ctx = CtxId(unsigned["head_ctx_id"].as_str().unwrap().to_string());
@@ -11314,10 +11336,24 @@ const EXPECTED_LOG003_VECTOR_COUNT: usize = 1;
 /// log-001: leaf canonical forms, leaf hashes, root, empty-tree root, checkpoint
 /// canonical form, checkpoint hash, re-minted checkpoint signature, inclusion path,
 /// inclusion verification.
-const EXPECTED_LOG001_ASSERTION_COUNT: usize = 9;
-/// log-003: first root, second root, consistency path, both checkpoint canonical
-/// forms, both re-minted signatures, consistency verification.
-const EXPECTED_LOG003_ASSERTION_COUNT: usize = 7;
+const EXPECTED_LOG001_ASSERTION_COUNT: usize = 10;
+/// log-001's tree size. Pinned as a const so the leaf loop below can attest it
+/// actually ran the expected number of times, and so `verify_inclusion`'s `tree_size`
+/// argument is not a bare `5`. Without this, the two `asserted += 2` increments sit
+/// OUTSIDE the loop and a zero-leaf fixture would be caught only incidentally, by the
+/// later `root_hash` assertion -- the count ratchet itself would not notice.
+const EXPECTED_LOG001_LEAF_COUNT: usize = 5;
+/// log-003: pinned key identity, first root, second root, consistency path, both
+/// checkpoint canonical forms, both re-minted signatures, and the consistency
+/// verification itself. That last one was enumerated here but never counted -- its
+/// `verify_consistency` call carried no `asserted += 1`, unlike log-001's parallel
+/// `verify_inclusion`. Counted now, so the comment and the const agree.
+const EXPECTED_LOG003_ASSERTION_COUNT: usize = 9;
+/// log-003's two tree sizes: the consistency proof runs 3 -> 5. Pinned so a spec-pin
+/// bump that changed the leaf counts fails at a named ratchet rather than inside
+/// `verify_consistency` with a bare pair of integers.
+const EXPECTED_LOG003_FIRST_SIZE: usize = 3;
+const EXPECTED_LOG003_SECOND_SIZE: usize = 5;
 
 /// Decode a `"sha256:<hex>"` wire hash into raw bytes.
 fn sha256_wire_to_bytes(s: &str, what: &str) -> [u8; 32] {
@@ -11390,6 +11426,7 @@ async fn log001_leaf_root_and_inclusion_golden_recomputed() {
         "log-001: leaf/hash count mismatch"
     );
     let mut leaf_hashes: Vec<[u8; 32]> = Vec::new();
+    let mut leaves_checked = 0usize;
     for (i, leaf_json) in leaves.iter().enumerate() {
         let leaf = acdp::types::log::LogLeaf::from_value(leaf_json)
             .unwrap_or_else(|e| panic!("log-001: leaf {i} does not parse: {e}"));
@@ -11406,7 +11443,14 @@ async fn log001_leaf_root_and_inclusion_golden_recomputed() {
             "log-001: leaf {i} hash mismatch"
         );
         leaf_hashes.push(leaf.leaf_hash().unwrap());
+        leaves_checked += 1;
     }
+    assert_eq!(
+        leaves_checked, EXPECTED_LOG001_LEAF_COUNT,
+        "log-001: the leaf loop must have verified exactly {EXPECTED_LOG001_LEAF_COUNT} \
+         leaves -- the two increments below are outside the loop, so without this check a \
+         zero-leaf fixture would still satisfy the assertion count"
+    );
     asserted += 2;
 
     // 3. Merkle tree hash over all five leaves.
@@ -11452,9 +11496,13 @@ async fn log001_leaf_root_and_inclusion_golden_recomputed() {
     let key_id = expected["log_checkpoint"]["signature"]["key_id"]
         .as_str()
         .unwrap();
-    let (did_part, fragment) = key_id.split_once('#').unwrap();
-    let authority = did_part.strip_prefix("did:web:").unwrap();
-    let signer = golden_signer(seed_hex, fragment, authority);
+    assert_eq!(
+        key_id, GOLDEN_KEY_ID,
+        "log-001: the golden's key_id must equal the pinned spec identity -- see \
+         GOLDEN_KEY_ID for why this is pinned rather than split out of key_id"
+    );
+    asserted += 1;
+    let signer = golden_signer(seed_hex, GOLDEN_KEY_FRAGMENT, GOLDEN_KEY_AUTHORITY);
     let reminted = signer
         .mint_log_checkpoint(
             v["log_id"].as_str().unwrap(),
@@ -11490,7 +11538,13 @@ async fn log001_leaf_root_and_inclusion_golden_recomputed() {
     // 9. The path actually verifies against the root -- comparing bytes is not the
     //    same as proving the proof works.
     assert!(
-        acdp::crypto::merkle::verify_inclusion(&leaf_hashes[0], 0, 5, &got_path, &root),
+        acdp::crypto::merkle::verify_inclusion(
+            &leaf_hashes[0],
+            0,
+            EXPECTED_LOG001_LEAF_COUNT as u64,
+            &got_path,
+            &root
+        ),
         "log-001: the recomputed inclusion path must verify against the golden root"
     );
     asserted += 1;
@@ -11552,7 +11606,13 @@ async fn log003_consistency_proof_golden_recomputed() {
         .collect();
 
     // 1-2. Both roots, recomputed from the same leaf-hash list.
-    let first_root = acdp::crypto::merkle::merkle_tree_hash(&leaf_hashes[..3]);
+    assert_eq!(
+        leaf_hashes.len(),
+        EXPECTED_LOG003_SECOND_SIZE,
+        "log-003: the golden must carry exactly {EXPECTED_LOG003_SECOND_SIZE} leaf hashes"
+    );
+    let first_root =
+        acdp::crypto::merkle::merkle_tree_hash(&leaf_hashes[..EXPECTED_LOG003_FIRST_SIZE]);
     assert_eq!(
         sha256_bytes_to_wire(&first_root),
         expected["first_root_hash"].as_str().unwrap(),
@@ -11574,8 +11634,9 @@ async fn log003_consistency_proof_golden_recomputed() {
         .iter()
         .map(|x| x.as_str().unwrap().to_string())
         .collect();
-    let got_path = acdp::crypto::merkle::consistency_proof(3, &leaf_hashes)
-        .unwrap_or_else(|| panic!("log-003: consistency_proof(3, ..) returned None"));
+    let got_path =
+        acdp::crypto::merkle::consistency_proof(EXPECTED_LOG003_FIRST_SIZE, &leaf_hashes)
+            .unwrap_or_else(|| panic!("log-003: consistency_proof(3, ..) returned None"));
     let got_wire: Vec<String> = got_path.iter().map(sha256_bytes_to_wire).collect();
     assert_eq!(
         got_wire, want_path,
@@ -11608,9 +11669,13 @@ async fn log003_consistency_proof_golden_recomputed() {
         .as_str()
         .unwrap();
     let key_id = fx["registry_test_keypair"]["key_id"].as_str().unwrap();
-    let (did_part, fragment) = key_id.split_once('#').unwrap();
-    let authority = did_part.strip_prefix("did:web:").unwrap();
-    let signer = golden_signer(seed_hex, fragment, authority);
+    assert_eq!(
+        key_id, GOLDEN_KEY_ID,
+        "log-003: the golden's key_id must equal the pinned spec identity -- see \
+         GOLDEN_KEY_ID for why this is pinned rather than split out of key_id"
+    );
+    asserted += 1;
+    let signer = golden_signer(seed_hex, GOLDEN_KEY_FRAGMENT, GOLDEN_KEY_AUTHORITY);
     for (cp_key, sig_key) in [
         ("first_checkpoint_unsigned", "first_signature_value_base64"),
         (
@@ -11637,16 +11702,29 @@ async fn log003_consistency_proof_golden_recomputed() {
 
     // The proof must actually verify, not merely match bytes.
     assert!(
-        acdp::crypto::merkle::verify_consistency(3, 5, &got_path, &first_root, &second_root),
+        acdp::crypto::merkle::verify_consistency(
+            EXPECTED_LOG003_FIRST_SIZE as u64,
+            EXPECTED_LOG003_SECOND_SIZE as u64,
+            &got_path,
+            &first_root,
+            &second_root
+        ),
         "log-003: the recomputed consistency path must verify 3 -> 5"
     );
+    asserted += 1;
 
     // NEGATIVE: tamper one path element; the proof must stop verifying. This is the
     // vector's own verification_steps[3], inverted.
     let mut tampered = got_path.clone();
     tampered[0][0] ^= 0xff;
     assert!(
-        !acdp::crypto::merkle::verify_consistency(3, 5, &tampered, &first_root, &second_root),
+        !acdp::crypto::merkle::verify_consistency(
+            EXPECTED_LOG003_FIRST_SIZE as u64,
+            EXPECTED_LOG003_SECOND_SIZE as u64,
+            &tampered,
+            &first_root,
+            &second_root
+        ),
         "log-003: a tampered consistency path must NOT verify -- if it does, the verification \
          above proves nothing"
     );
