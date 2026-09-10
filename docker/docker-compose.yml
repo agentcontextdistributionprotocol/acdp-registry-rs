@@ -2,7 +2,8 @@
 # `.env` file (or the operator's environment). The `${VAR:-default}`
 # substitution keeps the compose file usable for local demos via the
 # placeholder defaults. The startup-time validator (see main.rs) rejects
-# ACDP_REGISTRY_AUTH__JWT_SECRET set to the literal `changeme` ONLY when
+# ACDP_REGISTRY_AUTH__JWT_SECRET set to `changeme` (case-insensitively,
+# after trimming) ONLY when
 # auth is enabled on HS256 — and config.docker.toml ships
 # `auth.enabled = false`, so THIS STACK STARTS CLEANLY WITH THE
 # PLACEHOLDER and the check never runs. Generate a real secret with

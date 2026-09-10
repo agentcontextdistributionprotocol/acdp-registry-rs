@@ -916,3 +916,69 @@ Both are cross-repo and outside this unit; recorded so they are not lost.
   currently discards exactly the two event types #179 is about.
 - **`acdp-website/content/registry-server/webhooks.mdx`** documents three event types and no
   lifecycle events, so the public docs now lag this repo's `docs/WEBHOOKS.md`.
+
+## 9. U-005 — three settled calls on the operator-docs sweep (2026-09-10)
+
+**Decided by:** Opus (lane-1), during `/drive` on `#180`. Ruled on by the lane leader.
+
+### 9a. A claim grants paths, not authority over what a change means
+
+`docker/**` was in this unit's claim, so adding `ACDP_REGISTRY_AUTH__ENABLED = true` to
+`docker/RAILWAY.md`'s required env vars would have been strictly inside the grant. It was
+**not** done. Changing what a deployment recipe *instructs operators to deploy* is an
+operator-visible posture change — the class `#180` says must not change silently in a docs
+pass — and it merely happens to live in a granted file. The gap is **documented** instead:
+`RAILWAY.md` now states that the recipe leaves auth off, that the JWT secret is therefore
+never validated, and that `ALLOW_PUBLIC_BIND = true` waives a guard whose stated precondition
+includes an authenticating proxy. The note names the knob without mandating it. The row itself
+awaits a human ruling.
+
+The general rule, adopted: **a path grant is not a mandate to make every change that path
+would permit.** Scope is decided by what a change *means* to an operator, not by which file it
+lands in.
+
+### 9b. Wording rule for the `changeme` corrections
+
+Every site scopes the claim to `auth.enabled`, adds **HS256** wherever the surrounding context
+does not already establish it (`docs/AUTHENTICATION.md`'s callout is HS256-framed in its own
+opening line, so it names only the `auth.enabled` half), notes that the match is
+case-insensitive after trimming, and — where the file describes a shipped stack — states
+plainly that its own default does not trip the guard. Hedging alone was rejected: a reader of `docker-compose.yml` needs to know *that stack*
+boots with the placeholder, not merely that the rule has conditions. HS256 is load-bearing —
+under EdDSA `jwt_secret` is never examined, and `docs/CONFIGURATION.md:35` sits one sentence
+after an EdDSA discussion.
+
+Correspondingly for claim 1: every correction carries **both** guards (`main.rs:259` and
+`:267`). Documenting the first without the second would have sent an operator who followed the
+corrected doc into a different startup failure — the same defect class the unit exists to
+remove.
+
+### 9c. Line-pins into edited files are reported, never re-pointed
+
+Two live pins point into `docs/CONFIGURATION.md` (`DECISIONS.md:267` → `:112`,
+`CHANGELOG.md:2054` → `:242`), both drifting `+5`. Re-pointing them means editing existing
+lines in files this unit treats as additive-only, which contradicts its own zero-deletions
+constraint. Drift is recorded in the CHANGELOG entry and the PR body instead. This extends the
+same historical-record principle already applied to stale pins in CHANGELOG history.
+
+### 9d. A doc may not inherit a false rationale from the code it documents
+
+Three sites in the first draft said that `pinned_only = true` with an empty `pinned_keys`
+"would reject every publish outright." **That is false, and it is false in the dangerous
+direction.** `crates/acdp-registry-core/src/playground.rs:109-111` returns
+`PinOutcome::Skipped` when `pinned_keys` is empty — *before* `pinned_only` is consulted — and
+`Skipped` falls past the `if let PinOutcome::Verified` branch
+(`handlers/context.rs:464-474`) into the unverified publish path. `config.rs:739-740` states
+it plainly: "Has no effect when `pinned_keys` is empty." So that combination does not lock the
+registry down; it silently leaves it wide open.
+
+The wording was copied in good faith from the startup guard's own bail message
+(`crates/acdp-registry-server/src/main.rs:271-273`), which says the same wrong thing. **The
+error message is the defect; the docs merely inherited it.** Corrected wording now gives the
+real rationale — the guard exists because the configuration *looks* locked down and is not.
+
+Rule adopted: **an error message is not a source of truth about behaviour.** Verify a
+rationale against the code path, not against the string the code prints. This unit's whole
+premise is that documentation drifted from behaviour; quoting a stale error message is the
+same failure with a shorter feedback loop. The `main.rs` bail text is filed as a follow-up —
+`crates/**` is read-only for this unit.

@@ -59,8 +59,8 @@ Railway needs to pull from GHCR. Either:
 > *and* auth both disabled. That guard's stated precondition is a trusted proxy
 > that terminates TLS **and authenticates** in front of the registry; Railway's
 > edge does the former, not the latter. Requests reaching the registry are
-> therefore unauthenticated — publishes are still bound to DID-signature
-> verification, but nothing else is. Authentication is turned on with
+> therefore unauthenticated. Publishes and lifecycle events remain bound to
+> DID-signature verification; nothing else is. Authentication is turned on with
 > `ACDP_REGISTRY_AUTH__ENABLED = true`; run this recipe as written only where
 > something in front of Railway is genuinely doing the authenticating.
 

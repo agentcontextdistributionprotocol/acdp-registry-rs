@@ -52,7 +52,7 @@ did_methods          = ["did:web"]
 # With auth enabled + HS256 the startup-time validator refuses to launch
 # with the literal `changeme` (matched case-insensitively, after trimming),
 # and refuses an EMPTY secret unless allow_ephemeral_secret = true below.
-# Both branches are the same check: neither runs while auth is disabled.
+# Two checks, gated the same way: neither runs while auth is disabled.
 jwt_secret           = ""
 # Local dev only: boot with a random process-lifetime HS256 key when
 # jwt_secret is empty. Tokens won't survive a restart. MUST stay false in
@@ -163,9 +163,11 @@ enabled = false
 # every publish is verified, so playground + receipts IS supported.
 enabled = false
 # Reject publishes from agents not listed in pinned_keys. Has no effect
-# while pinned_keys is empty; with [receipt] configured, pinned_only =
-# true and an EMPTY pinned_keys is refused at startup (it would reject
-# every publish). Uncomment both together:
+# while pinned_keys is empty — which is why, with [receipt] configured,
+# pinned_only = true and an EMPTY pinned_keys is refused at startup: it
+# looks locked down but would fall through to the fully unverified
+# publish path. Uncomment all three together (playground + receipts also
+# needs enabled = true above):
 # pinned_only = true
 # [[playground.pinned_keys]]
 # agent_did      = "did:web:registry-a.playground.local:agents:alice"
