@@ -8671,41 +8671,56 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 const DEFERRED: &[(&str, &str, u32)] = &[
     (
         "rcpt",
-        "receipt verification (RFC-ACDP-0010); profile-gated residue ONLY. rcpt-002/003/004 \
-         declare applies_to_profiles [acdp-registry-receipts, acdp-consumer]; this harness \
-         advertises only acdp-registry-core (see HARNESS_PROFILES), so \
-         targets_unadvertised_profile skips them. Not a missing seam, and NOT closable here: \
-         advertising a profile the registry does not implement would make this ratchet lie. \
-         The golden half is already covered -- rcpt-001 is recomputed by \
+        "receipt VERIFICATION (RFC-ACDP-0010 \u{a7}8), which is the consumer role and not one \
+         this crate plays: acdp-registry-core implements only the producer side \
+         (load_signing_key / build_signer / build_did_document -- there is no verify fn in \
+         crates/acdp-registry-core/src/receipt.rs). rcpt-002/003/004 declare \
+         applies_to_profiles [acdp-registry-receipts, acdp-consumer]; this harness advertises \
+         only acdp-registry-core (see HARNESS_PROFILES), so targets_unadvertised_profile \
+         skips them first. Two independent reasons this is not owed, and neither is a missing \
+         seam: advertising a profile the registry does not implement would make this ratchet \
+         lie; and these fixtures carry no endpoint and no vectors array, so a 'direct pass' \
+         over them would run the acdp-types verifier over spec data and assert nothing about \
+         THIS registry -- manufactured coverage of exactly the kind this file exists to \
+         prevent. The producer half IS covered: rcpt-001 is recomputed by \
          rcpt001_registry_receipt_golden_recomputed_and_remintable, which \
-         DEFERRED_PARTIAL_DIRECT pins so it cannot be deleted while this entry stands.",
+         DEFERRED_PARTIAL_DIRECT pins and \
+         deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct ties to this \
+         sentence, so neither the test nor its pin can be dropped while this claim stands.",
         130,
     ),
     (
         "lhr",
-        "lineage-head receipts (RFC-ACDP-0011); profile-gated residue ONLY. lhr-002/003/004 \
-         declare applies_to_profiles [acdp-registry-head-receipts, acdp-consumer]; this \
-         harness advertises only acdp-registry-core (see HARNESS_PROFILES), so \
-         targets_unadvertised_profile skips them. Not a missing seam, and NOT closable here: \
-         advertising a profile the registry does not implement would make this ratchet lie. \
-         The golden half is already covered -- lhr-001 is recomputed by \
-         lhr001_lineage_head_receipt_golden_recomputed_and_remintable, which \
-         DEFERRED_PARTIAL_DIRECT pins so it cannot be deleted while this entry stands.",
+        "lineage-head receipt VERIFICATION (RFC-ACDP-0011), the consumer role; as with rcpt, \
+         acdp-registry-core mints lineage-head receipts but never verifies them. \
+         lhr-002/003/004 declare applies_to_profiles [acdp-registry-head-receipts, \
+         acdp-consumer]; this harness advertises only acdp-registry-core (see \
+         HARNESS_PROFILES), so targets_unadvertised_profile skips them first. Two independent \
+         reasons this is not owed: advertising an unimplemented profile would make this \
+         ratchet lie; and these fixtures carry no endpoint and no vectors array, so a 'direct \
+         pass' would assert something about acdp-types, not about this registry. The producer \
+         half IS covered: lhr-001 is recomputed by \
+         lhr001_lineage_head_receipt_golden_recomputed_and_remintable, pinned by \
+         DEFERRED_PARTIAL_DIRECT and tied to this sentence by \
+         deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct.",
         130,
     ),
     (
         "log",
-        "transparency-log verification (RFC-ACDP-0012); profile-gated residue ONLY. The \
-         emission side is implemented and always mounted (/log/checkpoint, /log/proof, \
-         /log/entries, crates/acdp-registry-core/src/lib.rs:87-89). log-002/004 declare \
-         applies_to_profiles [acdp-registry-transparency-log, acdp-consumer]; this harness \
-         advertises only acdp-registry-core (see HARNESS_PROFILES), so \
-         targets_unadvertised_profile skips them. Not a missing seam, and NOT closable here: \
-         advertising a profile the registry does not implement would make this ratchet lie. \
-         The golden half is already covered -- log-001 and log-003 are recomputed by \
-         log001_leaf_root_and_inclusion_golden_recomputed and \
-         log003_consistency_proof_golden_recomputed, which DEFERRED_PARTIAL_DIRECT pins so \
-         they cannot be deleted while this entry stands.",
+        "transparency-log VERIFICATION (RFC-ACDP-0012), the consumer role. The emission side \
+         is implemented and always mounted (/log/checkpoint, /log/proof, /log/entries, \
+         crates/acdp-registry-core/src/lib.rs:87-89); verification of someone else's log is \
+         not this crate's job. log-002/004 declare applies_to_profiles \
+         [acdp-registry-transparency-log, acdp-consumer]; this harness advertises only \
+         acdp-registry-core (see HARNESS_PROFILES), so targets_unadvertised_profile skips \
+         them first. Two independent reasons this is not owed: advertising an unimplemented \
+         profile would make this ratchet lie; and these fixtures carry no endpoint and no \
+         vectors array, so a 'direct pass' would assert something about acdp-crypto's merkle \
+         code, not about this registry. The emission half IS covered: log-001 and log-003 are \
+         recomputed by log001_leaf_root_and_inclusion_golden_recomputed and \
+         log003_consistency_proof_golden_recomputed, pinned by DEFERRED_PARTIAL_DIRECT and \
+         tied to this sentence by \
+         deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct.",
         130,
     ),
 ];
@@ -8787,6 +8802,24 @@ fn source_has_present_test_fn(name: &str) -> bool {
     false
 }
 
+/// The source text of `name`'s function body, from its `fn` line to the first
+/// closing brace at column 0. Used by
+/// `deferred_partial_direct_test_functions_are_present` to check a pinned golden
+/// test still *contains* its assertion-count ratchet, not merely that its name
+/// exists -- the gap a pure existence check leaves, and one the Phase 3
+/// verification round demonstrated by gutting 5,895 bytes out of `rcpt001`'s body
+/// while leaving the name and attribute in place: every test stayed green.
+///
+/// Deliberately crude. It is a text scan, not a parser, and it only has to be good
+/// enough to notice that a body has been emptied.
+fn source_test_fn_body(name: &str) -> Option<&'static str> {
+    let def_needle = format!("fn {name}(");
+    let start = OWN_SOURCE.find(&def_needle)?;
+    let rest = &OWN_SOURCE[start..];
+    let end = rest.find("\n}\n").map_or(rest.len(), |i| i + 2);
+    Some(&rest[..end])
+}
+
 /// Unconditional (no spec needed) half of Phase 11's mutation proof: every
 /// `CoverageMechanism::Direct` test-function name in `COVERED` genuinely
 /// exists in this file's own source, still wearing a test attribute.
@@ -8856,6 +8889,69 @@ fn deferred_partial_direct_test_functions_are_present() {
                  `{name}`, but that function no longer exists in this file as a present, \
                  test-attribute-registered function -- coverage was removed without updating \
                  DEFERRED_PARTIAL_DIRECT or the family's DEFERRED reason"
+            );
+            // Existence alone pins the SYMBOL, not the coverage: the Phase 3
+            // verification round gutted rcpt001's body while keeping its name and
+            // attribute, and every test stayed green. These goldens have no external
+            // `ran`-tally counterpart the way COVERED's `Replayed` families do -- their
+            // only anti-vacuity ratchet is the EXPECTED_*_ASSERTION_COUNT check at each
+            // body's tail, so require that the body still carries it.
+            let body = source_test_fn_body(name)
+                .unwrap_or_else(|| panic!("could not locate the body of `{name}`"));
+            assert!(
+                body.contains("EXPECTED_") && body.contains("asserted"),
+                "DEFERRED family \"{family}\"'s golden test `{name}` no longer carries its \
+                 assertion-count ratchet (an `asserted` tally checked against an EXPECTED_* \
+                 const). The function still exists and still wears its test attribute, so \
+                 the existence check above cannot see this -- but a gutted body proves \
+                 nothing, which is the exact failure mode this family's DEFERRED reason \
+                 claims is impossible"
+            );
+        }
+    }
+}
+
+/// The reverse-containment half of `DEFERRED_PARTIAL_DIRECT`, and the reason it
+/// exists: without it, the const's own membership is pinned by nothing.
+///
+/// The Phase 3 verification round found this by dropping the whole
+/// `("rcpt", ...)` tuple from `DEFERRED_PARTIAL_DIRECT` *and* de-registering
+/// `rcpt001` -- everything stayed green, because the presence test iterates over
+/// the const and an absent entry simply is not checked. That made the `rcpt`
+/// `DEFERRED` reason's claim that its golden test "cannot be deleted while this
+/// entry stands" false: the entry stood, and the test was deleted.
+///
+/// So tie the machine check to the prose that makes the claim. Every golden test
+/// identifier a `DEFERRED` reason names must be pinned by that family's
+/// `DEFERRED_PARTIAL_DIRECT` list. Deleting the const entry now requires also
+/// editing the reason text that names the test -- a visible, reviewable change to
+/// the claim itself, rather than a silent loss of coverage.
+#[test]
+fn deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct() {
+    let pinned: std::collections::BTreeMap<&str, &[&str]> =
+        DEFERRED_PARTIAL_DIRECT.iter().copied().collect();
+
+    for (family, reason, _) in DEFERRED {
+        let named: Vec<&str> = reason
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|word| word.contains("_golden_recomputed"))
+            .collect();
+        if named.is_empty() {
+            continue;
+        }
+        let listed = pinned.get(family).unwrap_or_else(|| {
+            panic!(
+                "DEFERRED family \"{family}\"'s reason names golden test(s) {named:?}, but \
+                 the family has no DEFERRED_PARTIAL_DIRECT entry -- the reason claims a \
+                 guarantee nothing enforces"
+            )
+        });
+        for name in named {
+            assert!(
+                listed.contains(&name),
+                "DEFERRED family \"{family}\"'s reason names `{name}` as covering its \
+                 golden half, but DEFERRED_PARTIAL_DIRECT does not pin it -- prose and \
+                 ratchet disagree"
             );
         }
     }
