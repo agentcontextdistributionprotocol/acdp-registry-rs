@@ -547,3 +547,28 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   commitment; narrowing to `pub(crate)` later is a one-line mechanical change that the
   compiler fully verifies. Nothing is foreclosed.
 - **Status:** CHANGED -> CONFIRMED (2026-09-10). Reconciled to `pub(crate)`; see `DECISIONS.md` entry 5. The kept-`pub` rationale did not survive analysis.
+
+## `cur-002`'s message-leak rationale is documented, not satisfied
+
+- **Plan:** `plans/u004-conformance-cur-rcpt-lhr-log.md` (U-004 — conformance #130)
+- **Assumed:** satisfying `cur-002`'s machine-checkable `expected` block (`error_code`,
+  `http_status`, `content_type`, `outcome`) is sufficient coverage for that vector, even
+  though its prose `rationale` additionally says a registry "MUST NOT leak why a cursor
+  failed to parse beyond the registered code".
+- **Chose:** assert the `expected` block only, and state the gap explicitly in the test's doc
+  comment. This registry answers `{"error":{"code":"invalid_cursor","message":"invalid
+  cursor: cursor is not valid base64"}}` — the message names the parse reason. It echoes no
+  caller input and exposes no registry state, so it is not an information-disclosure defect in
+  any practical sense, but it is not literally what the rationale asks for either.
+- **Alternatives:** change the message to a bare `"invalid cursor"` (rejected — that is a
+  `src/` edit, and `crates/acdp-registry-types/src/error.rs` is outside this unit's granted
+  paths; widening scope to satisfy prose would be exactly the kind of quiet scope creep the
+  lane claims exist to prevent); assert the message text and fail (rejected — that would make
+  the ratchet red for a defect this unit is not authorised to fix, blocking a legitimate
+  coverage gain); say nothing (rejected — an undocumented known gap is how a false coverage
+  claim survives).
+- **Blast radius if wrong:** low and bounded. If the leak matters, the fix is a one-line
+  message change in `error.rs` plus tightening this test's assertion; nothing built on top of
+  the current behaviour would need to change. The risk of the current choice is only that the
+  gap is forgotten — which this entry exists to prevent.
+- **Status:** UNCONFIRMED

@@ -10768,6 +10768,13 @@ async fn cur_get(app: &axum::Router, uri: &str) -> (StatusCode, Option<String>, 
 /// (2) `cur-001`'s "or the underlying result set changed" arm is not implemented —
 /// keyset pagination carries no result-set fingerprint — and the fixture reads
 /// "either ... or", so the TTL arm satisfies it.
+///
+/// **Scope note.** The cursor codec is duplicated byte-for-byte between the sqlite
+/// and postgres stores rather than shared. This harness is sqlite-backed, so the
+/// postgres path is covered only *incidentally* — a future divergence between the
+/// two would not be caught here. Deduplicating them is a `src/` change in crates
+/// this unit does not hold; recorded so the coverage claim is not read as broader
+/// than it is.
 #[tokio::test(flavor = "multi_thread")]
 async fn cur001_002_expired_and_malformed_cursors_are_distinguished() {
     use base64::Engine as _;
@@ -10873,6 +10880,13 @@ async fn cur001_002_expired_and_malformed_cursors_are_distinguished() {
         StatusCode::OK,
         "cur-001 control: the unaged cursor must still page, else the expiry assertion \
          proves nothing: {ctl}"
+    );
+    // ...and it must ADVANCE, not silently re-serve page 1. A registry that ignored a
+    // well-formed cursor would still return 200, so liveness alone is too weak a control.
+    assert_ne!(
+        ctl["matches"][0]["ctx_id"], page1["matches"][0]["ctx_id"],
+        "cur-001 control: the unaged cursor must advance past page 1, not re-serve it -- \
+         a silently-ignored cursor would otherwise satisfy this control: {ctl}"
     );
 
     // Age ONLY the mint stamp; anchor and ctx_id stay exactly as minted.
