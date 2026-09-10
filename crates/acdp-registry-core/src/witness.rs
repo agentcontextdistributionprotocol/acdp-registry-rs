@@ -430,6 +430,7 @@ mod tests {
                     idempotency: None,
                     tenant: None,
                     receipt_minter: Some(&mint),
+                    predecessor_admission: None,
                 })
             })
             .expect("logged publish");
