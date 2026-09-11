@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Corrected two false security claims in the Railway recipe, and disclosed its
+  read posture** (#208). [`docker/RAILWAY.md`](docker/RAILWAY.md) claimed the
+  `JWT_SECRET` "is never validated" with auth off, and that the `changeme`
+  rejection "is gated on auth being enabled". Both have been false since W3-U5:
+  the `changeme` and base64/≥32-byte checks run at startup whenever the secret is
+  non-empty on HS256, regardless of `auth.enabled` — only the *empty-secret*
+  check is auth-gated (`validate_config`,
+  `crates/acdp-registry-server/src/main.rs`). No boot outcome changes; the doc
+  now matches the binary.
+
+  The recipe also now states its **read posture** plainly, which it never did:
+  with auth off and `auth.anonymous_public_reads` at its default `false`, no
+  context is readable by anyone — `public` included — because the retrieval
+  predicate is `anonymous_public_reads || requester.is_some()` and auth-off makes
+  every caller anonymous. Publishing still works. The recipe documents both
+  opt-in flags and what each one opens, including that enabling auth lets **any**
+  valid token holder read every `public` context: token issuance gates on the
+  challenge binding, expiry, algorithm and DID method (default `["did:web"]`),
+  with no agent allowlist, so the bar is control of any domain serving a
+  `did.json`.
+
+  **The recipe keeps auth OFF.** The held W2-U3 patch that would have enabled it
+  is superseded and must not land: its prose predates W3-U5 and misstates the
+  secret-validation gating, and enabling auth would have widened `public` reads
+  through a flag named for something else.
+
 ### Added
 
 <!-- REG-11 Phase 7 -->
@@ -2478,7 +2506,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   **Reading old tags:** the eight `acdp-registry-<crate>-v0.1.0` tags and their
   GitHub Releases are untouched and still valid; new ones use a `/` instead of the
-  final `-`. **The first release run after this change re-bases the tag namespace
+  final `-`. The eight slash-namespace `v0.1.0` Releases were backfilled by hand
+  on 2026-09-11 (#210): the bootstrap run that minted those tags deliberately
+  suppressed Releases (#204), and release-plz only acts on version bumps, so it
+  would never have created them. Until the backfill, "Latest release" pointed at
+  June's `9bd4fb3` while the GHCR image `:0.1.0` was built from `6ae49bf` — 124
+  commits apart. `acdp-registry-server/v0.1.0` is now Latest, and the two agree. **The first release run after this change re-bases the tag namespace
   and produces no release PR — that is expected; the run after it produces one.**
 
   `docker.yml` triggered on `tags: ["v*"]`, which has never matched any tag this
