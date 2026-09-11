@@ -829,7 +829,12 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
                 // token is ever issued or verified — `build_router` does not
                 // mount `/auth/*`, and the context handlers return early before
                 // they reach the signer — so this key is unused and generating
-                // it is a non-event.
+                // it is a non-event. `/.well-known/jwks.json` IS mounted
+                // unconditionally and does reach the signer, but HS256 has no
+                // public half and it serves `{"keys":[]}`, so the symmetric key
+                // is not published either. Both halves observed against the
+                // running compose stack; the mounting half is pinned by
+                // `auth_disabled_does_not_mount_the_auth_routes`.
                 if cfg.auth.enabled {
                     tracing::warn!(
                         "auth.jwt_secret not set and auth.allow_ephemeral_secret=true — \
@@ -1378,6 +1383,82 @@ mod tests {
                 JwtSecret::from_base64(s).is_err(),
                 "{s:?} is accepted by the serve-path decoder — the hoist is no \
                  longer outcome-identical"
+            );
+        }
+    }
+
+    /// W3-U5: pins the invariant the auth-off `info!` in `serve_with_store`
+    /// asserts — with `auth.enabled = false` the `/auth/*` routes are not
+    /// mounted, so the ephemeral key generated on that path never issues or
+    /// verifies a token.
+    ///
+    /// The warn!/info! SPLIT itself is not testable without refactoring
+    /// `serve_with_store`, which binds a socket and never returns. The CLAIM
+    /// the message makes is, and an unpinned claim in an operator-facing log
+    /// line is precisely what this unit exists to stop shipping.
+    ///
+    /// Both directions are asserted deliberately: `404` alone would also be
+    /// what a typo'd path returns, so the auth-ON leg proves the 404 comes
+    /// from the mounting gate and not from a test that never hit a real route.
+    #[cfg(feature = "storage-sqlite")]
+    #[tokio::test]
+    async fn auth_disabled_does_not_mount_the_auth_routes() {
+        use acdp_registry_auth::InMemoryChallengeStore;
+        use acdp_registry_sqlite::SqliteStore;
+        use acdp_registry_types::AuthConfig;
+        use tower::ServiceExt as _;
+
+        async fn router_with_auth(enabled: bool) -> axum::Router {
+            let mut cfg = RegistryConfig::defaults();
+            cfg.auth.enabled = enabled;
+            let store = SqliteStore::connect_in_memory().await.unwrap();
+            store.migrate().await.unwrap();
+            let caps = build_capabilities(&cfg);
+            let authority = cfg.registry.authority.clone();
+            let server = Arc::new(RegistryServer::try_new(store, caps, &authority).unwrap());
+            let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+            let signer = JwtSigner::new(
+                JwtSecret::from_bytes(&[42u8; 32]),
+                format!("did:web:{authority}"),
+                authority.clone(),
+                30,
+            );
+            let auth = Arc::new(AuthService::new(
+                AuthConfig::default(),
+                challenges,
+                signer,
+                Arc::new(WebResolver::new()),
+                authority,
+            ));
+            build_router(AppStateInner::new(server, auth, None, cfg, None))
+        }
+
+        async fn post(router: axum::Router, path: &str) -> axum::http::StatusCode {
+            router
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+
+        for path in ["/auth/challenge", "/auth/token", "/auth/token/revoke"] {
+            assert_eq!(
+                post(router_with_auth(false).await, path).await,
+                axum::http::StatusCode::NOT_FOUND,
+                "{path} must not be mounted while auth is disabled"
+            );
+            assert_ne!(
+                post(router_with_auth(true).await, path).await,
+                axum::http::StatusCode::NOT_FOUND,
+                "{path} is not mounted even with auth ENABLED — the 404 above \
+                 proves nothing about the gate"
             );
         }
     }
