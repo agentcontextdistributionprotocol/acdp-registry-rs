@@ -29,7 +29,7 @@ cargo test   -p acdp-registry-server --no-default-features --features storage-me
 
 # The binary's feature space is eight: 4 backend states (sqlite | pg | memory |
 # none) x playground on/off. CI builds all eight (#200); these four are the ones
-# the block above omits. Skipping them passes locally and reddens `clippy` on
+# the commands above omit. Skipping them passes locally and reddens `clippy` on
 # the PR, which is a required check.
 cargo clippy -p acdp-registry-server --no-default-features --features storage-pg,playground --all-targets -- -D warnings
 cargo clippy -p acdp-registry-server --no-default-features --features storage-memory,playground --all-targets -- -D warnings

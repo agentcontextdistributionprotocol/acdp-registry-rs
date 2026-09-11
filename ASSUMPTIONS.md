@@ -1286,3 +1286,25 @@ Not folded in: it is a different crate's feature space, and this unit's ci.yml c
 CHANGELOG were framed around the server binary through two review rounds. Widening a reviewed
 frame at ship time is how reviewed material becomes unreviewed. Named in the ci.yml comment as
 known-and-unbuilt; filed as #221.
+
+### Correction recorded rather than quietly fixed (fifth one) — the same defect, one layer down
+The fix for the stale `main.rs:8-17` citation replaced it with `main.rs:37-46`. **Also wrong.**
+The guard is at `main.rs:45-54`. The error was arithmetic standing in for reading: the entry
+above said "the new explanatory comment is 29 lines" and added 29 to the old numbers. The
+inserted block is **37 lines** — a 28-line comment, the 8-line attribute, and a blank.
+
+The sharper point is not the arithmetic. The line number *was* read correctly from the file
+earlier in this unit, and then a later edit to the same file — widening the comment while
+closing a different gap — invalidated that reading, which was never re-taken. So:
+**a verified line number is valid only until the next edit to that file.** Verification has a
+shelf life, and editing the file is what expires it. Now read, not computed:
+`#[cfg(any(` at :45, `compile_error!(` at :50, `);` at :54.
+
+### Correction recorded rather than quietly fixed (sixth one) — inside the fifth's own fix
+The rewritten EDITING HAZARD block justified the `--all-targets` hazard with "the backend-less
+builds carry 2 dead-code items in the test target **that the bin target does not**". False: the
+test target's 2 (`serve_with_store`, `spawn_shutdown_watcher`) are a strict **subset** of the
+bin target's 7. And the consequence runs backwards — because both are also bin-dead, a
+`--bins`-only mutation would still redden. The outcome claim (all four steps minus
+`--all-targets` pass) is true and measured; only the reason given for it was invented. That is
+the identical defect this block was rewritten to fix, recurring inside the rewrite.

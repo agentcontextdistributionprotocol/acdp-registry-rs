@@ -159,7 +159,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   `--all-features` remains impossible here by design and is not the fix — it
   enables all three backends at once and trips the `compile_error!` at
-  `main.rs:37-46`, which rejects any pair. That is why coverage is enumerated,
+  `main.rs:45-54`, which rejects any pair. That is why coverage is enumerated,
   and the `ci.yml` comment above the new steps is now the single index of the
   space, with the arithmetic that generates the count.
 

@@ -63,7 +63,7 @@ jobs:
       #
       # WHY THIS IS ENUMERATED AND NOT `--all-features`: it can never pass here.
       # `--all-features` turns on all three storage backends at once, and the
-      # guard at crates/acdp-registry-server/src/main.rs:37-46 `compile_error!`s
+      # guard at crates/acdp-registry-server/src/main.rs:45-54 `compile_error!`s
       # on any PAIR of them, because `run()` selects the backend via cfg gates
       # that assume exactly one is live. That guard is correct and stays; the
       # cost is that the feature space can only be covered by writing it out,
@@ -90,8 +90,8 @@ jobs:
       # "covered incidentally"; it is not. Tracked as #221 rather than folded
       # in here.
       #
-      # 7 and 8 are the inert builds: with no storage backend, `run()` only
-      # prints which feature to rebuild with, so the whole serve path is
+      # 7 and 8 are the inert builds: with no storage backend, `run()` bails
+      # naming which feature to rebuild with, so the whole serve path is
       # unreachable. main.rs allows dead_code for exactly that configuration --
       # see the comment there. Both were warning-dirty and would have failed
       # these steps before that change. Step 7 is proved to redden in CI, in the
@@ -122,9 +122,11 @@ jobs:
       #     the only flag mistake anything here catches for you.
       #
       # Dropping `--all-targets` -- a property of the tree as shipped: all four
-      # steps still PASS, having silently stopped checking the test target. The
-      # backend-less builds carry 2 dead-code items in the test target that the
-      # bin target does not, so this is not a theoretical loss.
+      # steps still PASS, having silently stopped checking the test target. What
+      # is lost is future coverage, not present: the 2 items the test target
+      # reports today are a strict SUBSET of the bin target's 7, so nothing is
+      # unguarded right now -- but a dead item that appears only in the test
+      # target would go unchecked, and nothing would say so.
       #
       # Three of those four mistakes are silent. Keep these command lines
       # exact.
