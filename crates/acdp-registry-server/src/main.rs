@@ -84,6 +84,11 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
             ),
         }
     }
+    // NOTE the asymmetry with the block below, which is deliberate: THIS check
+    // stays gated on `auth.enabled`. An auth-off registry with no secret at all
+    // is a supported, working configuration — there is nothing to protect and no
+    // token to sign — so refusing it here would break every local dev stack that
+    // simply leaves the secret unset.
     if cfg.auth.enabled
         && cfg.auth.jwt_signing_alg.as_str() != "EdDSA"
         && cfg.auth.jwt_secret.trim().is_empty()
@@ -99,16 +104,27 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
              auth.allow_ephemeral_secret=true for local dev"
         );
     }
-    if cfg.auth.enabled
-        && cfg.auth.jwt_signing_alg.as_str() != "EdDSA"
-        && !cfg.auth.jwt_secret.is_empty()
-    {
-        // OPS-02 stronger guard: the docker-compose default placeholder
-        // must not reach production. Run the literal check FIRST so an
-        // operator who left `changeme` in place gets the actionable
-        // "generate a real secret" hint instead of the generic
-        // base64-length error that `JwtSecret::from_base64` would
-        // surface (`changeme` happens to be valid base64 of 6 bytes).
+    // W3-U5: NOT gated on `auth.enabled`, and that is the fix rather than an
+    // oversight. The serve path has always decoded and length-checked any
+    // non-empty `jwt_secret` with no such gate (see `serve_with_store`'s HS256
+    // arm), so an auth-off registry with a short secret ALREADY failed to
+    // boot — just late, after `store.migrate()` had run, which contradicts
+    // what this function says about itself above. Gating the check here only
+    // ever moved the failure later; it never prevented one.
+    //
+    // This is outcome-identical, not a posture change: every casing of the
+    // `changeme` placeholder is 8 base64 chars -> 6 bytes, already below the
+    // floor the serve path already applied, so ungating the literal guard swaps
+    // a generic length error for an actionable hint and changes no boot
+    // outcome. That premise is pinned by
+    // `every_changeme_casing_is_rejected_by_the_serve_path_decoder`; the
+    // conclusion by the four auth-off `validate_config` tests beside it.
+    if cfg.auth.jwt_signing_alg.as_str() != "EdDSA" && !cfg.auth.jwt_secret.is_empty() {
+        // OPS-02 stronger guard. Run the literal check FIRST so an operator
+        // who left `changeme` in place gets the actionable "generate a real
+        // secret" hint instead of the generic base64-length error that
+        // `JwtSecret::from_base64` would surface (`changeme` happens to be
+        // valid base64 of 6 bytes).
         let trimmed = cfg.auth.jwt_secret.trim();
         if trimmed.eq_ignore_ascii_case("changeme") {
             anyhow::bail!("auth.jwt_secret is the placeholder 'changeme'; generate a real secret");
@@ -803,14 +819,31 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
         // Default (HS256, backward-compatible).
         _ => {
             let jwt_secret = if cfg.auth.jwt_secret.is_empty() {
-                // Ephemeral secret — tokens won't survive a restart. Only
-                // reachable when auth.allow_ephemeral_secret=true (REG-P1-4);
-                // validate_config bails otherwise. Production MUST set
-                // ACDP_REGISTRY_AUTH__JWT_SECRET.
-                tracing::warn!(
-                    "auth.jwt_secret not set and allow_ephemeral_secret=true — \
-                     generating an ephemeral key; tokens will not survive a restart"
-                );
+                // Reached whenever `jwt_secret` is empty. With auth ON that
+                // requires `allow_ephemeral_secret=true` (validate_config bails
+                // otherwise, REG-P1-4). With auth OFF it is reached regardless,
+                // and `allow_ephemeral_secret` is irrelevant.
+                //
+                // Severity splits because the hazard does: with auth on, tokens
+                // silently stop validating after a restart. With auth off no
+                // token is ever issued or verified — `build_router` does not
+                // mount `/auth/*`, and the context handlers return early before
+                // they reach the signer — so this key is unused and generating
+                // it is a non-event.
+                if cfg.auth.enabled {
+                    tracing::warn!(
+                        "auth.jwt_secret not set and auth.allow_ephemeral_secret=true — \
+                         generating an ephemeral key; tokens will NOT survive a restart \
+                         and will not validate across replicas. Set \
+                         ACDP_REGISTRY_AUTH__JWT_SECRET in production."
+                    );
+                } else {
+                    tracing::info!(
+                        "auth.jwt_secret not set and auth is disabled — generating an \
+                         unused ephemeral key; with auth off no token is issued or \
+                         verified, so this key is never used"
+                    );
+                }
                 use rand::Rng;
                 let mut bytes = [0u8; 32];
                 rand::rng().fill_bytes(&mut bytes);
@@ -1228,6 +1261,125 @@ mod tests {
         cfg.auth.enabled = false;
         cfg.auth.jwt_secret = String::new();
         assert!(validate_config(&cfg).is_ok());
+    }
+
+    // --- W3-U5: `jwt_secret` validation is NOT scoped to `auth.enabled` ---
+    //
+    // The serve path (`serve_with_store`) has always decoded and length-checked
+    // any non-empty `jwt_secret`, with no `auth.enabled` gate. `validate_config`
+    // only checked it with auth ON, so the binary refused these configs LATE —
+    // after `store.migrate()` had already run — instead of before. These pin the
+    // hoisted gating.
+
+    #[test]
+    fn auth_disabled_placeholder_secret_is_refused() {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.auth.enabled = false;
+        cfg.auth.jwt_secret = "changeme".into();
+        let err = validate_config(&cfg)
+            .expect_err("the placeholder must be refused even with auth disabled");
+        assert!(
+            err.to_string().contains("placeholder 'changeme'"),
+            "want the actionable placeholder hint, not the generic length error; got: {err}"
+        );
+    }
+
+    #[test]
+    fn auth_disabled_short_secret_is_refused() {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.auth.enabled = false;
+        // Valid base64, 6 bytes — below the 32-byte floor `from_base64` enforces.
+        cfg.auth.jwt_secret = "aGVsbG8h".into();
+        let err = validate_config(&cfg)
+            .expect_err("a short secret must be refused even with auth disabled");
+        assert!(err.to_string().contains("≥32 bytes"), "got: {err}");
+    }
+
+    #[test]
+    fn whitespace_only_secret_is_refused() {
+        // `!is_empty()` is true for "  ", but the literal guard compares `.trim()`,
+        // so this skips the `changeme` branch and reaches `from_base64`, which
+        // trims to "" -> 0 bytes. Pinned so a later "tidy the trims" edit cannot
+        // silently open a hole.
+        let mut cfg = RegistryConfig::defaults();
+        cfg.auth.enabled = false;
+        cfg.auth.jwt_secret = "  ".into();
+        let err = validate_config(&cfg).expect_err("whitespace-only secret must be refused");
+        assert!(err.to_string().contains("≥32 bytes"), "got: {err}");
+    }
+
+    #[test]
+    fn eddsa_ignores_jwt_secret_regardless_of_auth() {
+        // The `!= "EdDSA"` condition is load-bearing and must survive the hoist:
+        // under EdDSA the HS256 secret is never examined, so a stale `changeme`
+        // left in the file must not block boot.
+        for enabled in [true, false] {
+            let mut cfg = RegistryConfig::defaults();
+            cfg.auth.enabled = enabled;
+            cfg.auth.jwt_signing_alg = "EdDSA".into();
+            // `validate_config` only checks this is NON-EMPTY (main.rs, the
+            // EdDSA arm); the PEM is parsed later, in the serve path. A
+            // placeholder is therefore the honest fixture here — using a real
+            // key would imply this test exercises parsing, which it does not.
+            cfg.auth.jwt_private_key_pem = "-- not parsed by validate_config --".into();
+            cfg.auth.jwt_secret = "changeme".into();
+            assert!(
+                validate_config(&cfg).is_ok(),
+                "EdDSA must ignore jwt_secret (auth.enabled={enabled})"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_signing_alg_is_treated_as_hs256_by_the_hoisted_check() {
+        // `validate_config`'s match treats "" as HS256 and the serve path's `_`
+        // arm does too. The hoisted condition is `!= "EdDSA"`, so "" is covered
+        // identically — pinned because a switch to `== "HS256"` would silently
+        // stop validating the default config.
+        let mut cfg = RegistryConfig::defaults();
+        cfg.auth.enabled = false;
+        cfg.auth.jwt_signing_alg = String::new();
+        cfg.auth.jwt_secret = "changeme".into();
+        assert!(
+            validate_config(&cfg).is_err(),
+            "empty alg must be treated as HS256"
+        );
+    }
+
+    #[test]
+    fn every_changeme_casing_is_rejected_by_the_serve_path_decoder() {
+        // A PREMISE of the outcome-identity argument, not the conclusion.
+        // Ungating the literal `changeme` guard can only change the MESSAGE and
+        // never the outcome, because the serve path's own decoder already
+        // refuses every casing. Two things are asserted, and the distinction is
+        // the whole subtlety of this unit:
+        //
+        //   1. every casing DECODES — `changeme` is valid base64. So the
+        //      literal guard is not what stops it; it never ran with auth off.
+        //   2. `JwtSecret::from_base64` — the exact function `serve_with_store`
+        //      calls — rejects it anyway, on the LENGTH floor.
+        //
+        // Asserting (2) through the real decoder derives the floor from
+        // `acdp-registry-auth` instead of hardcoding 32 here: if that floor ever
+        // drops to 6 bytes or below, this fails and the equivalence claim is
+        // void. The conclusion itself — that `validate_config` now refuses these
+        // configs up front — is pinned by the four auth-off tests above.
+        use base64::Engine as _;
+        for s in ["changeme", "CHANGEME", "ChangeMe", "cHaNgEmE", " changeme "] {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(s.trim())
+                .expect("every casing of the placeholder is valid base64");
+            assert_eq!(
+                decoded.len(),
+                6,
+                "{s:?} is no longer 6 bytes — re-derive the equivalence argument"
+            );
+            assert!(
+                JwtSecret::from_base64(s).is_err(),
+                "{s:?} is accepted by the serve-path decoder — the hoist is no \
+                 longer outcome-identical"
+            );
+        }
     }
 
     // #8 — insecure-default guard.
