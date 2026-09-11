@@ -2260,6 +2260,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/OPERATIONS.md` repaired **prose, not a pin**: the line it cites was
   correct and unchanged.
 
+  A tenth pin, in `crates/acdp-registry-store/src/lib.rs`, carried the **same
+  claim** as `docs/OPERATIONS.md` — that `admin_list` passes
+  `anonymous_public_reads = true` unconditionally — but cited the *requester*
+  line rather than the one that sets it. Two places asserted one fact and
+  named different lines; only one could be right. Repaired together with its
+  sibling, because a half-fixed truth-claim is worse than an unfixed one: the
+  corrected doc would otherwise lend the stale one credibility by contrast.
+
   The `admin.rs` drift resolved at **three** distinct offsets (+27, +34, +42),
   not the two that were expected, so no uniform shift could have landed all of
   them — every pin was re-derived against the merged tree by locating its
