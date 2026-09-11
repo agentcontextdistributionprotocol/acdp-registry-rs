@@ -413,12 +413,15 @@
 //! `no_excused_family_is_required_by_our_profile`) fail on an *unclassified* family or an
 //! *illegitimate excuse* -- never on a *classified-but-uncovered* one. A family with a
 //! logged skip reason and no coverage at all passes all four, which is exactly how `vis`
-//! and `idem` sat uncovered before Phases 8-10. As of Phase 15 the only families still in
-//! that position are `rcpt`/`lhr`/`log`, and only for their consumer-role residue (#130);
-//! `cur` closed to `COVERED` in Phase 15. (`caps`/`lin` closed to COVERED in Phase 7; `lc`
+//! and `idem` sat uncovered before Phases 8-10. **No family sits in that position today:
+//! the tally is 21 `COVERED` + 8 `EXCUSED` + 0 `DEFERRED` = 29.** `cur` closed to
+//! `COVERED` in Phase 15, and `rcpt`/`lhr`/`log` -- the last three, deferred only for
+//! their consumer-role verification residue -- moved to `EXCUSED` when #130 closed, on
+//! obligation-ownership grounds rather than coverage grounds (see `EXCUSED`'s own entries
+//! and the block comment above them). (`caps`/`lin` closed to COVERED in Phase 7; `lc`
 //! was DEFERRED under #115 until
 //! Phase 14 declared it EXCUSED instead -- see `EXCUSED`'s own entry for `lc` -- so #115
-//! now has zero `DEFERRED` members.) Phase 11 closes that gap with a fifth, deliberately
+//! too has zero `DEFERRED` members.) Phase 11 closes that gap with a fifth, deliberately
 //! UNCONDITIONAL test,
 //! `known_families_partition_into_covered_excused_or_deferred`: every family in
 //! `KNOWN_FAMILIES` must appear in exactly one of `COVERED`, `EXCUSED`, or `DEFERRED`.
@@ -476,44 +479,66 @@
 //! comment, and tightening the substring only moves the goalposts one mutation further
 //! out. Proving a test asserts something REAL needs a mutation oracle -- break the code
 //! under test, observe the test go red (`cargo-mutants`, or a fault-injection harness
-//! over `src/`) -- which is a different mechanism, not a stricter regex. Recorded on
-//! #130. Do not read a passing ratchet as evidence that the tests it names prove
+//! over `src/`) -- which is a different mechanism, not a stricter regex. Tracked on
+//! **#216**, split out of #130 when that issue closed so this thread keeps an open
+//! anchor of its own; #130 was the uncovered-family ratchet and never really this.
+//! Do not read a passing ratchet as evidence that the tests it names prove
 //! anything; read it as evidence they have not been deleted.
 //!
 //! `DEFERRED` is `&[(&str, &str, u32)]` -- family, a non-empty written reason, and an
-//! open GitHub issue number. **#115** was filed for `caps`/`lin`/`lc`: the first two
-//! closed to `COVERED` in Phase 7, and `lc` -- the only one of the three ever left in
-//! `DEFERRED` -- was moved to `EXCUSED` in Phase 14 (see `EXCUSED`'s own entry for `lc`),
-//! so #115 now has zero `DEFERRED` members; the check below tolerates that (it only
-//! requires #115 membership OF whichever of the trio still happen to sit in `DEFERRED`,
-//! never that one must). The remaining `rcpt`/`lhr`/`log` cite **#130**, filed
-//! enumerating each with its own reason (`meta` and `data-ref` closed to `COVERED` in
-//! Phase 10; `body` and `status` in Phase 11; `schema` in Phase 12; `sig`/`rev`/`dk` in
-//! Phase 13; `did-ssrf`/`err`/`rate` in Phase 14; `cur` in Phase 15, same #130 filing).
-//! `known_families_partition_into_covered_excused_or_deferred` checks both: reason
-//! non-empty, issue is one of the two known-open numbers, and that any of the
-//! `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115.
+//! **open** GitHub issue number. That second requirement is the contract, and it is what
+//! emptied the list: **`DEFERRED` is empty today**, and the mechanism is retained for a
+//! future spec pin that adds an uncovered family, not because anything currently sits in
+//! it. **#115** was filed for `caps`/`lin`/`lc`: the first two closed to `COVERED` in
+//! Phase 7, and `lc` -- the only one of the three ever left in `DEFERRED` -- was moved to
+//! `EXCUSED` in Phase 14 (see `EXCUSED`'s own entry for `lc`). **#130** covered the rest
+//! (`meta` and `data-ref` closed to `COVERED` in Phase 10; `body` and `status` in Phase
+//! 11; `schema` in Phase 12; `sig`/`rev`/`dk` in Phase 13; `did-ssrf`/`err`/`rate` in
+//! Phase 14; `cur` in Phase 15), ending with `rcpt`/`lhr`/`log`, which were reclassified
+//! to `EXCUSED` rather than covered: their residue is the consumer's verification duty
+//! under RFC-ACDP-0010 §8 / RFC-ACDP-0011 / RFC-ACDP-0012, not this registry's, so no
+//! amount of work here could close it, and leaving them `DEFERRED` against a closed #130
+//! would have made the ratchet cite a tracking issue that no longer tracks anything. That
+//! move extends the Phase 14 `lc` user decision to three further families, with the
+//! maintainer's explicit approval, and is recorded as such in `EXCUSED` itself rather
+//! than left to be inferred.
+//! `known_families_partition_into_covered_excused_or_deferred` still checks, for whatever
+//! `DEFERRED` may hold again: reason non-empty, issue one of the two known-open numbers,
+//! and any of the `caps`/`lin`/`lc` trio present cites #115.
 //!
-//! ## Partial coverage: `DEFERRED_PARTIAL_DIRECT` (REG-11 Phase 15)
+//! ## Partial coverage: `PARTIAL_DIRECT` (REG-11 Phase 15; generalized closing #130)
 //!
 //! The partition above buckets by **family**, which leaves a gap once a family is
-//! only *partly* closable. `rcpt`/`lhr`/`log` each split cleanly in two: a producer
-//! half this registry really implements and whose spec goldens are recomputed here,
-//! and a consumer-role verification half it does not implement and is not owed (see
-//! each family's `DEFERRED` reason). The family stays `DEFERRED` -- truthfully, for
-//! the residue -- but nothing in the partition asks a `DEFERRED` family to name any
-//! test, so the golden-half tests would sit unguarded: deleting one would leave every
-//! check green.
+//! only *partly* closable. `rcpt`/`lhr`/`log` each split cleanly in two: a
+//! producer/emission half this registry really implements and whose spec goldens are
+//! recomputed here, and a consumer-role VERIFICATION half it does not implement and
+//! does not owe (see each family's `EXCUSED` reason). The family is classified for
+//! its residue -- truthfully -- but nothing in the partition asks a `DEFERRED` or
+//! `EXCUSED` family to name any test, so the golden-half tests would sit unguarded:
+//! deleting one would leave every other check green.
 //!
-//! `DEFERRED_PARTIAL_DIRECT` closes that, with two tests rather than one because the
-//! first attempt was itself falsifiable:
-//! `deferred_partial_direct_test_functions_are_present` checks each named test exists,
-//! still wears its attribute, and still carries its `EXPECTED_*_ASSERTION_COUNT`
-//! ratchet (existence alone pins the symbol, not the coverage -- a gutted body passed
-//! it); and `deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct` checks
-//! the const's own membership against the `DEFERRED` prose, because otherwise deleting
-//! an entry simply made the first test vacuous while the reason still claimed the test
-//! could not be deleted.
+//! `PARTIAL_DIRECT` closes that, with two tests rather than one because the first
+//! attempt was itself falsifiable: `partial_direct_test_functions_are_present` checks
+//! each named test exists, still wears its attribute, and still carries its
+//! `EXPECTED_*_ASSERTION_COUNT` ratchet (existence alone pins the symbol, not the
+//! coverage -- a gutted body passed it); and
+//! `classification_reasons_naming_golden_tests_are_pinned_by_partial_direct` checks
+//! the const's own membership against the classification prose, because otherwise
+//! deleting an entry simply made the first test vacuous while the reason still
+//! claimed the test could not be deleted.
+//!
+//! **The `DEFERRED` -> `EXCUSED` reclassification that closed #130 is why this const
+//! is named `PARTIAL_DIRECT` and not `DEFERRED_PARTIAL_DIRECT`.** Its invariant used
+//! to be "a family here MUST also be in `DEFERRED`", which coupled four perfectly
+//! good pins to one bucket: moving `rcpt`/`lhr`/`log` to `EXCUSED` -- a change about
+//! who owns an obligation, not about what is covered -- would have reddened all four.
+//! The invariant is now membership in `DEFERRED` union `EXCUSED`, and the half that
+//! carries the weight is unchanged: a `COVERED` family must NOT appear here, since
+//! its tests belong in `COVERED`'s own `Direct(...)` list. Both enforcement tests now
+//! scan `EXCUSED` reasons alongside `DEFERRED` ones, which also keeps the prose/pin
+//! tie from going vacuous now that `DEFERRED` is empty; that test additionally
+//! asserts the forward direction (every pinned test is named by its family's own
+//! reason), so pin and prose cannot be deleted independently.
 //!
 //! Deliberately not a fourth partition bucket, and not a fourth `DEFERRED` tuple
 //! field: `DEFERRED` is destructured by two other checks and its type is quoted above,
@@ -8268,7 +8293,9 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 /// coverage — a family can sit classified-but-uncovered indefinitely, which
 /// is exactly what happened to `vis`/`idem` before Phases 8-10, and to
 /// `caps`/`lin` before Phase 7, and to `meta`/`data-ref` before Phase 10 --
-/// and what still holds for `rcpt`/`lhr`/`log`'s consumer-role residue (#130) today.
+/// and what held for `rcpt`/`lhr`/`log`'s consumer-role residue until #130 closed
+/// by reclassifying that residue as EXCUSED rather than covering it. Nothing sits
+/// classified-but-uncovered today.
 /// Every family in this list must now ALSO appear in exactly one of
 /// `COVERED`, `EXCUSED`, or `DEFERRED` — enforced unconditionally by
 /// `known_families_partition_into_covered_excused_or_deferred`, which needs
@@ -8464,6 +8491,23 @@ const CORE_INEXCUSABLE_FAMILIES: &[&str] = &[
 /// server delegates to, or declares `applies_to_profiles` disjoint from
 /// `acdp-registry-core`. See the module doc-comment's "Coverage ratchet"
 /// section for the full rule.
+///
+/// **Two grades of excuse live in this list, and the difference is load-bearing.**
+/// The WEAKER grade is a statement about this harness's *current* configuration:
+/// `lc` is excused only because `HARNESS_PROFILES` does not advertise
+/// `acdp-registry-lifecycle` today, and advertising it would make the obligation
+/// live. The STRONGER grade is a statement about *who owns the obligation*:
+/// `rot`, `rcpt`, `lhr`, and `log` name verification duties the RFCs assign to the
+/// consumer holding the artifact rather than to the registry that minted it, so no
+/// harness configuration change could make this registry responsible for them.
+/// Each entry says which grade it claims. Do not add a new entry without saying so
+/// -- an excuse that does not state its grade cannot be reviewed.
+///
+/// **An excused family may still owe partial coverage.** `rcpt`/`lhr`/`log` are
+/// excused for their consumer-role verification residue only; the producer/emission
+/// half each one DOES owe is covered by direct golden tests and pinned by
+/// `PARTIAL_DIRECT`, whose invariant is membership in `DEFERRED` union `EXCUSED`
+/// precisely so those pins survived that reclassification.
 const EXCUSED: &[(&str, &str)] = &[
     (
         "fp",
@@ -8515,6 +8559,108 @@ const EXCUSED: &[(&str, &str)] = &[
          advertising acdp-registry-lifecycle would make this obligation live, so this \
          excuse is a statement about today's harness configuration, not about who owns \
          the obligation.",
+    ),
+    // REG-11 #130: rcpt/lhr/log, moved here from DEFERRED. Read the three entries
+    // below together with this note.
+    //
+    // EXPLICIT EXTENSION OF A PRIOR USER RULING, STATED RATHER THAN SWEPT IN.
+    // Phase 14 declared `lc` EXCUSED on a user decision ("a user decision, not
+    // re-derived here", see lc's entry above). These three are a DIFFERENT and
+    // STRONGER case, and the maintainer has explicitly approved extending that
+    // ruling to cover them. The extension is recorded here, in the code, on
+    // purpose: it is a deliberate widening of a prior ruling, not an assumption
+    // inherited from it, and a reader must be able to see that without digging
+    // through issue history.
+    //
+    // WHY STRONGER, i.e. why these sit beside `rot` and not beside `lc`.
+    // `lc`'s excuse rests only on what this harness advertises today: flip
+    // HARNESS_PROFILES to include acdp-registry-lifecycle and the obligation
+    // becomes live. `rot`'s rests on WHO OWNS THE OBLIGATION: RFC-ACDP-0010
+    // assigns it to the consumer, so no harness configuration change could make
+    // this registry responsible. rcpt/lhr/log are `rot`-shaped. Each family
+    // splits cleanly in two -- a producer/emission half this registry really
+    // implements (and whose spec goldens are recomputed here, pinned by
+    // PARTIAL_DIRECT), and a VERIFICATION half that the RFCs assign to the
+    // consumer holding the artifact, not to the registry that minted it
+    // (RFC-ACDP-0010 §8 for receipts, RFC-ACDP-0011 for lineage-head receipts,
+    // RFC-ACDP-0012 for transparency logs). Only the verification residue was
+    // ever DEFERRED.
+    //
+    // WHY MOVED RATHER THAN LEFT DEFERRED. The ratchet's contract is that every
+    // DEFERRED family cites an OPEN tracking issue; #130 is being closed, so
+    // leaving them DEFERRED would leave the partition citing a closed issue --
+    // the ratchet would be lying about its own state. And DEFERRED means "not
+    // covered yet, we intend to close it", which is false here: the residue is
+    // not closeable by this harness at all. Those fixtures name profiles this
+    // harness does not advertise and carry no endpoint and no vectors array, so
+    // a "direct pass" over them would exercise acdp-types/acdp-crypto rather
+    // than this registry -- manufactured coverage of exactly the kind this file
+    // exists to prevent. EXCUSED is the truthful bucket; DEFERRED was not.
+    (
+        "rcpt",
+        "receipt VERIFICATION (RFC-ACDP-0010 \u{a7}8) is the CONSUMER's obligation, not the \
+         issuing registry's -- the same obligation-ownership ground as rot above, and \
+         the STRONGER kind of excuse: no harness configuration change would make this \
+         registry responsible for verifying a receipt it minted. acdp-registry-core \
+         implements only the producer side (load_signing_key / build_signer / \
+         build_did_document -- there is no verify fn in \
+         crates/acdp-registry-core/src/receipt.rs). Independently, rcpt-002/003/004 \
+         declare applies_to_profiles [acdp-registry-receipts, acdp-consumer] while this \
+         harness advertises only acdp-registry-core (see HARNESS_PROFILES), so \
+         targets_unadvertised_profile skips them first; and none of the family is in \
+         acdp-registry-core's required_fixtures or conditional_fixtures (rcpt is absent \
+         from CORE_INEXCUSABLE_FAMILIES). These fixtures carry no endpoint and no \
+         vectors array, so a 'direct pass' over them would run the acdp-types verifier \
+         over spec data and assert nothing about THIS registry. The producer half IS \
+         covered and stays pinned: rcpt-001 is recomputed by \
+         rcpt001_registry_receipt_golden_recomputed_and_remintable, which PARTIAL_DIRECT \
+         pins and classification_reasons_naming_golden_tests_are_pinned_by_partial_direct \
+         ties to this sentence, so neither the test nor its pin can be dropped while this \
+         claim stands. Reclassified from DEFERRED (#130) under the maintainer's explicit \
+         extension of the Phase 14 lc ruling -- see the block comment above this entry.",
+    ),
+    (
+        "lhr",
+        "lineage-head receipt VERIFICATION (RFC-ACDP-0011) is the CONSUMER's obligation, \
+         not the minting registry's -- obligation-ownership ground, the same STRONGER \
+         kind as rot's and rcpt's, not lc's weaker current-profile kind. \
+         acdp-registry-core mints lineage-head receipts but never verifies them. \
+         Independently, lhr-002/003/004 declare applies_to_profiles \
+         [acdp-registry-head-receipts, acdp-consumer] while this harness advertises only \
+         acdp-registry-core (see HARNESS_PROFILES), so targets_unadvertised_profile skips \
+         them first; and none of the family is in acdp-registry-core's required_fixtures \
+         or conditional_fixtures (lhr is absent from CORE_INEXCUSABLE_FAMILIES). These \
+         fixtures carry no endpoint and no vectors array, so a 'direct pass' would assert \
+         something about acdp-types, not about this registry. The producer half IS \
+         covered and stays pinned: lhr-001 is recomputed by \
+         lhr001_lineage_head_receipt_golden_recomputed_and_remintable, pinned by \
+         PARTIAL_DIRECT and tied to this sentence by \
+         classification_reasons_naming_golden_tests_are_pinned_by_partial_direct. \
+         Reclassified from DEFERRED (#130) under the maintainer's explicit extension of \
+         the Phase 14 lc ruling -- see the block comment above rcpt's entry.",
+    ),
+    (
+        "log",
+        "transparency-log VERIFICATION (RFC-ACDP-0012) is the CONSUMER's obligation: \
+         verifying someone else's log is not the emitting registry's job, which is \
+         obligation-ownership ground -- the STRONGER kind, as with rot/rcpt/lhr, not lc's \
+         current-profile kind. The emission side is implemented and always mounted \
+         (/log/checkpoint, /log/proof, /log/entries, \
+         crates/acdp-registry-core/src/lib.rs). Independently, log-002/004 declare \
+         applies_to_profiles [acdp-registry-transparency-log, acdp-consumer] while this \
+         harness advertises only acdp-registry-core (see HARNESS_PROFILES), so \
+         targets_unadvertised_profile skips them first; and none of the family is in \
+         acdp-registry-core's required_fixtures or conditional_fixtures (log is absent \
+         from CORE_INEXCUSABLE_FAMILIES). These fixtures carry no endpoint and no vectors \
+         array, so a 'direct pass' would assert something about acdp-crypto's merkle \
+         code, not about this registry. The emission half IS covered and stays pinned: \
+         log-001 and log-003 are recomputed by \
+         log001_leaf_root_and_inclusion_golden_recomputed and \
+         log003_consistency_proof_golden_recomputed, pinned by PARTIAL_DIRECT and tied to \
+         this sentence by \
+         classification_reasons_naming_golden_tests_are_pinned_by_partial_direct. \
+         Reclassified from DEFERRED (#130) under the maintainer's explicit extension of \
+         the Phase 14 lc ruling -- see the block comment above rcpt's entry.",
     ),
 ];
 
@@ -8698,7 +8844,49 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 ];
 
 /// Families with no coverage yet, each with a non-empty written reason and
-/// an open tracking-issue number. `caps` and `lin` were also originally
+/// an **open** tracking-issue number.
+///
+/// **This list is EMPTY, and that is a terminal state, not a milestone.** Every
+/// family in `KNOWN_FAMILIES` is now either `COVERED` (21) or `EXCUSED` (8). The
+/// mechanism stays in place -- with its type, its checks, and its issue-number
+/// allow-list -- because a spec pin bump can add a family tomorrow, and "uncovered"
+/// must still be something a contributor declares rather than defaults into.
+///
+/// **The contract that emptied it.** A `DEFERRED` entry asserts two things at once:
+/// that the family is uncovered, and that there is an OPEN issue tracking the work
+/// to cover it. The second half is what forced this list to empty when #130 closed.
+/// `rcpt`/`lhr`/`log` were the last three members; their residue is not closeable
+/// by this harness at all (see their `EXCUSED` entries), so keeping them `DEFERRED`
+/// would have meant the partition citing a closed issue -- the ratchet lying about
+/// its own state. They moved to `EXCUSED` on obligation-ownership grounds, an
+/// explicit maintainer-approved extension of the Phase 14 `lc` ruling.
+///
+/// **Adding an entry back.** Do it when a family is genuinely uncovered AND the
+/// work is genuinely intended: file the issue first, then add `(family, reason,
+/// issue)` here. `known_families_partition_into_covered_excused_or_deferred` will
+/// require a non-empty reason and an issue number from its allow-list, which holds
+/// the only two numbers ever used here (#115, #130). **Both are now closed**, so in
+/// practice a new entry means widening that allow-list in the same diff -- which is
+/// the point: adding a `DEFERRED` family should cost a deliberate edit naming the
+/// live issue, not a silent reuse of a dead one. Do NOT reach for `DEFERRED` to park a family whose obligation this
+/// registry does not own; that is what `EXCUSED`'s stronger grade is for, and
+/// `no_excused_family_is_required_by_our_profile` plus
+/// `core_inexcusable_families_are_never_excused_or_unclassified` are what stop that
+/// bucket from being abused.
+///
+/// **Vacuity, addressed rather than inherited.** An empty `DEFERRED` makes the
+/// three per-entry assertions in the partition test unreachable, which is harmless:
+/// that test's actual property -- every `KNOWN_FAMILIES` family classified exactly
+/// once -- is proven by its loop over `KNOWN_FAMILIES`, which is unaffected. The
+/// one check that WOULD have gone vacuous is the prose/pin tie
+/// (`classification_reasons_naming_golden_tests_are_pinned_by_partial_direct`),
+/// which used to iterate `DEFERRED` alone; it now scans `DEFERRED` *and* `EXCUSED`
+/// reasons, and additionally asserts in the forward direction that every
+/// `PARTIAL_DIRECT` entry is named by its family's own reason prose, so it cannot
+/// go vacuous by a family moving buckets or by prose being deleted.
+///
+/// Historical record of how this list drained, kept because the reasoning is the
+/// point: `caps` and `lin` were originally
 /// filed under **#115** (Q1 of `plans/reg10-conformance-and-ci-hygiene.md`)
 /// alongside `lc`, but REG-11 Phase 7 gave them direct-vector coverage
 /// (`caps_vectors_validate_capabilities_document`,
@@ -8719,98 +8907,53 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
 /// (`schema_vectors_openness_and_absent_vs_null_enforced`), Phase 13 closed
 /// `sig`, `rev`, and `dk`, and Phase 14 closed the last three
 /// `CORE_INEXCUSABLE_FAMILIES` stragglers, `did-ssrf`/`err`/`rate` (see
-/// `COVERED` above for all of these), and Phase 15 closed `cur`. The
-/// remaining `rcpt`/`lhr`/`log` cite **#130** (filed for Phase 6,
-/// enumerating each with its own reason); none of the three is in
-/// `CORE_INEXCUSABLE_FAMILIES`, so none is under the same closure pressure
-/// `did-ssrf`/`err`/`rate` were. Each is deferred only for its consumer-role
-/// residue; the producer half each one DOES owe is covered and pinned by
-/// `DEFERRED_PARTIAL_DIRECT`.
-/// `known_families_partition_into_covered_excused_or_deferred` checks: the
-/// reason is non-empty, the issue is one of the two known-open numbers, and
-/// any of the `caps`/`lin`/`lc` trio still present in `DEFERRED` cites #115
-/// (vacuously true today, since none of the three is).
-const DEFERRED: &[(&str, &str, u32)] = &[
-    (
-        "rcpt",
-        "receipt VERIFICATION (RFC-ACDP-0010 \u{a7}8), which is the consumer role and not one \
-         this crate plays: acdp-registry-core implements only the producer side \
-         (load_signing_key / build_signer / build_did_document -- there is no verify fn in \
-         crates/acdp-registry-core/src/receipt.rs). rcpt-002/003/004 declare \
-         applies_to_profiles [acdp-registry-receipts, acdp-consumer]; this harness advertises \
-         only acdp-registry-core (see HARNESS_PROFILES), so targets_unadvertised_profile \
-         skips them first. Two independent reasons this is not owed, and neither is a missing \
-         seam: advertising a profile the registry does not implement would make this ratchet \
-         lie; and these fixtures carry no endpoint and no vectors array, so a 'direct pass' \
-         over them would run the acdp-types verifier over spec data and assert nothing about \
-         THIS registry -- manufactured coverage of exactly the kind this file exists to \
-         prevent. The producer half IS covered: rcpt-001 is recomputed by \
-         rcpt001_registry_receipt_golden_recomputed_and_remintable, which \
-         DEFERRED_PARTIAL_DIRECT pins and \
-         deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct ties to this \
-         sentence, so neither the test nor its pin can be dropped while this claim stands.",
-        130,
-    ),
-    (
-        "lhr",
-        "lineage-head receipt VERIFICATION (RFC-ACDP-0011), the consumer role; as with rcpt, \
-         acdp-registry-core mints lineage-head receipts but never verifies them. \
-         lhr-002/003/004 declare applies_to_profiles [acdp-registry-head-receipts, \
-         acdp-consumer]; this harness advertises only acdp-registry-core (see \
-         HARNESS_PROFILES), so targets_unadvertised_profile skips them first. Two independent \
-         reasons this is not owed: advertising an unimplemented profile would make this \
-         ratchet lie; and these fixtures carry no endpoint and no vectors array, so a 'direct \
-         pass' would assert something about acdp-types, not about this registry. The producer \
-         half IS covered: lhr-001 is recomputed by \
-         lhr001_lineage_head_receipt_golden_recomputed_and_remintable, pinned by \
-         DEFERRED_PARTIAL_DIRECT and tied to this sentence by \
-         deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct.",
-        130,
-    ),
-    (
-        "log",
-        "transparency-log VERIFICATION (RFC-ACDP-0012), the consumer role. The emission side \
-         is implemented and always mounted (/log/checkpoint, /log/proof, /log/entries, \
-         crates/acdp-registry-core/src/lib.rs:87-89); verification of someone else's log is \
-         not this crate's job. log-002/004 declare applies_to_profiles \
-         [acdp-registry-transparency-log, acdp-consumer]; this harness advertises only \
-         acdp-registry-core (see HARNESS_PROFILES), so targets_unadvertised_profile skips \
-         them first. Two independent reasons this is not owed: advertising an unimplemented \
-         profile would make this ratchet lie; and these fixtures carry no endpoint and no \
-         vectors array, so a 'direct pass' would assert something about acdp-crypto's merkle \
-         code, not about this registry. The emission half IS covered: log-001 and log-003 are \
-         recomputed by log001_leaf_root_and_inclusion_golden_recomputed and \
-         log003_consistency_proof_golden_recomputed, pinned by DEFERRED_PARTIAL_DIRECT and \
-         tied to this sentence by \
-         deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct.",
-        130,
-    ),
-];
+/// `COVERED` above for all of these), and Phase 15 closed `cur`. The last
+/// three, `rcpt`/`lhr`/`log`, cited **#130** (filed for Phase 6, enumerating
+/// each with its own reason); none of the three is in
+/// `CORE_INEXCUSABLE_FAMILIES`, so none was under the same closure pressure
+/// `did-ssrf`/`err`/`rate` were -- and each was deferred only for its
+/// consumer-role residue, the producer half each one DOES owe being covered
+/// and pinned by `PARTIAL_DIRECT` throughout. This phase closed #130 by
+/// moving all three to `EXCUSED`; the pins moved with them.
+/// `known_families_partition_into_covered_excused_or_deferred` checks, for
+/// whatever this list one day holds again: the reason is non-empty, the
+/// issue is one of the two known-open numbers, and any of the
+/// `caps`/`lin`/`lc` trio present here cites #115.
+const DEFERRED: &[(&str, &str, u32)] = &[];
 
 /// The hole the strict `COVERED`/`EXCUSED`/`DEFERRED` partition otherwise leaves,
-/// and the reason it is a separate const rather than a fourth `DEFERRED` field.
+/// and the reason it is a separate const rather than a fourth tuple field.
 ///
-/// `rcpt`/`lhr`/`log` are each `DEFERRED` for a residue this harness legitimately
-/// cannot reach (see their reasons above), yet each ALSO has a golden half that is
-/// now fully recomputed by a direct test. The partition buckets by *family*, not by
-/// fixture, so those direct tests would otherwise be unguarded: deleting
-/// `rcpt001_registry_receipt_golden_recomputed_and_remintable` would leave every
-/// existing check green, because a `DEFERRED` family is not required to name any
-/// test function at all. This const closes that gap, and
-/// `deferred_partial_direct_test_functions_are_present` enforces it.
+/// `rcpt`/`lhr`/`log` are each excused for a residue this harness legitimately
+/// cannot reach (see their `EXCUSED` reasons above), yet each ALSO has a golden
+/// half that IS fully recomputed by a direct test. The partition buckets by
+/// *family*, not by fixture, so those direct tests would otherwise be unguarded:
+/// deleting `rcpt001_registry_receipt_golden_recomputed_and_remintable` would leave
+/// every other check green, because neither a `DEFERRED` nor an `EXCUSED` family is
+/// required to name any test function at all. This const closes that gap, and
+/// `partial_direct_test_functions_are_present` enforces it.
 ///
-/// Deliberately NOT a fourth field on the `DEFERRED` tuple, which was the obvious
-/// alternative: `DEFERRED` is destructured in two other checks
+/// **Formerly `DEFERRED_PARTIAL_DIRECT`, with a `DEFERRED`-only invariant.** The
+/// #130 reclassification moved `rcpt`/`lhr`/`log` from `DEFERRED` to `EXCUSED`, and
+/// the old invariant ("a family here MUST also be in `DEFERRED`") would have turned
+/// every one of these four pins red on a move that changes nothing about the pinned
+/// coverage. The invariant is now membership in `DEFERRED` union `EXCUSED`, which
+/// is the property that was always actually meant: a family whose golden half is
+/// pinned here must be partially, not fully, closed. Widening it to the union is
+/// not a loosening -- what it excludes is still the thing that matters. A family in
+/// `COVERED` must NOT appear here: `COVERED`'s own `Direct(...)` list is where a
+/// fully-covered family's tests are pinned, and `cur` is absent for exactly that
+/// reason. Both directions are checked.
+///
+/// Deliberately NOT a fourth field on the `DEFERRED`/`EXCUSED` tuples, which was the
+/// obvious alternative: `DEFERRED` is destructured in two other checks
 /// (`known_families_partition_into_covered_excused_or_deferred` and
 /// `core_inexcusable_families_are_never_excused_or_unclassified`) and its type is
 /// quoted in the module doc, so widening it edits five sites to gain only
-/// name-adjacency to the reason string. Deliberately NOT a fourth partition member
-/// either -- that would touch every set check in the file.
-///
-/// A family here MUST also be in `DEFERRED`. `cur` is absent on purpose: it is fully
-/// `COVERED`, not partially, so its tests are already pinned by `COVERED`'s own
-/// `Direct(...)` list.
-const DEFERRED_PARTIAL_DIRECT: &[(&str, &[&str])] = &[
+/// name-adjacency to the reason string -- and the reclassification just demonstrated
+/// the cost of coupling these pins to one bucket. Deliberately NOT a fourth partition
+/// member either -- that would touch every set check in the file.
+const PARTIAL_DIRECT: &[(&str, &[&str])] = &[
     (
         "rcpt",
         &["rcpt001_registry_receipt_golden_recomputed_and_remintable"],
@@ -8897,8 +9040,9 @@ fn source_has_present_test_fn(name: &str) -> bool {
 /// So these guards catch WHOLESALE GUTTING and deletion. They are not, and cannot be
 /// made into, proof that a test asserts something real. That property needs a mutation
 /// oracle -- break the code under test and observe the test go red (`cargo-mutants` or
-/// a fault-injection harness over `src/`) -- not a text oracle. Tracked on #130 rather
-/// than patched a fourth time.
+/// a fault-injection harness over `src/`) -- not a text oracle. Tracked on #216 rather
+/// than patched a fourth time (it was on #130 until that issue closed; the mutation
+/// oracle was always a separate concern riding on the same number).
 fn source_test_fn_body(name: &str) -> Option<&'static str> {
     let def_needle = format!("fn {name}(");
     let start = OWN_SOURCE.find(&def_needle)?;
@@ -8987,7 +9131,7 @@ fn covered_direct_families_have_present_test_functions() {
                     // evidence that the test proves anything. Kept deliberately
                     // generic (any `assert`) rather than the stricter
                     // EXPECTED_*/`asserted` ratchet used by
-                    // `deferred_partial_direct_test_functions_are_present` (which is
+                    // `partial_direct_test_functions_are_present` (which is
                     // in practice WEAKER -- both its tokens fit in one comment), because
                     // that counting convention is a Phase 15 idiom that most
                     // COVERED families predate. (No count here on purpose: this
@@ -9017,39 +9161,66 @@ fn covered_direct_families_have_present_test_functions() {
     }
 }
 
-/// `DEFERRED_PARTIAL_DIRECT`'s enforcement, and the sibling of
+/// `PARTIAL_DIRECT`'s enforcement, and the sibling of
 /// `covered_direct_families_have_present_test_functions` above: a family that
-/// is `DEFERRED` for its profile-gated residue while its golden half IS
-/// covered must keep naming the tests that cover that half, and those tests
-/// must still exist wearing a test attribute. Without this, the direct tests
-/// for `rcpt`/`lhr`/`log` are the only new coverage in the file that nothing
-/// guards -- the partition asks a `DEFERRED` family for a reason string, not
-/// for test functions. Also checks the containment invariant in the other
-/// direction, so a family cannot claim partial-direct coverage while sitting
-/// in `COVERED` or `EXCUSED`.
+/// is `DEFERRED` or `EXCUSED` for a residue it cannot reach, while its golden
+/// half IS covered, must keep naming the tests that cover that half, and those
+/// tests must still exist wearing a test attribute. Without this, the direct
+/// tests for `rcpt`/`lhr`/`log` are coverage in this file that nothing guards --
+/// the partition asks a `DEFERRED` or `EXCUSED` family for a reason string, not
+/// for test functions.
+///
+/// **The containment invariant is `DEFERRED` union `EXCUSED`, not `DEFERRED`
+/// alone.** It was `DEFERRED`-only until the #130 reclassification moved these
+/// three families to `EXCUSED` on obligation-ownership grounds; the narrower
+/// invariant would have reddened all four pins over a bucket change that alters
+/// nothing about the pinned coverage. The half of the invariant that carries the
+/// weight is unchanged and still checked below: a family in `COVERED` must NOT
+/// appear here, because a fully-covered family's tests belong in `COVERED`'s own
+/// `Direct(...)` list where the sibling check above pins them.
 #[test]
-fn deferred_partial_direct_test_functions_are_present() {
-    let deferred: std::collections::BTreeSet<&str> =
-        DEFERRED.iter().map(|(family, _, _)| *family).collect();
+fn partial_direct_test_functions_are_present() {
+    let deferred_or_excused: std::collections::BTreeSet<&str> = DEFERRED
+        .iter()
+        .map(|(family, _, _)| *family)
+        .chain(EXCUSED.iter().map(|(family, _)| *family))
+        .collect();
+    let covered: std::collections::BTreeSet<&str> =
+        COVERED.iter().map(|(family, _)| *family).collect();
 
-    for (family, names) in DEFERRED_PARTIAL_DIRECT {
+    assert!(
+        !PARTIAL_DIRECT.is_empty(),
+        "PARTIAL_DIRECT is empty -- every assertion in this test iterates it, so an empty \
+         list makes the whole check vacuous rather than passing. If the last partially- \
+         covered family genuinely closed to COVERED, delete this test along with the const"
+    );
+
+    for (family, names) in PARTIAL_DIRECT {
         assert!(
-            deferred.contains(family),
-            "\"{family}\" is in DEFERRED_PARTIAL_DIRECT but not in DEFERRED -- a family \
-             whose golden half is pinned here must still be deferred for its residue; if it \
-             is now fully covered, move its tests into COVERED's Direct(...) list instead"
+            deferred_or_excused.contains(family),
+            "\"{family}\" is in PARTIAL_DIRECT but in neither DEFERRED nor EXCUSED -- a \
+             family whose golden half is pinned here must still be classified as only \
+             partially closed (deferred for work still owed, or excused for a residue this \
+             registry does not owe)"
+        );
+        assert!(
+            !covered.contains(family),
+            "\"{family}\" is in PARTIAL_DIRECT but is also in COVERED -- a fully covered \
+             family pins its tests through COVERED's own Direct(...) list, checked by \
+             covered_direct_families_have_present_test_functions; pinning it in both places \
+             lets one copy rot unnoticed"
         );
         assert!(
             !names.is_empty(),
-            "DEFERRED_PARTIAL_DIRECT family \"{family}\" names no test functions at all"
+            "PARTIAL_DIRECT family \"{family}\" names no test functions at all"
         );
         for name in *names {
             assert!(
                 source_has_present_test_fn(name),
-                "DEFERRED family \"{family}\" claims its golden half is covered by \
-                 `{name}`, but that function no longer exists in this file as a present, \
+                "partially-covered family \"{family}\" claims its golden half is covered \
+                 by `{name}`, but that function no longer exists in this file as a present, \
                  test-attribute-registered function -- coverage was removed without updating \
-                 DEFERRED_PARTIAL_DIRECT or the family's DEFERRED reason"
+                 PARTIAL_DIRECT or the family's classification reason"
             );
             // Existence alone pins the SYMBOL, not the coverage: a verification round
             // gutted rcpt001's body while keeping its name and attribute, and every
@@ -9070,12 +9241,12 @@ fn deferred_partial_direct_test_functions_are_present() {
             });
             assert!(
                 body.contains("EXPECTED_") && body.contains("asserted"),
-                "DEFERRED family \"{family}\"'s golden test `{name}` no longer carries its \
-                 assertion-count ratchet (an `asserted` tally checked against an EXPECTED_* \
-                 const). The function still exists and still wears its test attribute, so \
-                 the existence check above cannot see this -- but a gutted body proves \
-                 nothing, which is the exact failure mode this family's DEFERRED reason \
-                 claims is impossible"
+                "partially-covered family \"{family}\"'s golden test `{name}` no longer \
+                 carries its assertion-count ratchet (an `asserted` tally checked against an \
+                 EXPECTED_* const). The function still exists and still wears its test \
+                 attribute, so the existence check above cannot see this -- but a gutted \
+                 body proves nothing, which is the exact failure mode this family's \
+                 classification reason claims is impossible"
             );
         }
     }
@@ -9174,47 +9345,95 @@ fn no_numeric_self_citations() {
     );
 }
 
-/// The reverse-containment half of `DEFERRED_PARTIAL_DIRECT`, and the reason it
-/// exists: without it, the const's own membership is pinned by nothing.
+/// The reverse-containment half of `PARTIAL_DIRECT`, and the reason it exists:
+/// without it, the const's own membership is pinned by nothing.
 ///
 /// The Phase 3 verification round found this by dropping the whole
-/// `("rcpt", ...)` tuple from `DEFERRED_PARTIAL_DIRECT` *and* de-registering
-/// `rcpt001` -- everything stayed green, because the presence test iterates over
-/// the const and an absent entry simply is not checked. That made the `rcpt`
-/// `DEFERRED` reason's claim that its golden test "cannot be deleted while this
-/// entry stands" false: the entry stood, and the test was deleted.
+/// `("rcpt", ...)` tuple from the const *and* de-registering `rcpt001` --
+/// everything stayed green, because the presence test iterates over the const and
+/// an absent entry simply is not checked. That made the `rcpt` reason's claim that
+/// its golden test "cannot be deleted while this entry stands" false: the entry
+/// stood, and the test was deleted.
 ///
-/// So tie the machine check to the prose that makes the claim. Every golden test
-/// identifier a `DEFERRED` reason names must be pinned by that family's
-/// `DEFERRED_PARTIAL_DIRECT` list. Deleting the const entry now requires also
-/// editing the reason text that names the test -- a visible, reviewable change to
-/// the claim itself, rather than a silent loss of coverage.
+/// So tie the machine check to the prose that makes the claim, in BOTH directions.
+///
+/// *Reverse:* every golden test identifier a classification reason names must be
+/// pinned by that family's `PARTIAL_DIRECT` list. Deleting the const entry now
+/// requires also editing the reason text that names the test -- a visible,
+/// reviewable change to the claim itself, rather than a silent loss of coverage.
+///
+/// *Forward (added by the #130 reclassification):* every test `PARTIAL_DIRECT`
+/// pins must be named by its own family's reason prose. The reverse direction
+/// alone iterates the reasons, so deleting BOTH the const entry and the sentence
+/// naming the test would have slipped through -- and, more immediately, an empty
+/// `DEFERRED` would have made the whole check vacuous had it kept iterating
+/// `DEFERRED` alone. It now scans `DEFERRED` *and* `EXCUSED`, and the forward
+/// direction anchors it to `PARTIAL_DIRECT`, which
+/// `partial_direct_test_functions_are_present` separately asserts is non-empty.
+/// Prose and pin now cannot disagree, and neither can quietly disappear.
 #[test]
-fn deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct() {
+fn classification_reasons_naming_golden_tests_are_pinned_by_partial_direct() {
     let pinned: std::collections::BTreeMap<&str, &[&str]> =
-        DEFERRED_PARTIAL_DIRECT.iter().copied().collect();
+        PARTIAL_DIRECT.iter().copied().collect();
 
-    for (family, reason, _) in DEFERRED {
-        let named: Vec<&str> = reason
+    // Every family carrying a written classification reason, deferred or excused.
+    // Scanning both is what survives a family moving buckets, as rcpt/lhr/log did.
+    let classified: Vec<(&str, &str)> = DEFERRED
+        .iter()
+        .map(|(family, reason, _)| (*family, *reason))
+        .chain(EXCUSED.iter().map(|(family, reason)| (*family, *reason)))
+        .collect();
+
+    let names_in = |reason: &'static str| -> Vec<&'static str> {
+        reason
             .split(|c: char| !(c.is_alphanumeric() || c == '_'))
             .filter(|word| word.contains("_golden_recomputed"))
-            .collect();
+            .collect()
+    };
+
+    for (family, reason) in &classified {
+        let named = names_in(reason);
         if named.is_empty() {
             continue;
         }
         let listed = pinned.get(family).unwrap_or_else(|| {
             panic!(
-                "DEFERRED family \"{family}\"'s reason names golden test(s) {named:?}, but \
-                 the family has no DEFERRED_PARTIAL_DIRECT entry -- the reason claims a \
-                 guarantee nothing enforces"
+                "family \"{family}\"'s classification reason names golden test(s) \
+                 {named:?}, but the family has no PARTIAL_DIRECT entry -- the reason \
+                 claims a guarantee nothing enforces"
             )
         });
         for name in named {
             assert!(
                 listed.contains(&name),
-                "DEFERRED family \"{family}\"'s reason names `{name}` as covering its \
-                 golden half, but DEFERRED_PARTIAL_DIRECT does not pin it -- prose and \
-                 ratchet disagree"
+                "family \"{family}\"'s classification reason names `{name}` as covering \
+                 its golden half, but PARTIAL_DIRECT does not pin it -- prose and ratchet \
+                 disagree"
+            );
+        }
+    }
+
+    // Forward direction: a pin with no prose behind it is a pin nothing explains,
+    // and deleting the pair silently would otherwise be invisible to the loop above.
+    for (family, names) in PARTIAL_DIRECT {
+        let reason = classified
+            .iter()
+            .find(|(fam, _)| fam == family)
+            .map(|(_, reason)| *reason)
+            .unwrap_or_else(|| {
+                panic!(
+                    "PARTIAL_DIRECT family \"{family}\" has no DEFERRED or EXCUSED reason \
+                     to anchor its pins to"
+                )
+            });
+        let named = names_in(reason);
+        for name in *names {
+            assert!(
+                named.contains(name),
+                "PARTIAL_DIRECT pins `{name}` for family \"{family}\", but that family's \
+                 classification reason never names it -- the pin and the prose that \
+                 justifies it must be deleted together or not at all, which is the whole \
+                 point of tying them"
             );
         }
     }
@@ -9245,10 +9464,17 @@ fn known_families_partition_into_covered_excused_or_deferred() {
             !reason.trim().is_empty(),
             "DEFERRED family \"{family}\" has an empty reason"
         );
+        // #115 and #130 are the only numbers this list has ever carried, and both
+        // are now closed -- so a genuinely new DEFERRED entry must widen this
+        // allow-list with its own live issue number, in the same diff. That is the
+        // intended cost, not an oversight: the bucket's whole contract is "uncovered,
+        // and something OPEN is tracking the work".
         assert!(
             *issue == 115 || *issue == 130,
-            "DEFERRED family \"{family}\" cites issue #{issue}, expected #115 (caps/lin/lc) \
-             or #130 (everything else)"
+            "DEFERRED family \"{family}\" cites issue #{issue}, which is not in this \
+             check's allow-list (#115 for caps/lin/lc, #130 for everything else -- both \
+             now closed). Add the new tracking issue's number here in the same diff that \
+             adds the family, and make sure that issue is actually open"
         );
         if matches!(*family, "caps" | "lin" | "lc") {
             assert_eq!(
@@ -11507,7 +11733,9 @@ fn golden_signer(
 /// `applies_to_profiles` is absent, which `targets_unadvertised_profile` treats as
 /// "no restriction". The family's profile-gated members (`rcpt-002/003/004`,
 /// restricted to `acdp-registry-receipts` / `acdp-consumer`) are a different
-/// population and remain deferred — see `DEFERRED`.
+/// population, EXCUSED (not deferred) since #130 closed: verifying a receipt is the
+/// consumer's obligation under RFC-ACDP-0010 §8, not the issuing registry's — see
+/// `EXCUSED`'s own `rcpt` entry. This test stays pinned by `PARTIAL_DIRECT`.
 ///
 /// **Why this proves something.** Every pinned value is recomputed from the
 /// vector's own inputs: the JCS canonical form, the SHA-256 preimage hash, and —
@@ -11658,8 +11886,9 @@ async fn rcpt001_registry_receipt_golden_recomputed_and_remintable() {
 /// pure golden vector, no HTTP, `Direct` coverage, every pinned value recomputed
 /// and the signature re-minted through this repo's own signer. The family's
 /// profile-gated members (`lhr-002/003/004`, restricted to
-/// `acdp-registry-head-receipts` / `acdp-consumer`) are a separate population and
-/// stay deferred.
+/// `acdp-registry-head-receipts` / `acdp-consumer`) are a separate population,
+/// EXCUSED (not deferred) since #130 closed — verification is the consumer's
+/// obligation under RFC-ACDP-0011, not the minting registry's.
 ///
 /// Two cross-checks are specific to RFC-ACDP-0011 §4 and worth pinning here rather
 /// than assuming: `lineage_id` must be the derivation of `head_ctx_id`, and a
