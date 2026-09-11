@@ -65,17 +65,40 @@ rate limiter (`[rate_limit]`): it admits or rejects a request with `429` +
 > **Cache-Control on the data plane (#205).** Every requester-relative endpoint
 > below — `GET /contexts/{ctx_id}`, `/contexts/{ctx_id}/body`,
 > `GET /contexts/search`, `GET /lineages/{lineage_id}`,
-> `/lineages/{lineage_id}/current`, `GET /log/proof` and `GET /log/entries`, plus
-> the publish/retract/republish `POST`s — answers with
+> `/lineages/{lineage_id}/current`, `GET /log/checkpoint`, `GET /log/proof` and
+> `GET /log/entries`, plus the publish/retract/republish `POST`s — answers with
 > `Cache-Control: private` and `Vary: authorization, x-tenant-id`, so a shared
 > cache cannot reuse one requester's view for another. `/auth/*`, `/admin/*` and
 > `GET /healthz` answer `Cache-Control: no-store`. The three `/.well-known/*`
-> documents are requester-invariant and keep `Cache-Control: max-age=300`.
+> documents are requester-invariant and keep `Cache-Control: public,
+> max-age=300` — `public` is the half that matters: it is the deliberate
+> opposite of `private` above, not an omission.
+>
+> Two exceptions, stated rather than left to be discovered:
+>
+> - **`GET /metrics` emits no cache directive.** It gates on
+>   `metrics.bearer_token`, so its 200-vs-401 *is* authorization-relative. It sits
+>   outside the #205 posture; tracked as #218. Scrapers do not cache, but
+>   do not put a shared cache in front of it either.
+> - **`GET /log/checkpoint` answers `private`** even though the checkpoint itself
+>   is requester-invariant. It inherits the data-plane posture by group
+>   membership. That is conservative, not wrong — it forgoes shared caching of a
+>   cacheable document rather than risking the reverse.
+> - **CORS preflight is not covered.** An `OPTIONS` request is answered by the
+>   CORS layer above the route layers, so it carries no `Cache-Control`. A
+>   preflight response has no body and discloses nothing requester-specific.
+
+The headers are emitted on every *matched* route regardless of status — a 405,
+and a handler-produced 404 on a real path, both carry `private`. That is
+deliberate: a 404 whose existence depends on the caller's visibility is exactly
+what `private` is for. Unrouted paths fall through to a bare router fallback and
+carry no directive.
+>
 > See [RECEIPTS.md](RECEIPTS.md) for what this does and does not buy you.
 
 ### `GET /.well-known/acdp.json`
 
-Capabilities document. `Cache-Control: max-age=300`.
+Capabilities document. `Cache-Control: public, max-age=300`.
 
 ```json
 {
@@ -109,7 +132,7 @@ different axes — do not infer what a registry actually enforces from
 ### `GET /.well-known/jwks.json`
 
 JSON Web Key Set for verifying this registry's JWTs. `Cache-Control:
-max-age=300`, `Content-Type: application/jwk-set+json`.
+public, max-age=300`, `Content-Type: application/jwk-set+json`.
 
 - **EdDSA mode** — one OKP/Ed25519 public key:
   ```json
@@ -127,7 +150,7 @@ this is where consumers resolve the receipt verification key
 (`did:web:<authority>` resolves to exactly this URL). The active signing
 key appears in `verificationMethod` **and** `assertionMethod`; retired keys
 (`[[receipt.retired_keys]]`) appear in `verificationMethod` only, per the
-RFC-ACDP-0010 §9 retention rule. `Cache-Control: max-age=300`. `404` when no
+RFC-ACDP-0010 §9 retention rule. `Cache-Control: public, max-age=300`. `404` when no
 receipt key is configured. See [RECEIPTS.md](RECEIPTS.md).
 
 ### `GET /healthz`

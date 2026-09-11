@@ -127,7 +127,13 @@ arm as well as the healthy one — a cached "ok" masks an outage).
 
 The three `/.well-known/*` documents keep `public, max-age=300`
 (`crates/acdp-registry-core/src/handlers/meta.rs:74`, `:95`, `:126`). None of
-them is requester-relative, and a test pins that they did not change.
+them is requester-relative, and `every_well_known_document_keeps_public_caching`
+pins all three against a downgrade. (`/.well-known/did.json` exists only when a
+receipt key is configured; its 404 arm carries no directive at all.)
+
+`GET /metrics` is the one requester-relative response outside this posture: it
+gates on `metrics.bearer_token` and emits no cache directive. Tracked as #218
+rather than folded in here.
 
 ### What this does not buy you
 

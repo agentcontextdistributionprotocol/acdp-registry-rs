@@ -6980,9 +6980,16 @@ async fn anchors_uri_never_dereferenced_publish_and_retrieve() {
 //
 // These tests ARE the control. The posture is positional: a route added to the
 // `acdp` builder instead of the `data` group in `acdp-registry-core::lib` gets
-// no cache directive, silently, which is the same defect class that produced
-// #190. A three-path sample would not notice; the table below is meant to be
-// exhaustive over the data plane, so a new route has an obvious place to fail.
+// no cache directive, and nothing about the code looks wrong.
+//
+// A table of probe URIs cannot notice that on its own -- it can only check the
+// routes someone remembered to list. So the guard is split in two:
+//
+//   * `cache_posture_covers_every_data_plane_route` probes the wire and pins
+//     what each listed route actually answers;
+//   * `every_route_in_the_core_router_is_classified` scans the router's own
+//     SOURCE and fails on any `.route(...)` path it cannot place in a posture
+//     group, which is what makes "added outside `data`" detectable at all.
 //
 // Note these assert on MATCHED routes regardless of status: the layer covers
 // every method arm, so a handler-produced 404 on a real route still carries
@@ -6990,20 +6997,38 @@ async fn anchors_uri_never_dereferenced_publish_and_retrieve() {
 // caller's visibility is exactly what `private` is for.
 // ---------------------------------------------------------------------------
 
-/// Every requester-relative route in the ACDP data plane. Keep in sync with the
-/// `data` router in `acdp-registry-core/src/lib.rs`.
-const DATA_PLANE_ROUTES: &[(&str, &str)] = &[
-    ("POST", "/contexts"),
-    ("GET", "/contexts/search"),
-    ("GET", "/contexts/ctx_nonexistent"),
-    ("GET", "/contexts/ctx_nonexistent/body"),
-    ("POST", "/contexts/ctx_nonexistent/retract"),
-    ("POST", "/contexts/ctx_nonexistent/republish"),
-    ("GET", "/lineages/lin_nonexistent"),
-    ("GET", "/lineages/lin_nonexistent/current"),
-    ("GET", "/log/checkpoint"),
-    ("GET", "/log/proof"),
-    ("GET", "/log/entries"),
+/// Every requester-relative route in the ACDP data plane, as
+/// `(method, probe URI, route template)`. The template is what the source scan
+/// in `every_route_in_the_core_router_is_classified` round-trips against the
+/// `data` router, so the two lists cannot drift apart in either direction.
+const DATA_PLANE_ROUTES: &[(&str, &str, &str)] = &[
+    ("POST", "/contexts", "/contexts"),
+    ("GET", "/contexts/search", "/contexts/search"),
+    ("GET", "/contexts/ctx_nonexistent", "/contexts/{ctx_id}"),
+    (
+        "GET",
+        "/contexts/ctx_nonexistent/body",
+        "/contexts/{ctx_id}/body",
+    ),
+    (
+        "POST",
+        "/contexts/ctx_nonexistent/retract",
+        "/contexts/{ctx_id}/retract",
+    ),
+    (
+        "POST",
+        "/contexts/ctx_nonexistent/republish",
+        "/contexts/{ctx_id}/republish",
+    ),
+    ("GET", "/lineages/lin_nonexistent", "/lineages/{lineage_id}"),
+    (
+        "GET",
+        "/lineages/lin_nonexistent/current",
+        "/lineages/{lineage_id}/current",
+    ),
+    ("GET", "/log/checkpoint", "/log/checkpoint"),
+    ("GET", "/log/proof", "/log/proof"),
+    ("GET", "/log/entries", "/log/entries"),
 ];
 
 #[tokio::test]
@@ -7011,7 +7036,7 @@ async fn cache_posture_covers_every_data_plane_route() {
     let h = harness(true).await;
     let app = &h.router;
 
-    for (method, uri) in DATA_PLANE_ROUTES {
+    for (method, uri, _template) in DATA_PLANE_ROUTES {
         let resp = app
             .clone()
             .oneshot(
@@ -7059,6 +7084,130 @@ async fn cache_posture_covers_every_data_plane_route() {
     }
 }
 
+/// The core router's own source, read at compile time.
+///
+/// This is deliberately a SOURCE scan and not a router walk: axum exposes no
+/// route introspection, so the only way to notice a route that was mounted
+/// without ever being given a cache posture is to read the file that mounts it.
+/// A hand-maintained probe table can only check the routes someone remembered
+/// to add to it -- it is structurally blind to the one direction that matters.
+const CORE_ROUTER_SRC: &str = include_str!("../../acdp-registry-core/src/lib.rs");
+
+/// The first string-literal argument of every route registration in `src`.
+///
+/// Only accepts a literal that is the first non-whitespace token after the
+/// opening paren, so prose in a doc comment that happens to mention the macro
+/// shape is skipped rather than parsed as a path.
+fn mounted_route_paths(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(i) = rest.find(".route(") {
+        rest = &rest[i + ".route(".len()..];
+        let Some(q) = rest.find('"') else { break };
+        if rest[..q].chars().any(|c| !c.is_whitespace()) {
+            continue;
+        }
+        let after = &rest[q + 1..];
+        let Some(end) = after.find('"') else { break };
+        out.push(after[..end].to_string());
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// Routes that intentionally sit OUTSIDE the `data` group, each with the reason
+/// it is not requester-relative-cacheable. Adding a route to the core router
+/// without adding it here (or to `DATA_PLANE_ROUTES`) fails the test below --
+/// which is the point: the author has to state a posture, not inherit silence.
+const NON_DATA_ROUTES: &[(&str, &str)] = &[
+    // Requester-INVARIANT discovery documents. They keep their handler-set
+    // `public, max-age=300`; #205 must not have touched them.
+    ("/.well-known/acdp.json", "public discovery document"),
+    ("/.well-known/jwks.json", "public discovery document"),
+    ("/.well-known/did.json", "public discovery document"),
+    // Credentials (RFC 6749 section 5.1) -- `no-store`, overriding.
+    ("/auth/challenge", "credential endpoint: no-store"),
+    ("/auth/token", "credential endpoint: no-store"),
+    ("/auth/token/revoke", "credential endpoint: no-store"),
+    // Operational internals behind an admin token -- `no-store`, overriding.
+    ("/admin/status", "admin ops: no-store"),
+    ("/admin/lineages/{lineage_id}/audit", "admin ops: no-store"),
+    ("/admin/contexts/{ctx_id}/retract", "admin ops: no-store"),
+    ("/admin/contexts/{ctx_id}/republish", "admin ops: no-store"),
+    // Playground-only admin routes (cfg-gated `admin_router`) -- `no-store`.
+    ("/admin/contexts", "admin ops (playground): no-store"),
+    (
+        "/admin/pinned-keys/reload",
+        "admin ops (playground): no-store",
+    ),
+    // Liveness -- `no-store` from the handler, on both arms.
+    ("/healthz", "liveness: no-store from the handler"),
+    // KNOWN GAP, tracked separately: `/metrics` gates on
+    // `metrics.bearer_token`, so its 200-vs-401 IS authorization-relative, and
+    // it emits no cache directive today. Listed here as an explicit exemption
+    // rather than silently omitted -- tracked as #218. Deleting this line is how
+    // the fix announces itself.
+    (
+        "/metrics",
+        "EXEMPT: known gap, no directive emitted (follow-up issue)",
+    ),
+];
+
+#[test]
+fn every_route_in_the_core_router_is_classified() {
+    // 1. The `data` group's membership, round-tripped against the probe table
+    //    in both directions. A route moved out of `data` fails the wire test
+    //    above; a route moved in, or added to the table but never mounted,
+    //    fails here.
+    let block_start = CORE_ROUTER_SRC
+        .find("let data = Router::new()")
+        .expect("the `data` router group should exist in the core router source");
+    let block = &CORE_ROUTER_SRC[block_start..];
+    let block_end = block[1..]
+        .find("\n    let ")
+        .expect("the `data` group should be followed by another statement");
+    let block = &block[..block_end];
+
+    let mounted: std::collections::BTreeSet<String> =
+        mounted_route_paths(block).into_iter().collect();
+    let tabled: std::collections::BTreeSet<String> = DATA_PLANE_ROUTES
+        .iter()
+        .map(|(_, _, template)| (*template).to_string())
+        .collect();
+    assert_eq!(
+        mounted, tabled,
+        "the `data` router group and DATA_PLANE_ROUTES have drifted apart -- every route in \
+         the group must have a probe, and every probe must name a real mounted route",
+    );
+
+    // 2. Every route the core router mounts, anywhere, must be classified.
+    //    This is the assertion that notices a NEW route added outside `data`.
+    let known: std::collections::BTreeSet<String> = tabled
+        .iter()
+        .cloned()
+        .chain(NON_DATA_ROUTES.iter().map(|(p, _)| (*p).to_string()))
+        .collect();
+    let unclassified: Vec<String> = mounted_route_paths(CORE_ROUTER_SRC)
+        .into_iter()
+        .filter(|p| !known.contains(p))
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "these routes are mounted by the core router but carry no declared cache posture: \
+         {unclassified:?} -- add each to the `data` group (and to DATA_PLANE_ROUTES), or to \
+         NON_DATA_ROUTES with the posture that covers it. A route with no posture emits no \
+         Cache-Control header at all, which is the defect #190/#205 exist to prevent.",
+    );
+
+    // Guard the guard: a scan that silently matched nothing would make both
+    // assertions above vacuously true.
+    assert!(
+        mounted_route_paths(CORE_ROUTER_SRC).len() >= DATA_PLANE_ROUTES.len() + 10,
+        "the source scan found implausibly few routes -- the parser has probably stopped \
+         matching the router's syntax, which would make this whole test vacuous",
+    );
+}
+
 #[tokio::test]
 async fn well_known_capabilities_keeps_public_caching_and_does_not_vary_on_authorization() {
     let h = harness(true).await;
@@ -7097,6 +7246,114 @@ async fn well_known_capabilities_keeps_public_caching_and_does_not_vary_on_autho
         !vary.contains("authorization"),
         "capabilities must not vary on authorization (got {vary:?})",
     );
+}
+
+#[tokio::test]
+async fn every_well_known_document_keeps_public_caching() {
+    // All THREE requester-invariant discovery documents, not just the one.
+    // `CHANGELOG.md` and `docs/RECEIPTS.md` both state that a test pins this;
+    // until this test existed that sentence covered `/.well-known/acdp.json`
+    // alone, which is the overstated-guarantee defect #190 exists to correct.
+    let h = harness(true).await;
+    for uri in ["/.well-known/acdp.json", "/.well-known/jwks.json"] {
+        let resp = h
+            .router
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("public, max-age=300"),
+            "{uri} is requester-invariant and must keep public caching",
+        );
+    }
+
+    // `/.well-known/did.json` exists only when a receipt key is configured.
+    let r = receipts_harness().await;
+    let resp = r
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/did.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("public, max-age=300"),
+        "/.well-known/did.json must keep public caching",
+    );
+
+    // The 404 arm carries no directive at all: `aux` has no route layer, so
+    // whatever the handler sets is what ships. Pre-existing behaviour, pinned
+    // here so a change to it is a visible test failure rather than a surprise.
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/did.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .is_none(),
+        "the did.json 404 arm sets no Cache-Control",
+    );
+}
+
+/// The cfg-gated half of `/admin/*`. `healthz_and_admin_ops_are_never_cacheable`
+/// covers `/admin/status`, which lives in the always-compiled `admin_ops`
+/// group; these two routes live in `admin_router`, whose layer is the FRAGILE
+/// one -- it must stay inside the `playground` arm because `route_layer` panics
+/// on the empty router the other arm returns. The arm most likely to be
+/// refactored wrongly was the arm with no test.
+#[cfg(feature = "playground")]
+#[tokio::test]
+async fn playground_admin_routes_are_never_cacheable() {
+    let h = harness(true).await;
+
+    for (method, uri) in [
+        ("GET", "/admin/contexts"),
+        ("POST", "/admin/pinned-keys/reload"),
+    ] {
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "{method} {uri} must be no-store (status {})",
+            resp.status(),
+        );
+    }
 }
 
 #[tokio::test]

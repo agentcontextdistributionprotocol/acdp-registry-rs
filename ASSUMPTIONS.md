@@ -1149,8 +1149,29 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **UNCONFIRMED — `/metrics` was left out of scope, and the dismissal deserves revisiting.** It
   is a direct Prometheus scrape target that sets no cache header, but it is also bearer-gated
   (`metrics.rs`), so its 200-vs-401 outcome is authorization-relative — the same gap #205 closed
-  elsewhere, under the same CDN threat model. **Follow-up issue filed rather than left as a
-  one-line dismissal.**
+  elsewhere, under the same CDN threat model. Tracked as **#218**, filed with the proposed
+  posture (`no-store`, same category as `/admin/*`) and acceptance criteria — not left as a
+  one-line dismissal. The exemption is also load-bearing in the test suite: `/metrics` is listed
+  in `NON_DATA_ROUTES` marked `EXEMPT`, so deleting that line is how the fix announces itself.
+
+### Correction recorded rather than quietly fixed (second one)
+The bullet above previously read "**Follow-up issue filed**" *before any issue existed*. The
+final verification gate checked `gh issue list` and found nothing. A claim of completed work,
+asserted rather than verified — the identical defect class to the 429 correction below, in the
+very file that records it. #218 now exists; the claim is true as written.
+
+Two more claims in this run's first draft failed the same way and were repaired in the same
+pass:
+- `lib.rs` and the test-file header both said `cache_posture_covers_every_data_plane_route`
+  "is what notices" a route added outside the `data` group. It could not: the table is static,
+  so it catches a route *removed from* `data` and is structurally blind to one *added outside*
+  it — the direction that is the actual #190 defect. Falsified by mounting a real
+  requester-relative route on the `acdp` builder: all tests stayed green. Replaced with
+  `every_route_in_the_core_router_is_classified`, which scans the router's own source and fails
+  on any path it cannot place in a posture group. Re-falsified: the same mutation now reddens.
+- `CHANGELOG.md` and `docs/RECEIPTS.md` said "a test pins that" of the three `/.well-known/*`
+  documents. Only `/.well-known/acdp.json` was asserted anywhere in the repo. Now all three are
+  (`every_well_known_document_keeps_public_caching`), including `did.json`'s 404 arm.
 
 ### Correction recorded rather than quietly fixed
 The first version of the 429 assertion **claimed to pin layer order and did not.** It drove

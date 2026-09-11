@@ -62,8 +62,14 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
     // #205: the requester-relative data plane, grouped so the cache posture
     // below lands on exactly these routes and nothing else. Membership of this
     // group IS the posture -- a route added to `acdp` instead of `data` gets no
-    // cache directive, silently. `cache_posture_covers_every_data_plane_route`
-    // in `http_integration.rs` is what notices; keep it in sync with this list.
+    // cache directive, and nothing about the code will look wrong.
+    //
+    // `every_route_in_the_core_router_is_classified` in `http_integration.rs`
+    // is what notices: it scans THIS FILE's `.route(...)` literals and fails on
+    // any path it cannot classify, so a new route must be placed in a posture
+    // group (or explicitly exempted) before the suite goes green. A round-trip
+    // assertion in the same test pins this block's membership against
+    // `DATA_PLANE_ROUTES` in both directions.
     let data = Router::new()
         // Contexts
         .route("/contexts", post(handlers::publish::<S>))
@@ -217,7 +223,14 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
             "/admin/contexts/{ctx_id}/republish",
             post(handlers::admin_republish::<S>),
         )
-        .route_layer(SetResponseHeaderLayer::if_not_present(
+        // `overriding`, not `if_not_present`: `docs/HTTP-API.md` states flatly
+        // that every `/admin/*` response is `no-store`, and `if_not_present`
+        // would make that "no-store unless some future handler set its own" --
+        // an overstated guarantee is the #190 defect. Same reasoning, same
+        // mode, as `/auth/*` above. `if_not_present` is right only where a
+        // handler's own directive is the INTENDED answer, which is the
+        // `/.well-known/*` case on the `data` group.
+        .route_layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ));
@@ -368,7 +381,10 @@ fn admin_router<S: ExtendedRegistryStore + 'static>() -> Router<Arc<AppState<S>>
         // `default = []` in this crate's Cargo.toml, so non-playground is the
         // DEFAULT build: hoisting this out would panic at router construction
         // in the common configuration.
-        .route_layer(SetResponseHeaderLayer::if_not_present(
+        //
+        // `overriding` for the same reason as `admin_ops` above: the documented
+        // guarantee for `/admin/*` is unconditional, so the layer must be too.
+        .route_layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ))

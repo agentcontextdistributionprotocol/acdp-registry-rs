@@ -16,11 +16,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Requester-relative routes (`GET /contexts/{ctx_id}`, `/contexts/{ctx_id}/body`,
   `GET /contexts/search`, `GET /lineages/{lineage_id}`,
-  `/lineages/{lineage_id}/current`, `GET /log/proof`, `GET /log/entries`, and the
-  publish/retract/republish `POST`s) now answer `Cache-Control: private` and
-  `Vary: authorization, x-tenant-id`. `/auth/*`, `/admin/*` and `GET /healthz`
-  answer `Cache-Control: no-store`. The three `/.well-known/*` documents are
-  unchanged at `public, max-age=300`, and a test pins that.
+  `/lineages/{lineage_id}/current`, `GET /log/checkpoint`, `GET /log/proof`,
+  `GET /log/entries`, and the publish/retract/republish `POST`s) now answer
+  `Cache-Control: private` and `Vary: authorization, x-tenant-id`. `/auth/*`,
+  `/admin/*` and `GET /healthz` answer `Cache-Control: no-store`. The three
+  `/.well-known/*` documents are unchanged at `public, max-age=300`, and a test
+  pins all three. `GET /metrics` is knowingly outside the posture and is tracked
+  as #218.
 
   **No live cache-poisoning bug existed** — every header the registry emitted
   was already on a requester-invariant document. This closes a hardening gap:
