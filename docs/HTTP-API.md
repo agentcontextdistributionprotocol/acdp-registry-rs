@@ -62,6 +62,17 @@ rate limiter (`[rate_limit]`): it admits or rejects a request with `429` +
 
 ## Metadata
 
+> **Cache-Control on the data plane (#205).** Every requester-relative endpoint
+> below — `GET /contexts/{ctx_id}`, `/contexts/{ctx_id}/body`,
+> `GET /contexts/search`, `GET /lineages/{lineage_id}`,
+> `/lineages/{lineage_id}/current`, `GET /log/proof` and `GET /log/entries`, plus
+> the publish/retract/republish `POST`s — answers with
+> `Cache-Control: private` and `Vary: authorization, x-tenant-id`, so a shared
+> cache cannot reuse one requester's view for another. `/auth/*`, `/admin/*` and
+> `GET /healthz` answer `Cache-Control: no-store`. The three `/.well-known/*`
+> documents are requester-invariant and keep `Cache-Control: max-age=300`.
+> See [RECEIPTS.md](RECEIPTS.md) for what this does and does not buy you.
+
 ### `GET /.well-known/acdp.json`
 
 Capabilities document. `Cache-Control: max-age=300`.
