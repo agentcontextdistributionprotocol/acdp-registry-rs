@@ -1182,3 +1182,107 @@ left it GREEN, which is how it was caught — review had not. Retargeted at
 only path that can bypass an inner header layer. This is the run's recurring defect class — a
 claim asserted from reasoning rather than from a probe — reproduced inside the very unit whose
 tests exist to prevent it.
+
+## W3-U10 — CI builds every valid feature configuration (#200)
+
+### UNCONFIRMED: the four new steps run `clippy`, not `cargo build`
+Issue #200 and the unit assignment both say "`--all-targets` builds; no test run needed."
+The four steps added to the `clippy` job run `cargo clippy … -- -D warnings` instead.
+Reasoning: all four *existing* feature steps are clippy, the job is measured at 24–43s so
+the difference is seconds, and building-only would create two classes of configuration —
+one lint-checked, one not — which is a smaller instance of the coverage gap being closed.
+Reverses in one line per step if the leader disagrees.
+
+### CONFIRMED by measurement, and it reversed two design decisions
+Both of this unit's first-draft designs were wrong, and both were caught by a review round
+rather than by the author:
+- `#[cfg]`-gating the seven dead items **does not compile.** Those items are what keep ten
+  `use` lines alive; gating them turns 7 dead-code warnings into 10 unused-import errors.
+  The `cfg_attr`-scoped allow is the correct answer, and the assignment's own escape hatch
+  ("if a blanket allow is genuinely the right answer for some item, say why in the code")
+  is what it is invoked under.
+- Putting the new steps in a **separate `features` job would not have closed #200.**
+  Branch protection requires exactly `rustfmt`, `clippy`, `tests`,
+  `conformance (spec fixtures)`. A new job is not a required check, so a break in one of
+  the four new configurations could still have landed green — the precise harm the issue
+  was filed about. The steps go inside `clippy`.
+
+### Correction recorded rather than quietly fixed
+The first draft justified that separate job partly on "the clippy job already runs four
+full compiles against a 30-minute timeout." **That was asserted, never measured, and is
+false**: across the 12 most recent runs the job takes 24–43 seconds, and its four feature
+steps cost 9s + 3s + 3s + 0s. An unmeasured cost stated as a reason — written roughly an
+hour after this same lane flagged "an untranscribed claim is an unverified claim" as W3-U5's
+headline finding. The rewrite's replacement cost argument is measured where it claims to be,
+and explicitly marks the parts that are not ("the added seconds are not measured and are not
+claimed as such").
+
+### Correction recorded rather than quietly fixed (second one)
+The rewrite then asserted that "every integration test is backend-gated at the file level,"
+so the backend-less rows compile the test suite to nothing. **False.**
+`tests/anchors_uri_never_dereferenced.rs` and `tests/conformance_gate.rs` carry no gate —
+the `#![cfg(feature = "storage-sqlite")]` on `conformance_gate.rs:2` is prose *about another
+file* and reads as an attribute. Measured under `--no-default-features`: 7 test executables
+build and 71 tests run. The tidier false version came within one acceptance criterion of
+being written into `ci.yml` as permanent repo documentation.
+
+### The feature space is eight, not the seven #200 describes
+`Cargo.toml` declares four features; with the pair guard the space is 4 backend states ×
+playground on/off = 8. #200 lists three missing configurations and this plan's first draft
+inherited that count, omitting `--no-default-features --features playground` — which is
+buildable and **fails today** with the same 7-bin/2-test dead-code errors. A comment calling
+itself "the single index of the whole feature space" would have shipped with a hole in it,
+reproducing the exact enumeration rot the unit exists to close. Four steps, not three.
+
+### The two `<backend>,playground` steps are coverage, not guards — stated, not dressed up
+Both are green before and after this change. `feature = "playground"` does not appear in
+`crates/acdp-registry-server/src/` at all; it gates only `acdp-registry-core`
+(`src/lib.rs:369,393`, `handlers/admin.rs:26,28`), which is generic over
+`S: ExtendedRegistryStore`, so there is no backend×playground-specific site for them to catch
+anything at today. A planned falsification for them was dropped once it became clear it would
+have had to *create* its own target to have something to break. By CHARTER Rule 41's own
+standard they are not yet guards; they are future-proofing, and the PR body says so.
+
+### Correction recorded rather than quietly fixed (third one)
+The shipped attribute allowed `dead_code, unused_imports`. **`unused_imports` was never
+needed.** Measured across all six backend-less target/feature combinations: `allow(dead_code)`
+alone is rc=0 everywhere, and the regression itself produces seven `is never used` items in
+the bin and two in the test target with **zero** unused-import diagnostics. The justification
+written into the plan — "F1 proves it is genuinely needed" — was a conclusion carried over
+from the `#[cfg]`-gate design that F1 *rejected*: under that design the items vanish and
+orphan their imports; under the shipped one they stay, so the imports stay used. The allow was
+one lint wider than the evidence, enlarging the hidden class for free. Narrowed, and the
+comment in `main.rs` now says why `dead_code` alone is the right width.
+
+### Correction recorded rather than quietly fixed (fourth one)
+The `ci.yml` comment and the CHANGELOG both pointed at the pair guard as `main.rs:8-17`.
+**This diff moved it to `main.rs:37-46`** — the new explanatory comment is 29 lines, so the
+pointer landed in the middle of prose about itself. A citation invalidated by the very change
+that ships it.
+
+### The flag-mutation hazard needed two baselines, not one
+The first version of the ci.yml hazard block said "ANY of the four steps minus `--all-targets`
+passes silently", presented as measured against the regression. Against the regression that is
+**false** — steps 7 and 8 fail rc=101, because the bin target is itself dirty. The
+`--all-targets` hazard is a property of the tree **as shipped**; the `--no-default-features`
+hazard can only be demonstrated **against the regression**. Two questions, two baselines, and
+collapsing them inverted one answer. Both are now stated with their baseline named. Measured:
+7/8 minus `--no-default-features` -> rc=0 silent; 5/6 minus it -> rc=101 loud; all four minus
+`--all-targets` (shipped tree) -> rc=0 silent.
+
+### Environment trap that produced two false readings
+The Bash tool's shell is **zsh**, which does not word-split unquoted parameter expansions. A
+loop passing flags via `$f` sent `--features playground` as a *single argument*, so cargo
+exited **rc=1** with `unexpected argument` — which reads as a failing configuration if only
+the exit code is checked. A real compile failure here is **rc=101**. Related: never put `$?`
+and a `$(command substitution)` in the same `echo`; the substitution runs during word
+expansion and clobbers the status. Capture `rc=$?` on its own line.
+
+### Filed, not fixed: a ninth configuration (#221)
+`acdp-registry-types` declares `default = ["axum"]` with a manifest comment calling the
+non-axum build a supported consumer scenario, and no CI job builds it (rc=0 today, so valid
+and unexercised). #200's body asserts it is "covered incidentally by existing jobs" — false.
+Not folded in: it is a different crate's feature space, and this unit's ci.yml comment and
+CHANGELOG were framed around the server binary through two review rounds. Widening a reviewed
+frame at ship time is how reviewed material becomes unreviewed. Named in the ci.yml comment as
+known-and-unbuilt; filed as #221.

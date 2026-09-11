@@ -59,6 +59,96 @@ jobs:
             --no-default-features --features storage-memory \
             --all-targets -- -D warnings
 
+      # The four steps below close #200. Read this before adding a feature.
+      #
+      # WHY THIS IS ENUMERATED AND NOT `--all-features`: it can never pass here.
+      # `--all-features` turns on all three storage backends at once, and the
+      # guard at crates/acdp-registry-server/src/main.rs:37-46 `compile_error!`s
+      # on any PAIR of them, because `run()` selects the backend via cfg gates
+      # that assume exactly one is live. That guard is correct and stays; the
+      # cost is that the feature space can only be covered by writing it out,
+      # and a written-out list goes stale silently. It already did once — these
+      # four configurations were valid and unbuilt for the whole of #195.
+      #
+      # THIS BINARY'S SPACE IS EIGHT, and the arithmetic keeps the list honest:
+      # 4 backend states (sqlite | pg | memory | none) x playground on/off = 8.
+      # Check the count against the arithmetic rather than trusting the list.
+      #
+      #   1 sqlite                 default workspace step above
+      #   2 pg                     step above
+      #   3 memory                 step above
+      #   4 sqlite,playground      step above
+      #   5 pg,playground          below
+      #   6 memory,playground      below
+      #   7 none                   below
+      #   8 playground (no backend) below
+      #
+      # Scope note: this is acdp-registry-server's feature space, NOT the
+      # workspace's. `acdp-registry-types` has its own `default = ["axum"]` /
+      # `axum` pair whose no-default-features build is a supported consumer
+      # scenario and is still built by no job here. #200 assumed it was
+      # "covered incidentally"; it is not. Tracked as #221 rather than folded
+      # in here.
+      #
+      # 7 and 8 are the inert builds: with no storage backend, `run()` only
+      # prints which feature to rebuild with, so the whole serve path is
+      # unreachable. main.rs allows dead_code for exactly that configuration --
+      # see the comment there. Both were warning-dirty and would have failed
+      # these steps before that change. Step 7 is proved to redden in CI, in the
+      # PR that added these steps; step 8 fails on the identical cause and was
+      # proved locally, because a job aborts at its first failing step, so only
+      # one of the two can be shown red in any single run.
+      #
+      # WHAT 7 AND 8 DO NOT COVER: four integration-test files are gated to a
+      # backend at file level (http_integration.rs, conformance.rs,
+      # metrics_integration.rs on storage-sqlite; pg_integration.rs on
+      # storage-pg) and compile to empty harnesses. Measured: 7 test
+      # executables build and 71 tests run, essentially all from main.rs's
+      # inline module plus anchors_uri_never_dereferenced.rs and
+      # conformance_gate.rs, which are ungated. These steps are a compile gate
+      # on the binary, not test coverage.
+      #
+      # EDITING HAZARD, worth more than it looks. Both mutations below were
+      # measured, but they answer two different questions, so note the baseline
+      # each is measured against -- conflating them gets the answer backwards.
+      #
+      # Dropping `--no-default-features` -- measured against the regression
+      # these steps exist to catch (main.rs's allow removed), because with a
+      # clean tree there is nothing for the mutated step to miss:
+      #   * Steps 7 and 8 -> still PASS. Each degenerates into the default
+      #     sqlite build: a green duplicate of the first step, covering nothing.
+      #     Silent, and it is the row that matters that fails this way.
+      #   * Steps 5 and 6 -> fail loudly (the pair guard above fires). That is
+      #     the only flag mistake anything here catches for you.
+      #
+      # Dropping `--all-targets` -- a property of the tree as shipped: all four
+      # steps still PASS, having silently stopped checking the test target. The
+      # backend-less builds carry 2 dead-code items in the test target that the
+      # bin target does not, so this is not a theoretical loss.
+      #
+      # Three of those four mistakes are silent. Keep these command lines
+      # exact.
+      - name: clippy (postgres + playground)
+        run: |
+          cargo clippy -p acdp-registry-server \
+            --no-default-features --features storage-pg,playground \
+            --all-targets -- -D warnings
+      - name: clippy (memory + playground)
+        run: |
+          cargo clippy -p acdp-registry-server \
+            --no-default-features --features storage-memory,playground \
+            --all-targets -- -D warnings
+      - name: clippy (no storage backend)
+        run: |
+          cargo clippy -p acdp-registry-server \
+            --no-default-features \
+            --all-targets -- -D warnings
+      - name: clippy (playground, no storage backend)
+        run: |
+          cargo clippy -p acdp-registry-server \
+            --no-default-features --features playground \
+            --all-targets -- -D warnings
+
   # The workspace declares rust-version = 1.88; make that claim enforceable
   # instead of aspirational. Checks both shipped storage backends.
   msrv:

@@ -132,6 +132,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+<!-- W3-U10 -->
+
+- **CI now builds all eight valid feature configurations, not four** (#200). The
+  `clippy` job gained four steps: `storage-pg,playground`,
+  `storage-memory,playground`, no-backend (`--no-default-features`), and
+  `playground` with no backend. The space is 4 backend states (sqlite | pg |
+  memory | none) x playground on/off; the four new ones were valid, buildable
+  and never exercised, so a change could break one and land green.
+
+  No wire, API or runtime behaviour changes. The two backend-less
+  configurations were warning-dirty and would have failed under CI's
+  `RUSTFLAGS: "-D warnings"`, so `crates/acdp-registry-server/src/main.rs` gained
+  a `cfg_attr`-scoped `allow(dead_code)` that applies **only**
+  when no storage backend is enabled — the configuration in which `run()` is
+  deliberately inert and the entire serve path is unreachable by construction.
+  Every configuration that can actually serve still treats `dead_code` as a hard
+  error.
+
+  Two things #200 did not know, recorded because they cost time to find. The
+  issue lists three missing configurations; there are four — `playground` with
+  no backend was missed, and it was broken in exactly the same way. And the
+  issue's suggested fix, applied literally, would have turned CI red on the
+  first run: the backend-less builds emit 7 dead-code warnings in the bin target
+  and 2 in the test target, which `-D warnings` promotes to errors.
+
+  `--all-features` remains impossible here by design and is not the fix — it
+  enables all three backends at once and trips the `compile_error!` at
+  `main.rs:37-46`, which rejects any pair. That is why coverage is enumerated,
+  and the `ci.yml` comment above the new steps is now the single index of the
+  space, with the arithmetic that generates the count.
+
+  Scope: eight is **this binary's** feature space, not the workspace's.
+  `acdp-registry-types` builds without its default `axum` feature — a supported
+  consumer scenario per its own manifest comment — and no CI job builds it.
+  #200 assumed that one was covered incidentally; it is not. Filed as #221
+  rather than widened into this change.
+
 <!-- REG-11 Phase 7 -->
 
 - **`lin` and `caps` move from `DEFERRED` to `COVERED`** (`REG-11` Phase 7,
