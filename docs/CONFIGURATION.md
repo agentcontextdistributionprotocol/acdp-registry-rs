@@ -31,10 +31,28 @@ The binary validates config before serving and refuses to boot on a misconfig
 
 - **Auth** — `jwt_signing_alg` ∈ {`HS256`, `EdDSA`}. EdDSA requires a non-empty
   `jwt_private_key_pem`. HS256 with an empty `jwt_secret` requires
-  `allow_ephemeral_secret = true`, otherwise it fails. With auth enabled on
-  HS256, a non-empty secret is rejected if it is the literal `changeme`
-  (case-insensitive, after trimming), and must decode to ≥32 bytes. Under
-  EdDSA `jwt_secret` is not examined at all.
+  `allow_ephemeral_secret = true`, otherwise it fails. A non-empty
+  `jwt_secret` is checked whether or not auth is enabled: it is rejected if it
+  is the literal `changeme` (case-insensitive, after trimming), and must decode
+  to ≥32 bytes. Under EdDSA `jwt_secret` is not examined at all.
+
+  Note the asymmetry, and note that it is only partial. Inside
+  `validate_config` the non-empty-`jwt_secret` rule is the only one in this
+  bullet not gated on `auth.enabled` — but "gated here" is not the same as
+  "not enforced", and the three gated rules do not behave alike. Measured
+  against the binary with `auth.enabled = false`:
+
+  - **Algorithm check** — an unrecognised `jwt_signing_alg` boots, falling
+    through to the HS256 default. Genuinely not enforced.
+  - **Empty-secret rule** — an empty secret boots. Genuinely not enforced, and
+    deliberately: that is a supported configuration.
+  - **EdDSA `jwt_private_key_pem`** — an empty PEM still refuses to boot, from
+    the serve path, *after* migrations have run. Gated here, enforced anyway,
+    late.
+
+  So a bad `jwt_secret` is refused either way and refused *before* migrations;
+  a missing EdDSA PEM is refused either way but only *after* them. Closing
+  that second case is not done here.
 - **Admin tokens** — every entry in `auth.admin_tokens` must be non-blank and
   carry no leading or trailing whitespace. An empty *list* remains valid and
   still means "admin routes disabled"; it is a bad *entry* that is refused.
