@@ -26,7 +26,20 @@ cargo clippy -p acdp-registry-server --features storage-sqlite,playground   --al
 cargo test   -p acdp-registry-server --features storage-sqlite,playground
 cargo clippy -p acdp-registry-server --no-default-features --features storage-memory --all-targets -- -D warnings
 cargo test   -p acdp-registry-server --no-default-features --features storage-memory
+
+# The binary's feature space is eight: 4 backend states (sqlite | pg | memory |
+# none) x playground on/off. CI builds all eight (#200); these four are the ones
+# the block above omits. Skipping them passes locally and reddens `clippy` on
+# the PR, which is a required check.
+cargo clippy -p acdp-registry-server --no-default-features --features storage-pg,playground --all-targets -- -D warnings
+cargo clippy -p acdp-registry-server --no-default-features --features storage-memory,playground --all-targets -- -D warnings
+cargo clippy -p acdp-registry-server --no-default-features --all-targets -- -D warnings
+cargo clippy -p acdp-registry-server --no-default-features --features playground --all-targets -- -D warnings
 ```
+
+The authoritative list is the comment above those steps in
+`.github/workflows/ci.yml` — it carries the arithmetic that generates the count,
+so you can check the list rather than trust it.
 
 CI additionally gates PRs on checks you can reproduce locally:
 
