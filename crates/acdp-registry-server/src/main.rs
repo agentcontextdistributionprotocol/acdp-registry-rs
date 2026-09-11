@@ -1274,7 +1274,7 @@ mod tests {
     // any non-empty `jwt_secret`, with no `auth.enabled` gate. `validate_config`
     // only checked it with auth ON, so the binary refused these configs LATE —
     // after `store.migrate()` had already run — instead of before. These pin the
-    // hoisted gating.
+    // hoisted gating. See DECISIONS `W3-U5-a`.
 
     #[test]
     fn auth_disabled_placeholder_secret_is_refused() {

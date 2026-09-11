@@ -2504,6 +2504,71 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- end W2-U3 -->
 
+<!-- W3-U5 (lane-1) -->
+
+- **The `docker compose up` quickstart boots** (`W3-U5`). It did not. The
+  stack shipped `ACDP_REGISTRY_JWT_SECRET:-changeme`, and on HS256 every
+  non-empty `jwt_secret` is decoded and length-checked on every boot —
+  `changeme` is valid base64 of six bytes, so the container exited `rc=1`
+  before serving a request. `docker/docker-compose.yml` now ships **no**
+  secret (`${ACDP_REGISTRY_JWT_SECRET:-}`); an empty secret with
+  `auth.enabled = false`, which `docker/config.docker.toml` sets, is a
+  supported configuration, so the demo needs no secret material committed to
+  the repo. Chosen over shipping a real 32-byte default, which would have
+  worked at the cost of a fixed secret in a tracked file that gets copied into
+  non-disposable use.
+
+  Observed against the real image and a real Postgres, not reasoned from the
+  code: no secret set → boots, `GET /healthz` `200`,
+  `GET /.well-known/jwks.json` `200 {"keys":[]}`, `POST /auth/challenge`
+  `404`. With `ACDP_REGISTRY_JWT_SECRET=changeme` → exit `1`, and the error is
+  the container's entire output.
+
+- **`jwt_secret` is validated regardless of `auth.enabled`, before migrations
+  run** (`W3-U5`). `validate_config` only checked a non-empty `jwt_secret`
+  with auth ON, so an auth-off registry with a bad secret still failed — just
+  late, from `serve_with_store`, after `store.migrate()` had connected and run
+  DDL. That contradicted what `validate_config` documents about itself
+  ("before running migrations or binding the socket"). The check is hoisted
+  out of the gate.
+
+  **No boot outcome changes.** Every casing of `changeme` is valid base64 of
+  six bytes, already below the floor the serve path always applied, so
+  ungating the literal guard swaps a generic length error for an actionable
+  hint. The seven-row boot matrix reproduces with identical `BOOTED`/`EXITED`
+  and identical `rc`. One genuine difference, scoped rather than smoothed
+  over: for a config with **two** fatal faults the first error reported can
+  differ, because validation now precedes the backend checks and
+  `PgStore::connect`.
+
+  The EMPTY-secret check deliberately keeps its `auth.enabled` gate — an
+  auth-off registry with no secret is supported — and that asymmetry is
+  commented rather than left to read as an oversight. Not closed here, and
+  stated rather than swept: the algorithm check and the EdDSA
+  `jwt_private_key_pem` check remain gated on `auth.enabled`. With auth off an
+  unrecognised algorithm boots and an empty secret boots, but an empty EdDSA
+  PEM still refuses — from the serve path, *after* migrations. A bad
+  `jwt_secret` is now refused before migrations; a missing EdDSA PEM is still
+  refused after them.
+
+- **Four documents that described the old gating now describe the binary**
+  (`W3-U5`) — `docker/docker-compose.yml`, `config/registry.example.toml`,
+  `SECURITY.md`, `docs/CONFIGURATION.md` — in one commit with the compose
+  change, so no window exists where `SECURITY.md` warns about a hazard the
+  repo has just removed. `SECURITY.md` had the error inverted: it warned that
+  a placeholder "can survive there unnoticed" with auth off, when a
+  placeholder in fact stops the stack from booting.
+  `config/registry.example.toml`'s "Two checks, gated the same way: neither
+  runs while auth is disabled" was wrong on both counts.
+
+  Each claim is scoped to HS256 where HS256 is load-bearing. **Under EdDSA
+  `jwt_secret` is never examined** — not for the literal, not for length, auth
+  on or off — so a stale placeholder is silently ignored there rather than
+  rejected. `SECURITY.md` gains that as its own bullet, because the bullet
+  after it recommends EdDSA for federation and an unqualified "a placeholder
+  cannot survive unnoticed" would have been false for exactly the
+  configuration being recommended.
+
 ### Security
 
 <!-- U-001 #174 (lane-1) -->
@@ -2985,3 +3050,49 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     contexts. This is a pre-existing gap between the route's `/admin/` path
     and its actual authorization, not a behavior change — `OPERATIONS.md`
     and `README.md`'s endpoint table corrected to match.
+
+<!-- W3-U5 (lane-1) — correcting the U-005 entry above -->
+
+- **This changelog said `docker compose up` boots cleanly. It did not**
+  (`W3-U5`). Correcting a false claim introduced by the `U-005` entry above.
+  Appended, never rewritten, per `D-008`.
+
+  **The claim, quoted verbatim:**
+
+  > **`docker compose up` with the shipped `changeme` default boots
+  > cleanly** — the guard never fires in the one setup where a placeholder
+  > secret is likeliest to survive into production.
+
+  **What was actually true.** It did not boot. It exited `rc=1` before serving
+  a request, and had done so for as long as the placeholder had been there.
+  The first half of that sentence was false; the second half was true, and is
+  *why* the first half was believed. The literal `changeme` guard is indeed
+  gated on `auth.enabled` and indeed never fired in the compose stack — but it
+  was never what stopped the boot. `serve_with_store` passes any non-empty
+  `jwt_secret` to `JwtSecret::from_base64`, which imposes a 32-byte floor with
+  no `auth.enabled` gate. `changeme` is valid base64 of six bytes, so the
+  stack died on the length floor, in a code path `U-005` never examined.
+
+  Two further sentences in that entry are also wrong and are corrected here
+  rather than in place. It described the check as "nested inside `auth.enabled
+  && jwt_signing_alg != "EdDSA" && !jwt_secret.is_empty()`" — the
+  `auth.enabled` conjunct is gone as of this unit. And it instructed:
+  "**Operators auditing whether they were affected should note this: if you
+  relied on that documented check with auth disabled, it never ran.**" That
+  instruction is wrong in a way worth being explicit about: the check that
+  actually stopped the boot — the ≥32-byte floor in the serve path — *always*
+  ran with auth disabled. An operator following that audit advice would have
+  looked for a silent acceptance that never happened.
+
+  **What operators should actually note.** No deployment was made less safe by
+  the original error: the stack refused to start rather than starting
+  insecurely. But anyone who tried the documented quickstart and concluded the
+  repo was broken was right, and anyone who read this file to decide whether
+  to bother was misled. If you are on EdDSA, a different fact applies — a
+  `changeme` in `jwt_secret` is ignored entirely there, then and now.
+
+  For the record, since this entry corrects a pin as well as a claim: `U-005`
+  listed seven files as corrected. Four are corrected again here.
+  `docker/RAILWAY.md`, `docs/OPERATIONS.md` and `docs/AUTHENTICATION.md` still
+  carry the false gating claim and are **not** this unit's to change; they are
+  reported to their owners with quotes rather than edited.
