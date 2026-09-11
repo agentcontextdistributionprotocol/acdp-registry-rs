@@ -336,7 +336,8 @@ itself is **not** feature-gated: the publish handler's DID-signature bypass
 `playground_snapshot.enabled` branch) is a plain runtime `if`, compiled into
 every build including a stock release binary with default features.
 `did:key` producers are checked before this branch, unconditionally, through
-acdp's offline verifier (`context.rs:414`, comment at `:423-432`) — a
+acdp's offline verifier (the `starts_with("did:key:")` branch,
+`context.rs:421`; rationale in the comment at `:422-428`) — a
 `did:key` identity is self-verifying by construction, so `[playground]` never
 affects how a `did:key` publish is authorized. Pinned agents
 (`[[playground.pinned_keys]]`) are cryptographically verified inside the
@@ -361,7 +362,7 @@ Repeatable.
 | `valid_until` | i64 | — | Unix seconds, exclusive; open-ended if omitted. |
 
 Hot-reload the `[playground]` section with `POST /admin/pinned-keys/reload`
-(playground feature) — see [HTTP-API.md](HTTP-API.md#post-adminpinned-keysreload).
+(playground feature) — see [HTTP-API.md](HTTP-API.md#post-adminpinned-keysreload-playground-feature).
 
 ### `[receipt]` *(ACDP 0.2.0)*
 
@@ -403,8 +404,19 @@ retracted contexts from default search and from `/current`, serves
 (`acdp_version` itself is unconditionally `"0.5.0"` as of REG-3 —
 RFC-ACDP-0016 §10's anchors claim always wins the version max() — and no
 longer moves with this flag). When disabled (the default) both endpoints
-answer `501 not_implemented` and neither `lifecycle_events` nor the
-`retracted` status is ever emitted.
+answer `501 not_implemented`, and a registry that has *never* had lifecycle
+enabled emits neither `lifecycle_events` nor the `retracted` status.
+
+**Disabling the flag does not retract what a previous enablement recorded.**
+The stores attach `registry_state.lifecycle_events` and derive the `retracted`
+status from stored columns unconditionally — there is no `lifecycle.enabled`
+check anywhere in either store (`crates/acdp-registry-sqlite/src/store.rs:489`
+and `:515`; the `retracted` column is selected on every read path). So a
+registry that enabled lifecycle, accumulated events, then disabled the profile
+keeps serving both while advertising neither and answering `501` on the
+lifecycle endpoints. If you need the emission to stop, the events have to go —
+turning the flag off is not sufficient. `HTTP-API.md`'s wording is the accurate
+one: it describes the emission as a property of the data, not of the flag.
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|

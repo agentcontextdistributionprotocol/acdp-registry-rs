@@ -2697,6 +2697,54 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Documentation
 
+<!-- run-close sweep (leader) #190 #191 -->
+
+- **Five documented behaviours the code does not implement, plus four pins and
+  two anchors** (`#190`, `#191`). All re-derived from the artefact before
+  editing; two were worse than their issues recorded and two were in nobody's
+  issue at all.
+
+  - **`invalid_log_proof` is reachable from this registry's own handler.**
+    Three sites said otherwise — `docs/HTTP-API.md`'s error table, the wire-code
+    arm in `crates/acdp-registry-types/src/error.rs`, and the doc comment on
+    `invalid_log_proof_is_502_with_registered_code`. `/log/proof` echoes the
+    leaf for retrieval-authorized requesters via `record.leaf()`
+    (`handlers/log.rs:359`), and a stored leaf that no longer parses under the
+    closed schema raises it locally. Recorded but deliberately **not** changed:
+    that path answers `502`, which blames an upstream for a local data fault —
+    a wire change, not a docs fix.
+  - **`lifecycle.enabled = false` does not stop emission.** `CONFIGURATION.md`
+    stated the absolute; there is no `lifecycle.enabled` check in either store.
+    Both attach `registry_state.lifecycle_events` and derive the `retracted`
+    status from stored columns unconditionally, so a registry that enabled
+    lifecycle, accumulated events, then disabled it keeps serving both while
+    answering `501` on the endpoints.
+  - **`docs/RECEIPTS.md` promised a `Cache-Control: private` posture that does
+    not exist.** The only `Cache-Control` this registry emits is
+    `public, max-age=300` on three `/.well-known/*` routes, none of them
+    requester-relative. Rewritten as an operator obligation with the exposure
+    scoped to deployments that actually front a shared cache. Whether the
+    registry should emit `private`/`no-store` itself is `#205`, split out so a
+    wire change is not shipped inside a docs correction.
+  - **Ten stale spec-SHA citations, removed rather than re-pointed.**
+    `conformance.rs` cited `417211f` ten times against a CI pin of `d1f06d0`.
+    Every assertion was still true — only the coordinate was wrong, so nothing
+    could turn red. Re-pointing would re-stale on the next bump; the counts now
+    read "at the CI-pinned spec", which resolves to the single `ref:` in
+    `ci.yml` that `bump-spec.yml` rewrites.
+  - **Four pins and two anchors.** `OPERATIONS.md` pinned `store/src/lib.rs:74`
+    for `anonymous_public_reads`; `:74` is `tenant`. `CONFIGURATION.md` pinned
+    `context.rs:414` for the `did:key` branch (that line is a comment about the
+    playground snapshot; the branch is `:421`) and misquoted its rationale
+    comment's range. `AUTHENTICATION.md` stated one `/metrics` fact twice, each
+    with its own pin at the same lines — one claim, two pins drifting in
+    lockstep, reading to a checker as two independent confirmations. Two broken
+    anchors in `HTTP-API.md` and `CONFIGURATION.md`; every same-file and
+    cross-file anchor across `docs/` now resolves.
+
+  Pins touched here name their construct next to the line, so a pin that rots
+  degrades to *searchable* rather than to *wrong*.
+
 <!-- U-005 #180 (lane-1) -->
 
 - **Corrected two false claims replicated across eleven operator-facing sites**

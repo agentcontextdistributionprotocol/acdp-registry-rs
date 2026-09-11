@@ -101,8 +101,26 @@ With `head_receipts = true` the registry:
 
 Because head receipts are requester-relative (the head is selected under
 the requester's visibility), `/current` responses must not be cached across
-differently-authorized requesters — the existing `Cache-Control: private`
-posture for non-public content covers this.
+differently-authorized requesters.
+
+**The registry does not mark them.** `/current`, `/contexts/*` and the search
+endpoints emit **no** `Cache-Control` header at all — not `private`, not
+`no-store`. The only `Cache-Control` this registry ever emits is
+`public, max-age=300`, on the three `/.well-known/*` endpoints
+(`crates/acdp-registry-core/src/handlers/meta.rs:74`, `:95`, `:126`), and none
+of those are requester-relative. Absent a directive, a shared cache applies its
+own heuristics, and the failure mode is a visibility-scoped body served to a
+requester who should have seen a different one.
+
+So this is an operator obligation, not something the registry has handled for
+you: **if you front the registry with a shared cache or CDN, configure it not
+to cache `/lineages/*/current`, `/contexts/*` or the search endpoints across
+requesters.** A single-tenant deployment with no shared cache in front of it —
+including the Railway recipe in [RAILWAY.md](../docker/RAILWAY.md) — is not
+exposed. Whether the registry should emit `private`/`no-store` itself is a
+deliberate wire-behaviour decision, tracked in
+[#205](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/issues/205);
+it is not assumed here.
 
 ## Serving `/.well-known/did.json`
 

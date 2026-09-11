@@ -942,3 +942,61 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Not re-litigated, and explicitly out of scope:** runtime pin-evaluation semantics.
   `PinOutcome::Skipped` still means "no policy active". This unit refuses bad config at the
   two doors; it does not change what a good config means.
+
+## Run-close sweep — #190/#191 docs truth pass and the full local matrix (2026-09-11, leader)
+
+- **CONFIRMED by execution, not by reading CI: every feature configuration builds, and the
+  three CI has never built are clean.** Ran the full CI-equivalent matrix locally —
+  `fmt`, clippy ×4, `rustdoc`, tests on sqlite/playground/pg/memory, conformance in
+  require-mode against the pinned spec checkout, `cargo-deny`, MSRV 1.88 — plus #200's three
+  unbuilt configurations (`storage-pg,playground`, `storage-memory,playground`, and no
+  backend at all). All green. **Status: CONFIRMED.**
+- **CONFIRMED, and it contradicts #200's suggested fix:** the no-backend build emits **7
+  dead-code warnings**, so adding it to the clippy job (which runs `-D warnings`) turns CI
+  red. The issue says "add the three configurations to the existing build matrix"; applied
+  literally, that breaks the build it was filed to protect. The configuration itself is
+  deliberate — the `compile_error!` at `main.rs:8-17` rejects only *pairs*, and there is an
+  explicit `#[cfg(not(any(...)))] fn run()` that bails with a useful message — so the fix is
+  a scoped `allow(dead_code)`, not a guard. **Status: CONFIRMED** (recorded on #200; the
+  `main.rs` half was still under lane-1's claim when this was written).
+- **CONFIRMED by the gate firing on me.** The first matrix run failed `test-memory`, and the
+  fault was mine: I exported `ACDP_REQUIRE_CONFORMANCE=1` process-wide, where CI scopes it to
+  the conformance job. `conformance_gate.rs` refused a require-mode run with `storage-sqlite`
+  off — precisely the "compiled to nothing, proves nothing" case it exists to catch. Worth
+  recording as a *success*: this file's recurring finding all run has been verification that
+  looks sound and cannot fire, and this is the counter-example — a guard that fired against
+  its own author. **Status: CONFIRMED.**
+- **CONFIRMED against the artefact — `lifecycle.enabled = false` does not stop emission.**
+  There is no `lifecycle.enabled` check anywhere in either store. `lifecycle_events` is
+  attached and the `retracted` status derived from stored columns unconditionally
+  (`crates/acdp-registry-sqlite/src/store.rs:489`, `:515`). Disabling the profile makes the
+  endpoints answer `501` and changes nothing about what reads emit. **Status: CONFIRMED.**
+- **CONFIRMED — `invalid_log_proof` is reachable from this registry's own handler**, which
+  three separate sites denied. `/log/proof` echoes the leaf via `record.leaf()`
+  (`handlers/log.rs:359`) and a stored leaf that no longer parses under the closed schema
+  raises it locally; `store/src/log.rs`'s own tests pin the reject cases. **Status:
+  CONFIRMED.**
+- **UNCONFIRMED and deliberately left alone:** that path answers `502`, which blames an
+  upstream for a local data fault. It is defensible (the wire code is registered to
+  RFC-ACDP-0012 §11's federation meaning) and changing it is a wire change. Noted next to the
+  mapping in `error.rs` rather than fixed inside a docs pass. **Status: UNCONFIRMED —
+  recorded, not decided.**
+- **Assumption made explicit, because re-pointing would have hidden it:** the ten stale
+  `417211f` citations in `conformance.rs` asserted counts that are **still true** at the CI
+  pin `d1f06d0` — verified by running the suite against that checkout (67 pass, require-mode
+  on). Only the coordinate was wrong, which is why nothing could turn red. The literal is
+  gone rather than corrected: a symbolic "at the CI-pinned spec" cannot drift, and if a count
+  ever stops holding after a bump, the test fails, which is the signal the counts exist to
+  provide. **Status: CONFIRMED.**
+- **Confirmed by sweeping rather than by report, and it validates lane-3's warning:**
+  `docs/OPERATIONS.md` pinned `store/src/lib.rs:74` for `anonymous_public_reads`; `:74` is
+  `tenant`. That pin was in no issue and no sweep had touched it. lane-3 predicted this at
+  stand-down — two of the six pins it re-derived in #203 were wrong *before* any drift, so
+  the untouched pins carry an independent error rate and a diff-driven sweep preserves every
+  one of them. This pass re-derived all twenty pins in `docs/`, not only the moved ones.
+  **Status: CONFIRMED.**
+- **Scope boundary, stated rather than assumed:** whether the registry should emit
+  `Cache-Control: private` or `no-store` on requester-relative responses is **not** decided
+  here. `#190` was a false claim and is fixed by making the prose true; the wire question is
+  `#205`. Shipping a header change inside a docs correction would be the same defect as the
+  original claim, pointing the other way. **Status: UNCONFIRMED — split out by design.**

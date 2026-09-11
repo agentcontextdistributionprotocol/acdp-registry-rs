@@ -105,8 +105,9 @@ out of band and distribute them to operators / monitoring.
   `anonymous_public_reads` parameter — the local is spelled
   `admin_sees_public_arm` where it is declared
   (`crates/acdp-registry-core/src/handlers/admin.rs:87`) and is passed as the
-  fifth positional argument (`admin.rs:101`), binding to that parameter
-  (`crates/acdp-registry-store/src/lib.rs:74`), so it
+  fifth positional argument (`admin.rs:101`), binding to
+  `list_contexts`'s `anonymous_public_reads` parameter
+  (`crates/acdp-registry-store/src/lib.rs:75`), so it
   reaches the RFC-ACDP-0008 §4.5 public arm only — restricted and private
   contexts are never disclosed to it.
 
