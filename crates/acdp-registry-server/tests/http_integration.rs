@@ -3180,6 +3180,259 @@ async fn harness_with_playground(playground: PlaygroundConfig) -> Harness {
     }
 }
 
+/// W3-U1 (#192): like `harness_with_playground`, but also hands back a handle
+/// on the LIVE `playground` cell. `build_router` takes state by value, so the
+/// only way to observe the cell later is to clone the `Arc` before that call.
+/// This lives here rather than in `tests/common/mod.rs` deliberately — the
+/// shared `Harness` has no field for it and that file is another lane's.
+#[cfg(feature = "playground")]
+async fn harness_with_playground_cell(
+    playground: PlaygroundConfig,
+    admin_tokens: Vec<String>,
+) -> (Harness, Arc<std::sync::RwLock<PlaygroundConfig>>) {
+    let db = tempfile::Builder::new()
+        .prefix("acdp-pin-cell-")
+        .suffix(".sqlite")
+        .tempfile()
+        .unwrap();
+    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    store.migrate().await.unwrap();
+    let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
+    let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+    let secret = JwtSecret::from_bytes(&[42u8; 32]);
+    let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
+    let resolver = Arc::new(WebResolver::new());
+    let auth = Arc::new(AuthService::new(
+        AuthConfig::default(),
+        challenges,
+        signer,
+        resolver,
+        AUTHORITY.into(),
+    ));
+    let mut cfg = config(true);
+    cfg.playground = playground;
+    cfg.auth.admin_tokens = admin_tokens;
+    let state = AppStateInner::new(server, auth, None, cfg, None);
+    let cell = Arc::clone(&state.playground);
+    (
+        Harness {
+            router: build_router(state),
+            db: Some(db),
+        },
+        cell,
+    )
+}
+
+/// W3-U1 (#192): `RegistryConfig::load(None)` has no injection seam — it reads
+/// process env directly — so driving a specific reload outcome means setting
+/// `ACDP_REGISTRY_CONFIG`. That is process-global and races the parallel test
+/// runner, hence `#[serial]` on every test in this file that touches it.
+#[cfg(feature = "playground")]
+fn write_temp_config(body: &str) -> tempfile::NamedTempFile {
+    use std::io::Write as _;
+    let mut f = tempfile::Builder::new()
+        .prefix("acdp-reload-")
+        .suffix(".toml")
+        .tempfile()
+        .unwrap();
+    f.write_all(body.as_bytes()).unwrap();
+    f.flush().unwrap();
+    f
+}
+
+#[cfg(feature = "playground")]
+fn live_pinned_dids(cell: &Arc<std::sync::RwLock<PlaygroundConfig>>) -> Vec<String> {
+    cell.read()
+        .unwrap()
+        .pinned_keys
+        .iter()
+        .map(|p| p.agent_did.clone())
+        .collect()
+}
+
+/// #192: a reload carrying a structurally-invalid playground section must be
+/// REJECTED, and — the part that actually matters — must leave the live cell
+/// untouched. A reload that half-applies is worse than one that fails.
+#[tokio::test]
+#[cfg(feature = "playground")]
+#[serial_test::serial]
+async fn reload_with_invalid_pinned_key_is_rejected_and_leaves_cell_unchanged() {
+    use base64::Engine as _;
+    let good = PinnedAgentKey {
+        agent_did: "did:web:agents.test:alice".into(),
+        public_key_b64: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+        algorithm: "ed25519".into(),
+        valid_from: None,
+        valid_until: None,
+    };
+    let (h, cell) = harness_with_playground_cell(
+        PlaygroundConfig {
+            enabled: true,
+            pinned_keys: vec![good],
+            pinned_only: false,
+        },
+        vec!["secret-admin".into()],
+    )
+    .await;
+
+    let before = live_pinned_dids(&cell);
+    assert_eq!(before, vec!["did:web:agents.test:alice".to_string()]);
+
+    // On-disk config whose pinned entry has an unsupported algorithm.
+    let f = write_temp_config(
+        r#"
+[playground]
+enabled = true
+pinned_only = false
+[[playground.pinned_keys]]
+agent_did = "did:web:agents.test:mallory"
+public_key_b64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+algorithm = "Ed25519"
+"#,
+    );
+    std::env::set_var("ACDP_REGISTRY_CONFIG", f.path());
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/pinned-keys/reload")
+                .header("authorization", "Bearer secret-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+
+    std::env::remove_var("ACDP_REGISTRY_CONFIG");
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an invalid playground config must be rejected as a client/config error,          distinguishable from ConfigReload's 500 — a config typo is not a server outage"
+    );
+    assert_eq!(
+        live_pinned_dids(&cell),
+        before,
+        "REJECTED RELOAD MUTATED THE LIVE CELL — a half-applied reload is worse than a failed one"
+    );
+}
+
+/// #192: the bypass proper — a reload must not be able to reintroduce a state
+/// that `validate_config` refuses at startup.
+#[tokio::test]
+#[cfg(feature = "playground")]
+#[serial_test::serial]
+async fn reload_cannot_reintroduce_the_empty_pinned_only_state() {
+    use base64::Engine as _;
+    let good = PinnedAgentKey {
+        agent_did: "did:web:agents.test:alice".into(),
+        public_key_b64: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+        algorithm: "ed25519".into(),
+        valid_from: None,
+        valid_until: None,
+    };
+    let (h, cell) = harness_with_playground_cell(
+        PlaygroundConfig {
+            enabled: true,
+            pinned_keys: vec![good],
+            pinned_only: true,
+        },
+        vec!["secret-admin".into()],
+    )
+    .await;
+    let before = live_pinned_dids(&cell);
+
+    // pinned_only=true with NO pinned keys: refused at startup since #185,
+    // and reachable through the reload door until #192.
+    let f = write_temp_config(
+        r#"
+[playground]
+enabled = true
+pinned_only = true
+"#,
+    );
+    std::env::set_var("ACDP_REGISTRY_CONFIG", f.path());
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/pinned-keys/reload")
+                .header("authorization", "Bearer secret-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    std::env::remove_var("ACDP_REGISTRY_CONFIG");
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the #185 state must not be reachable by reload"
+    );
+    assert_eq!(live_pinned_dids(&cell), before, "cell must be unchanged");
+}
+
+/// #192: a VALID reload must still apply — the guard must not be so broad that
+/// it breaks the endpoint's actual job.
+#[tokio::test]
+#[cfg(feature = "playground")]
+#[serial_test::serial]
+async fn reload_with_valid_config_still_applies() {
+    let (h, cell) = harness_with_playground_cell(
+        PlaygroundConfig {
+            enabled: true,
+            pinned_keys: vec![],
+            pinned_only: false,
+        },
+        vec!["secret-admin".into()],
+    )
+    .await;
+    assert!(live_pinned_dids(&cell).is_empty());
+
+    let f = write_temp_config(
+        r#"
+[playground]
+enabled = true
+pinned_only = false
+[[playground.pinned_keys]]
+agent_did = "did:web:agents.test:bob"
+public_key_b64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+algorithm = "ed25519"
+"#,
+    );
+    std::env::set_var("ACDP_REGISTRY_CONFIG", f.path());
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/pinned-keys/reload")
+                .header("authorization", "Bearer secret-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    std::env::remove_var("ACDP_REGISTRY_CONFIG");
+
+    assert_eq!(status, StatusCode::OK, "a valid reload must still apply");
+    assert_eq!(
+        live_pinned_dids(&cell),
+        vec!["did:web:agents.test:bob".to_string()],
+        "a valid reload must actually swap the live cell"
+    );
+}
+
 #[tokio::test]
 async fn challenge_endpoint_returns_well_formed_challenge() {
     // The success shape of POST /auth/challenge was previously unasserted
@@ -3597,6 +3850,11 @@ async fn retrieve_body_for_unknown_context_returns_404() {
 /// as the other admin-route tests so it compiles in both build variants.
 #[cfg(feature = "playground")]
 #[tokio::test]
+// W3-U1 (#192): MUST be serial. It calls RegistryConfig::load(None), which
+// reads process env, and W3-U1 added tests that set ACDP_REGISTRY_CONFIG.
+// Without this it races them and sees another test's config. Observed, not
+// theorised — it went red the moment those tests landed.
+#[serial_test::serial]
 async fn admin_reload_pinned_keys_requires_admin_token() {
     let mut cfg = config(true);
     cfg.auth.admin_tokens = vec!["secret-admin".into()];

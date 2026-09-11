@@ -141,6 +141,30 @@ pub async fn reload_pinned_keys<S: ExtendedRegistryStore + 'static>(
         AdminAuthError::ConfigReload(e.to_string())
     })?;
 
+    // W3-U1 (#192): validate BEFORE taking the write lock, so a rejected
+    // reload is *structurally* incapable of half-applying — the swap below is
+    // not reached at all. Validating inside the lock would also work, but then
+    // "unchanged on failure" would be a property of statement order rather than
+    // of shape, and a reviewer could not confirm it by looking.
+    //
+    // `state.config.receipt` is the right receipt input: receipts are
+    // restart-only, and the live cell only ever holds `playground`. Without it
+    // a reload could reintroduce the RFC-ACDP-0010 §7 state that startup
+    // refuses — which is the same bypass #192 is about, one guard over.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let warnings = crate::playground::validate_playground_config(
+        &fresh.playground,
+        state.config.receipt.is_configured(),
+        now,
+    )
+    .map_err(AdminAuthError::InvalidConfig)?;
+    for w in &warnings {
+        tracing::warn!("pinned-keys reload: {w}");
+    }
+
     let count = fresh.playground.pinned_keys.len();
     {
         let mut guard = state
@@ -719,6 +743,13 @@ pub enum AdminAuthError {
     /// join). Distinct from `ConfigReload` so the response body names
     /// the actual failure instead of claiming a config reload happened.
     Internal(String),
+    /// W3-U1 (#192): the on-disk config parsed, but its `[playground]`
+    /// section is one the startup validator would refuse. **400, not 500**,
+    /// and deliberately distinct from `ConfigReload`: that one means the
+    /// registry could not read its own config (a server fault), this one
+    /// means the operator wrote something invalid. Conflating them would make
+    /// a config typo page someone as an outage.
+    InvalidConfig(String),
 }
 
 impl IntoResponse for AdminAuthError {
@@ -737,6 +768,14 @@ impl IntoResponse for AdminAuthError {
             AdminAuthError::Internal(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("internal error: {msg}")})),
+            )
+                .into_response(),
+            AdminAuthError::InvalidConfig(msg) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!(
+                    "rejected: the on-disk playground config is invalid and was NOT applied; \
+                     the running configuration is unchanged. {msg}"
+                )})),
             )
                 .into_response(),
         }

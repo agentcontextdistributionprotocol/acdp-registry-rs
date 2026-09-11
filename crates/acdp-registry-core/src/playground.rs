@@ -261,16 +261,38 @@ pub fn validate_playground_config(
     receipt_configured: bool,
     now: i64,
 ) -> Result<Vec<String>, String> {
+    // EXHAUSTIVE DESTRUCTURE, deliberately without `..`. Adding a field to
+    // `PlaygroundConfig` must break THIS BUILD, forcing whoever adds it to
+    // decide whether it needs validating. A by-example test suite cannot hold
+    // that property: it would keep passing while the new field went unchecked,
+    // which is precisely the defect family #192 and #193 belong to — a
+    // validator narrower than the hazard it was written for. Do not "fix" a
+    // compile error here by adding `..`; that silently re-opens the hole.
+    let PlaygroundConfig {
+        enabled,
+        pinned_keys,
+        pinned_only,
+    } = cfg;
+
     // Structural defects first: deterministic, time-independent, and silent
     // today (they surface only as per-request 500s).
-    for (i, pin) in cfg.pinned_keys.iter().enumerate() {
-        let did = pin.agent_did.as_str();
-        let alg = PinnedAlgorithm::parse(&pin.algorithm).ok_or_else(|| {
+    for (i, pin) in pinned_keys.iter().enumerate() {
+        // Same exhaustive-destructure contract as above, for the entry type.
+        let PinnedAgentKey {
+            agent_did,
+            algorithm,
+            valid_from,
+            valid_until,
+            // Validated by the per-algorithm decoders below, which take `pin`.
+            public_key_b64: _,
+        } = pin;
+        let did = agent_did.as_str();
+        let alg = PinnedAlgorithm::parse(algorithm).ok_or_else(|| {
             format!(
                 "playground.pinned_keys[{i}] ({did}): algorithm '{}' is not supported (expected \
                  one of: ed25519, ecdsa-p256). A publish from this agent that selects this entry \
                  is rejected at request time (HTTP 500, internal_error).",
-                pin.algorithm
+                algorithm
             )
         })?;
         match alg {
@@ -285,7 +307,7 @@ pub fn validate_playground_config(
                     .map_err(|e| format!("playground.pinned_keys[{i}]: {e}"))?;
             }
         }
-        if let (Some(from), Some(until)) = (pin.valid_from, pin.valid_until) {
+        if let (Some(from), Some(until)) = (*valid_from, *valid_until) {
             if from >= until {
                 return Err(format!(
                     "playground.pinned_keys[{i}] ({did}): valid_from ({from}) is not before \
@@ -298,7 +320,7 @@ pub fn validate_playground_config(
     // RFC-ACDP-0010 §7: a receipts-advertising registry has no unverified
     // publish path. Enforced here rather than only at startup so a reload
     // cannot reintroduce the state (#192).
-    if receipt_configured && cfg.enabled && !cfg.pinned_only {
+    if receipt_configured && *enabled && !*pinned_only {
         return Err(
             "playground.enabled with pinned_only=false is incompatible with [receipt]: a \
              receipts-advertising registry has no unverified publish path (RFC-ACDP-0010 \
@@ -309,7 +331,7 @@ pub fn validate_playground_config(
     }
 
     // W2-U1 (#185), moved here from the binary so both doors share one copy.
-    if cfg.enabled && cfg.pinned_only && cfg.pinned_keys.is_empty() {
+    if *enabled && *pinned_only && pinned_keys.is_empty() {
         return Err(
             "playground.pinned_only=true has no effect while playground.pinned_keys is \
              empty: this config does NOT restrict publishing — every non-did:key agent \
@@ -326,18 +348,17 @@ pub fn validate_playground_config(
     // pins at all, which is supported. But the two branches do OPPOSITE things,
     // so the text branches too.
     let mut warnings = Vec::new();
-    if cfg.enabled && !cfg.pinned_keys.is_empty() {
-        let any_live = cfg.pinned_keys.iter().any(|p| p.is_valid_at(now));
+    if *enabled && !pinned_keys.is_empty() {
+        let any_live = pinned_keys.iter().any(|p| p.is_valid_at(now));
         if !any_live {
-            let n = cfg.pinned_keys.len();
-            let latest = cfg
-                .pinned_keys
+            let n = pinned_keys.len();
+            let latest = pinned_keys
                 .iter()
                 .filter_map(|p| p.valid_until)
                 .max()
                 .map(|t| t.to_string())
                 .unwrap_or_else(|| "none".to_string());
-            warnings.push(if cfg.pinned_only {
+            warnings.push(if *pinned_only {
                 format!(
                     "playground.pinned_keys: no entry is currently within its validity window \
                      ({n} entries, most recent valid_until {latest}). With pinned_only=true every \
