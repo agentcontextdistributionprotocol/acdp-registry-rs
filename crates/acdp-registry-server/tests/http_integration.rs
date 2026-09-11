@@ -6965,3 +6965,151 @@ async fn anchors_uri_never_dereferenced_publish_and_retrieve() {
          anchor_conns == 0 assertions above would hold even for a broken harness"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #205 — Cache-Control posture (the wire half of #190).
+//
+// These tests ARE the control. The posture is positional: a route added to the
+// `acdp` builder instead of the `data` group in `acdp-registry-core::lib` gets
+// no cache directive, silently, which is the same defect class that produced
+// #190. A three-path sample would not notice; the table below is meant to be
+// exhaustive over the data plane, so a new route has an obvious place to fail.
+//
+// Note these assert on MATCHED routes regardless of status: the layer covers
+// every method arm, so a handler-produced 404 on a real route still carries
+// `private`. That is deliberate -- a 404 whose existence depends on the
+// caller's visibility is exactly what `private` is for.
+// ---------------------------------------------------------------------------
+
+/// Every requester-relative route in the ACDP data plane. Keep in sync with the
+/// `data` router in `acdp-registry-core/src/lib.rs`.
+const DATA_PLANE_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/contexts"),
+    ("GET", "/contexts/search"),
+    ("GET", "/contexts/ctx_nonexistent"),
+    ("GET", "/contexts/ctx_nonexistent/body"),
+    ("POST", "/contexts/ctx_nonexistent/retract"),
+    ("POST", "/contexts/ctx_nonexistent/republish"),
+    ("GET", "/lineages/lin_nonexistent"),
+    ("GET", "/lineages/lin_nonexistent/current"),
+    ("GET", "/log/checkpoint"),
+    ("GET", "/log/proof"),
+    ("GET", "/log/entries"),
+];
+
+#[tokio::test]
+async fn cache_posture_covers_every_data_plane_route() {
+    let h = harness(true).await;
+    let app = &h.router;
+
+    for (method, uri) in DATA_PLANE_ROUTES {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(*method)
+                    .uri(*uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let cc = resp
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        assert_eq!(
+            cc.as_deref(),
+            Some("private"),
+            "{method} {uri} must answer Cache-Control: private (status {})",
+            resp.status(),
+        );
+
+        // Both axes. `Vary: Authorization` alone would be semantically wrong:
+        // `tenant_for_request` honours `x-tenant-id`, and with auth disabled it
+        // is the ONLY tenant signal.
+        let vary = resp
+            .headers()
+            .get_all(axum::http::header::VARY)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .to_ascii_lowercase();
+        assert!(
+            vary.contains("authorization"),
+            "{method} {uri} Vary must name authorization (got {vary:?})",
+        );
+        assert!(
+            vary.contains("x-tenant-id"),
+            "{method} {uri} Vary must name x-tenant-id (got {vary:?})",
+        );
+    }
+}
+
+#[tokio::test]
+async fn well_known_capabilities_keeps_public_caching_and_does_not_vary_on_authorization() {
+    let h = harness(true).await;
+    let app = &h.router;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/acdp.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // The discovery document is requester-INVARIANT. #205 must not have
+    // downgraded it: `if_not_present` leaves the handler's own header alone.
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("public, max-age=300"),
+    );
+    // It DOES carry a Vary -- CorsLayer emits its default set unconditionally.
+    // What must not appear is `authorization`, which would fragment CDN caching
+    // of a public document by a header it does not vary on.
+    let vary = resp
+        .headers()
+        .get_all(axum::http::header::VARY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(", ")
+        .to_ascii_lowercase();
+    assert!(
+        !vary.contains("authorization"),
+        "capabilities must not vary on authorization (got {vary:?})",
+    );
+}
+
+#[tokio::test]
+async fn unrouted_paths_carry_no_cache_directive() {
+    let h = harness(true).await;
+    let app = &h.router;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/no-such-endpoint")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // `route_layer` (not `layer`) is what keeps the fallback bare.
+    assert!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .is_none(),
+        "router fallback must not carry a Cache-Control header",
+    );
+}

@@ -59,8 +59,12 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
     // response-header layer that sets the media type. JWKS, health, and the
     // operational admin routes keep their conventional media types and are
     // mounted separately below.
-    let mut acdp = Router::new()
-        .route("/.well-known/acdp.json", get(handlers::capabilities::<S>))
+    // #205: the requester-relative data plane, grouped so the cache posture
+    // below lands on exactly these routes and nothing else. Membership of this
+    // group IS the posture -- a route added to `acdp` instead of `data` gets no
+    // cache directive, silently. `cache_posture_covers_every_data_plane_route`
+    // in `http_integration.rs` is what notices; keep it in sync with this list.
+    let data = Router::new()
         // Contexts
         .route("/contexts", post(handlers::publish::<S>))
         .route("/contexts/search", get(handlers::search::<S>))
@@ -86,7 +90,52 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
         // posture); there is never a `log_unavailable` (§7.1).
         .route("/log/checkpoint", get(handlers::log_checkpoint::<S>))
         .route("/log/proof", get(handlers::log_proof::<S>))
-        .route("/log/entries", get(handlers::log_entries::<S>));
+        .route("/log/entries", get(handlers::log_entries::<S>))
+        // #205 (wire half of #190). These responses depend on WHO is asking --
+        // §4.5 visibility, tenant scoping, and the per-requester leaf echo on
+        // `/log/*` -- so a shared cache must never reuse one requester's copy
+        // for another.
+        //
+        // `private` rather than `no-store`: the threat is shared caches, which
+        // `private` excludes exactly. `no-store` would only add protection
+        // against caches that ignore directives (they ignore `no-store` too)
+        // while permanently forbidding legitimate same-requester caching.
+        //
+        // `if_not_present` so a handler can still override per route -- that is
+        // also what leaves `/log/checkpoint` (hash-only, requester-invariant, and
+        // currently inheriting `private` it never needed) an explicit public TTL
+        // later without touching this layer.
+        //
+        // `route_layer`, not `layer`: the router fallback must stay bare. Note
+        // this DOES cover the 405 arm and handler-produced 4xx on matched routes
+        // -- deliberate: a 404 whose existence depends on the caller's
+        // visibility is precisely what `private` is for.
+        .route_layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("private"),
+        ))
+        // Both axes, not just `authorization`: `tenant_for_request` honours
+        // `x-tenant-id`, and with `auth.enabled = false` it is the ONLY tenant
+        // signal (`handlers/context.rs`). `Vary: Authorization` alone would be
+        // semantically wrong here. `appending` so a future handler-set `Vary`
+        // survives -- CorsLayer is the outer layer and appends on its own, so it
+        // is not at risk either way.
+        //
+        // Vary is the SECONDARY line. `private` carries the guarantee; shared
+        // caches with overridden or buggy Vary handling are common.
+        .route_layer(SetResponseHeaderLayer::appending(
+            axum::http::header::VARY,
+            HeaderValue::from_static("authorization, x-tenant-id"),
+        ));
+
+    // Capabilities is deliberately OUTSIDE `data`: it is requester-invariant and
+    // sets its own `Cache-Control: public, max-age=300` (`handlers/meta.rs`).
+    // `if_not_present` would have spared the header anyway, but `appending` on
+    // Vary has no such guard and would fragment CDN caching of the discovery
+    // document by `Authorization`.
+    let mut acdp = Router::new()
+        .route("/.well-known/acdp.json", get(handlers::capabilities::<S>))
+        .merge(data);
 
     if auth_enabled {
         // FEAT-06: the `/auth/*` endpoints are the most attacker-controllable
