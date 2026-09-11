@@ -1124,3 +1124,40 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Status: UNCONFIRMED — blocked on the R3 ruling, not on evidence.** The evidence is
   settled; only the remedy is open. **If R3 is declined, these two lines still need a
   standalone factual fix** — they do not become true by the recipe staying auth-off.
+
+## #205 — Cache-Control posture on requester-relative responses (leader lane)
+
+- **CONFIRMED: there was no live cache-poisoning bug.** All three `Cache-Control` emissions on
+  `main` before this change (`handlers/meta.rs:74/:95/:126`) are on requester-invariant
+  documents. This closed a hardening gap; the CHANGELOG and PR say so explicitly rather than
+  claiming a fix for a live defect.
+- **CONFIRMED by falsification, not by reading:** removing the data-plane layer reddens
+  `cache_posture_covers_every_data_plane_route`; restoring it greens. Removing/moving the auth
+  layer inside the limiter reddens `credential_endpoints_are_never_stored`.
+- **UNCONFIRMED — a CDN in "cache everything / ignore origin headers" mode defeats both
+  `private` and `Vary`.** No origin header can fix this. It stays an operator note in
+  `RECEIPTS.md`, downgraded to defense-in-depth rather than deleted. Not testable from here.
+- **UNCONFIRMED — `private` carries no validators.** No `ETag`, no `Last-Modified`, no
+  `max-age`, so a requester's *own* cache may briefly reuse a context retracted since. Accepted
+  deliberately: they already held those bytes. **The future fix is ETags plus explicit
+  freshness, NOT `no-store`** — reaching for `no-store` would trade a real client-caching
+  capability for protection against caches that ignore directives anyway.
+- **UNCONFIRMED — `/log/checkpoint` inherits `private` it does not need.** It is hash-only and
+  requester-invariant (`handlers/log.rs`, `State` only). It gives up shared cacheability it has
+  never used. `if_not_present` was chosen precisely so an explicit short public TTL can be added
+  later without touching the layer.
+- **UNCONFIRMED — `/metrics` was left out of scope, and the dismissal deserves revisiting.** It
+  is a direct Prometheus scrape target that sets no cache header, but it is also bearer-gated
+  (`metrics.rs`), so its 200-vs-401 outcome is authorization-relative — the same gap #205 closed
+  elsewhere, under the same CDN threat model. **Follow-up issue filed rather than left as a
+  one-line dismissal.**
+
+### Correction recorded rather than quietly fixed
+The first version of the 429 assertion **claimed to pin layer order and did not.** It drove
+`limits.challenge_rate_per_minute`, enforced inside the *handler* (`state.rs`) and therefore
+within both layers, so the 429 carried the header under either ordering. The falsification run
+left it GREEN, which is how it was caught — review had not. Retargeted at
+`rate_limit.per_ip_per_minute` so the 429 comes from the `auth_rate_limit` **middleware**, the
+only path that can bypass an inner header layer. This is the run's recurring defect class — a
+claim asserted from reasoning rather than from a probe — reproduced inside the very unit whose
+tests exist to prevent it.
