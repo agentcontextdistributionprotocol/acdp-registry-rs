@@ -319,10 +319,16 @@ OKP/Ed25519 JWK, with `kid` derived from the key fingerprint unless
 
 > **Dev convenience:** with HS256 and an empty `jwt_secret`, set
 > `auth.allow_ephemeral_secret = true` to boot with a random process-lifetime
-> key. Tokens won't survive a restart. Never use this in production — set a real
-> `jwt_secret`. The startup validator refuses `changeme` (case-insensitively,
-> after trimming) and refuses an empty secret unless `allow_ephemeral_secret` is
-> set — both checks only when `auth.enabled = true`.
+> key. Tokens won't survive a restart, and startup says so — it is not silent.
+> Never use this in production — set a real `jwt_secret`.
+>
+> **The two startup checks are gated differently.** The validator refuses
+> `changeme` (case-insensitively, after trimming), and refuses a secret that is
+> not base64 of at least 32 bytes, **whenever the secret is non-empty and
+> `jwt_signing_alg` is not `EdDSA` — regardless of `auth.enabled`.** It refuses
+> an *empty* secret only when `auth.enabled = true` and `allow_ephemeral_secret`
+> is unset, because an auth-off registry with no secret has nothing to sign and
+> is a supported configuration. Under `EdDSA`, `jwt_secret` is never examined.
 
 ## Token revocation
 

@@ -1077,3 +1077,50 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   version section, and the sentence was at `:2686` when I found it and `:2727` after a rebase —
   which is itself the argument for content anchors over line pins. **Status: CONFIRMED
   (corrected).**
+
+## W3-U7 + W3-U8 — the two false `auth.enabled` doc claims, and #209 (leader lane)
+
+- **CONFIRMED, read from `main.rs` at `abfebf7`, not from the issue text.** The `changeme`
+  literal check and the base64/≥32-byte length check are gated on
+  `jwt_signing_alg != "EdDSA" && !jwt_secret.is_empty()` — **not** on `auth.enabled`. The
+  *empty*-secret check **is** gated on `auth.enabled` (plus `!allow_ephemeral_secret`), and
+  the source comment states that asymmetry is deliberate: an auth-off registry with no secret
+  is supported. `docs/OPERATIONS.md` and `docs/AUTHENTICATION.md` both asserted the ungated
+  checks were gated; both now describe the split as a two-row table rather than a sentence,
+  because the previous wording failed by binding two differently-gated facts with "both".
+- **CONFIRMED: the guard is non-`EdDSA`, not HS256-only.** The docs said "on HS256", which
+  **under**-claims enforcement — `RS256` + `changeme` is also refused. Corrected to name the
+  actual condition. Under `EdDSA` the secret is never examined; that carve-out is stated
+  explicitly in both files so a future edit cannot flatten it into "always checked".
+- **CONFIRMED: the compose file ships no JWT default.** `docker-compose.yml:69` is
+  `${ACDP_REGISTRY_JWT_SECRET:-}`. `OPERATIONS.md` still described the removed `changeme`
+  default and called the resulting stack startable; it was not startable, which is what W3-U5
+  fixed.
+
+### The foreign pin lane-2 flagged and correctly refused to touch — now discharged
+- **Observed:** `ASSUMPTIONS.md:713` (U-005's entry) cites `docker/RAILWAY.md:45` meaning the
+  `ACDP_REGISTRY_AUTH__JWT_SECRET` row. lane-2's W2-U3 entry above records that the pin went
+  stale when Phase 5 added twelve lines, and that fixing a foreign append-only entry was not
+  the lane's to do. It was right on both counts.
+- **Re-pointed by content, per CHARTER rule 15, without editing the foreign entry.** The row
+  U-005 meant is the table row whose first cell is `` `ACDP_REGISTRY_AUTH__JWT_SECRET` `` in
+  `docker/RAILWAY.md`'s "Set the env vars" table. **Cite it that way, not by line.** This
+  commit did not move it: `RAILWAY.md` is 91 lines before and after.
+- **Status: CONFIRMED (discharged).** Third instance in three units of a docs-only edit
+  invalidating a pin in a file the editing lane could not touch. The durable fix remains
+  rule 15.
+
+### Left standing deliberately — `docker/RAILWAY.md:57` and `:68` are FALSE on `main` today
+- **Observed:** both still say the `changeme` check is gated on auth being enabled and that
+  the Railway `JWT_SECRET` "is never validated". Both are false — and `:68` was false *before*
+  W3-U5 too, because the ≥32-byte floor already ran ungated from the serve path, so a Railway
+  deploy carrying `changeme` was already dying at boot, just later and with a worse message.
+- **Not repaired here, and this is a judgement call worth recording.** Both lines sit inside
+  the region rewritten wholesale by the **held R3 patch**
+  (`archive/lane-2/20260911T030908Z-w2-u3-phase6-held.patch`, still uncommitted, awaiting a
+  human ruling on whether the Railway recipe should enable auth). Editing them now would
+  conflict with that patch and pre-empt the ruling. Verified this commit leaves it applying
+  cleanly.
+- **Status: UNCONFIRMED — blocked on the R3 ruling, not on evidence.** The evidence is
+  settled; only the remedy is open. **If R3 is declined, these two lines still need a
+  standalone factual fix** — they do not become true by the recipe staying auth-off.
