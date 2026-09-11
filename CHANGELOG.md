@@ -8,6 +8,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Wire behaviour: the registry now emits a cache posture on requester-relative
+  responses** (#205, the wire half of #190). Additive response headers — no
+  client parses their absence and nothing about request handling changes — but
+  it is a wire change, which is why #205 was split out of #190 rather than
+  shipped with the docs fix.
+
+  Requester-relative routes (`GET /contexts/{ctx_id}`, `/contexts/{ctx_id}/body`,
+  `GET /contexts/search`, `GET /lineages/{lineage_id}`,
+  `/lineages/{lineage_id}/current`, `GET /log/checkpoint`, `GET /log/proof`,
+  `GET /log/entries`, and the publish/retract/republish `POST`s) now answer
+  `Cache-Control: private` and `Vary: authorization, x-tenant-id`. `/auth/*`,
+  `/admin/*` and `GET /healthz` answer `Cache-Control: no-store`. The three
+  `/.well-known/*` documents are unchanged at `public, max-age=300`, and a test
+  pins all three. `GET /metrics` is knowingly outside the posture and is tracked
+  as #218.
+
+  **No live cache-poisoning bug existed** — every header the registry emitted
+  was already on a requester-invariant document. This closes a hardening gap:
+  requester-relative routes carried no directive at all, which is safe only for
+  as long as nobody puts a CDN with a default TTL in front of the registry.
+
+  `private` rather than `no-store` on the data plane: the threat is shared
+  caches, which `private` excludes precisely, whereas `no-store` only adds
+  protection against caches that ignore directives anyway while forbidding
+  legitimate same-requester client caching. `Vary` names both axes because
+  `x-tenant-id` is the only tenant signal when `auth.enabled = false`.
+
 <!-- #130 conformance reclassification -->
 
 - **`rcpt`, `lhr` and `log` move from `DEFERRED` to `EXCUSED`, closing #130; the
