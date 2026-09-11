@@ -103,9 +103,9 @@ out of band and distribute them to operators / monitoring.
   /admin/contexts` authenticates the caller but names no agent DID, and
   `admin_list` unconditionally passes `true` for the store's
   `anonymous_public_reads` parameter — the local is spelled
-  `admin_sees_public_arm` at the call site
-  (`crates/acdp-registry-core/src/handlers/admin.rs:87`) and binds to that
-  parameter positionally
+  `admin_sees_public_arm` where it is declared
+  (`crates/acdp-registry-core/src/handlers/admin.rs:87`) and is passed as the
+  fifth positional argument (`admin.rs:101`), binding to that parameter
   (`crates/acdp-registry-store/src/lib.rs:74`), so it
   reaches the RFC-ACDP-0008 §4.5 public arm only — restricted and private
   contexts are never disclosed to it.

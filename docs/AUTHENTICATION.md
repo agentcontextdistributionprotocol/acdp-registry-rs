@@ -125,8 +125,8 @@ differences in the same commit that documents them.
 | Route group | Parser | Scheme prefixes accepted | Trims the token? | Unrecognised header shape |
 |---|---|---|---|---|
 | `/contexts/*`, `/lineages/*`, and the other ordinary read/publish routes | `extract_bearer` (`crates/acdp-registry-auth/src/service.rs:400-405`) | `Bearer ` **and** `bearer ` | yes | treated as **anonymous** |
-| `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs:707-721`) | `Bearer ` only | **no** | rejected with **403** `{"error": "admin-only"}` (`admin.rs:761-765`) |
-| `/metrics` | inline in `metrics_endpoint` (`crates/acdp-registry-core/src/metrics.rs:124-128`) | `Bearer ` only | yes | rejected with **401** + a `WWW-Authenticate` challenge (`metrics.rs:141-148`) |
+| `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs:707-735`) | `Bearer ` only | **no** | rejected with **403** `{"error": "admin-only"}` (`admin.rs:761-765`) |
+| `/metrics` | inline in `metrics_endpoint` (`crates/acdp-registry-core/src/metrics.rs:124-128`) | `Bearer ` only | yes | rejected with **401** + a `WWW-Authenticate` challenge (`metrics.rs:141-149`) |
 
 The `/metrics` parser is a hybrid of the other two: case-sensitive on the scheme
 like the admin one, trimming like the lax one. It is also the only one of the
@@ -279,7 +279,7 @@ consequences follow, and they are the ones that surprise people:
   against, so the guard is deliberately narrower than the admin-token one.
 
 Failures on this endpoint answer `401` with
-`WWW-Authenticate: Bearer realm="metrics"` (`metrics.rs:141-148`) — the one place
+`WWW-Authenticate: Bearer realm="metrics"` (`metrics.rs:141-149`) — the one place
 in the registry that does. Everything else authenticated answers `403`.
 
 The presented token is compared to the configured one in **constant time**,

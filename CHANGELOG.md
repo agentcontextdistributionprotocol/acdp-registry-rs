@@ -2248,25 +2248,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   defined, which is the same failure `#187` removed by collapsing two
   byte-identical copies of the codec into one crate.
 
-- **Nine line-pins repaired across two docs** (`W3-U6`): six in
-  `docs/AUTHENTICATION.md` drifted when `#201` inserted into
-  `handlers/admin.rs`; one more in the same file was misaligned before that;
-  and `docs/OPERATIONS.md` named a parameter that does not appear at the line
-  it cites.
+- **Nine line-pins repaired in `docs/AUTHENTICATION.md`, plus a prose
+  correction in `docs/OPERATIONS.md`** (`W3-U6`). The breakdown matters more
+  than the total, because only the first group is drift:
+  - **six drifted** when `#201` inserted into `handlers/admin.rs`;
+  - **three were misaligned independently of that merge** — one pinned
+    `caller_from_headers` starting inside its doc comment, and two (the same
+    pin cited twice) stopped one line before the end of the statement they
+    describe.
+
+  `docs/OPERATIONS.md` repaired **prose, not a pin**: the line it cites was
+  correct and unchanged.
 
   The `admin.rs` drift resolved at **three** distinct offsets (+27, +34, +42),
-  not the two that were expected — every pin was re-derived against the merged
-  tree by locating its construct, rather than by applying an offset. Two of the
-  six were additionally short by one line *before* the drift, ending just
-  before the closing brace of the test they cite. The
-  `handlers/context.rs` pin for `caller_from_headers` began inside the
-  function's doc comment and ended mid-body; it now spans the function.
+  not the two that were expected, so no uniform shift could have landed all of
+  them — every pin was re-derived against the merged tree by locating its
+  construct, rather than by applying an offset. Two of the six were
+  additionally short by one line *before* the drift, ending just before the
+  closing brace of the test they cite; their end lines were therefore wrong by
+  four rather than three, the drift and the pre-existing error compounding.
 
   `OPERATIONS.md` said `admin_list` "passes `anonymous_public_reads = true`"
   and cited a line where the local is spelled `admin_sees_public_arm`. Both
   names are real — the local binds positionally to the store parameter — so the
   text now names both and cites each.
-
 
 ### Fixed
 
