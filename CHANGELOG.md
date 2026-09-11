@@ -8,6 +8,75 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+<!-- #130 conformance reclassification -->
+
+- **`rcpt`, `lhr` and `log` move from `DEFERRED` to `EXCUSED`, closing #130; the
+  coverage tally is now 21 `COVERED` / 8 `EXCUSED` / 0 `DEFERRED`** (29 families).
+  Tests only — no runtime, API or wire-format change.
+
+  The three families were never uncovered in the sense `DEFERRED` means. Each
+  splits in two: a producer/emission half this registry implements, whose spec
+  goldens are recomputed here (`rcpt-001`, `lhr-001`, `log-001`, `log-003`), and a
+  consumer-role **verification** half. Only the verification residue was deferred,
+  and it is not coverable by this harness at all: those fixtures name profiles
+  `HARNESS_PROFILES` does not advertise and carry no `endpoint` and no `vectors`
+  array, so a "direct pass" over them would exercise `acdp-types`/`acdp-crypto`
+  rather than this registry. Verification is the consumer's obligation under
+  RFC-ACDP-0010 §8 (receipts), RFC-ACDP-0011 (lineage-head receipts) and
+  RFC-ACDP-0012 (transparency logs).
+
+  `DEFERRED`'s contract is that every entry cites an **open** tracking issue, so
+  closing #130 forced the choice: reclassify, or leave the ratchet citing a closed
+  issue. They are excused on the **obligation-ownership** ground — the strong kind,
+  the same one `rot` rests on, where no harness configuration change could make
+  this registry responsible — and explicitly *not* on the weaker current-profile
+  ground `lc` rests on. `EXCUSED`'s doc comment now names those two grades and
+  requires every entry to say which it claims.
+
+  **This extends the REG-11 Phase 14 `lc` ruling (a user decision) to three further
+  families, with the maintainer's explicit approval.** The extension is stated in
+  the code, at each moved entry and in the block comment above them, rather than
+  swept in silently.
+
+  Rule 1 (`no_excused_family_is_required_by_our_profile`) still holds: none of the
+  three appears in `acdp-registry-core`'s `required_fixtures` or
+  `conditional_fixtures` at spec pin `d1f06d0`, and none is in
+  `CORE_INEXCUSABLE_FAMILIES`.
+
+- **`DEFERRED_PARTIAL_DIRECT` is now `PARTIAL_DIRECT`, and its invariant widened
+  from `DEFERRED` to `DEFERRED` ∪ `EXCUSED`.** The old name and invariant coupled
+  four good golden-test pins to one bucket, so a reclassification that changes
+  nothing about the pinned coverage would have reddened all four. The half that
+  carries the weight is unchanged and still enforced: a `COVERED` family must not
+  appear there, because its tests belong in `COVERED`'s own `Direct(...)` list.
+  Both enforcement tests were renamed and generalized to scan `EXCUSED` reasons
+  alongside `DEFERRED` ones:
+  `deferred_partial_direct_test_functions_are_present` →
+  `partial_direct_test_functions_are_present`, and
+  `deferred_reasons_naming_golden_tests_are_pinned_by_partial_direct` →
+  `classification_reasons_naming_golden_tests_are_pinned_by_partial_direct`.
+
+- **Anti-vacuity work forced by `DEFERRED` becoming empty.** The prose/pin tie
+  iterated `DEFERRED` alone and would have silently become a no-op. It now scans
+  both buckets *and* checks the forward direction — every test `PARTIAL_DIRECT`
+  pins must be named by its own family's reason prose — so a pin and the sentence
+  justifying it can no longer be deleted independently. `PARTIAL_DIRECT` is also
+  asserted non-empty. The partition test itself is unaffected: its real property
+  (every `KNOWN_FAMILIES` family classified exactly once) is proven by its loop
+  over `KNOWN_FAMILIES`, not over `DEFERRED`.
+
+  Both mutations were verified red before being relied on: renaming
+  `rcpt001_registry_receipt_golden_recomputed_and_remintable` fails
+  `partial_direct_test_functions_are_present`, and deleting its name from `rcpt`'s
+  reason prose fails
+  `classification_reasons_naming_golden_tests_are_pinned_by_partial_direct`.
+
+- **The mutation-oracle thread moved from #130 to #216.** The file's own
+  anti-vacuity guards are substring oracles over `include_str!` that catch
+  wholesale deletion and gutting but not `assert!(true)`-grade hollowing; the real
+  fix is `cargo-mutants` or a fault-injection harness. #130 had been the de-facto
+  anchor for that separate concern, so it was split out before #130 closed.
+
 - **Corrected two false security claims in the Railway recipe, and disclosed its
   read posture** (#208). [`docker/RAILWAY.md`](docker/RAILWAY.md) claimed the
   `JWT_SECRET` "is never validated" with auth off, and that the `changeme`
