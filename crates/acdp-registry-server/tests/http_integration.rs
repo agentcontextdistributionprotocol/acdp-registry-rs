@@ -3190,6 +3190,19 @@ async fn harness_with_playground_cell(
     playground: PlaygroundConfig,
     admin_tokens: Vec<String>,
 ) -> (Harness, Arc<std::sync::RwLock<PlaygroundConfig>>) {
+    harness_with_playground_cell_and_receipt(playground, admin_tokens, None).await
+}
+
+/// As above, but `receipt_seed` configures `[receipt]` on the RUNNING config.
+/// That matters for exactly one test: the reload validates against the running
+/// receipt posture, not the reloaded file's, because `[receipt]` is not
+/// hot-swappable — only `[playground]` is.
+#[cfg(feature = "playground")]
+async fn harness_with_playground_cell_and_receipt(
+    playground: PlaygroundConfig,
+    admin_tokens: Vec<String>,
+    receipt_seed: Option<String>,
+) -> (Harness, Arc<std::sync::RwLock<PlaygroundConfig>>) {
     let db = tempfile::Builder::new()
         .prefix("acdp-pin-cell-")
         .suffix(".sqlite")
@@ -3212,6 +3225,9 @@ async fn harness_with_playground_cell(
     let mut cfg = config(true);
     cfg.playground = playground;
     cfg.auth.admin_tokens = admin_tokens;
+    if let Some(seed) = receipt_seed {
+        cfg.receipt.signing_key_seed_b64 = seed;
+    }
     let state = AppStateInner::new(server, auth, None, cfg, None);
     let cell = Arc::clone(&state.playground);
     (
@@ -3312,12 +3328,169 @@ algorithm = "Ed25519"
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "an invalid playground config must be rejected as a client/config error,          distinguishable from ConfigReload's 500 — a config typo is not a server outage"
+        "an invalid playground config must be rejected as a client/config error, distinguishable from ConfigReload's 500 — a config typo is not a server outage"
     );
     assert_eq!(
         live_pinned_dids(&cell),
         before,
         "REJECTED RELOAD MUTATED THE LIVE CELL — a half-applied reload is worse than a failed one"
+    );
+
+    // The body is quoted verbatim in docs/HTTP-API.md. Pin it here so the doc
+    // cannot drift away from what the handler actually emits — the failure
+    // mode this unit hit three times in prose.
+    let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"].as_str().unwrap(),
+        "rejected: the on-disk playground config is invalid and was NOT applied; \
+         the running configuration is unchanged. playground.pinned_keys[0] \
+         (did:web:agents.test:mallory): algorithm 'Ed25519' is not supported \
+         (expected one of: ed25519, ecdsa-p256). A publish from this agent that \
+         selects this entry is rejected at request time (HTTP 500, internal_error)."
+    );
+}
+
+/// #192, the decision in DECISIONS W3-U1-c: the reload validates against the
+/// RUNNING receipt posture, not the freshly-loaded file's, because `[receipt]`
+/// is not hot-swappable — only `[playground]` is.
+///
+/// Without this, an operator could delete `[receipt]` from disk and reload
+/// `pinned_only = false`; the still-receipt-minting process would re-enter the
+/// RFC-ACDP-0010 §7 "no degraded mode" state — the very bypass #192 closes,
+/// one guard over. Changing `state.config.receipt` to `fresh.receipt` in the
+/// handler leaves every other test in this suite green and fails only here.
+#[tokio::test]
+#[cfg(feature = "playground")]
+#[serial_test::serial]
+async fn reload_validates_against_the_running_receipt_posture_not_the_files() {
+    use base64::Engine as _;
+    let good = PinnedAgentKey {
+        agent_did: "did:web:agents.test:alice".into(),
+        public_key_b64: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+        algorithm: "ed25519".into(),
+        valid_from: None,
+        valid_until: None,
+    };
+    // Running process: receipts configured, playground strict. Legal.
+    let (h, cell) = harness_with_playground_cell_and_receipt(
+        PlaygroundConfig {
+            enabled: true,
+            pinned_keys: vec![good],
+            pinned_only: true,
+        },
+        vec!["secret-admin".into()],
+        Some(base64::engine::general_purpose::STANDARD.encode([3u8; 32])),
+    )
+    .await;
+    let before = live_pinned_dids(&cell);
+
+    // On-disk config drops to lax AND omits [receipt] entirely. Judged by the
+    // file alone this is fine; judged by the running process it is the §7
+    // degraded mode.
+    let f = write_temp_config(
+        r#"
+[playground]
+enabled = true
+pinned_only = false
+[[playground.pinned_keys]]
+agent_did = "did:web:agents.test:bob"
+public_key_b64 = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+algorithm = "ed25519"
+"#,
+    );
+    std::env::set_var("ACDP_REGISTRY_CONFIG", f.path());
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/pinned-keys/reload")
+                .header("authorization", "Bearer secret-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    std::env::remove_var("ACDP_REGISTRY_CONFIG");
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a reload must be judged against the receipt posture of the RUNNING process, \
+         which still mints receipts; the file's own (absent) [receipt] is irrelevant \
+         because [receipt] is not hot-swappable"
+    );
+    assert_eq!(
+        live_pinned_dids(&cell),
+        before,
+        "rejected reload mutated the live cell"
+    );
+}
+
+/// The other half of the 400-vs-500 distinction the docs build a table around:
+/// a config the registry cannot READ is still a 500 (a server fault), not the
+/// new 400 (an operator error). Pinned so the two cannot collapse into one.
+#[tokio::test]
+#[cfg(feature = "playground")]
+#[serial_test::serial]
+async fn reload_with_unreadable_config_is_still_a_500_not_the_new_400() {
+    use base64::Engine as _;
+    let good = PinnedAgentKey {
+        agent_did: "did:web:agents.test:alice".into(),
+        public_key_b64: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+        algorithm: "ed25519".into(),
+        valid_from: None,
+        valid_until: None,
+    };
+    let (h, cell) = harness_with_playground_cell(
+        PlaygroundConfig {
+            enabled: true,
+            pinned_keys: vec![good],
+            pinned_only: false,
+        },
+        vec!["secret-admin".into()],
+    )
+    .await;
+    let before = live_pinned_dids(&cell);
+
+    // Not invalid config — invalid TOML. The registry cannot read its own file.
+    let f = write_temp_config(
+        "[playground
+enabled = = true
+",
+    );
+    std::env::set_var("ACDP_REGISTRY_CONFIG", f.path());
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/pinned-keys/reload")
+                .header("authorization", "Bearer secret-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    std::env::remove_var("ACDP_REGISTRY_CONFIG");
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unparsable config file is a server fault and must stay a 500; only a \
+         readable-but-invalid [playground] section is the new 400"
+    );
+    assert_eq!(
+        live_pinned_dids(&cell),
+        before,
+        "failed reload mutated the live cell"
     );
 }
 

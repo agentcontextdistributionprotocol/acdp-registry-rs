@@ -2276,10 +2276,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   two modes do opposite things — strict rejects every `did:web` publish, lax
   **accepts them with no signature check**.
 
-  **Upgrade note:** a config that boots today can be refused after this. The
-  case is a rotated-out entry left in place with broken key material — expired
-  *and* malformed. It was inert before, because the validity-window filter
-  skipped it. Delete rotated-out entries rather than leaving them broken.
+  **Upgrade note:** a config that boots today can be refused after this — any
+  entry matching one of the five is now fatal, however harmless it looked
+  before. Three shapes cover essentially all of it: a **rotated-out entry left
+  in place with broken key material** (expired *and* malformed — wholly inert
+  before, since `pinned_for_at` filters on the validity window and nothing ever
+  decoded it); **any** broken entry while `playground.enabled = false`, because
+  these rules do not consult `enabled`; and a **currently-live** entry with a
+  typo'd `algorithm` or bad key material, which was already failing but only
+  for that one agent's publishes and only as an opaque 500, which is how it
+  goes unnoticed. Delete rotated-out entries rather than leaving them broken.
   Runtime pin-evaluation semantics are unchanged: this refuses bad config at
   the two doors, it does not change what a good config means. Docs:
   `docs/CONFIGURATION.md` (startup validation) and `docs/HTTP-API.md`

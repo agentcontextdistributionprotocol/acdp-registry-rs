@@ -1231,8 +1231,9 @@ One new `pub` item in core, not a new public config API.
 ### W3-U1-b. An all-expired pinned-key list WARNS; it does not refuse — a departure from AC3
 
 The assignment's AC3 says an unusable list "MUST" be refused at startup and that
-"all entries expired" must count as unusable. **I refuse the four structural defects and
-the impossible window, and I warn on the all-expired list.** Flagged to the leader rather
+"all entries expired" must count as unusable. **I refuse all five structural defects — the four
+key-material ones and the impossible window — and I warn on the all-expired
+list.** Flagged to the leader rather
 than taken silently, and logged `UNCONFIRMED` in `ASSUMPTIONS.md`.
 
 Two reasons, both about what the state actually *is* rather than what it looks like:

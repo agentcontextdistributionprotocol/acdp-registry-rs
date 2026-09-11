@@ -82,11 +82,26 @@ The binary validates config before serving and refuses to boot on a misconfig
   `"internal error"` (RFC-ACDP-0007 §5), leaving the operator a 500 with no
   indication that the cause is a config typo.
 
-  > **Upgrade note.** A config that boots today can be refused after this
-  > change. The case to check is a **rotated-out entry left in place with
-  > broken key material** — expired *and* malformed. It was inert before,
-  > because the validity-window filter skipped it, and is now a startup
-  > failure. Delete rotated-out entries rather than leaving them broken.
+  > **Upgrade note — a config that boots today can be refused after this
+  > change.** Any entry matching one of the five above is now fatal, however
+  > harmless it looked before. Three shapes account for essentially all of it,
+  > in rising order of how quiet they were:
+  >
+  > - **A rotated-out entry left in place with broken key material** — expired
+  >   *and* malformed. Completely inert before: `pinned_for_at` filters on the
+  >   validity window, so nothing ever decoded it. Nothing was wrong at
+  >   runtime, and now the registry will not start.
+  > - **Any broken entry at all while `playground.enabled = false`.** These
+  >   rules do not consult `enabled`, so a section you consider switched off
+  >   is still validated.
+  > - **A currently-live entry with a typo'd `algorithm` or bad key
+  >   material.** This one *was* already failing — but only for that single
+  >   agent's publishes, as an opaque 500, which is why it can sit unnoticed
+  >   for a long time. It is now refused up front for everyone.
+  >
+  > Delete rotated-out entries rather than leaving them broken. If a registry
+  > that has been running for months suddenly will not start after an upgrade,
+  > this is the first thing to check.
 
   **Not a refusal — a startup warning:** a list where *no* entry is currently
   within its validity window (all expired, or all future-dated). This is not
