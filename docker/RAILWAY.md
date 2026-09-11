@@ -1,20 +1,31 @@
 # Deploying the registry to Railway
 
-The CI pipeline (`.github/workflows/docker.yml`) builds a multi-arch image and
+The CI pipeline (`.github/workflows/docker.yml`) builds a `linux/amd64` image and
 pushes it to the GitHub Container Registry (GHCR) on every push to `main` and on
-every `v*` tag:
+every `acdp-registry-server/v*` release tag:
 
 ```
-ghcr.io/agentcontextdistributionprotocol/acdp-registry:latest   # default branch
-ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1.0    # release tags (leading `v` stripped)
-ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<sha>
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:latest        # tip of main
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:main          # tip of main
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1.1         # e.g. — a release tag, leading `v` stripped
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1           # e.g. — rolling major.minor
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every push
 ```
+
+> **`:latest` tracks the tip of `main`, not the last release.** Pin a version tag
+> (`:0.1.1`, or `:0.1` to follow patches) for anything you care about keeping
+> stable. The two version tags above are shown as *examples of the shape*: the
+> release pipeline had never successfully published one before 2026-09-10, so the
+> first real version tag appears with the next release.
+
+Pull-request builds compute a `pr-<n>` tag but never push it — the login and push
+steps are skipped for `pull_request` events.
 
 ## Deploy the prebuilt GHCR image (recommended)
 
 `acdp` is consumed from crates.io, so Railway *could* build this repo from source
 directly. We still recommend deploying the **prebuilt GHCR image**: it's the
-exact multi-arch artifact CI already built and tested, so deploys are fast and
+exact `linux/amd64` artifact CI already built and tested, so deploys are fast and
 reproducible instead of recompiling the Rust workspace on every push.
 
 ## One-time GHCR setup
@@ -31,7 +42,8 @@ Railway needs to pull from GHCR. Either:
 
 1. New Project → **Deploy from a Docker image**.
 2. Image: `ghcr.io/agentcontextdistributionprotocol/acdp-registry:latest`
-   (pin a `vX.Y.Z` tag for production stability).
+   (pin a version tag such as `0.1.1` for production stability — the image tag
+   carries no leading `v`).
 3. Add a **PostgreSQL** plugin (the image is built with `STORAGE_FEATURE=storage-pg`).
 4. Set the env vars below.
 5. Networking → expose the service; set the target port (see `$PORT` note).

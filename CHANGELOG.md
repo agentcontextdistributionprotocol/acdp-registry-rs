@@ -2463,6 +2463,47 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- end U-002 #179 -->
 
+<!-- W2-U3 release & CI plumbing -->
+
+- **Releases work again, and the container pipeline can finally publish a version
+  tag** (`W2-U3`): `release-plz` had produced no release since 2026-06-13 despite
+  83 squash-merged pull requests on `main` since then — 23 of them `feat`/`fix`,
+  the prefixes that should bump a version — reporting success in under a minute
+  each time. It resolves "what was last released" from crates.io even with
+  `publish = false`; nothing here is published, so all eight crates read as
+  never-released, it proposed the current `0.1.0`, and the release step then
+  refused because that tag already existed. `git_only = true` moves the baseline
+  onto git tags, and `git_tag_name` changes to `{{ package }}/v{{ version }}` so
+  the un-packageable June tags stop matching without being deleted.
+
+  **Reading old tags:** the eight `acdp-registry-<crate>-v0.1.0` tags and their
+  GitHub Releases are untouched and still valid; new ones use a `/` instead of the
+  final `-`. **The first release run after this change re-bases the tag namespace
+  and produces no release PR — that is expected; the run after it produces one.**
+
+  `docker.yml` triggered on `tags: ["v*"]`, which has never matched any tag this
+  repo creates, so that trigger had never fired and its `type=semver` rule was
+  dead — the image has only ever existed as `:latest`, `:main` and `:sha-<sha>`.
+  It now
+  triggers on `acdp-registry-server/v*` (one tag per release, not eight) and
+  extracts the version with an explicit `match=`, guarded by a step that fails the
+  job if a tag push ever stops yielding a semver version. `release-plz` also now
+  authenticates as a GitHub App, because tags pushed with the default
+  `GITHUB_TOKEN` do not start workflow runs — without that, the corrected trigger
+  would still never fire. That App token is scoped to `contents` and
+  `pull-requests` only, and `CARGO_REGISTRY_TOKEN` is no longer passed to the
+  release job at all: nothing in `git_only` mode publishes to crates.io, so
+  withholding it makes an accidental publish impossible rather than merely
+  unintended.
+
+  [`docker/RAILWAY.md`](docker/RAILWAY.md) advertised
+  `ghcr.io/…/acdp-registry:0.1.0` built on "every `v*` tag"; that image has never
+  existed, and the image is `linux/amd64`, not multi-arch. Both corrected.
+  `PROGRESS.md` and `.drive.lock` are now git-ignored, and the duplicate `## 6.`
+  heading in `DECISIONS.md` is disambiguated without renumbering entries 7-10.
+
+<!-- end W2-U3 -->
+
 ### Security
 
 <!-- U-001 #174 (lane-1) -->
