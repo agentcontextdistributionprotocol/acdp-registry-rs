@@ -1317,3 +1317,131 @@ same commit: the `JWT_SECRET` row's "never validated", the note's "This recipe l
 authentication OFF", and the `ALLOW_PUBLIC_BIND` argument. The `ALLOW_PUBLIC_BIND` row is
 **kept and re-documented, not dropped** — removing it would change the recipe a second time
 beyond what was authorized.
+
+## W3-U1 — #192/#193: refusing bad playground config at both doors (2026-09-10)
+
+**Decided by:** Opus, under the lane assignment. Recorded because three of the four calls
+below either depart from a written acceptance criterion or cut against an existing entry,
+and a future reader would otherwise read them as drift.
+
+### W3-U1-a. The shared validator lives in `acdp-registry-core`, not `acdp-registry-types`
+
+The assignment named the structural constraint and it holds: `validate_config` is in
+`crates/acdp-registry-server/src/main.rs`, and that crate is bin-only (`[[bin]]`, no
+`[lib]`), so `acdp-registry-core` — where the reload handler lives — cannot call it. One
+copy of the rules has to move somewhere both doors can see.
+
+**This is the same question entry 5 answered the other way, and the difference is real.**
+Entry 5 narrowed `ct_eq` to `pub(crate)` and explicitly rejected moving it to
+`acdp-registry-types` as "speculative restructuring for a need that does not exist". The
+need was absent there because every caller was inside one crate. Here two crates genuinely
+both need the validation *today* — that is precisely the condition entry 5 said was
+missing. Entry 12 already drew this same line for the cursor codec.
+
+**But the destination is core, not types**, which is where this departs from both prior
+entries. The rules being enforced are not properties of the `PlaygroundConfig` *shape* —
+they are properties of what the *runtime* will accept, and the authority for that is
+`PinnedAlgorithm::parse` and the two key decoders, all private to
+`crates/acdp-registry-core/src/playground.rs`. Putting the validator in types would mean
+restating the algorithm list and the byte-length rules a crate away from the code that
+enforces them: exactly the drift this unit exists to close, reintroduced one layer up. The
+binary already calls into core from `validate_config` in three places, so this extends an
+established direction rather than opening one.
+
+Consequence, stated deliberately: `acdp-registry-types` ends this unit with **zero diff**,
+so nothing here becomes a semver commitment when `release-plz.toml`'s `publish` flag flips.
+One new `pub` item in core, not a new public config API.
+
+### W3-U1-b. An all-expired pinned-key list WARNS; it does not refuse — a departure from AC3
+
+The assignment's AC3 says an unusable list "MUST" be refused at startup and that
+"all entries expired" must count as unusable. **I refuse all five structural defects — the four
+key-material ones and the impossible window — and I warn on the all-expired
+list.** Flagged to the leader rather
+than taken silently, and logged `UNCONFIRMED` in `ASSUMPTIONS.md`.
+
+Two reasons, both about what the state actually *is* rather than what it looks like:
+
+1. **Expiry is time-dependent, and the others are not.** A typo'd algorithm is wrong in
+   every possible present. An all-expired list is a config that was valid yesterday and is
+   identical today. Refusing it makes *bootability a function of the wall clock* — the same
+   file starts a registry at 09:00 and refuses to start it at 09:01, and the failure lands
+   on whoever happens to restart next, which is usually an unrelated incident. That turns a
+   key-rotation lapse into a second outage during the first one.
+2. **Under `pinned_only = false` the state is not even an error.** Lax-with-expired-pins is
+   behaviourally identical to lax-with-no-pins, which is a supported configuration. Refusing
+   it would refuse a state the registry otherwise permits.
+
+The warning therefore carries the whole weight, and it **branches on `pinned_only`**,
+because the two modes do opposite things: strict rejects every `did:web` publish; lax
+**accepts them with no signature check**. A single message could only have been right about
+one. See W3-U1-d.
+
+**What would change my mind:** a strict-mode deployment that would rather fail to start than
+run rejecting every publish. That is a legitimate preference and the right shape for it is a
+config key (`playground.refuse_on_no_live_pin`), not a change to this default — because the
+default has to be right for the lax case too, where refusing is plainly wrong.
+
+### W3-U1-c. A rejected reload must leave the live cell untouched, and the test proves the cell
+
+AC2 asked for the observable state, not the status code, and the distinction turned out to
+be load-bearing rather than pedantic. Two mutations were run against the fix:
+
+- Remove the rejection entirely → both refusal tests fail. Expected.
+- **Swap first, validate after** → the status assertion still **passes** (the request is
+  still rejected with `400`), and the test fails only at the cell assertion:
+  `left: ["did:web:agents.test:mallory"]`, `right: ["did:web:agents.test:alice"]`.
+
+The second mutation is the one that matters. A status-only test would have been **green**
+against a handler that corrupts the running configuration on every rejection — a reload that
+half-applies is strictly worse than one that fails, because the operator is told "rejected"
+and left running the rejected config. Validation is therefore ordered before the write lock
+is taken, not inside the critical section: the swap is not merely undone on failure, it is
+never reached.
+
+The reload validates against the **running** receipt posture
+(`state.config.receipt.is_configured()`), not the freshly-loaded one, because `[receipt]` is
+not hot-swappable — only the `[playground]` section is. Validating the new playground section
+against a receipt setting that will not take effect until restart would refuse configs that
+are correct for the process actually running.
+
+### W3-U1-d. No error string is written until its branch is read
+
+Adopted as a rule after the third occurrence of one failure. In `U-005` and again in `W2-U1`
+I wrote prose that dropped precision the text it replaced already had (the `did:key` carve-
+out: `did:key` identities are self-verifying and never reach the playground gate). The third
+was in this unit's own first draft — a warning reading "Pinned agents will be rejected until
+a key is rotated in", which is **false in the lax branch**, where they are accepted
+unverified. That draft would have told an operator their registry was closed at the exact
+moment it was silently open.
+
+The rule is mechanical, because judgement is what failed: **every new error or warning
+string is checked against the code path that emits it, by reading that path, before the
+string is written.** Applied here to the doc examples too — the `400` body quoted in
+`docs/HTTP-API.md` is the byte-exact string the handler produces, and the claim that a
+request-time failure is opaque was checked against
+`crates/acdp-registry-types/src/error.rs:125`, which redacts every `internal_error` to the
+static message `"internal error"`.
+
+### W3-U1-e. Exhaustiveness is enforced by the compiler, not by a test
+
+The gap `#193` closed was a validator narrower than the hazard it was written for. The
+obvious way to reintroduce it is to add a field to `PinnedAgentKey` tomorrow and not validate
+it — and every by-example test in this unit would still pass, because none of them know the
+new field exists.
+
+`validate_playground_config` therefore destructures both `PlaygroundConfig` and
+`PinnedAgentKey` **exhaustively and deliberately without `..`**, with each ignored field
+bound explicitly and commented with where it *is* validated. Adding a field is then a compile
+error in this function, not a silent coverage hole. Mutation-proven rather than asserted:
+adding `pub key_usage: String` to `PinnedAgentKey` produced
+
+```
+error[E0027]: pattern does not mention field `key_usage`
+  --> crates/acdp-registry-core/src/playground.rs:281:13
+```
+
+The code carries a comment saying not to "fix" this with `..`, since that is what a reader
+tidying warnings would reach for first. Chosen over a self-inspecting test (the shape lane-3
+used elsewhere) for this specific property: a test that enumerates fields can go vacuous
+without anyone noticing, whereas this cannot compile wrong.

@@ -864,3 +864,38 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   by line. This is the second time in two units that a docs-only edit invalidated a pin in a
   file the editing lane was not allowed to touch.
 - **Status:** UNCONFIRMED
+## W3-U1 — #192/#193: validating playground config at both doors (2026-09-10, lane-1)
+
+- **UNCONFIRMED — a deliberate departure from a written acceptance criterion.** The unit
+  assignment's AC3 says an unusable pinned-key list "MUST" be refused at startup and names
+  "all entries expired" as qualifying. This unit **refuses the five structural defects**
+  (unknown `algorithm`, non-base64 key material, wrong `ed25519`/`ecdsa-p256` byte length or
+  missing `0x04` tag, and `valid_from >= valid_until`) but **warns, loudly and branched, on
+  an all-expired list rather than refusing it.** Reasoning in full in `DECISIONS.md`
+  (`W3-U1-b`); in short: expiry is time-dependent, so refusing makes bootability a function
+  of the wall clock and turns a rotation lapse into an outage during the next unrelated
+  restart — and under `pinned_only = false` the state is behaviourally identical to having
+  no pins at all, which is a supported configuration. Flagged to the leader in the done
+  report rather than taken silently. **If the leader wants AC3's literal reading, the change
+  is small and localized** — the warning branch becomes an `Err` — but it should arrive as a
+  config key (`playground.refuse_on_no_live_pin`) rather than a default, because refusing is
+  plainly wrong for the lax case. **Status: UNCONFIRMED.**
+- **Resolved from this file's own W2-U1 entry above:** that entry left placement of the
+  shared validator (`acdp-registry-types` vs `acdp-registry-core`) deliberately undecided for
+  whoever took #192/#193. Taken here: **`acdp-registry-core`**, because the rules being
+  enforced are properties of what the runtime accepts and their authority
+  (`PinnedAlgorithm::parse` and the two key decoders) is private to
+  `crates/acdp-registry-core/src/playground.rs`. `acdp-registry-types` ends with zero diff.
+  **Status: CONFIRMED** (see `DECISIONS.md` `W3-U1-a`, which also reconciles this against the
+  `ct_eq` precedent in entry 5).
+- **CONFIRMED by mutation, not by assertion:** that the `#192` tests prove the *live cell* is
+  untouched on rejection and not merely the status code. Reordering the handler to swap first
+  and validate after leaves the status assertion **green** and fails only at the cell
+  assertion. A status-only test would have passed against a handler that corrupts running
+  config on every rejection. **Status: CONFIRMED.**
+- **CONFIRMED by mutation:** that the validator cannot silently go stale when
+  `PinnedAgentKey` gains a field. Exhaustive destructuring without `..` makes that a compile
+  error (`error[E0027]`), observed by actually adding a field. **Status: CONFIRMED.**
+- **Not re-litigated, and explicitly out of scope:** runtime pin-evaluation semantics.
+  `PinOutcome::Skipped` still means "no policy active". This unit refuses bad config at the
+  two doors; it does not change what a good config means.
