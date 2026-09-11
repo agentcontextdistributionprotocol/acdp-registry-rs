@@ -103,24 +103,50 @@ Because head receipts are requester-relative (the head is selected under
 the requester's visibility), `/current` responses must not be cached across
 differently-authorized requesters.
 
-**The registry does not mark them.** `/current`, `/contexts/*` and the search
-endpoints emit **no** `Cache-Control` header at all — not `private`, not
-`no-store`. The only `Cache-Control` this registry ever emits is
-`public, max-age=300`, on the three `/.well-known/*` endpoints
-(`crates/acdp-registry-core/src/handlers/meta.rs:74`, `:95`, `:126`), and none
-of those are requester-relative. Absent a directive, a shared cache applies its
-own heuristics, and the failure mode is a visibility-scoped body served to a
-requester who should have seen a different one.
+**The registry marks them** (#205). `/current`, `/contexts/*`, `/lineages/*`,
+the search endpoint and `/log/proof`/`/log/entries` all emit:
 
-So this is an operator obligation, not something the registry has handled for
-you: **if you front the registry with a shared cache or CDN, configure it not
-to cache `/lineages/*/current`, `/contexts/*` or the search endpoints across
-requesters.** A single-tenant deployment with no shared cache in front of it —
-including the Railway recipe in [RAILWAY.md](../docker/RAILWAY.md) — is not
-exposed. Whether the registry should emit `private`/`no-store` itself is a
-deliberate wire-behaviour decision, tracked in
-[#205](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/issues/205);
-it is not assumed here.
+```
+Cache-Control: private
+Vary: authorization, x-tenant-id
+```
+
+`private` rather than `no-store` deliberately: the threat is a **shared** cache
+reusing one requester's copy for another, and that is exactly what `private`
+excludes. `no-store` would add protection only against caches that ignore
+directives — which ignore `no-store` too — while permanently forbidding
+legitimate same-requester client caching.
+
+`Vary` names **both** axes because tenant scope comes from `x-tenant-id` as well
+as from the bearer token, and with `auth.enabled = false` the header is the only
+tenant signal. `Vary: Authorization` alone would be wrong for this registry.
+
+Credential and operational responses go further and emit `Cache-Control:
+no-store`: `/auth/*`, the `/admin/*` routes, and `/healthz` (on the degraded
+arm as well as the healthy one — a cached "ok" masks an outage).
+
+The three `/.well-known/*` documents keep `public, max-age=300`
+(`crates/acdp-registry-core/src/handlers/meta.rs:74`, `:95`, `:126`). None of
+them is requester-relative, and `every_well_known_document_keeps_public_caching`
+pins all three against a downgrade. (`/.well-known/did.json` exists only when a
+receipt key is configured; its 404 arm carries no directive at all.)
+
+`GET /metrics` is the one requester-relative response outside this posture: it
+gates on `metrics.bearer_token` and emits no cache directive. Tracked as #218
+rather than folded in here.
+
+### What this does not buy you
+
+Defense in depth, not a guarantee. Two limits worth stating plainly:
+
+- **A CDN configured to "cache everything" / ignore origin headers defeats both
+  `private` and `Vary`.** No header the origin sends can fix that. If you front
+  the registry with a shared cache, still confirm it honours origin directives
+  on `/contexts/*`, `/lineages/*` and the search endpoint.
+- **`private` carries no validators.** There is no `ETag`, no `Last-Modified`
+  and no `max-age`, so a requester's *own* cache may briefly reuse a context
+  that has since been retracted. Accepted: they already held those bytes. The
+  fix if it ever matters is ETags plus explicit freshness — not `no-store`.
 
 ## Serving `/.well-known/did.json`
 

@@ -151,5 +151,14 @@ pub async fn health<S: ExtendedRegistryStore + 'static>(
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (status, body)
+    // #205: never cacheable, on BOTH arms. A cached "degraded" masks a recovery
+    // and a cached "ok" masks an outage; staleness here is the failure mode the
+    // endpoint exists to rule out. Set in the handler rather than by a layer
+    // because `/healthz` shares the `aux` group with the two well-known
+    // documents (which set their own `public, max-age=300`) and `/metrics`.
+    (
+        status,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        body,
+    )
 }
