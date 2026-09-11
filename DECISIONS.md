@@ -811,7 +811,7 @@ human call. Two had their *reasoning* corrected — the decisions were right, th
 arguments were not, and an argument that does not hold is worse than none because the next
 maintainer will cite it.
 
-## 6. `WEBHOOK_SCHEMA_VERSION` stays `"1.0"` across the `event_id` wire rename (2026-09-10)
+## 6-bis. `WEBHOOK_SCHEMA_VERSION` stays `"1.0"` across the `event_id` wire rename (2026-09-10)
 
 **Decided by:** Opus. **Verdict: CONFIRMED, rationale replaced.**
 
@@ -1193,6 +1193,130 @@ for someone to discover at publish time.
 **What would change my mind:** a second consumer appearing that wants a *different* cursor
 format. Then the right shape is a trait with the codec behind it, not a free function — and
 that is a bigger change than visibility.
+## W2-U3 — release-plz un-stall, docker tag pipeline, Railway auth posture (2026-09-10)
+
+Unit-scoped slug, matching the precedent lane-1 set with
+`## W2-U1 — #185: hoisting the pinned-keys guard`. Decided by Opus under `/drive`; the
+auth-posture item was ruled by the human and is recorded here as ratification, not as a
+lane call.
+
+> **On the `D-0xx` and "CHARTER rule N" identifiers used below.** They refer to a
+> multi-session coordination board that lives *outside this repository* and is deliberately
+> not in git, so they are **not resolvable from this tree**. Every one of them is therefore
+> stated with its substance inline; the identifier is provenance, never the argument. This
+> file already carried that convention before this entry (two such references predate it),
+> but it is worth naming: a citation a reader cannot follow has to carry its own content.
+
+### 1. The duplicate `## 6.` heading is disambiguated as `## 6-bis.`, not renumbered
+
+`DECISIONS.md` carried two `## 6.` entries — `U-001 — predecessor_admission …` and
+`WEBHOOK_SCHEMA_VERSION stays "1.0" …` — because two lanes numbered against the same base
+with no lock. That is the collision CHARTER rule 16 was written for.
+
+The `WEBHOOK_SCHEMA_VERSION` entry's heading becomes `## 6-bis.`. **A cascading renumber was
+forbidden and would have been wrong anyway**: entries 7-10 are cited elsewhere, including
+`ASSUMPTIONS.md`'s pointer to entry 10.
+
+A unit slug (`## U-002 — …`) was considered for the renamed entry and **rejected**: that
+entry's body carries no unit id, and neither does its neighbour, so assigning it to U-002
+would invent provenance that cannot be verified from the tree — the exact failure CHARTER
+rule 15 exists to prevent. `6-bis.` asserts only what is certainly true: a sibling of entry 6
+from the same wave, sorting between 6 and 7. New entries, whose provenance *is* known, get
+slugs.
+
+### 2. `.gitignore` gains root-anchored `/PROGRESS.md` and `/.drive.lock`
+
+The CHARTER rule-13 grant. Root-anchored on purpose: unanchored patterns would also hide a
+future `crates/*/PROGRESS.md`, which the grant does not cover.
+
+> **Tense warning.** Sections 3-6 record decisions taken for this unit and describe the
+> state *after* all of its phases land. At the moment this entry was appended, only the two
+> items above were in the tree. Where a statement below is a prediction rather than an
+> observation, it says so explicitly.
+
+### 3. release-plz is un-stalled with `git_only = true`, NOT by publishing to crates.io
+
+Root cause established from evidence, not hypothesis. release-plz resolves "what was last
+released" from the **cargo registry** even when `publish = false`; nothing is on crates.io;
+every crate reads as never-released; it proposes the current version `0.1.0`; the existing
+tag then blocks it. A self-sustaining deadlock. The DEBUG log names the path outright
+(`Processing 8 packages from registry` -> `downloading packages from cargo registry crates.io`
+-> `Package acdp-registry-types@*.*.* not found`), with zero git-tag lookups.
+
+Flipping `publish = true` would have "fixed" it by starting to publish eight crates to
+crates.io. **Rejected outright** as a one-way door and a cross-boundary publish, not a lane's
+call. The constraint was standing before the analysis began, so no escalation was needed —
+the fix below never approached it. `git_only = true` un-stalls versioning with no publish anywhere.
+
+### 4. The dead `*-v0.1.0` tags are retired by changing `git_tag_name`, not by deleting them
+
+`git_only` alone still fails: it makes release-plz `cargo package` the June tag's tree, which
+cannot resolve because at that commit `acdp` was a **git** dependency, and across the surrounding
+range it was a `path = "../acdp-rs"` dependency with a `[patch.crates-io]` — neither of which
+`cargo package` can rebuild from a tarball. (The path-dependency period runs through
+2026-07-05 and is not cleanly "after" the git-dependency one; both simply predate the current
+crates.io dependency.) The baseline must therefore be
+re-based at a modern commit. **Deleting the eight tags was rejected — it would orphan eight
+published GitHub Releases.** Changing the tag template retires them non-destructively: they
+simply stop matching.
+
+Consequence, accepted knowingly — and this is a **prediction from a local simulation, not an
+observation**: the first post-merge run is expected to mint new-shape tags and create eight
+duplicate `0.1.0` GitHub Releases, moving the "Latest release" marker. The evidence is a
+throwaway-clone run with synthetic tags planted 12 commits back, not a real CI run; a tag
+event cannot be staged before merge. Cosmetic and
+reversible by a human with `gh release delete <tag>` — which must **not** delete the tag.
+
+### 5. This is a TWO-STEP bootstrap and the first post-merge run is deliberately PR-less
+
+**Predicted, from the same local simulation.** The merge that lands this unit is expected to
+mint the tags and produce no release PR. **The merge after it is the one that produces the
+first release PR.** A green, PR-less bootstrap run is success, not failure. Recorded here because the
+obvious misreading — "still broken" — is the one a future reader is most likely to make.
+
+### 5-bis. release-plz runs as a GitHub App, with its permissions pinned down
+
+Tags and PRs created with the default `GITHUB_TOKEN` **do not start workflow runs** — GitHub
+suppresses them to prevent recursion, and release-plz documents this for `on: push: tags`
+specifically. So the corrected `docker.yml` trigger would have been right and still never
+fired, and CI would never have run on the release PR. release-plz therefore mints a GitHub App
+installation token (the App this repo already runs in `notify-website.yml`, `bump-acdp.yml` and
+`bump-spec.yml`) and uses that as its `GITHUB_TOKEN`.
+
+`owner` and `repositories` are omitted so the token scopes to this repository. Copying
+`notify-website.yml`'s shape would have been wrong twice over: it sets
+`repositories: acdp-website` because it dispatches into a different repo, which would leave
+release-plz with no permission here; and setting `owner` alone widens the token to every
+repository in the installation.
+
+**`permission-contents: write` and `permission-pull-requests: write` are load-bearing, not
+hygiene.** An App token ignores the job's `permissions:` block and otherwise inherits every
+permission the installation holds — for this App that includes `workflows: write`. Without
+those two lines the change would have handed a third-party action, and the binary it
+downloads, the ability to rewrite `.github/workflows/*` — authority the default token it
+replaces never had. Scoping the repository is not scoping the grant; that distinction was
+missed on the first pass and caught at the verification gate.
+
+Consequences a future reader should know: the App's token lives exactly 60 minutes, which is
+why the job is bounded at 45 rather than 60 — a 60-minute bound would fail on an opaque 401
+instead of a clean timeout. `persist-credentials: false` on checkout keeps the default token
+out of `.git/config`, so release-plz's `git push` fallback paths cannot silently re-acquire an
+identity that cannot trigger workflows. And because the release PR is now authored by the App
+rather than by `github-actions[bot]`, anything keyed on the old author — auto-merge rules,
+CODEOWNERS review requirements — is keyed on the wrong identity. If tags are ever configured
+to be GPG-signed, release-plz falls back to `git push` and this arrangement needs revisiting.
+
+### 6. Only `docker/RAILWAY.md` turns authentication on; the compose stack does not
+
+Human ruling (D-016/D-018 escalation). Railway and the shipped compose stack are different
+deployment classes and only Railway was ruled on; `docker/config.docker.toml` and
+`docker/docker-compose.yml` keep `auth.enabled = false` per D-016 item 1.
+
+Enabling auth falsifies three statements the previous unit shipped, so all three move in the
+same commit: the `JWT_SECRET` row's "never validated", the note's "This recipe leaves
+authentication OFF", and the `ALLOW_PUBLIC_BIND` argument. The `ALLOW_PUBLIC_BIND` row is
+**kept and re-documented, not dropped** — removing it would change the recipe a second time
+beyond what was authorized.
 
 ## W3-U1 — #192/#193: refusing bad playground config at both doors (2026-09-10)
 
@@ -1321,3 +1445,53 @@ The code carries a comment saying not to "fix" this with `..`, since that is wha
 tidying warnings would reach for first. Chosen over a self-inspecting test (the shape lane-3
 used elsewhere) for this specific property: a test that enumerates fields can go vacuous
 without anyone noticing, whereas this cannot compile wrong.
+
+---
+
+## W2-U3 addendum — the eight duplicate GitHub Releases are NOT accepted after all (2026-09-11)
+
+**This supersedes the "Consequence, accepted knowingly" paragraph in this unit's section 4 and
+the "eight GitHub Releases" prediction in section 5.** Those paragraphs are left in place —
+`DECISIONS.md` is append-only — but they no longer describe what shipped, and a reader who stops
+there gets the opposite of the truth.
+
+**What changed.** Section 4 recorded, as accepted, that the bootstrap run would create eight
+duplicate `0.1.0` GitHub Releases and move the repository's "Latest release" marker, on the
+grounds that this is cosmetic and a human can reverse it with `gh release delete`. It also
+recorded that toggling `git_release_enable` off and on across two merges **was rejected as the
+worse trade**, because it needs two merges and risks the flag never being restored.
+
+**The human overruled that**, in full knowledge of the objection — the "flag never restored" risk
+was put to them in writing, by me, as the reason not to do this. They chose the two-merge route
+anyway. It is their repo. The decision stands and is implemented.
+
+**Decided by:** the human, overruling both this lane's recommendation and the leader's.
+
+**What shipped instead:**
+
+- Merge A (PR #202) carries `git_release_enable = false`. The bootstrap run mints the eight
+  new-shape tags and creates **no** Releases. Nothing touches the eight 2026-06-13 tags or their
+  existing Releases, and the "Latest release" marker does not move.
+- Merge B restores `git_release_enable = true` immediately after, and removes the `TEMPORARY`
+  comment block with it.
+
+**The load-bearing check that made this safe.** Merge A's entire purpose is minting the tags, so
+the route collapses if the flag also suppresses tagging. It does not — verified against the
+0.3.160 source (two independent `if` blocks in `create_git_tag_and_release`, distinct config
+fields, one read site repo-wide) and by running `release --dry-run` both ways. Recorded in full
+in `ASSUMPTIONS.md` under "Disabling GitHub Releases for the bootstrap merge does not disable git
+tags", now **CONFIRMED**.
+
+**The risk this decision knowingly takes, stated plainly so the record carries it.** If merge B
+does not happen, GitHub Releases are disabled for this project indefinitely, and the failure is
+silent: release-plz keeps reporting success and keeps minting tags. Four independent carriers
+exist against that — issue #204, a `TEMPORARY` comment above the flag, a section at the top of
+PR #202's body, and this entry. A fifth was considered and not built: a CI check that fails while
+the flag is off. It is the only carrier that does not rely on a human reading something, and it
+is the right long-term answer; it is not in scope for a lane under stand-down, and is recorded
+here and on #204 as the recommended follow-up.
+
+**Restore precondition — do not restore blind.** Merge B should land only once the eight
+new-shape tags are confirmed present on `main`. If the bootstrap run fails to mint them, restoring
+the flag means the *next* run mints tags **and** the eight duplicate Releases — the exact outcome
+this route exists to prevent.

@@ -3,7 +3,19 @@ name: docker
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    # release-plz tags every crate in the workspace at the same commit, so a
+    # release produces eight tags at once. Only the server crate's tag denotes a
+    # *server* release — docker/Dockerfile builds the `acdp-registry` binary from
+    # crates/acdp-registry-server — and matching only it keeps this workflow to
+    # one run per release. A broader `*-v*` would fire eight concurrent builds
+    # racing on the same image tag; `concurrency: docker-${{ github.ref }}` would
+    # NOT serialise them, because each tag is a different ref.
+    #
+    # The previous value here was `v*`, which never matched anything: no tag of
+    # that shape has ever existed in this repo, so this trigger had never fired
+    # and the semver rule below was dead. Keep this in step with
+    # release-plz.toml's `git_tag_name`.
+    tags: ["acdp-registry-server/v*"]
   pull_request:
     branches: [main]
 
@@ -34,12 +46,44 @@ jobs:
         id: meta
         with:
           images: ${{ env.IMAGE }}
+          # `latest` must come only from the default-branch rule below. The
+          # `latest=auto` default would additionally attach it to release tags,
+          # silently moving what `:latest` points at — and docker/RAILWAY.md
+          # tells operators to deploy `:latest`.
+          flavor: latest=false
+          # `match=` on the two semver rules is required: these tags are
+          # `acdp-registry-server/v1.2.3`, not a bare `v1.2.3`, and type=semver
+          # cannot parse the prefixed form on its own. Without it the rule does
+          # not match, metadata-action emits only a warning, and `version`
+          # silently falls through to `sha-...` (semver priority 900, sha 100).
+          # The assert step below exists because that failure is otherwise
+          # invisible in a green job.
+          #
+          # These comments sit ABOVE `tags:` deliberately. `tags:` is a block
+          # scalar, so anything indented under it is literal INPUT, not a YAML
+          # comment — a `#` line there only survives because metadata-action's
+          # CSV parser happens to be configured to strip `#`, which its README
+          # does not document. Relying on that would mean a future version of
+          # the action silently reinterpreting six comments as six malformed
+          # tag rules. Keep prose out of the block scalar.
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
+            type=semver,pattern={{version}},match=v(\d+\.\d+\.\d+.*)$
+            type=semver,pattern={{major}}.{{minor}},match=v(\d+\.\d+\.\d+.*)$
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
+
+      # A green job is not evidence that the tag rules fired. Make it evidence.
+      - name: assert semver tag on a release tag push
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          v='${{ steps.meta.outputs.version }}'
+          case "$v" in
+            [0-9]*.[0-9]*.[0-9]*) echo "metadata version '$v' is semver" ;;
+            *) echo "::error::metadata-action produced version '$v' for ${{ github.ref }}; the type=semver match= rule did not fire"; exit 1 ;;
+          esac
 
       # `option_env!("ACDP_BUILD_SHA")` is compiled into the binary, so the
       # commit has to arrive as a build ARG (`.dockerignore` excludes `.git/`).
