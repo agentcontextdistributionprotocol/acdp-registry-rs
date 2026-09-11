@@ -121,7 +121,10 @@ pub struct ReloadPinnedKeysResponse {
 /// Authorization: bearer token MUST be present in `auth.admin_tokens`.
 /// Mirrors the federated-revocation-feed gate (peers carry their
 /// `admin_token` in the same header). Returns 403 on bad/missing
-/// auth, 500 if the config can't be re-read.
+/// auth, 500 if the config can't be re-read, and 400 if it re-reads
+/// fine but its `[playground]` section is one startup would refuse
+/// (W3-U1/#192). The 400/500 split is deliberate — see
+/// `AdminAuthError::InvalidConfig`.
 ///
 /// The endpoint always re-reads the WHOLE config (cheap; small TOML)
 /// but applies only the `playground` section. Touching other sections

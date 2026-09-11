@@ -705,7 +705,7 @@ operator watching 5xx should not be paged for one. The `400` body names the
 offending entry and states that the running configuration is unchanged:
 
 ```json
-{ "error": "rejected: the on-disk playground config is invalid and was NOT applied; the running configuration is unchanged. playground.pinned_keys[0] (did:web:agents.test:alice): algorithm 'Ed25519' is not supported (expected one of: ed25519, ecdsa-p256). A publish from this agent that selects this entry is rejected at request time (HTTP 500, internal_error)." }
+{ "error": "rejected: the on-disk playground config is invalid and was NOT applied; the running configuration is unchanged. playground.pinned_keys[0] (did:web:agents.test:mallory): algorithm 'Ed25519' is not supported (expected one of: ed25519, ecdsa-p256). A publish from this agent that selects this entry is rejected at request time (HTTP 500, internal_error)." }
 ```
 
 Validation runs before the write lock is taken, so a rejected reload cannot
