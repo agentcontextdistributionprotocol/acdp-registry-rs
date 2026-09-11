@@ -21,19 +21,65 @@ jobs:
     # instead of downloading one tarball from crates.io. Measured at 10.7 min for
     # eight crates — but that was macOS/Apple Silicon with a warm ~/.cargo. This
     # runner is a slower 4-core box with a cold registry and no cargo cache step,
-    # so budget 25-35 min: 60 is a real bound with roughly 2x headroom, not 6x.
+    # so budget 25-35 min. Bounded at 45 rather than 60 deliberately: the App
+    # token minted below lives exactly 60 minutes, so a 60-minute job bound
+    # leaves no margin and a long run would die on an opaque 401 instead of a
+    # clean timeout. 45 still clears the 25-35 budget.
     # Note the *bootstrap* run is the fast path (tag lookups only, no
     # `cargo package`); the slow path starts on the second post-merge run.
     # This job holds the `concurrency: release-plz` group, so a hung run blocks
     # every later push to main until cancelled by hand. GitHub's default is 360.
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # Don't leave the default GITHUB_TOKEN in .git/config. release-plz
+          # creates tags and the release branch through the API with the App
+          # token, so this is not load-bearing today — but its `git push`
+          # fallback paths would otherwise silently authenticate as the default
+          # token, which cannot trigger workflows. That failure is invisible;
+          # without the persisted credential it is loud instead.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
+      # Tags and PRs created with the default GITHUB_TOKEN do NOT start workflow
+      # runs — GitHub suppresses them to prevent recursion, and release-plz
+      # documents this for `on: push: tags` specifically. With the default token
+      # the corrected trigger in docker.yml would be right and still never fire,
+      # and CI would never run on the release PR. Mint an App token instead.
+      #
+      # `owner`/`repositories` are deliberately omitted: the action then scopes
+      # the token to the current repository. Do NOT copy the shape used in
+      # notify-website.yml — that one sets `repositories: acdp-website` because it
+      # dispatches into a different repo, and copying it here would leave
+      # release-plz with no permission on this one. Setting `owner` alone is
+      # worse still: it widens the token to every repo in the installation.
+      #
+      # The two `permission-*` inputs are NOT optional hygiene. An App token
+      # ignores the job's `permissions:` block above and otherwise inherits
+      # EVERY permission the installation holds — which for this App includes
+      # `workflows: write`. Without these lines this job would hand a
+      # third-party action, and the release-plz binary it downloads, the ability
+      # to rewrite .github/workflows/* — authority the default GITHUB_TOKEN it
+      # replaces never had. Scoping the repository is not scoping the grant.
+      #
+      # `app-id` is deprecated in v3 in favour of `client-id`, so each run logs a
+      # deprecation warning. Kept because the stored secret is an App ID and
+      # notify-website.yml uses the same input; switching needs a new secret.
+      #
+      # First-party `actions/*` are trusted by major tag here (DECISIONS.md
+      # OQ4 names this action explicitly); third-party actions stay SHA-pinned.
+      - name: Mint a token whose pushes can trigger workflows
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.ACDP_BOT_APP_ID }}
+          private-key: ${{ secrets.ACDP_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: release-plz
         uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
@@ -46,7 +92,7 @@ jobs:
           # together with the SHA above, never on its own.
           version: "0.3.160"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
           # CARGO_REGISTRY_TOKEN is deliberately NOT passed.
           #
           # In git_only mode nothing here publishes to crates.io, so the

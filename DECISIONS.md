@@ -1274,6 +1274,38 @@ mint the tags and produce no release PR. **The merge after it is the one that pr
 first release PR.** A green, PR-less bootstrap run is success, not failure. Recorded here because the
 obvious misreading — "still broken" — is the one a future reader is most likely to make.
 
+### 5-bis. release-plz runs as a GitHub App, with its permissions pinned down
+
+Tags and PRs created with the default `GITHUB_TOKEN` **do not start workflow runs** — GitHub
+suppresses them to prevent recursion, and release-plz documents this for `on: push: tags`
+specifically. So the corrected `docker.yml` trigger would have been right and still never
+fired, and CI would never have run on the release PR. release-plz therefore mints a GitHub App
+installation token (the App this repo already runs in `notify-website.yml`, `bump-acdp.yml` and
+`bump-spec.yml`) and uses that as its `GITHUB_TOKEN`.
+
+`owner` and `repositories` are omitted so the token scopes to this repository. Copying
+`notify-website.yml`'s shape would have been wrong twice over: it sets
+`repositories: acdp-website` because it dispatches into a different repo, which would leave
+release-plz with no permission here; and setting `owner` alone widens the token to every
+repository in the installation.
+
+**`permission-contents: write` and `permission-pull-requests: write` are load-bearing, not
+hygiene.** An App token ignores the job's `permissions:` block and otherwise inherits every
+permission the installation holds — for this App that includes `workflows: write`. Without
+those two lines the change would have handed a third-party action, and the binary it
+downloads, the ability to rewrite `.github/workflows/*` — authority the default token it
+replaces never had. Scoping the repository is not scoping the grant; that distinction was
+missed on the first pass and caught at the verification gate.
+
+Consequences a future reader should know: the App's token lives exactly 60 minutes, which is
+why the job is bounded at 45 rather than 60 — a 60-minute bound would fail on an opaque 401
+instead of a clean timeout. `persist-credentials: false` on checkout keeps the default token
+out of `.git/config`, so release-plz's `git push` fallback paths cannot silently re-acquire an
+identity that cannot trigger workflows. And because the release PR is now authored by the App
+rather than by `github-actions[bot]`, anything keyed on the old author — auto-merge rules,
+CODEOWNERS review requirements — is keyed on the wrong identity. If tags are ever configured
+to be GPG-signed, release-plz falls back to `git push` and this arrangement needs revisiting.
+
 ### 6. Only `docker/RAILWAY.md` turns authentication on; the compose stack does not
 
 Human ruling (D-016/D-018 escalation). Railway and the shipped compose stack are different
