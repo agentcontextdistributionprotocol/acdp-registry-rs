@@ -118,7 +118,9 @@ to cache `/lineages/*/current`, `/contexts/*` or the search endpoints across
 requesters.** A single-tenant deployment with no shared cache in front of it —
 including the Railway recipe in [RAILWAY.md](../docker/RAILWAY.md) — is not
 exposed. Whether the registry should emit `private`/`no-store` itself is a
-deliberate wire-behaviour decision, tracked separately; it is not assumed here.
+deliberate wire-behaviour decision, tracked in
+[#205](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/issues/205);
+it is not assumed here.
 
 ## Serving `/.well-known/did.json`
 
