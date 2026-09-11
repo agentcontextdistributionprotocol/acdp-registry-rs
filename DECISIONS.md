@@ -1450,16 +1450,18 @@ without anyone noticing, whereas this cannot compile wrong.
 
 ## W2-U3 addendum — the eight duplicate GitHub Releases are NOT accepted after all (2026-09-11)
 
-**This supersedes the "Consequence, accepted knowingly" paragraph in this unit's section 4 and
-the "eight GitHub Releases" prediction in section 5.** Those paragraphs are left in place —
+**This supersedes the "Consequence, accepted knowingly" paragraph in this unit's section 4**,
+which is where both the acceptance and the "eight GitHub Releases" prediction live. Those paragraphs are left in place —
 `DECISIONS.md` is append-only — but they no longer describe what shipped, and a reader who stops
 there gets the opposite of the truth.
 
 **What changed.** Section 4 recorded, as accepted, that the bootstrap run would create eight
 duplicate `0.1.0` GitHub Releases and move the repository's "Latest release" marker, on the
-grounds that this is cosmetic and a human can reverse it with `gh release delete`. It also
-recorded that toggling `git_release_enable` off and on across two merges **was rejected as the
-worse trade**, because it needs two merges and risks the flag never being restored.
+grounds that this is cosmetic and a human can reverse it with `gh release delete`. The
+companion plan (`plans/w2-u3-release-ci-plumbing.md`, gitignored) went further and recorded that
+toggling `git_release_enable` off and on across two merges **was rejected as the worse trade**,
+because it needs two merges and risks the flag never being restored. That phrase is the plan's,
+not this file's — an earlier draft of this entry misattributed it here.
 
 **The human overruled that**, in full knowledge of the objection — the "flag never restored" risk
 was put to them in writing, by me, as the reason not to do this. They chose the two-merge route
