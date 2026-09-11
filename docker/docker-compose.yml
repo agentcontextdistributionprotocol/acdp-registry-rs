@@ -3,9 +3,11 @@
 # keeps this file usable for local demos.
 #
 # ACDP_REGISTRY_AUTH__JWT_SECRET is the deliberate exception: it defaults to
-# EMPTY, not to a placeholder. On HS256 — which config.docker.toml selects by
-# default — `validate_config` (see main.rs) decodes and length-checks every
-# non-empty `jwt_secret` on every boot, whether or not auth is enabled. So a
+# EMPTY, not to a placeholder. On HS256 — which the binary defaults to and
+# config.docker.toml does not override (the default lives in
+# acdp-registry-types/src/config.rs, not in this stack's config file) —
+# `validate_config` (see main.rs) decodes and length-checks every non-empty
+# `jwt_secret` on every boot, whether or not auth is enabled. So a
 # `changeme` placeholder here does not produce a working demo; it produces a
 # stack that exits rc=1 before serving a request. This file shipped exactly
 # that placeholder until W3-U5. (Under EdDSA `jwt_secret` is not examined at
@@ -26,8 +28,10 @@
 # the TOML file in the precedence chain — so the value you put in the file is
 # discarded unless you also set ACDP_REGISTRY_JWT_SECRET here. With auth off
 # that is harmless. With auth on it fails loudly, EXCEPT when
-# allow_ephemeral_secret = true, where it silently downgrades to a
-# process-lifetime key. Prefer the .env line above to editing the TOML.
+# allow_ephemeral_secret = true, where it downgrades to a process-lifetime
+# key after emitting a single startup `warn!` naming the hazard (main.rs) —
+# quiet, not silent, and easy to miss in a log tail. Prefer the .env line
+# above to editing the TOML.
 
 services:
   postgres:

@@ -1559,7 +1559,8 @@ One hazard the choice does introduce, recorded rather than discovered later: com
 variable as *set-to-empty* rather than absent, and an env var outranks the TOML file, so a
 `jwt_secret` uncommented in `config.docker.toml` is silently discarded. With auth off that is
 harmless and with auth on it fails loudly — except with `allow_ephemeral_secret = true`, where
-it downgrades silently to a process-lifetime key. Option (a) has the same property plus a secret
+it downgrades to a process-lifetime key after one startup `warn!` (`main.rs:838-844`) and no
+further signal. Option (a) has the same property plus a secret
 in git, so this does not change the ranking; it earns a caveat in the compose header.
 
 ### W3-U5-c. Four documents, one commit, because a truth-flip has no safe halfway point

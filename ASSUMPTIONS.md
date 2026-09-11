@@ -1063,8 +1063,13 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Reported, not fixed:** compose renders `ACDP_REGISTRY_AUTH__JWT_SECRET` as *set-to-empty*
   rather than absent, and an env var outranks the TOML file, so a `jwt_secret` uncommented in
   `docker/config.docker.toml` is silently discarded unless the operator also sets the shell
-  variable. Harmless with auth off; loud with auth on; a **silent** downgrade to a
-  process-lifetime key with auth on plus `allow_ephemeral_secret = true`. `config.docker.toml`
+  variable. Harmless with auth off; loud with auth on; with auth on plus
+  `allow_ephemeral_secret = true`, a downgrade to a process-lifetime key carrying **one
+  startup `warn!`** and nothing further. The first draft of this bullet called that downgrade
+  **silent**, which the ship gate refuted against `main.rs:838-844`: the `warn!` names the
+  hazard verbatim. That is this unit's own error class — overstating an exposure — recurring a
+  fourth time, in the ledger written to record it, and it survived because it was the one claim
+  in the diff with no captured transcript behind it. `config.docker.toml`
   is not in this unit's grant, so the caveat went into the compose header instead.
 - **Premise correction, derived from the artefact:** the dispatch described the false changelog
   sentence as **released** and pinned it at `CHANGELOG.md:2637`. Neither holds. `CHANGELOG.md`
