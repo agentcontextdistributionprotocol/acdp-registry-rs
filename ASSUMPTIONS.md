@@ -847,7 +847,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Status:** **CONFIRMED (2026-09-11)** — and this one is genuinely closed, not deferred.
   Source, at the exact version CI pins (0.3.160): `is_git_release_enabled` reads
   `config.git_release.enabled` and `is_git_tag_enabled` reads `config.git_tag.enabled`
-  (`release_plz_core/src/command/release.rs:157-162`), held as distinct struct fields (`:284-285`);
+  (`release_plz_core/src/command/release.rs:156-164`), held as distinct struct fields (`:284-285`);
   `create_git_tag_and_release` guards them in two sequential, independent `if` blocks (`:995`,
   `:1016`) with the tag block first. Repo-wide, `config.git_release.enabled` has exactly one read
   site. Behaviour: `release --dry-run` lists the Release item with the flag on and drops it with
@@ -856,10 +856,19 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   0.3.160. An independent verifier diffed the two underlying `release_plz_core` versions (0.37.2
   vs 0.37.0) and found `src/command/release.rs`, `src/project.rs`, `src/git/forge.rs` and
   `release_plz/src/config.rs` **byte-identical**, so the evidence transfers on this path. Note the
-  flip side, which is a live trap for anyone repeating this: `src/next_ver.rs` and
-  `src/update_request.rs` **do** differ between those versions, and they differ precisely in the
-  `git_only` worktree-reconstruction logic — so local evidence from `release-plz update` at 0.3.162
-  would **not** transfer to 0.3.160.
+  flip side, which is a live trap for anyone repeating this: six files under
+  `release_plz_core/src/` **do** differ across those versions — `next_ver.rs`,
+  `command/update/updater.rs`, `command/release_pr/mod.rs`, `command/release_pr/git.rs`,
+  `clone/mod.rs` and `repo_url.rs` — and `next_ver.rs` differs precisely in the `git_only`
+  worktree-reconstruction logic. So local evidence from `release-plz update` at 0.3.162 would
+  **not** transfer to 0.3.160.
+
+  (Corrected 2026-09-11: an earlier draft of this entry named `src/update_request.rs` as the
+  second differing file. That was wrong twice over — the path is
+  `src/command/update/update_request.rs`, and it is byte-identical across the two versions. The
+  real second update-path difference is `updater.rs`. The error was conservative, over-warning
+  rather than under-warning, but it was still an unchecked claim in an entry whose whole purpose
+  is to distinguish checked from unchecked.)
 
 ### GitHub's ref matcher accepts `acdp-registry-server/v*` on a real push event
 - **Assumed:** the glob matches the ref NAME, and a literal `/` followed by `*` behaves as

@@ -1,25 +1,6 @@
 [workspace]
 changelog_update  = true
-# >>> TEMPORARY — BOOTSTRAP ONLY. RESTORE TO `true`. See issue #204. <<<
-#
-# This flag is OFF for exactly one merge: the release-plz bootstrap merge (#202).
-# Changing `git_tag_name` below re-bases release-plz's tag namespace, so the first
-# `release` run after that merge mints eight NEW tags at the current main — all of
-# them still version 0.1.0, the same version the eight 2026-06-13 tags already
-# carry. Left enabled, that run would create eight DUPLICATE public GitHub
-# Releases for 0.1.0 and move the repository's "Latest release" marker onto them.
-#
-# Turning this off suppresses the duplicate Releases WITHOUT suppressing the tags.
-# The two are independent: release_plz_core's `create_git_tag_and_release` guards
-# the tag on `git_tag.enabled` and the Release on `git_release.enabled` in two
-# separate `if` blocks (verified against the 0.3.160 source, and confirmed with
-# `release-plz release --dry-run`, which still lists all eight tag creations with
-# this set to false).
-#
-# Once the bootstrap run has landed, set this back to `true`. Leaving it as-is
-# silently disables GitHub Releases for this project forever, and the failure is
-# invisible: release-plz keeps reporting success and keeps minting tags.
-git_release_enable = false
+git_release_enable = true
 git_tag_enable    = true
 
 # Determine the previous release from git tags, not from crates.io.
