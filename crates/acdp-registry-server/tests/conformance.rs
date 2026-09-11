@@ -31,6 +31,22 @@
 //!     `storage-sqlite` feature off, which would compile this whole file
 //!     away and vacuously pass.
 //!
+//! ## "the CI-pinned spec"
+//!
+//! Several counts and fixture inventories below are stated as holding *at the
+//! CI-pinned spec*. That phrase is deliberately symbolic and resolves to
+//! exactly one place: the `ref:` passed to `checkout-spec` in the `conformance`
+//! job of `.github/workflows/ci.yml`, which `bump-spec.yml` rewrites in place
+//! when the spec repo dispatches a release.
+//!
+//! It used to be a literal SHA repeated ten times in this file, and those ten
+//! copies had gone stale against the pin without anything turning red — the
+//! *assertions* were still true, only the coordinate was wrong, so nothing
+//! could catch it (#191). A symbolic reference cannot drift, and it degrades
+//! usefully: if one of these counts stops holding after a pin bump, the test
+//! fails and the failure is the signal, which is the behaviour the counts exist
+//! to provide in the first place. Do not reintroduce a literal SHA here.
+//!
 //! The spec corpus is heterogeneous: only some families map to a single HTTP
 //! request/response the registry can replay through its public API. The rest
 //! are deliberately NOT replayed here, and the harness logs a per-family /
@@ -2736,7 +2752,7 @@ fn resolve_fixture_dir(dir: &str) -> Option<PathBuf> {
     .find(has_json)
 }
 
-/// Exchanges replayable at spec 417211f: pub-004, pub-005, pub-008, ret-001
+/// Exchanges replayable at the CI-pinned spec: pub-004, pub-005, pub-008, ret-001
 /// (Shapes A/C: 4), plus vis-006's 1 scenario (Shape D, REG-10 Phase 8's
 /// proof fixture), plus (REG-10 Phase 9a) vis-001's 5 scenarios and
 /// vis-004's 4 scenarios (4 + 1 + 5 + 4 = 14), plus (REG-10 Phase 9b)
@@ -5317,7 +5333,7 @@ fn wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted() {
 // **idem-006 / idem-007 -- not owed, with their real reasons (per the
 // pinned spec's own `registries/profiles.json`, `acdp-registry-core`
 // profile).** `idem-006` sits in `tolerated_outcomes` (`profiles.json:140`
-// at pin `417211f`), a THIRD obligation category alongside
+// at the CI-pinned spec), a THIRD obligation category alongside
 // `required_fixtures` and `conditional_fixtures` -- its own notes call it a
 // fixture that "documents a tolerated race outcome and is not a strict
 // requirement". It pins RFC-ACDP-0003 §6.2.1 step 4's atomicity BOUND under
@@ -6381,7 +6397,7 @@ async fn anc003_empty_anchors_array_is_rejected_with_established_ordering() {
 // argument, not a coverage argument, and the ratchet is deliberately deaf
 // to cost/duplication arguments.
 
-/// can-* vector count pinned at spec `417211f` (REG-10 Phase 7): **35**
+/// can-* vector count measured against the CI-pinned spec (REG-10 Phase 7): **35**
 /// total across all 12 can-* fixtures. Split into two constants because
 /// can-007 alone carries no `input`/hash at all (see
 /// `can007_registry_created_at_millisecond_truncation`'s doc comment) and
@@ -6538,7 +6554,7 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
         assert_eq!(
             vectors.len(),
             7,
-            "can-001 must carry exactly 7 vectors at spec pin 417211f: {fx}"
+            "can-001 must carry exactly 7 vectors at the CI-pinned spec: {fx}"
         );
         for (i, v) in vectors.iter().enumerate() {
             let ctx = format!("can-001 vector {i} ({})", v["name"].as_str().unwrap_or("?"));
@@ -6568,7 +6584,7 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
         assert_eq!(
             vectors.len(),
             6,
-            "can-011 must carry exactly 6 vectors at spec pin 417211f: {fx}"
+            "can-011 must carry exactly 6 vectors at the CI-pinned spec: {fx}"
         );
         for (i, v) in vectors.iter().enumerate() {
             let ctx = format!("can-011 vector {i} ({})", v["name"].as_str().unwrap_or("?"));
@@ -6589,7 +6605,7 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
         assert_eq!(
             vectors.len(),
             2,
-            "can-006 must carry exactly 2 vectors at spec pin 417211f: {fx}"
+            "can-006 must carry exactly 2 vectors at the CI-pinned spec: {fx}"
         );
         let forms: Vec<String> = vectors
             .iter()
@@ -6659,7 +6675,7 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
         assert_eq!(
             vectors.len(),
             expected_len,
-            "{id} must carry exactly {expected_len} vector(s) at spec pin 417211f: {fx}"
+            "{id} must carry exactly {expected_len} vector(s) at the CI-pinned spec: {fx}"
         );
         for (i, v) in vectors.iter().enumerate() {
             let ctx = format!("{id} vector {i} ({})", v["name"].as_str().unwrap_or("?"));
@@ -6671,7 +6687,7 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
     assert_eq!(
         asserted, EXPECTED_CAN_HASH_VECTOR_COUNT,
         "expected exactly {EXPECTED_CAN_HASH_VECTOR_COUNT} can-* canonical-form/hash vectors at \
-         spec pin 417211f across 11 of the 12 can-* fixtures (can-007 has no input/hash at all \
+         the CI-pinned spec across 11 of the 12 can-* fixtures (can-007 has no input/hash at all \
          and is covered separately by can007_registry_created_at_millisecond_truncation) -- a \
          silently-shrinking count here is exactly the vacuous-pass failure mode this ratchet \
          exists to prevent"
@@ -6720,7 +6736,7 @@ fn can007_registry_created_at_millisecond_truncation() {
     assert_eq!(
         vectors.len(),
         expected_len,
-        "can-007 must carry exactly {expected_len} vectors at spec pin 417211f: {fx}"
+        "can-007 must carry exactly {expected_len} vectors at the CI-pinned spec: {fx}"
     );
 
     for (i, v) in vectors.iter().enumerate() {
@@ -8240,7 +8256,7 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 // ─── Phase 4: family-coverage ratchet (`KNOWN_FAMILIES` / `EXCUSED`) ───
 
 /// All 29 fixture families the pinned spec (`registries/profiles.json`'s
-/// `fixture_families` object) declares, as of SHA `417211f`. Every one has
+/// `fixture_families` object) declares, as of the CI-pinned spec SHA. Every one has
 /// fixtures on disk and is classified (replayed or skipped-with-reason) by
 /// this harness. Listing all 29 — not just the ones we replay — is the
 /// honest statement "we have looked at every family"; a 30th family (the

@@ -168,8 +168,14 @@ fn acdp_wire_code(err: &AcdpError) -> &'static str {
         // the §9 verification procedures. On the wire this is emitted by a
         // federated resolver (or any registry validating an UPSTREAM's
         // proofs on a caller's behalf) — hence 502, the upstream is at
-        // fault. The registry's own /log/* handlers never emit it: their
-        // failure modes are schema_violation (malformed queries),
+        // fault. It is ALSO reachable from our own /log/proof: the leaf
+        // echo for retrieval-authorized requesters calls `record.leaf()`
+        // (handlers/log.rs), and a stored leaf that no longer parses under
+        // the closed schema raises InvalidLogProof from this registry, not
+        // from a peer. Note the consequence for the 502 above: that case
+        // blames an upstream for a local data fault. Changing it is a wire
+        // change and is deliberately not done here -- see #191. The other
+        // /log/* failure modes are schema_violation (malformed queries),
         // not_found (unlogged / invisible ctx_id), and not_implemented
         // (profile not advertised). There is no log_unavailable (§7.1).
         AcdpError::InvalidLogProof(_) => "invalid_log_proof",
@@ -410,8 +416,9 @@ mod tests {
 
     /// RFC-ACDP-0012 §11 — `invalid_log_proof` is a registered 0.3.0 wire
     /// code, HTTP 502 (the upstream whose proof failed is at fault). The
-    /// registry's own /log/* handlers never emit it; the mapping exists
-    /// for federation paths that verify an upstream's proofs.
+    /// mapping exists for federation paths that verify an upstream's
+    /// proofs, but `/log/proof`'s leaf echo can raise it locally too — see
+    /// the note on the wire-code arm above.
     #[test]
     fn invalid_log_proof_is_502_with_registered_code() {
         let e = acdp(AcdpError::InvalidLogProof("path does not fold".into()));

@@ -126,7 +126,7 @@ differences in the same commit that documents them.
 |---|---|---|---|---|
 | `/contexts/*`, `/lineages/*`, and the other ordinary read/publish routes | `extract_bearer` (`crates/acdp-registry-auth/src/service.rs:400-405`) | `Bearer ` **and** `bearer ` | yes | treated as **anonymous** |
 | `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs:707-735`) | `Bearer ` only | **no** | rejected with **403** `{"error": "admin-only"}` (`admin.rs:761-765`) |
-| `/metrics` | inline in `metrics_endpoint` (`crates/acdp-registry-core/src/metrics.rs:124-128`) | `Bearer ` only | yes | rejected with **401** + a `WWW-Authenticate` challenge (`metrics.rs:141-149`) |
+| `/metrics` | inline in `metrics_endpoint` (the `strip_prefix("Bearer ")` chain, `crates/acdp-registry-core/src/metrics.rs:124-128`) | `Bearer ` only | yes | rejected with **401** + a `WWW-Authenticate` challenge (the `WWW_AUTHENTICATE` early return in `metrics_endpoint`, `metrics.rs:141-149`) |
 
 The `/metrics` parser is a hybrid of the other two: case-sensitive on the scheme
 like the admin one, trimming like the lax one. It is also the only one of the
@@ -279,8 +279,11 @@ consequences follow, and they are the ones that surprise people:
   against, so the guard is deliberately narrower than the admin-token one.
 
 Failures on this endpoint answer `401` with
-`WWW-Authenticate: Bearer realm="metrics"` (`metrics.rs:141-149`) — the one place
-in the registry that does. Everything else authenticated answers `403`.
+`WWW-Authenticate: Bearer realm="metrics"` — the one place in the registry that
+does; everything else authenticated answers `403`. Pinned once, in the
+[parser comparison table](#presenting-a-bearer) above, rather than a second
+time here: this is a single fact, and two separately-pinned copies of it read
+to a checker as two independent confirmations while drifting in lockstep.
 
 The presented token is compared to the configured one in **constant time**,
 using the same `ct_eq` helper as the `/admin/*` allowlist

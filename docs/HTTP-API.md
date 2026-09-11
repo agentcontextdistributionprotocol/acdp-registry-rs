@@ -635,7 +635,7 @@ An empty body is accepted (`reason` is optional). Any other member →
 - **`[receipt]` key configured** → the event **MUST** be signed under the
   receipt key (RFC-ACDP-0013 §5; the receipts-profile MUST). `signature.key_id`
   is `did:web:<authority>#<receipt.key_id_fragment>`, verifiable against the
-  registry DID document at [`/.well-known/did.json`](#-well-known-didjson-acdp-020).
+  registry DID document at [`/.well-known/did.json`](#get-well-knowndidjson-acdp-020).
 - **No `[receipt]` key** → the event is recorded **unsigned but attributed**:
   `actor` still names the registry DID, and `signature` is omitted. Consumers
   weight an unsigned registry event only as far as the response transport (§5).
@@ -756,7 +756,7 @@ documents only the registry's HTTP-status projection of them.
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
 | 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*` and lifecycle endpoints when their profiles are not enabled). |
 | 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (also covers SSRF-policy rejection). |
-| 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Emitted only when validating an *upstream's* proofs (federation); this registry's own `/log/*` handlers never raise it — their failures are `schema_violation`, `not_found`, or `not_implemented`, and there is no `log_unavailable`. |
+| 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Normally raised when validating an *upstream's* proofs (federation), which is why it is a 502. **It is also reachable from this registry's own `/log/proof`**: for a retrieval-authorized requester the handler echoes the leaf via `record.leaf()` (`crates/acdp-registry-core/src/handlers/log.rs:359`), and a stored leaf that no longer parses under the closed schema surfaces as `invalid_log_proof` from here, not from a peer (`crates/acdp-registry-store/src/log.rs:64`, with the reject cases pinned by that module's own tests). If you see it and you are not federating, suspect your own `log_leaves` table. The other `/log/*` failures are `schema_violation`, `not_found`, or `not_implemented`; there is no `log_unavailable`. |
 
 Note: auth failures on the ACDP routes surface as `403 not_authorized`, not
 `401`, and carry no `WWW-Authenticate` challenge. `/admin/*` likewise answers
