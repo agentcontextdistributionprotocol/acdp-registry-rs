@@ -110,7 +110,7 @@ rejected with `403 not_authorized`.
 **Three** bearer parsers coexist and no two of them agree. Each is deliberate,
 and the differences below are pinned by tests — `extract_bearer_accepts_two_casings_and_trims`
 (`crates/acdp-registry-auth/src/service.rs`), `bearer_scheme_is_case_sensitive`
-and `rejects_token_with_extra_whitespace` (`handlers/admin.rs:840-859`), and
+and `rejects_token_with_extra_whitespace` (`handlers/admin.rs:882-902`), and
 `metrics_bearer_parser_shape_is_pinned`
 (`crates/acdp-registry-server/tests/metrics_integration.rs`). The differences
 were undocumented rather than accidental, and stating them is what this section
@@ -125,7 +125,7 @@ differences in the same commit that documents them.
 | Route group | Parser | Scheme prefixes accepted | Trims the token? | Unrecognised header shape |
 |---|---|---|---|---|
 | `/contexts/*`, `/lineages/*`, and the other ordinary read/publish routes | `extract_bearer` (`crates/acdp-registry-auth/src/service.rs:400-405`) | `Bearer ` **and** `bearer ` | yes | treated as **anonymous** |
-| `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs:680-694`) | `Bearer ` only | **no** | rejected with **403** `{"error": "admin-only"}` (`admin.rs:727-731`) |
+| `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs:707-721`) | `Bearer ` only | **no** | rejected with **403** `{"error": "admin-only"}` (`admin.rs:761-765`) |
 | `/metrics` | inline in `metrics_endpoint` (`crates/acdp-registry-core/src/metrics.rs:124-128`) | `Bearer ` only | yes | rejected with **401** + a `WWW-Authenticate` challenge (`metrics.rs:141-148`) |
 
 The `/metrics` parser is a hybrid of the other two: case-sensitive on the scheme
@@ -145,7 +145,7 @@ one parser is merely more permissive than the others, not more conformant.
 
 ### Unrecognised means anonymous on the ordinary routes
 
-`caller_from_headers` (`crates/acdp-registry-core/src/handlers/context.rs:1348-1365`)
+`caller_from_headers` (`crates/acdp-registry-core/src/handlers/context.rs:1350-1367`)
 returns `Ok(None)` — an anonymous caller — in three cases:
 
 - `auth.enabled = false`, regardless of what the client sent;
@@ -184,7 +184,7 @@ suspecting the token.
 
 On `/admin/*` the same inputs return `403` — absent, non-UTF-8, and unrecognised
 headers are all refused, and an empty `auth.admin_tokens` list disables the routes
-outright (`admin.rs:685`).
+outright (`admin.rs:712`).
 
 ### What each parser accepts
 
@@ -218,7 +218,7 @@ response status itself.
 
 Both behaviours on the admin side are pinned by tests, so loosening either is a
 deliberate reviewed change rather than a refactor: `bearer_scheme_is_case_sensitive`
-(`admin.rs:840-849`) and `rejects_token_with_extra_whitespace` (`admin.rs:852-859`).
+(`admin.rs:882-891`) and `rejects_token_with_extra_whitespace` (`admin.rs:894-902`).
 
 #### Trailing whitespace depends on the HTTP version
 
