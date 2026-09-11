@@ -223,7 +223,18 @@ cargo build --release -p acdp-registry-server                   \
     --features storage-sqlite,playground                       # Playground
 ```
 
-CI exercises every combination on every commit.
+These four are the common ones, not the whole set. The binary's feature space is
+**eight** — 4 backend states (`sqlite` | `pg` | `memory` | `none`) x `playground`
+on/off — and CI builds all eight on every commit (#200).
+
+Rather than repeat the list here and give it a second place to go stale, the
+authoritative index is the comment above the feature steps in the `clippy` job of
+`.github/workflows/ci.yml`. It carries the arithmetic that generates the count, so
+the list can be checked rather than trusted.
+
+Note this is the *server binary's* feature space, not the workspace's:
+`acdp-registry-types` builds without its default `axum` feature and is not yet
+covered by CI (#221).
 
 ## License
 
