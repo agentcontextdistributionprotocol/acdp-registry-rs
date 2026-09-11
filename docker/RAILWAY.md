@@ -7,16 +7,16 @@ every `acdp-registry-server/v*` release tag:
 ```
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:latest        # tip of main
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:main          # tip of main
-ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1.1         # e.g. — a release tag, leading `v` stripped
-ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1           # e.g. — rolling major.minor
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1.0         # a release tag, leading `v` stripped
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1           # rolling major.minor
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every push
 ```
 
 > **`:latest` tracks the tip of `main`, not the last release.** Pin a version tag
-> (`:0.1.1`, or `:0.1` to follow patches) for anything you care about keeping
-> stable. The two version tags above are shown as *examples of the shape*: the
-> release pipeline had never successfully published one before 2026-09-10, so the
-> first real version tag appears with the next release.
+> (`:0.1.0`, or `:0.1` to follow patches) for anything you care about keeping
+> stable: `:latest` moves on every merge to `main`, a version tag does not.
+> Both version tags above are **real and pullable** — the release pipeline
+> published its first one on 2026-09-10. They are no longer illustrative.
 
 Pull-request builds compute a `pr-<n>` tag but never push it — the login and push
 steps are skipped for `pull_request` events.
@@ -42,7 +42,7 @@ Railway needs to pull from GHCR. Either:
 
 1. New Project → **Deploy from a Docker image**.
 2. Image: `ghcr.io/agentcontextdistributionprotocol/acdp-registry:latest`
-   (pin a version tag such as `0.1.1` for production stability — the image tag
+   (pin a version tag such as `0.1.0` for production stability — the image tag
    carries no leading `v`).
 3. Add a **PostgreSQL** plugin (the image is built with `STORAGE_FEATURE=storage-pg`).
 4. Set the env vars below.

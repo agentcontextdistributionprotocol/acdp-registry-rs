@@ -18,12 +18,27 @@ from `ACDP_REGISTRY_STORAGE__POSTGRES_URL`. The image is built with the
 crates.io, so the build context is just this repo.
 
 **Secrets** are sourced from the environment or a sibling `.env` file via
-`${VAR:-default}` substitution. The placeholder default for the JWT secret is
-`changeme`. The startup validator rejects that literal (case-insensitively,
-after trimming) **only when auth is enabled on HS256** — and the shipped compose
-stack sets `auth.enabled = false`, so it starts cleanly with the placeholder and
-the check never runs. Set a real secret before enabling auth or promoting beyond
-a disposable demo:
+`${VAR:-default}` substitution. **The compose file ships no default for the JWT
+secret**: `ACDP_REGISTRY_AUTH__JWT_SECRET` resolves to empty unless you set
+`ACDP_REGISTRY_JWT_SECRET`, and that is what lets the quickstart boot as
+documented. It previously defaulted to the literal `changeme`, which did not
+boot at all — the stack this section described was never startable.
+
+The startup validator rejects that literal (case-insensitively, after trimming)
+**whenever `jwt_secret` is non-empty and `jwt_signing_alg` is not `EdDSA`** —
+including with `auth.enabled = false`, which is the shipped compose posture. The
+refusal happens before `store.migrate()`, so a rejected config creates no
+database files. The two checks are gated differently, and the asymmetry is
+deliberate rather than an oversight:
+
+| check | gated on `auth.enabled`? |
+|---|---|
+| a **non-empty** `jwt_secret` that is `changeme`, or is not base64 of ≥32 bytes | **no** — always runs, for any non-`EdDSA` algorithm |
+| an **empty** `jwt_secret` (refused unless `auth.allow_ephemeral_secret`) | **yes** — empty + auth off is a supported configuration, and is how the quickstart runs |
+
+Under `EdDSA` the secret is not examined at all; the key comes from
+`jwt_private_key_pem`. Set a real secret before enabling auth or promoting
+beyond a disposable demo:
 
 ```bash
 echo "ACDP_REGISTRY_JWT_SECRET=$(openssl rand -base64 32)" >> docker/.env
