@@ -1,5 +1,12 @@
 
 
+## [0.1.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.1.0...acdp-registry-sqlite/v0.1.1) - 2026-09-11
+
+### Other
+
+- update Cargo.toml dependencies
+
+
 ## [0.1.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/releases/tag/acdp-registry-sqlite-v0.1.0) - 2026-06-13
 
 ### Added

@@ -1,5 +1,12 @@
 
 
+## [0.1.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.1.0...acdp-registry-core/v0.1.1) - 2026-09-11
+
+### Added
+
+- *(http)* Cache-Control posture on requester-relative responses ([#205](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/205)) ([#219](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/219))
+
+
 ## [0.1.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/releases/tag/acdp-registry-core-v0.1.0) - 2026-06-13
 
 ### Added

@@ -1,5 +1,22 @@
 
 
+## [0.1.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.1.0...acdp-registry-server/v0.1.1) - 2026-09-11
+
+### Added
+
+- *(http)* Cache-Control posture on requester-relative responses ([#205](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/205)) ([#219](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/219))
+
+### Fixed
+
+- *(docker)* ship no jwt_secret so the quickstart actually boots (W3-U5) ([#211](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/211))
+
+### Other
+
+- build every valid feature configuration of the server binary ([#200](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/200)) ([#222](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/222))
+- *(conformance)* reclassify rcpt/lhr/log as EXCUSED, closing #130 ([#217](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/217))
+- close #190 and #191, and repair four pins nobody had swept ([#206](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/206))
+
+
 ## [0.1.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/releases/tag/acdp-registry-server-v0.1.0) - 2026-06-13
 
 ### Added
