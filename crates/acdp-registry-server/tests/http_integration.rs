@@ -2408,6 +2408,15 @@ async fn health_503_when_storage_pool_closed() {
         StatusCode::SERVICE_UNAVAILABLE,
         "load balancers gate traffic on 503; degraded must not return 200"
     );
+    // #205: the DEGRADED arm must be no-store too -- a cached "degraded" masks
+    // a recovery exactly as a cached "ok" masks an outage.
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "/healthz 503 arm must be no-store",
+    );
     let v = body_to_json(resp).await;
     assert_eq!(v["status"], "degraded");
     assert_eq!(v["storage"], false);
@@ -7111,5 +7120,138 @@ async fn unrouted_paths_carry_no_cache_directive() {
             .get(axum::http::header::CACHE_CONTROL)
             .is_none(),
         "router fallback must not carry a Cache-Control header",
+    );
+}
+
+#[tokio::test]
+async fn healthz_and_admin_ops_are_never_cacheable() {
+    let h = harness(true).await;
+    let app = &h.router;
+
+    // /healthz, healthy arm. (The 503/degraded arm is asserted inside
+    // `health_503_when_storage_pool_closed`, where the broken pool is set up.)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "/healthz 200 arm must be no-store",
+    );
+
+    // Admin ops. Unauthenticated here -> 403, which is exactly the arm a shared
+    // cache would be most likely to reuse across callers.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "/admin/status must be no-store (status {})",
+        resp.status(),
+    );
+}
+
+#[tokio::test]
+async fn credential_endpoints_are_never_stored() {
+    // RFC 6749 §5.1. Note: no test in this suite reaches a 200 from
+    // `POST /auth/token` -- the happy path needs a resolvable agent DID that the
+    // in-process SSRF guard blocks -- so this pins the arms that ARE reachable.
+    let mut cfg = config(false);
+    cfg.auth.enabled = true;
+    // Drive the MIDDLEWARE limiter (per-IP), not the per-agent handler budget.
+    cfg.rate_limit.enabled = true;
+    cfg.rate_limit.per_ip_per_minute = 2;
+    let h = harness_from_config(cfg).await;
+
+    // 403 arm: /auth/token with a nonce the registry never issued.
+    let body = json!({
+        "nonce": "never-issued-nonce",
+        "agent_id": "did:web:agents.test:alice",
+        "expires_at": chrono::Utc::now().timestamp() + 60,
+        "algorithm": "ed25519",
+        "key_id": "did:web:agents.test:alice#key-1",
+        "signature": "AAAA",
+    });
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/token")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "/auth/token 403 arm must be no-store",
+    );
+
+    // 429 arm from the `auth_rate_limit` MIDDLEWARE -- this is the one that
+    // pins LAYER ORDER, and it has to be the middleware specifically.
+    //
+    // `limits.challenge_rate_per_minute` is enforced inside the HANDLER
+    // (`state.rs`), which sits within both layers, so a handler-produced 429
+    // carries the header under either ordering and pins nothing. The
+    // middleware's early return (`auth_rate_limit` in `lib.rs`) is the only
+    // path that bypasses an inner header layer, so it is driven by
+    // `rate_limit.per_ip_per_minute` here. Verified by falsification: moving
+    // the header layer inside the limiter reddens exactly this assertion.
+    let challenge = |app: axum::Router| async move {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/challenge")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"agent_id": "did:web:agents.test:alice"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+    let mut limited = None;
+    for _ in 0..5 {
+        let resp = challenge(h.router.clone()).await;
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            limited = Some(resp);
+            break;
+        }
+    }
+    let resp = limited.expect("challenge endpoint should rate-limit within 5 attempts");
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "the rate-limit 429 must carry no-store -- the header layer must wrap the limiter",
     );
 }

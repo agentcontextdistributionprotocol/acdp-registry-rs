@@ -149,7 +149,23 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
             .route("/auth/challenge", post(handlers::issue_challenge::<S>))
             .route("/auth/token", post(handlers::issue_token::<S>))
             .route("/auth/token/revoke", post(handlers::revoke_token::<S>))
-            .route_layer(from_fn_with_state(state.clone(), auth_rate_limit::<S>));
+            .route_layer(from_fn_with_state(state.clone(), auth_rate_limit::<S>))
+            // #205: credential responses must never be stored. RFC 6749 §5.1.
+            //
+            // Chained AFTER the limiter deliberately -- each successive
+            // `route_layer` wraps the current endpoint, so the LATER call is the
+            // OUTER one. Outside the limiter, this also covers
+            // `auth_rate_limit`'s early-return 429; inside it, the 429 would
+            // bypass the header entirely.
+            //
+            // These routes are NOT members of the `data` group above, so they
+            // receive no data-plane posture at all -- `no-store` is their only
+            // cache directive. There is no outer `if_not_present` to fall back
+            // on; do not assume one exists.
+            .route_layer(SetResponseHeaderLayer::overriding(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            ));
         acdp = acdp.merge(auth);
     }
 
@@ -160,7 +176,7 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
 
     // Non-ACDP endpoints: JWKS sets `application/jwk-set+json` itself, health
     // and admin/status are operational JSON — none get the acdp+json override.
-    let mut aux = Router::new()
+    let aux = Router::new()
         .route("/.well-known/jwks.json", get(handlers::jwks::<S>))
         // The registry's own did:web document (receipt verification keys,
         // RFC-ACDP-0010). Conventional application/json — DID resolvers
@@ -169,7 +185,13 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
             "/.well-known/did.json",
             get(handlers::registry_did_document::<S>),
         )
-        .route("/healthz", get(handlers::health::<S>))
+        .route("/healthz", get(handlers::health::<S>));
+
+    // #205: operational internals behind an admin token -- never cacheable.
+    // Grouped rather than layered onto `aux` wholesale, because `aux` also
+    // carries `/.well-known/jwks.json` and `/.well-known/did.json` (which set
+    // their own `public, max-age=300`) and `/metrics` (out of scope for #205).
+    let admin_ops = Router::new()
         // Admin status (auth-gated by auth.admin_tokens; ships in every build)
         .route("/admin/status", get(handlers::admin_status::<S>))
         // Full lineage walk as an on-demand integrity audit (D3) — the
@@ -194,7 +216,13 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
         .route(
             "/admin/contexts/{ctx_id}/republish",
             post(handlers::admin_republish::<S>),
-        );
+        )
+        .route_layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ));
+
+    let mut aux = aux.merge(admin_ops);
 
     // FEAT-10: mount `GET /metrics` only when a recorder is installed
     // ([metrics] enabled). Deliberately in the un-authed, un-rate-limited
@@ -333,9 +361,22 @@ fn admin_router<S: ExtendedRegistryStore + 'static>() -> Router<Arc<AppState<S>>
             "/admin/pinned-keys/reload",
             post(handlers::reload_pinned_keys::<S>),
         )
+        // #205: admin internals are never cacheable. This layer lives INSIDE
+        // the playground variant on purpose -- the `not(playground)` arm below
+        // returns an empty router, and axum's `route_layer` PANICS on a router
+        // with no routes ("Adding a route_layer before any routes is a no-op").
+        // `default = []` in this crate's Cargo.toml, so non-playground is the
+        // DEFAULT build: hoisting this out would panic at router construction
+        // in the common configuration.
+        .route_layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
 }
 
 #[cfg(not(feature = "playground"))]
 fn admin_router<S: ExtendedRegistryStore + 'static>() -> Router<Arc<AppState<S>>> {
+    // Intentionally empty -- and intentionally NOT carrying the #205 no-store
+    // `route_layer`, which would panic here. See the playground arm above.
     Router::new()
 }
