@@ -790,3 +790,77 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   message described a real failure mode attached to the wrong config.
 - **Not re-litigated:** the behaviour change itself (leader-ruled lane-decidable — rejects a
   self-contradictory config, no shipped default affected).
+
+## W2-U3 — release-plz un-stall, docker tag pipeline, Railway auth posture
+
+- **Plan:** `plans/w2-u3-release-ci-plumbing.md`
+
+### `git_only = true` is the right fix, and `git_tag_name` is the right escape from the dead baseline
+- **Assumed:** release-plz resolves the previous release from the cargo registry even under
+  `publish = false`, so with nothing on crates.io every crate reads as never-released and the
+  existing tag then blocks the proposed version.
+- **Chose:** `git_only = true` plus `git_tag_name = "{{ package }}/v{{ version }}"`, retiring the
+  eight dead `*-v0.1.0` tags by making them stop matching rather than deleting them.
+- **Alternatives:** `publish = true` (rejected outright — a one-way door that would publish eight
+  crates to crates.io); deleting the old tags (rejected — orphans eight published GitHub
+  Releases); bumping the workspace version by hand (out of scope, and does not work: `git_only`
+  still resolves the June tag and still dies in `cargo package`).
+- **Evidence:** reproduced red/green/forward locally on release-plz 0.3.160 in throwaway clones.
+  DEBUG confirms `Processing 8 packages in git_only mode` and `0 tags matched pattern` with zero
+  crates.io fetches.
+- **Blast radius if wrong:** releases stay stalled; no data or wire effect. Reversible by
+  reverting one config file.
+- **Status:** UNCONFIRMED
+
+### The bootstrap run MINTS the new-shape tags — the one link with no local evidence
+- **Assumed:** `release-plz release` will create `acdp-registry-<crate>/v0.1.0` tags on the first
+  post-merge run.
+- **Chose:** to proceed on it, because the alternative (forcing a tag by hand) is a remote write
+  no lane may make.
+- **Why it is NOT proven:** every local proof ran `release-plz update`. The `release` path was
+  never exercised — it needs a token and a real remote. The forward-proof PLANTS by hand exactly
+  the tag shape it assumes the bootstrap will create, so it demonstrates what happens AFTER tags
+  exist, not that they come to exist.
+- **Consequence for acceptance:** criterion 2a has two halves and only one is demonstrated. A
+  first run that is green and PR-less but mints NO tags is a FAILURE, not a pass.
+- **Blast radius if wrong:** the stall persists in a new form; docker's tag trigger stays dead.
+  No irreversible effect.
+- **Status:** UNCONFIRMED
+
+### GitHub's ref matcher accepts `acdp-registry-server/v*` on a real push event
+- **Assumed:** the glob matches the ref NAME, and a literal `/` followed by `*` behaves as
+  documented.
+- **Evidence:** GitHub's filter-pattern documentation, confirmed by an independent verifier —
+  patterns are evaluated against the ref name, `*` does not cross `/`, and `feature/*` is the
+  documented working form.
+- **Why it is NOT proven:** a tag event cannot be staged before merge. The metadata harness
+  validates the version COMPUTATION at the pinned action SHA; it says nothing about whether
+  GitHub dispatches the workflow.
+- **Blast radius if wrong:** the docker trigger stays dead exactly as it is today — no
+  regression, just no fix. The guard step cannot catch it, because the guard only runs once the
+  workflow has already triggered.
+- **Status:** UNCONFIRMED
+
+### The `ACDP_BOT` App has `contents: write` + `pull-requests: write` on THIS repo
+- **Assumed:** yes, from `repository_selection: all` on the org App and its use in three existing
+  workflows here.
+- **Why it is NOT proven:** verifying needs a JWT; org secret listing needs admin.
+- **Mitigation that made it safe to proceed:** failure is loud and immediate — token minting
+  fails before any side effect — and the token is now explicitly narrowed with
+  `permission-contents` / `permission-pull-requests` rather than inheriting every installation
+  permission (which would have included `workflows: write`).
+- **Blast radius if wrong:** the release-plz job fails at the mint step. Reversible in two lines.
+- **Status:** UNCONFIRMED
+
+### Rule-10 / rule-15 sweep: a FOREIGN pin went stale because of this branch, and I cannot fix it
+- **Observed:** `ASSUMPTIONS.md` (U-005's entry) cites `docker/RAILWAY.md:45`. That was correct at
+  this branch's merge-base. Phase 5 added twelve lines above it, so `:45` now lands on the
+  image-tag pin line; the `ACDP_REGISTRY_AUTH__JWT_SECRET` row it meant to cite has moved. If
+  Phase 6 lands it moves again.
+- **Not repointed, deliberately:** that entry belongs to another unit and `ASSUMPTIONS.md` is
+  APPEND-ONLY for this lane. Editing a foreign entry is not mine to do even to correct it.
+  Recording it here instead, and flagged to the leader as a claim-request candidate.
+- **The durable fix** is the one CHARTER rule 15 already prescribes: cite by quoted content, not
+  by line. This is the second time in two units that a docs-only edit invalidated a pin in a
+  file the editing lane was not allowed to touch.
+- **Status:** UNCONFIRMED
