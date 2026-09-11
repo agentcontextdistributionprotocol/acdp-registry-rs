@@ -5,6 +5,43 @@
 //! compile time via Cargo features: `storage-sqlite` (default),
 //! `storage-pg`.
 
+// With no storage backend feature enabled, this binary is deliberately inert:
+// `run()` below (the `#[cfg(not(any(...)))]` arm) does nothing but print which
+// feature to rebuild with, and every serve-path item — `serve_with_store` and
+// the helpers only it reaches — is unreachable by construction. That is the
+// configuration behaving as designed, not dead code to delete, so `dead_code`
+// is allowed for exactly that configuration and no other.
+//
+// `dead_code` alone, deliberately: the items stay compiled, so the imports that
+// type them stay used and `unused_imports` never fires here. An earlier draft
+// allowed both — a conclusion carried over from the rejected `#[cfg]` design
+// below, where the items DO disappear and orphan their imports. Measured under
+// this design: all six backend-less target/feature combinations are clean with
+// `dead_code` alone.
+//
+// Scoped with `cfg_attr` rather than allowed outright on purpose: in every
+// configuration that can actually serve, `dead_code` stays a hard error under
+// CI's `RUSTFLAGS: "-D warnings"` (set in .github/workflows/ci.yml, not in any
+// manifest here), and CI checks all eight of this binary's feature
+// configurations (`clippy` job). So a
+// genuinely dead item still fails the build everywhere it could matter; the
+// only class this can hide is "dead only when nothing can serve".
+//
+// Deliberately NOT `#[cfg]`-gating the items themselves: they are what keep ten
+// `use` lines alive, so gating them turns 7 dead-code warnings into 10 unused-
+// import errors, and making that route work needs ~17 attributes plus a split-
+// import table with a different predicate per import — a hand-maintained table
+// that any future import shuffle silently re-breaks. (That design is also where
+// the `unused_imports` allow came from; it has no purpose under this one.)
+#![cfg_attr(
+    not(any(
+        feature = "storage-sqlite",
+        feature = "storage-pg",
+        feature = "storage-memory"
+    )),
+    allow(dead_code)
+)]
+
 #[cfg(any(
     all(feature = "storage-sqlite", feature = "storage-pg"),
     all(feature = "storage-sqlite", feature = "storage-memory"),
