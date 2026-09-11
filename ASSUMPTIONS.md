@@ -826,6 +826,40 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Blast radius if wrong:** the stall persists in a new form; docker's tag trigger stays dead.
   No irreversible effect.
 - **Status:** UNCONFIRMED
+- **Update, 2026-09-11 — PARTIALLY narrowed, still UNCONFIRMED.** The `release` path has now been
+  exercised locally after all, which the paragraph above says was never done; that sentence was
+  true when written and is now superseded rather than wrong. `release-plz release --dry-run`, run
+  against a throwaway clone of this branch with a live token, reaches
+  `release_package_if_needed`, shows `tag_exists` does **not** short-circuit on the new tag shape,
+  lands in the tag-creation branch, and names all eight expected tags. What it still does not do
+  is cross the dry-run boundary and actually push a tag. So the half that remains unproven is
+  narrower than before — the code path is demonstrated, the remote write is not — but criterion
+  2a is still only dischargeable by observing the real post-merge run.
+
+### Disabling GitHub Releases for the bootstrap merge does not disable git tags
+- **Assumed:** `git_release_enable = false` suppresses only GitHub Release objects, leaving tag
+  creation untouched — so the bootstrap merge still does the one thing it exists to do.
+- **Chose:** to ship the flag off for merge A, per the human's two-merge ruling, and restore it in
+  merge B.
+- **Why this entry exists at all:** if the two were coupled, merge A would accomplish nothing and
+  merge B would re-enter the original deadlock. Neither the leader nor I was willing to assert it
+  from the docs.
+- **Status:** **CONFIRMED (2026-09-11)** — and this one is genuinely closed, not deferred.
+  Source, at the exact version CI pins (0.3.160): `is_git_release_enabled` reads
+  `config.git_release.enabled` and `is_git_tag_enabled` reads `config.git_tag.enabled`
+  (`release_plz_core/src/command/release.rs:157-162`), held as distinct struct fields (`:284-285`);
+  `create_git_tag_and_release` guards them in two sequential, independent `if` blocks (`:995`,
+  `:1016`) with the tag block first. Repo-wide, `config.git_release.enabled` has exactly one read
+  site. Behaviour: `release --dry-run` lists the Release item with the flag on and drops it with
+  the flag off, listing all eight tag creations either way.
+- **Version caveat, and why it does not bite:** the binary used was 0.3.162, not the pinned
+  0.3.160. An independent verifier diffed the two underlying `release_plz_core` versions (0.37.2
+  vs 0.37.0) and found `src/command/release.rs`, `src/project.rs`, `src/git/forge.rs` and
+  `release_plz/src/config.rs` **byte-identical**, so the evidence transfers on this path. Note the
+  flip side, which is a live trap for anyone repeating this: `src/next_ver.rs` and
+  `src/update_request.rs` **do** differ between those versions, and they differ precisely in the
+  `git_only` worktree-reconstruction logic — so local evidence from `release-plz update` at 0.3.162
+  would **not** transfer to 0.3.160.
 
 ### GitHub's ref matcher accepts `acdp-registry-server/v*` on a real push event
 - **Assumed:** the glob matches the ref NAME, and a literal `/` followed by `*` behaves as

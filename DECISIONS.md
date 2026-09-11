@@ -1445,3 +1445,53 @@ The code carries a comment saying not to "fix" this with `..`, since that is wha
 tidying warnings would reach for first. Chosen over a self-inspecting test (the shape lane-3
 used elsewhere) for this specific property: a test that enumerates fields can go vacuous
 without anyone noticing, whereas this cannot compile wrong.
+
+---
+
+## W2-U3 addendum — the eight duplicate GitHub Releases are NOT accepted after all (2026-09-11)
+
+**This supersedes the "Consequence, accepted knowingly" paragraph in this unit's section 4 and
+the "eight GitHub Releases" prediction in section 5.** Those paragraphs are left in place —
+`DECISIONS.md` is append-only — but they no longer describe what shipped, and a reader who stops
+there gets the opposite of the truth.
+
+**What changed.** Section 4 recorded, as accepted, that the bootstrap run would create eight
+duplicate `0.1.0` GitHub Releases and move the repository's "Latest release" marker, on the
+grounds that this is cosmetic and a human can reverse it with `gh release delete`. It also
+recorded that toggling `git_release_enable` off and on across two merges **was rejected as the
+worse trade**, because it needs two merges and risks the flag never being restored.
+
+**The human overruled that**, in full knowledge of the objection — the "flag never restored" risk
+was put to them in writing, by me, as the reason not to do this. They chose the two-merge route
+anyway. It is their repo. The decision stands and is implemented.
+
+**Decided by:** the human, overruling both this lane's recommendation and the leader's.
+
+**What shipped instead:**
+
+- Merge A (PR #202) carries `git_release_enable = false`. The bootstrap run mints the eight
+  new-shape tags and creates **no** Releases. Nothing touches the eight 2026-06-13 tags or their
+  existing Releases, and the "Latest release" marker does not move.
+- Merge B restores `git_release_enable = true` immediately after, and removes the `TEMPORARY`
+  comment block with it.
+
+**The load-bearing check that made this safe.** Merge A's entire purpose is minting the tags, so
+the route collapses if the flag also suppresses tagging. It does not — verified against the
+0.3.160 source (two independent `if` blocks in `create_git_tag_and_release`, distinct config
+fields, one read site repo-wide) and by running `release --dry-run` both ways. Recorded in full
+in `ASSUMPTIONS.md` under "Disabling GitHub Releases for the bootstrap merge does not disable git
+tags", now **CONFIRMED**.
+
+**The risk this decision knowingly takes, stated plainly so the record carries it.** If merge B
+does not happen, GitHub Releases are disabled for this project indefinitely, and the failure is
+silent: release-plz keeps reporting success and keeps minting tags. Four independent carriers
+exist against that — issue #204, a `TEMPORARY` comment above the flag, a section at the top of
+PR #202's body, and this entry. A fifth was considered and not built: a CI check that fails while
+the flag is off. It is the only carrier that does not rely on a human reading something, and it
+is the right long-term answer; it is not in scope for a lane under stand-down, and is recorded
+here and on #204 as the recommended follow-up.
+
+**Restore precondition — do not restore blind.** Merge B should land only once the eight
+new-shape tags are confirmed present on `main`. If the bootstrap run fails to mint them, restoring
+the flag means the *next* run mints tags **and** the eight duplicate Releases — the exact outcome
+this route exists to prevent.
