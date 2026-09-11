@@ -1622,10 +1622,23 @@ async fn search_returns_published_context() {
 
 #[tokio::test]
 async fn search_rejects_malformed_cursor_with_invalid_cursor() {
-    // Cursors are opaque base64("mint_ms|anchor_ms|ctx_id") strings minted
-    // by the store. One that isn't base64 at all — or decodes to the wrong
-    // shape — is a caller error: 400 `invalid_cursor`, not a 500 and not a
-    // silently-ignored filter.
+    // Cursors are opaque base64("mint_ms:anchor_ms:ctx_id") strings minted by
+    // the store. The separator is a COLON, and that is load-bearing rather than
+    // incidental: `ctx_id` values are URIs that themselves contain colons
+    // (`acdp://reg/ctx-1`), so the decoder splits with a limit of 3 and lets the
+    // final field keep its own colons. A reader who assumes a separator that
+    // cannot appear in the payload would write a greedy split and corrupt every
+    // `ctx_id`.
+    //
+    // `acdp_registry_store::cursor` is the single authority for this format —
+    // its module doc defines the wire shape and `decode_cursor` implements it.
+    // Prefer it over this comment: #187 collapsed two byte-identical copies of
+    // that codec into one crate precisely because a format described in more
+    // than one place drifts, and this sentence said "|" until #196 caught it.
+    //
+    // One that isn't base64 at all — or decodes to the wrong shape — is a
+    // caller error: 400 `invalid_cursor`, not a 500 and not a silently-ignored
+    // filter.
     let h = harness(true).await;
     // "!!not-base64!!" (percent-encoded) and base64("not-a-cursor").
     for cursor in ["%21%21not-base64%21%21", "bm90LWEtY3Vyc29y"] {
