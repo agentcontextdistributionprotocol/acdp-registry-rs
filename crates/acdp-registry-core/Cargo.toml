@@ -12,10 +12,10 @@ workspace = true
 
 [dependencies]
 acdp                  = { workspace = true }
-acdp-registry-auth    = { path = "../acdp-registry-auth", version = "0.1.1" }
-acdp-registry-store   = { path = "../acdp-registry-store", version = "0.1.1" }
-acdp-registry-types   = { path = "../acdp-registry-types", version = "0.1.1" }
-acdp-registry-webhook = { path = "../acdp-registry-webhook", version = "0.1.1" }
+acdp-registry-auth    = { path = "../acdp-registry-auth", version = "0.1.2" }
+acdp-registry-store   = { path = "../acdp-registry-store", version = "0.1.2" }
+acdp-registry-types   = { path = "../acdp-registry-types", version = "0.1.2" }
+acdp-registry-webhook = { path = "../acdp-registry-webhook", version = "0.1.2" }
 axum       = { workspace = true }
 chrono     = { workspace = true }
 http       = "1"
@@ -34,7 +34,7 @@ metrics-exporter-prometheus = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-acdp-registry-sqlite = { path = "../acdp-registry-sqlite", version = "0.1.1" }
+acdp-registry-sqlite = { path = "../acdp-registry-sqlite", version = "0.1.2" }
 
 [features]
 default    = []
