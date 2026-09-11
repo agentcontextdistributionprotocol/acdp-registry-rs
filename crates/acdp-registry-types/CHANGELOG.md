@@ -1,5 +1,12 @@
 
 
+## [0.1.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.1.0...acdp-registry-types/v0.1.1) - 2026-09-11
+
+### Other
+
+- close #190 and #191, and repair four pins nobody had swept ([#206](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/206))
+
+
 ## [0.1.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/releases/tag/acdp-registry-types-v0.1.0) - 2026-06-13
 
 ### Added
