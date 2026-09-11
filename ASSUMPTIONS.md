@@ -1000,3 +1000,80 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   here. `#190` was a false claim and is fixed by making the prose true; the wire question is
   `#205`. Shipping a header change inside a docs correction would be the same defect as the
   original claim, pointing the other way. **Status: UNCONFIRMED — split out by design.**
+
+## W3-U5 — the quickstart did not boot (lane-1, 2026-09-11)
+
+- **CORRECTION to `U-005`'s first bullet above, which is left standing per `D-005`.** That
+  bullet reads: *"Assumed then verified: that `crates/acdp-registry-server/src/main.rs` is the
+  sole enforcement point for both documented claims. Confirmed — exactly one `changeme` check
+  exists tree-wide."* Every clause of that is **still true**, and it is still the wrong
+  conclusion. There is exactly one `changeme` check, it is in `main.rs`, and it was correctly
+  gated on `auth.enabled`. What the bullet missed is that the literal check was never the only
+  thing between a placeholder and a boot: `serve_with_store` passes any non-empty `jwt_secret`
+  to `JwtSecret::from_base64` (`crates/acdp-registry-auth/src/jwt.rs`), which imposes a 32-byte
+  floor with **no** `auth.enabled` gate. `changeme` is valid base64 of six bytes. The stack
+  died on the length floor, not on the `changeme` guard, and `U-005` verified the wrong door.
+  **Status of the original assumption: CONFIRMED but NON-LOAD-BEARING — true, and it did not
+  support what was built on it.**
+- **Also corrected: `U-005`'s closing bullet**, *"Not re-litigated: `auth.enabled = false` in
+  the compose stack stays (leader-confirmed; the demo must boot)."* The premise held — auth
+  stays off — but "the demo must boot" was recorded as a settled constraint without anyone
+  checking that the demo **did** boot. It did not. A constraint asserted and never measured is
+  indistinguishable from a constraint satisfied, until someone runs it. **Status: CONFIRMED
+  (the constraint), VIOLATED (the tree at the time).**
+- **CONFIRMED by observation, not by reading:** the hoist changes no boot outcome. All seven
+  rows of the matrix reproduce with identical `BOOTED`/`EXITED` and identical `rc`; verified
+  again at the compose level against a real Postgres. One scoped exception, found by the gate
+  and not by me: for a config with **two** fatal faults the first error reported can differ,
+  since validation now precedes the backend checks and `PgStore::connect`. **Status:
+  CONFIRMED (scoped).**
+- **CONFIRMED by mutation:** that `every_changeme_casing_is_rejected_by_the_serve_path_decoder`
+  derives the 32-byte floor from `acdp-registry-auth` rather than restating it — lowering that
+  floor to 6 fails it. Its first draft hardcoded `< 32`, never entered production code, and
+  would have stayed green with the guard deleted outright. **Status: CONFIRMED.**
+- **CONFIRMED by mutation:** that `/auth/*` is genuinely unmounted with auth disabled, which is
+  what the auth-off `info!` asserts to operators. Mounting the subrouter unconditionally fails
+  `auth_disabled_does_not_mount_the_auth_routes`. **Status: CONFIRMED.**
+- **ASSERTED, THEN REFUTED by the phase-1 gate:** that no test pinning that invariant was
+  writable inside this unit's granted paths. It was writable throughout — `main.rs` already
+  imports `build_router`/`AppStateInner`, `tower` is a regular dependency, and
+  `SqliteStore::connect_in_memory()` ships under the default feature. The claim was made
+  without checking and pointed in the direction that avoided work. **Status: REFUTED.**
+- **ASSERTED, THEN REFUTED by the phase-2 gate:** that the EdDSA `jwt_private_key_pem` check
+  being gated on `auth.enabled` means it is not enforced with auth off. It is enforced — from
+  the serve path, after `store.migrate()`. Observed: auth off + `EdDSA` + empty PEM exits
+  `rc=1` with `auth.jwt_signing_alg=EdDSA but auth.jwt_private_key_pem is empty`, printed
+  *after* the `starting acdp-registry` line. My evidence for the original claim was four
+  `validate_config` line cites; the serve path was never consulted. **This is the unit's own
+  root-cause error recurring inside the fix for it.** **Status: REFUTED, doc corrected.**
+- **ASSERTED, THEN REFUTED by the phase-2 gate:** that "a non-empty secret is checked
+  regardless of `auth.enabled`" could be written without an algorithm qualifier. Under EdDSA
+  `jwt_secret` is never examined, so the unqualified form was false for precisely the
+  algorithm `SECURITY.md` recommends one bullet later. Observed: `EdDSA` + a valid PEM +
+  `jwt_secret = "changeme"` boots normally with auth off **and** with auth on. **Status:
+  REFUTED, HS256 scoping restored and the EdDSA carve-out given its own bullet.**
+- **Deliberately bounded, not assumed away:** this unit narrows `validate_config`'s
+  validate-before-migrate contract to `jwt_secret` and does **not** restore it. The EdDSA PEM
+  case still fails late. Every document it touches is scoped to say so. **Status: OPEN, owned
+  by nobody, reported in this lane's `done`.**
+- **UNCONFIRMED — reported, not acted on:** that `.github/workflows/docker.yml` sets no
+  `jwt_secret`, so CI never exercised the stack the repo ships and green CI was never evidence
+  about the compose file. `.github/**` is not this lane's to change; the leader ruled it a
+  separate unit.
+- **Reported, not fixed:** compose renders `ACDP_REGISTRY_AUTH__JWT_SECRET` as *set-to-empty*
+  rather than absent, and an env var outranks the TOML file, so a `jwt_secret` uncommented in
+  `docker/config.docker.toml` is silently discarded unless the operator also sets the shell
+  variable. Harmless with auth off; loud with auth on; with auth on plus
+  `allow_ephemeral_secret = true`, a downgrade to a process-lifetime key carrying **one
+  startup `warn!`** and nothing further. The first draft of this bullet called that downgrade
+  **silent**, which the ship gate refuted against `main.rs:838-844`: the `warn!` names the
+  hazard verbatim. That is this unit's own error class — overstating an exposure — recurring a
+  fourth time, in the ledger written to record it, and it survived because it was the one claim
+  in the diff with no captured transcript behind it. `config.docker.toml`
+  is not in this unit's grant, so the caveat went into the compose header instead.
+- **Premise correction, derived from the artefact:** the dispatch described the false changelog
+  sentence as **released** and pinned it at `CHANGELOG.md:2637`. Neither holds. `CHANGELOG.md`
+  carries exactly one `##` header (`## [Unreleased]`), so nothing in it sits in a released
+  version section, and the sentence was at `:2686` when I found it and `:2727` after a rebase —
+  which is itself the argument for content anchors over line pins. **Status: CONFIRMED
+  (corrected).**

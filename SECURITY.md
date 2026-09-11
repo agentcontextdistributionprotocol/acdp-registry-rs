@@ -16,11 +16,23 @@ issue. We aim to acknowledge reports within 72 hours.
   base64-encoded random material). With auth enabled and HS256, the startup
   validator refuses to boot on an empty secret — the random process-lifetime
   fallback requires an explicit `auth.allow_ephemeral_secret = true` and is for
-  local development only (its tokens do not survive a restart). A companion
-  check, gated the same way, rejects a non-empty secret that is `changeme`, matched
-  case-insensitively after trimming. Neither branch runs when
-  `auth.enabled = false` — as in the shipped docker compose stack — so a
-  placeholder secret can survive there unnoticed.
+  local development only (its tokens do not survive a restart). **On HS256** a
+  non-empty secret is checked regardless of `auth.enabled`: it is rejected if
+  it is `changeme` (matched case-insensitively after trimming), or if it does
+  not decode to ≥32 bytes. So on HS256 a placeholder cannot survive unnoticed
+  in an auth-disabled stack — it stops that stack from booting at all. The
+  shipped docker compose stack accordingly ships NO secret rather than a
+  placeholder: an empty secret with auth disabled is a supported
+  configuration, and the unused ephemeral key it generates signs nothing,
+  because no token is issued or verified while auth is off.
+- **Under EdDSA, `jwt_secret` is never examined at all** — not for the
+  `changeme` literal, not for length, with auth on or off. A stale or
+  placeholder secret left in config or the environment is therefore silently
+  ignored rather than rejected: it neither stops a boot nor warns. Observed,
+  not inferred: `auth.enabled = true`, `jwt_signing_alg = "EdDSA"`, a valid
+  `jwt_private_key_pem` and `jwt_secret = "changeme"` boots normally. If you
+  move a deployment from HS256 to EdDSA — which the next bullet recommends for
+  federation — remove `jwt_secret` yourself; nothing will remind you.
 - For federated deployments, prefer EdDSA (`auth.jwt_signing_alg = "EdDSA"`) so
   peers verify your tokens against the public key at `/.well-known/jwks.json`
   instead of a shared secret. See [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md).

@@ -1497,3 +1497,145 @@ here and on #204 as the recommended follow-up.
 new-shape tags are confirmed present on `main`. If the bootstrap run fails to mint them, restoring
 the flag means the *next* run mints tags **and** the eight duplicate Releases — the exact outcome
 this route exists to prevent.
+
+### W3-U5-a. The root cause was an inference, not a sentence
+
+`U-005` was mine. It set out to correct two operator-facing claims about the `changeme`
+placeholder, and it did correct them. It also introduced a new false claim — that
+`docker compose up` with the shipped default "boots cleanly" — and shipped it in the very
+entry announcing that the old claims were wrong.
+
+What happened: I located the literal-`changeme` guard, verified its gating, found it correctly
+nested inside `auth.enabled && jwt_signing_alg != "EdDSA" && !jwt_secret.is_empty()`, and
+concluded from that verified fact that the *boot path* was gated on `auth.enabled`. It was not.
+`serve_with_store` has always passed any non-empty `jwt_secret` to `JwtSecret::from_base64`,
+which imposes a 32-byte floor, with no `auth.enabled` gate anywhere. `changeme` is valid base64
+of six bytes, so the stack died on the LENGTH FLOOR — a door I never looked at — while I was
+confirming the literal guard could not fire.
+
+**The inference is the defect; the prose was only where it surfaced.**
+
+This is the same shape as verifying a branch against `git diff origin/main` while `origin/main`
+moves: *verified against A reference and concluded it was THE reference*. The check performed
+was sound. The set it was performed over was incomplete, and nothing in the method would ever
+have revealed that, because a passing check on a subset looks identical to a passing check on
+the whole.
+
+The rule adopted is therefore not "read more carefully". It is: **a claim about what a stack
+DOES is backed by an observed boot with captured output, or it does not ship.** Every
+behavioural sentence in this unit's diff traces to a transcript in `PROGRESS.md`. That is a
+control rather than an intention, which is the distinction `CHARTER 29` draws — and which this
+unit went on to test three more times before it was finished (`W3-U5-e`).
+
+### W3-U5-b. Ship no secret, rather than a working one or a better error
+
+Two directions were offered: (a) commit a real 32-byte base64 default so the quickstart works,
+at the cost of a fixed secret in a tracked file; or (b) keep failing, but fail with a message
+telling the operator what to generate. The leader leaned (a) and explicitly declined to rule it,
+because neither of us had read `docker/docker-compose.yml` and `config/` for this question.
+
+Reading them produced a third option that dominates both: **ship no secret at all**
+(`${ACDP_REGISTRY_JWT_SECRET:-}`).
+
+It works because of a fact neither (a) nor (b) accounted for: an EMPTY `jwt_secret` with
+`auth.enabled = false` is already a supported, working configuration. The empty-secret check is
+gated on `auth.enabled` and *stays* gated — the deliberate asymmetry now commented in `main.rs`
+— while only a NON-EMPTY secret is examined unconditionally. `docker/config.docker.toml` ships
+`auth.enabled = false`. So removing the placeholder did not require a replacement; it required
+nothing.
+
+Against (a): a 32-byte secret in a tracked file is a real if low hazard whose failure mode is
+that it gets copied into something that is not a disposable demo, and the documentation calling
+it throwaway does not travel with the value. Against (b): an honest error on a quickstart that
+still does not run is a 100% failure rate for every new user. "Fail well" is right when no
+working configuration exists; here one did.
+
+The decisive evidence that this had gone unnoticed: `.github/workflows/docker.yml` sets no
+`jwt_secret` at all. **CI was green because CI exercised a different stack than the one the repo
+ships.** The compose placeholder was never on any tested path. Filed, not fixed — `.github/**`
+is another unit's.
+
+One hazard the choice does introduce, recorded rather than discovered later: compose renders the
+variable as *set-to-empty* rather than absent, and an env var outranks the TOML file, so a
+`jwt_secret` uncommented in `config.docker.toml` is silently discarded. With auth off that is
+harmless and with auth on it fails loudly — except with `allow_ephemeral_secret = true`, where
+it downgrades to a process-lifetime key after one startup `warn!` (`main.rs:838-844`) and no
+further signal. Option (a) has the same property plus a secret
+in git, so this does not change the ranking; it earns a caveat in the compose header.
+
+### W3-U5-c. Four documents, one commit, because a truth-flip has no safe halfway point
+
+`docker/docker-compose.yml`, `config/registry.example.toml`, `SECURITY.md` and
+`docs/CONFIGURATION.md` all described the `jwt_secret` checks as gated on `auth.enabled`. Two
+said so in the direction of false confidence ("starts cleanly with the placeholder", "NOT
+validated in this stack"); `SECURITY.md` said so *inverted*, warning that a placeholder "can
+survive there unnoticed" — asserting a weakness that could not exist, since a placeholder stops
+the stack from booting.
+
+They land in one commit. The leader's ruling, quoted: *"Splitting those into two PRs creates a
+window where the repo's security document describes a hazard the repo has just removed. One unit
+makes that window impossible."*
+
+The general rule promoted from it — **a doc your change falsifies moves in your commit; a doc
+that is already wrong is someone's backlog item** — also decided what this unit did NOT touch.
+`docs/OPERATIONS.md`, `docs/AUTHENTICATION.md` and `docker/RAILWAY.md` carry the same false
+gating claim. They are named in this lane's `done` with verbatim quotes and content anchors, and
+left to their owners. Being able to see a defect is not a claim on it.
+
+### W3-U5-d. The corrected changelog entry is appended, and the brief's premise about it was wrong
+
+`AC3` required appending rather than rewriting, and said that if append-only should bend, that is
+a `blocked` and not a judgement call. It did not need to bend.
+
+One premise correction, derived from the artefact rather than relayed: the brief called the false
+sentence **released** and pinned it at `CHANGELOG.md:2637`. Neither holds. `CHANGELOG.md`
+contains exactly one `##` header — `## [Unreleased]` — so nothing in the file sits in a released
+version section, and the sentence was at `:2686`, moving to `:2727` under a mid-unit rebase.
+Calling it "released" would have been this unit repeating the error it exists to fix. Appended
+either way; `D-008` keeps history pins stale on purpose, and zero deleted lines against the
+merge-base is verified mechanically before shipping.
+
+The correction also retracts a second sentence from that entry that nobody had flagged: its
+explicit audit instruction to operators — *"if you relied on that documented check with auth
+disabled, it never ran"* — is false. The check that actually stopped the boot, the ≥32-byte
+floor, always ran with auth disabled. A wrong instruction aimed at operators outranks a wrong
+description aimed at readers, so it is corrected by name.
+
+### W3-U5-e. Three more instances of the same error, inside the unit written to fix it
+
+Every one was caught by a fresh-Opus gate and none by me, which is the whole argument for
+`CHARTER 29`: a rule you write for yourself is not a control until something external checks it.
+
+**One.** Phase 1's first gate found three comments asserting the Phase-2 world as present fact —
+that an auth-off stack with no secret "is what the docker-compose quickstart ships", at a commit
+where the quickstart still shipped `changeme`. True one commit later; false where it stood.
+Closed by deleting the cross-references rather than forward-tensing them, so the commit that
+makes them true is the commit that adds them.
+
+**Two.** Phase 1's second gate found I had declined to write a test on the grounds that it was
+not writable inside my granted paths — and that this was simply false. `main.rs` already
+imported `build_router` and `AppStateInner`, `tower` was already a regular dependency,
+`SqliteStore::connect_in_memory()` ships under the default feature. **I asserted infeasibility
+instead of checking it**, and it pointed in the direction that saved me work.
+
+**Three, and this is the one that matters.** Phase 2's gate found that
+`docs/CONFIGURATION.md` claimed the EdDSA `jwt_private_key_pem` check "still requires auth to be
+enabled". True of `validate_config`. False of the binary: auth off + EdDSA + an empty PEM still
+refuses to boot, from the serve path, after migrations. My evidence for that sentence was four
+`validate_config` line cites and nothing else — **the serve path was never consulted.** That is
+`W3-U5-a`'s error, with the same two code paths, committed inside the commit that fixes it. The
+same gate found a second instance in `SECURITY.md`, where dropping the HS256 qualifier the old
+text carried made "a placeholder cannot survive unnoticed" false under EdDSA — the algorithm the
+next bullet recommends.
+
+**A process defect worth more than any of them.** Phase 1's gate reported that the worktree
+changed under it mid-run: I was making Phase 2 edits while it read. Its results survived by luck
+— no test it ran touches those files — not by design. The rule is **no worktree edits while a
+verification gate is running**; I broke it once more within the same phase and disclosed the
+advancing HEAD to the running phase-2 gate in flight rather than letting it surface as a
+confusing finding.
+
+The pattern across all of them: the failure is never the sentence. It is a check performed over
+a set smaller than the claim, by someone who did not notice the difference. Three fresh gates
+caught what three careful readings by the author did not, and the cost of each catch was one
+commit instead of one release.

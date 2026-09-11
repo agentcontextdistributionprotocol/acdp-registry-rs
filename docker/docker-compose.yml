@@ -1,14 +1,37 @@
-# OPS-02: every secret-bearing variable is now sourced from a sibling
-# `.env` file (or the operator's environment). The `${VAR:-default}`
-# substitution keeps the compose file usable for local demos via the
-# placeholder defaults. The startup-time validator (see main.rs) rejects
-# ACDP_REGISTRY_AUTH__JWT_SECRET set to `changeme` (case-insensitively,
-# after trimming) ONLY when
-# auth is enabled on HS256 — and config.docker.toml ships
-# `auth.enabled = false`, so THIS STACK STARTS CLEANLY WITH THE
-# PLACEHOLDER and the check never runs. Generate a real secret with
-# `openssl rand -base64 32` before enabling auth or promoting this stack
-# beyond a disposable demo.
+# OPS-02: every secret-bearing variable is sourced from a sibling `.env` file
+# (or the operator's environment) via `${VAR:-default}` substitution, which
+# keeps this file usable for local demos.
+#
+# ACDP_REGISTRY_AUTH__JWT_SECRET is the deliberate exception: it defaults to
+# EMPTY, not to a placeholder. On HS256 — which the binary defaults to and
+# config.docker.toml does not override (the default lives in
+# acdp-registry-types/src/config.rs, not in this stack's config file) —
+# `validate_config` (see main.rs) decodes and length-checks every non-empty
+# `jwt_secret` on every boot, whether or not auth is enabled. So a
+# `changeme` placeholder here does not produce a working demo; it produces a
+# stack that exits rc=1 before serving a request. This file shipped exactly
+# that placeholder until W3-U5. (Under EdDSA `jwt_secret` is not examined at
+# all, so the same placeholder would be ignored rather than rejected.)
+#
+# What this stack does now: config.docker.toml ships `auth.enabled = false`
+# and no secret is set, so the registry boots and logs that it generated an
+# unused ephemeral key. With auth off no token is ever issued or verified, so
+# that key signs nothing.
+#
+# Set a real secret before enabling auth, or before promoting this stack
+# beyond a disposable demo — with auth on, an empty secret refuses to boot
+# unless auth.allow_ephemeral_secret = true:
+#   echo "ACDP_REGISTRY_JWT_SECRET=$(openssl rand -base64 32)" >> docker/.env
+#
+# CAVEAT if you instead uncomment `jwt_secret` in config.docker.toml: compose
+# renders the variable below as SET-TO-EMPTY, not absent, and an env var beats
+# the TOML file in the precedence chain — so the value you put in the file is
+# discarded unless you also set ACDP_REGISTRY_JWT_SECRET here. With auth off
+# that is harmless. With auth on it fails loudly, EXCEPT when
+# allow_ephemeral_secret = true, where it downgrades to a process-lifetime
+# key after emitting a single startup `warn!` naming the hazard (main.rs) —
+# quiet, not silent, and easy to miss in a log tail. Prefer the .env line
+# above to editing the TOML.
 
 services:
   postgres:
@@ -38,11 +61,12 @@ services:
     environment:
       ACDP_REGISTRY_CONFIG: /app/config.toml
       ACDP_REGISTRY_STORAGE__POSTGRES_URL: postgres://${POSTGRES_USER:-acdp}:${POSTGRES_PASSWORD:-acdp}@postgres:5432/${POSTGRES_DB:-acdp_registry}
-      # NOT validated in this stack: the `changeme` check only runs with
-      # auth enabled on HS256, and config.docker.toml disables auth (see
-      # the header note). Replace before enabling auth or promoting to
-      # anything non-disposable.
-      ACDP_REGISTRY_AUTH__JWT_SECRET: ${ACDP_REGISTRY_JWT_SECRET:-changeme}
+      # Deliberately EMPTY, not a placeholder. On the HS256 default this
+      # stack uses, a non-empty value IS validated here — the check does not
+      # depend on auth being enabled — so a placeholder would stop the
+      # quickstart booting. Set ACDP_REGISTRY_JWT_SECRET to override, and see
+      # the header note before putting a secret in config.docker.toml instead.
+      ACDP_REGISTRY_AUTH__JWT_SECRET: ${ACDP_REGISTRY_JWT_SECRET:-}
       RUST_LOG: info,acdp=info,acdp_registry=info
     ports:
       - "8443:8443"
