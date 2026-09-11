@@ -65,6 +65,61 @@ The binary validates config before serving and refuses to boot on a misconfig
   publishes from every non-`did:key` agent (`did:key` identities are
   self-verifying and never reach this gate). Add a pinned key, or set
   `playground.enabled = false`.
+- **Pinned-key entries** — each `[[playground.pinned_keys]]` entry must be
+  *usable*, not merely present. Five refusals, each naming the offending entry
+  by index and DID:
+  1. `algorithm` is not `ed25519` or `ecdsa-p256` (exact match, case-sensitive).
+  2. `public_key_b64` is not valid base64.
+  3. an `ed25519` key does not decode to **32** bytes.
+  4. an `ecdsa-p256` key does not decode to **65** bytes, or does not begin
+     `0x04` (SEC1 uncompressed).
+  5. `valid_from >= valid_until` — a window that can never be open.
+
+  These are checked **regardless of `playground.enabled`**, so a latent typo
+  surfaces before the flag is flipped rather than after. Startup is the only
+  place the detail is legible: at request time such an entry fails as an
+  `internal_error`, whose wire message is redacted to the static string
+  `"internal error"` (RFC-ACDP-0007 §5), leaving the operator a 500 with no
+  indication that the cause is a config typo.
+
+  > **Upgrade note — a config that boots today can be refused after this
+  > change.** Any entry matching one of the five above is now fatal, however
+  > harmless it looked before. Three shapes account for essentially all of it,
+  > in rising order of how quiet they were:
+  >
+  > - **A rotated-out entry left in place with broken key material** — expired
+  >   *and* malformed. Completely inert before: `pinned_for_at` filters on the
+  >   validity window, so nothing ever decoded it. Nothing was wrong at
+  >   runtime, and now the registry will not start.
+  > - **Any broken entry at all while `playground.enabled = false`.** These
+  >   rules do not consult `enabled`, so a section you consider switched off
+  >   is still validated.
+  > - **A currently-live entry with a typo'd `algorithm` or bad key
+  >   material.** This one *was* already failing — but only for that single
+  >   agent's publishes, as an opaque 500, which is why it can sit unnoticed
+  >   for a long time. It is now refused up front for everyone.
+  >
+  > Delete rotated-out entries rather than leaving them broken. If a registry
+  > that has been running for months suddenly will not start after an upgrade,
+  > this is the first thing to check.
+
+  **Not a refusal — a startup warning:** a list where *no* entry is currently
+  within its validity window (all expired, or all future-dated). This is not
+  fatal because expiry is time-dependent — refusing would make bootability a
+  function of the wall clock rather than of the config file — and because in
+  lax mode the state is identical to having no pins at all, which is supported.
+  The warning branches, because the two modes do opposite things:
+  with `pinned_only = true` every `did:web` publish is **rejected** until a key
+  is rotated in; with `pinned_only = false` publishes from those agents are
+  **accepted with no signature check**, i.e. pinning is silently inert. The
+  second is the one worth an alert.
+
+  The same rules gate `POST /admin/pinned-keys/reload`, so a reload cannot
+  install a config startup would refuse — see
+  [HTTP-API.md](HTTP-API.md#post-adminpinned-keysreload-playground-feature).
+  Both doors call one function, `validate_playground_config` in
+  `crates/acdp-registry-core/src/playground.rs`, rather than each keeping its
+  own copy of the rules.
 - **Receipts** — a configured `[receipt]` key must parse (exactly one source,
   valid base64, 32 bytes), and is incompatible with `playground.enabled = true`
   **unless** `playground.pinned_only = true` with at least one

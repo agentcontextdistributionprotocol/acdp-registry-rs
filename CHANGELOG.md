@@ -2234,6 +2234,63 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+<!-- W3-U1 #192 #193 (lane-1) -->
+
+- **Pinned-key entries are validated for usability, not just presence, and the
+  reload endpoint can no longer bypass config validation** (`W3-U1`, `#193`,
+  `#192`). `#185` made startup refuse `playground.enabled` +
+  `pinned_only = true` + an *empty* `pinned_keys` list. These are the two
+  remaining routes to the state that guard exists to refuse:
+  - **Under it** (`#193`): the guard checked the list was non-empty, never that
+    an entry was *usable*. An entry with a typo'd `algorithm`, key material that
+    is not base64, an `ed25519` key that is not 32 bytes, an `ecdsa-p256` key
+    that is not 65 bytes or does not begin `0x04`, or `valid_from >=
+    valid_until`, booted clean and then failed at request time — as a redacted
+    `internal_error` (`crates/acdp-registry-types/src/error.rs:125`), so the
+    operator saw a bare 500 with nothing pointing at the config. All five are
+    now startup refusals naming the entry by index and DID.
+  - **Around it** (`#192`): `reload_pinned_keys` ran
+    `RegistryConfig::load(None)` and then `*guard = fresh.playground` with
+    nothing in between, so *every* config guard — including `#185`'s — was
+    bypassable at runtime on a registry that booted clean. The handler now
+    validates before taking the write lock and returns **`400`** with the live
+    config untouched. `400`, not `500`, and deliberately distinct from the
+    existing `ConfigReload` `500`: that one means the registry could not read
+    its own config (a server fault), this one means the operator wrote
+    something invalid. Conflating them makes a config typo page someone as an
+    outage.
+
+  Both doors now call one function, `validate_playground_config` in
+  `crates/acdp-registry-core/src/playground.rs` — placed there because
+  `validate_config` lives in the server *binary*, which
+  `acdp-registry-core` cannot call into, and because the algorithm list it
+  checks against is `PinnedAlgorithm::parse`, private to that module.
+  `acdp-registry-types` is unchanged, so no new public API surface is
+  committed ahead of the `release-plz` `publish` flip.
+
+  **Not a refusal:** a pinned-key list where no entry is *currently* within its
+  validity window warns loudly instead of refusing. Expiry is time-dependent,
+  so refusing would make bootability a function of the wall clock, and under
+  `pinned_only = false` the state is behaviourally identical to having no pins
+  at all, which is supported. The warning branches on `pinned_only`, because the
+  two modes do opposite things — strict rejects every `did:web` publish, lax
+  **accepts them with no signature check**.
+
+  **Upgrade note:** a config that boots today can be refused after this — any
+  entry matching one of the five is now fatal, however harmless it looked
+  before. Three shapes cover essentially all of it: a **rotated-out entry left
+  in place with broken key material** (expired *and* malformed — wholly inert
+  before, since `pinned_for_at` filters on the validity window and nothing ever
+  decoded it); **any** broken entry while `playground.enabled = false`, because
+  these rules do not consult `enabled`; and a **currently-live** entry with a
+  typo'd `algorithm` or bad key material, which was already failing but only
+  for that one agent's publishes and only as an opaque 500, which is how it
+  goes unnoticed. Delete rotated-out entries rather than leaving them broken.
+  Runtime pin-evaluation semantics are unchanged: this refuses bad config at
+  the two doors, it does not change what a good config means. Docs:
+  `docs/CONFIGURATION.md` (startup validation) and `docs/HTTP-API.md`
+  (the reload endpoint's three responses).
+
 - **The playground publish branch now honors `supports_idempotency_key`**
   (`REG-11` Phase 5, `#128`): `crates/acdp-registry-core/src/handlers/
   context.rs`'s playground unpinned publish branch — the manual
