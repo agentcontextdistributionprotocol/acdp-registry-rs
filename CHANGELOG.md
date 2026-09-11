@@ -2232,6 +2232,55 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gated path that could reference the crate. `grep` across each crate's entire
   directory — `src/`, `tests/`, `migrations/` — returns zero occurrences.
 
+<!-- W3-U6 / #196 -->
+
+- **Cursor wire format documented with the wrong separator** (`W3-U6`, `#196`):
+  `crates/acdp-registry-server/tests/http_integration.rs` described cursors as
+  `base64("mint_ms|anchor_ms|ctx_id")`. The separator is a **colon**, and that
+  is load-bearing rather than incidental — `ctx_id` values are URIs containing
+  colons (`acdp://reg/ctx-1`), which is exactly why the decoder splits with a
+  limit of 3 and lets the final field keep its own. A reader who trusted the
+  `|` and wrote a greedy split would corrupt every `ctx_id`.
+
+  The comment now also names `acdp_registry_store::cursor` as the single
+  authority for the format. That is the half that matters: this defect existed
+  because a wire format was described in a place other than where it is
+  defined, which is the same failure `#187` removed by collapsing two
+  byte-identical copies of the codec into one crate.
+
+- **Nine line-pins repaired in `docs/AUTHENTICATION.md`, plus a prose
+  correction in `docs/OPERATIONS.md`** (`W3-U6`). The breakdown matters more
+  than the total, because only the first group is drift:
+  - **six drifted** when `#201` inserted into `handlers/admin.rs`;
+  - **three were misaligned independently of that merge** — one pinned
+    `caller_from_headers` starting inside its doc comment, and two (the same
+    pin cited twice) stopped one line before the end of the statement they
+    describe.
+
+  `docs/OPERATIONS.md` repaired **prose, not a pin**: the line it cites was
+  correct and unchanged.
+
+  A tenth pin, in `crates/acdp-registry-store/src/lib.rs`, carried the **same
+  claim** as `docs/OPERATIONS.md` — that `admin_list` passes
+  `anonymous_public_reads = true` unconditionally — but cited the *requester*
+  line rather than the one that sets it. Two places asserted one fact and
+  named different lines; only one could be right. Repaired together with its
+  sibling, because a half-fixed truth-claim is worse than an unfixed one: the
+  corrected doc would otherwise lend the stale one credibility by contrast.
+
+  The `admin.rs` drift resolved at **three** distinct offsets (+27, +34, +42),
+  not the two that were expected, so no uniform shift could have landed all of
+  them — every pin was re-derived against the merged tree by locating its
+  construct, rather than by applying an offset. Two of the six were
+  additionally short by one line *before* the drift, ending just before the
+  closing brace of the test they cite; their end lines were therefore wrong by
+  four rather than three, the drift and the pre-existing error compounding.
+
+  `OPERATIONS.md` said `admin_list` "passes `anonymous_public_reads = true`"
+  and cited a line where the local is spelled `admin_sees_public_arm`. Both
+  names are real — the local binds positionally to the store parameter — so the
+  text now names both and cites each.
+
 ### Fixed
 
 <!-- W3-U1 #192 #193 (lane-1) -->
