@@ -29,3 +29,23 @@ async fn fulltext_matches_the_cross_backend_contract() {
     let (store, _tmp) = store().await;
     parity::assert_fulltext_parity(&store, "sqlite").await;
 }
+
+/// B3: desynchronize the denormalized `retracted` column from the event log —
+/// the exact state a torn read between the row query and the event query would
+/// observe — and assert `get()` still serves a coherent pair.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_desynced_retraction_is_not_served_as_active() {
+    let (store, _tmp) = store().await;
+    let ctx_id = parity::publish_then_retract(&store, 220, "torn read fixture").await;
+
+    // Clear only the denormalized flag; the lifecycle event stays.
+    let affected = sqlx::query("UPDATE contexts SET retracted = 0 WHERE ctx_id = ?")
+        .bind(&ctx_id)
+        .execute(store.pool())
+        .await
+        .expect("desync the flag")
+        .rows_affected();
+    assert_eq!(affected, 1, "the UPDATE must have hit the context row");
+
+    parity::assert_desynced_retraction_is_not_served_active(&store, "sqlite", &ctx_id).await;
+}

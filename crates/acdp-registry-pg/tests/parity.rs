@@ -107,3 +107,22 @@ async fn the_stopword_list_still_matches_postgres() {
         );
     }
 }
+
+/// B3: same construction as the SQLite side — see that test. `retracted` is a
+/// boolean here rather than an integer, which is the only difference.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_desynced_retraction_is_not_served_as_active() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    let ctx_id = parity::publish_then_retract(&store, 221, "torn read fixture").await;
+
+    let affected = sqlx::query("UPDATE contexts SET retracted = false WHERE ctx_id = $1")
+        .bind(&ctx_id)
+        .execute(store.pool())
+        .await
+        .expect("desync the flag")
+        .rows_affected();
+    assert_eq!(affected, 1, "the UPDATE must have hit the context row");
+
+    parity::assert_desynced_retraction_is_not_served_active(&store, "pg", &ctx_id).await;
+}
