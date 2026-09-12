@@ -468,8 +468,49 @@ pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
     let requested_tenant = tenant_for_request(&state, &headers)?;
 
     let records = state.server.store().log_entries(start, capped_end).await?;
+
+    // A4: ONE visibility query for the whole page, not one per record.
+    //
+    // This loop previously called `requester_can_retrieve` per entry, each of
+    // which did a blocking `RegistryServer::retrieve` plus, under a tenant
+    // header, a `tenant_of_ctx`. On a full 256-record page that is 256 blocking
+    // dispatches and up to 512 store round-trips to answer one request.
+    // `visible_ctx_ids` answers the same question -- §4.5 retrieve visibility
+    // plus the tenant gate -- for the whole page, and both SQL backends
+    // override it with a single query.
+    //
+    // `anonymous_public_reads: true` is PRESERVING behaviour, not ignoring the
+    // config, and the distinction matters enough to measure rather than assert.
+    // The call this replaces used `RegistryServer::retrieve`, which does not
+    // consult that flag: with `auth.enabled = true` and
+    // `anonymous_public_reads = false`, an anonymous `GET /contexts/{ctx_id}`
+    // on a public context still returns 200 -- verified on the wire, not
+    // inferred. The flag gates `search`/`list_contexts`, which is how
+    // `docs/ARCHITECTURE.md` and `docs/MULTI-TENANCY.md` describe it.
+    //
+    // So passing `state.config.auth.anonymous_public_reads` here -- the
+    // obvious-looking thing, and what a future reader will reach for -- would
+    // make this endpoint STRICTER than the retrieve it is supposed to mirror,
+    // and would break §8.3's own rule: `leaf` is present exactly where the
+    // requester could retrieve the context, and they demonstrably can.
+    let ctx_ids: Vec<&str> = records.iter().map(|r| r.ctx_id.as_str()).collect();
+    let visible = if ctx_ids.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        state
+            .server
+            .store()
+            .visible_ctx_ids(
+                &ctx_ids,
+                requester.as_ref(),
+                requested_tenant.as_deref(),
+                true,
+            )
+            .await?
+    };
+
     let mut entries = Vec::with_capacity(records.len());
-    for record in records {
+    for record in &records {
         let mut entry = json!({
             "leaf_index": record.leaf_index,
             "leaf_hash": record.leaf_hash,
@@ -478,14 +519,7 @@ pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
         // the context (public: always); absent — never null — otherwise.
         // An unauthorized auditor learns that *a* publish occupies this
         // position, nothing else.
-        if requester_can_retrieve(
-            &state,
-            requester.as_ref(),
-            requested_tenant.as_deref(),
-            &record.ctx_id,
-        )
-        .await?
-        {
+        if visible.contains(record.ctx_id.as_str()) {
             entry["leaf"] = record.leaf_value().map_err(RegistryError::Acdp)?;
         }
         entries.push(entry);

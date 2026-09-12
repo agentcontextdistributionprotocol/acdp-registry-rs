@@ -3906,3 +3906,33 @@ hold entries from several releases. Use the commands.
   `docker/RAILWAY.md`, `docs/OPERATIONS.md` and `docs/AUTHENTICATION.md` still
   carry the false gating claim and are **not** this unit's to change; they are
   reported to their owners with quotes rather than edited.
+
+### `/log/entries` answers a page with one visibility query (H-A P9, A4)
+
+**Changed.** `GET /log/entries` resolved `leaf` visibility one record at a time: a blocking
+`RegistryServer::retrieve` dispatch per entry, plus — under an `X-Tenant-Id` header — a
+`tenant_of_ctx` per entry. On a full 256-record page (RFC-ACDP-0012 §8.3 RECOMMENDS a cap of at
+least 256) that is 256 blocking-pool dispatches and up to 512 store round-trips to answer one
+request. It now makes a single `ExtendedRegistryStore::visible_ctx_ids` call for the whole page,
+which both SQL backends override with one query.
+
+**Responses are byte-identical.** This is a cost change, not a wire change: the same entries
+carry the same `leaf_index`, `leaf_hash`, and the same `leaf` where §8.3 allows one.
+
+**One thing that is NOT identical, and it is not a refactor.** The old loop never asked about a
+row it was about to hide, so a `tenant_of_ctx` error could surface only for rows that were
+already visible. The batched call covers the whole page including invisible rows, so a store
+error can now surface on a page where it previously could not — a page that used to return 200
+with some leaves omitted can now return 500. Strictly more honest; still a behaviour change.
+
+**Why `anonymous_public_reads: true` is passed rather than the configured value.** The call this
+replaces went through `RegistryServer::retrieve`, which does not consult that flag — verified on
+the wire, not inferred. Passing the config value would make this endpoint stricter than the
+retrieve §8.3 defines it to mirror. The reasoning is at the call site too, because it is a
+mistake a reader makes by being helpful.
+
+**Guards.** The improvement is invisible in the response, so nothing in the suite could have
+noticed a revert — the guard is the deliverable. A `CountingStore` test wrapper counts `get`,
+`visible_ctx_ids` and `tenant_of_ctx`; three new tests pin one batched query and zero per-record
+reads, with and without a tenant header, and pin that the reserved `default` sentinel is refused
+before any row is read. Each assertion was falsified against a mutation that violates it alone.

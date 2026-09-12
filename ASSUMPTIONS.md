@@ -2058,3 +2058,48 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 - **Status:** UNCONFIRMED — A2 ships PARTIAL by design. The cursor oracle remains open and is
   asserted by `search_cursor_oracle_remains_open_for_tenant_scoped_caller`; A2 must not be
   described as closed until the store-side predicate lands and that test is deliberately deleted.
+
+## H-A P9 (A4) — `/log/entries` answers a page with one visibility query
+
+- **Assumption:** passing `anonymous_public_reads: true` to `visible_ctx_ids` from
+  `/log/entries` preserves the endpoint's existing behaviour, rather than ignoring the
+  operator's configuration.
+- **Why it holds, measured rather than reasoned:** the call this replaces went through
+  `RegistryServer::retrieve`, which does not consult that flag. Probed on the wire with
+  `auth.enabled = true` and `anonymous_public_reads = false`, an anonymous
+  `GET /contexts/{ctx_id}` on a public context still returns 200. So passing the config value
+  — the obvious-looking thing, and what a future reader will reach for — would make
+  `/log/entries` STRICTER than the retrieve it is defined to mirror, and would break
+  RFC-ACDP-0012 §8.3's own rule that `leaf` is present exactly where the requester could
+  retrieve the context. The flag gates `search`/`list_contexts`, which is how
+  `docs/ARCHITECTURE.md` and `docs/MULTI-TENANCY.md` describe it.
+- **Blast radius if wrong:** public leaves would disappear from the log for anonymous
+  auditors on a deployment that sets the flag — a silent transparency regression, not an error.
+- **Status:** CONFIRMED by wire probe. The rationale is also written into `handlers/log.rs`
+  at the call site, because the mistake is one a reader makes by being helpful.
+
+- **Assumption:** the old handler-side tenant fallback
+  (`tenant_of_ctx(...).unwrap_or_else(|| "default")`) had no behaviour to preserve.
+- **Why it holds:** two independent reasons, both verified. (1) `tenant_id` is
+  `TEXT NOT NULL DEFAULT 'default'` (`crates/acdp-registry-sqlite/migrations/007_tenant_id.sql:11`),
+  so `tenant_of_ctx` returns `None` only for a row that does not exist — and such a row already
+  failed the visibility check above it. (2) `"default"` is a RESERVED sentinel:
+  `reject_reserved_tenant` (`handlers/context.rs:190`) refuses it from the header AND from a
+  token claim, so `requested_tenant` is never `Some("default")` and the comparison was
+  unreachable in the affirmative. Probed: `X-Tenant-Id: default` on `/log/entries` returns 400
+  `schema_violation` "'default' is a reserved tenant sentinel".
+- **Note on the plan:** this phase's plan asked for a test that a missing row "still resolves to
+  `default`". Written to that premise it would have asserted nothing. The test that ships
+  (`log_entries_rejects_the_reserved_default_tenant`) pins (2) instead — the property that
+  actually makes `AND tenant_id = ?` safe, since the untenanted bucket cannot be named.
+- **Status:** CONFIRMED.
+
+- **Assumption (NOT an equivalence — recorded because it is a real behaviour change):** the
+  reordering is boolean-identical on the **success path only**.
+- **Why:** these are fallible store reads. Today a per-record error could surface only for rows
+  that were already visible — the old loop never asked about a row it was about to hide. The
+  batched call covers the whole page including invisible rows, so a store error can now surface
+  on a page where it previously could not.
+- **Blast radius:** a page that used to return 200 with some leaves omitted can now return 500.
+  Strictly more honest, but it is a change, and calling this a pure refactor would be wrong.
+- **Status:** CONFIRMED as intended. Stated in the PR body, not just here.
