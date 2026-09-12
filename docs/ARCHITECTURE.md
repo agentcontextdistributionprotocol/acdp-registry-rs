@@ -4,46 +4,45 @@ How the 8-crate workspace fits together, and the path a request takes through
 it. The per-topic docs linked below go deeper on each subsystem.
 
 ```
-                       ┌────────────────────────┐
-                       │  acdp (crates.io dep)  │
-                       │  types / crypto / did  │
-                       │  validator + server    │
-                       └───────┬────────────────┘
-                               │
-            ┌──────────────────┴─────────────────────┐
-            │                                        │
-   ┌────────▼────────────┐               ┌───────────▼────────────┐
-   │ acdp-registry-types │               │ acdp-registry-store    │
-   │  config / errors    │               │  trait Extended…       │
-   │  wire / events      │               └───────────┬────────────┘
-   └────────┬────────────┘                           │
-            │                                        │
-            │      ┌─────────────────┬───────────────┤
-            │      │                 │               │
-            │  ┌───▼────────┐ ┌──────▼─────┐ ┌───────▼───────────┐
-            │  │ -pg        │ │ -sqlite    │ │ -auth             │
-            │  │ Postgres   │ │ SQLite     │ │ DID + JWT + revoke│
-            │  └───┬────────┘ └──────┬─────┘ └───────┬───────────┘
-            │      │                 │               │
-            │      │  ┌──────────────▼───┐           │
-            │      │  │ -webhook         │           │
-            │      │  │ HMAC POSTs       │           │
-            │      │  └──────────────────┘           │
-            │      │                                 │
-            │      └────────────────┬────────────────┘
-            │                       │
-            │              ┌────────▼────────────┐
-            │              │ acdp-registry-core   │
-            │              │ axum + handlers      │
-            │              │ (generic over S)     │
-            │              └────────┬────────────┘
-            │                       │
-            │              ┌────────▼────────────┐
-            └──────────────► acdp-registry-server│
-                           │ binary; picks S via │
-                           │ Cargo features      │
-                           └─────────────────────┘
+acdp (crates.io)  ── types / crypto / did / validator / RegistryServer
+  │
+  ▼
+acdp-registry-types ......... leaf. EVERY crate below depends on it.
+  │
+  ├──▶ acdp-registry-store ... trait ExtendedRegistryStore
+  │        │
+  │        ├──▶ acdp-registry-pg      (Postgres backend)
+  │        └──▶ acdp-registry-sqlite  (SQLite backend)
+  │
+  ├──▶ acdp-registry-auth ..... DID challenge → JWT, revocation
+  │
+  └──▶ acdp-registry-webhook .. HMAC POSTs
+
+acdp-registry-core ......... axum + handlers, generic over S
+  depends on: -types, -store, -sqlite, -auth, -webhook
+
+acdp-registry-server ....... binary; picks S via Cargo features
+  depends on: all seven
 ```
+
+Edges above are the real `[dependencies]` graph, not a sketch. Re-derive it
+with:
+
+```bash
+cargo metadata --format-version 1 --no-deps | python3 -c "
+import json,sys
+for p in sorted(json.load(sys.stdin)['packages'], key=lambda x: x['name']):
+    deps = sorted({d['name'] for d in p['dependencies']
+                   if d['name'].startswith('acdp-registry')})
+    print(f\"{p['name']:<24} -> {', '.join(deps) or '(leaf)'}\")
+"
+```
+
+This replaced a hand-drawn box diagram that asserted two dependency edges
+which do not exist: `-store → -auth` and `-sqlite → -webhook`. Both of those
+crates depend on `-types` alone. A drawing cannot be checked by anything, so
+it drifted silently; the command above can be run in one line, which is why
+the edges are written as text.
 
 The protocol library [`acdp`](https://crates.io/crates/acdp) is consumed as a
 **crates.io** dependency (not a path dep) — `types`, crypto, `did` resolution,

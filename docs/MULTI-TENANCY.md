@@ -102,10 +102,25 @@ The store carries the tenant binding alongside each context:
   an anonymous caller with `anonymous_public_reads = false` sees zero rows
   regardless of tenant, and a non-`None` requester's results are unaffected
   by this flag.
-- Search and lineage **post-filter the tenant binding** in the handler with a
-  bounded refill loop (up to 6 inner pages) — so a search page may come back
-  shorter than `limit`; keep paging until `next_cursor` is absent. (Visibility
-  itself is enforced in SQL and never causes short pages.)
+- Search, lineage and `/lineages/{lineage_id}/current` all **post-filter the
+  tenant binding** in the handler rather than in SQL, but only `search` paginates,
+  so only `search` carries the short-page consequence:
+  - `GET /contexts/search` runs a bounded refill loop, capped at
+    `SEARCH_REFILL_MAX_PAGES` inner pages (**6** today,
+    `handlers/context.rs`). Hitting that cap returns **fewer than `limit`**
+    rows while still emitting a non-`None` `next_cursor`, so a short page is
+    NOT an end-of-results signal — keep paging until `next_cursor` is absent.
+  - `GET /lineages/{lineage_id}` returns the complete lineage in one unpaginated
+    array and filters it in the handler. There is no refill loop and no cursor,
+    so there is no short page to misread; a fully-foreign lineage comes back as
+    an empty array, not a 404.
+  - `GET /lineages/{lineage_id}/current` filters the single resolved version and
+    returns **404 `no current version`** when it belongs to another tenant —
+    deliberately indistinguishable from "no such lineage", so the endpoint does
+    not confirm existence across a tenant boundary.
+
+  Visibility (`public`/`private`) is a separate axis, enforced in SQL, and never
+  causes short pages.
 
 ## Configuration
 

@@ -492,7 +492,7 @@ async fn auth_rate_limit<S: ExtendedRegistryStore + 'static>(
     // ordering.
     if rl.global_per_minute > 0 {
         if let Err(retry_after_seconds) = limiter.check_global() {
-            metrics::record_rate_limit_rejection("auth_global");
+            metrics::record_rate_limit_rejection(metrics::RateLimitScope::AuthGlobal);
             return RegistryError::RateLimited {
                 retry_after_seconds,
             }
@@ -501,7 +501,7 @@ async fn auth_rate_limit<S: ExtendedRegistryStore + 'static>(
     }
     if rl.per_ip_per_minute > 0 {
         if let Err(retry_after_seconds) = limiter.check(&ip.to_string()) {
-            metrics::record_rate_limit_rejection("auth_per_ip");
+            metrics::record_rate_limit_rejection(metrics::RateLimitScope::AuthPerIp);
             return RegistryError::RateLimited {
                 retry_after_seconds,
             }

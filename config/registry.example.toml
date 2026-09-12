@@ -183,9 +183,15 @@ enabled = false
 [receipt]
 # Registry-receipt signing identity (RFC-ACDP-0010, ACDP 0.2.0). When a
 # signing key is configured the registry mints a signed receipt for every
-# publish (persisted atomically with the context row) and advertises
-# acdp_version 0.2.0 + the `acdp-registry-receipts` profile. Leave unset to
-# stay a 0.1.0 receipt-less registry.
+# publish (persisted atomically with the context row) and advertises the
+# `acdp-registry-receipts` profile. Leave unset to stay receipt-less.
+#
+# NOTE on acdp_version: enabling this does NOT move the advertised
+# `acdp_version`. Since RFC-ACDP-0016 (anchors) the registry folds an
+# UNCONDITIONAL 0.5.0 claim into the max()-over-claims in
+# `acdp_version_claim` (main.rs:1144,1154), so /.well-known/acdp.json
+# advertises 0.5.0 regardless of which features are on. "ACDP 0.2.0" above
+# is the protocol level this FEATURE belongs to, not what gets served.
 #
 # Exactly one key source. Generate a seed with: openssl rand -base64 32
 # Env override: ACDP_REGISTRY_RECEIPT__SIGNING_KEY_SEED_B64.
@@ -201,7 +207,8 @@ key_id_fragment = "receipt-key-1"
 # Lineage-head receipts (RFC-ACDP-0011, ACDP 0.3.0): mint a registry-signed
 # head attestation on every GET /lineages/{id}/current response, signed with
 # the SAME receipt key (no new key role). Requires a signing key above;
-# advertises `acdp-registry-head-receipts` and acdp_version 0.3.0.
+# advertises the `acdp-registry-head-receipts` profile. (Advertised
+# acdp_version is unconditionally 0.5.0 — see the [receipt] note above.)
 # head_receipts = false
 
 # Rotated-out receipt verification keys. RFC-ACDP-0010 §9: these stay in the
@@ -217,8 +224,9 @@ key_id_fragment = "receipt-key-1"
 # registry serves POST /contexts/{ctx_id}/retract and /republish
 # (producer-signed events, verified like a publish), derives status with the
 # retracted > superseded > expired > active precedence, excludes retracted
-# contexts from default search and /current, and advertises
-# `acdp-registry-lifecycle` + acdp_version 0.3.0. Retraction is
+# contexts from default search and /current, and advertises the
+# `acdp-registry-lifecycle` profile. (Advertised acdp_version is
+# unconditionally 0.5.0 — see the [receipt] note above.) Retraction is
 # mark-not-delete: bodies stay retrievable forever.
 enabled = false
 
@@ -229,7 +237,8 @@ enabled = false
 # row and its receipt (no degraded mode — a publish that cannot append its
 # leaf fails), serves GET /log/checkpoint, /log/proof, and /log/entries,
 # signs checkpoints with the [receipt] key (no new key role), and advertises
-# `acdp-registry-transparency-log` + acdp_version 0.3.0.
+# the `acdp-registry-transparency-log` profile. (Advertised acdp_version is
+# unconditionally 0.5.0 — see the [receipt] note above.)
 #
 # Prerequisites: a configured [receipt] signing key and a durable storage
 # backend (sqlite or postgres) — both enforced at startup.
