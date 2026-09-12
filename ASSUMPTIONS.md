@@ -2427,3 +2427,38 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   directional result is what shows the end-to-end test measures caps rather than config, and it is
   why the config half needs its own assertion to be protected at all.
 - **Status:** UNCONFIRMED
+
+## H-A2-w — `total_estimate` returns for tenant-scoped callers
+
+- **Assumption:** the store's `COUNT(*) OVER ()` is tenant-correct, so returning `total_estimate`
+  to a tenant-asserting caller discloses nothing.
+- **Verified in the code, then on the wire:** `search_in_tenant` appends `AND tenant_id = ?` to the
+  same statement that carries `COUNT(*) OVER ()` (`acdp-registry-sqlite/src/store.rs`,
+  `acdp-registry-pg/src/store.rs`), so the count rides a scan that only ever sees the caller's
+  rows. On the wire, a `tenant-a` caller against a fixture of 2 own rows and 3 foreign rows
+  receives `2`.
+- **Why the wire check is not redundant with reading the SQL:** the handler chooses between
+  `search_in_tenant` and `RegistryServer::search` at `handlers/context.rs`. Correct SQL reached by
+  the wrong branch would still report the registry-wide number, and only an end-to-end assertion
+  distinguishes those.
+- **Status:** CONFIRMED.
+
+- **Assumption:** asserting the VALUE rather than the presence of `total_estimate` is necessary.
+- **Why:** `Option<u64>` with `skip_serializing_if` makes absent and null identical on the wire, so
+  `.is_some()` cannot tell "present and null" from "present with a number". More importantly,
+  presence alone passes against two live bugs. The fixture separates all three readings — 2 is the
+  tenant's count, 5 the registry's, 1 the page size at `limit=1` — and each was produced by a real
+  mutation rather than predicted:
+  - omission restored in the handler -> `None`;
+  - tenant predicate removed from the store's WHERE clause (the pre-#259 world) -> `Some(5)`;
+  - `total_estimate = matches.len()` -> `Some(1)`.
+- **Status:** CONFIRMED by falsification, three ways.
+
+- **Assumption (NOT acted on, recorded so the next reader does not "tidy" it):** the refill loop's
+  tenant `retain` and its `tenants_of_ctxs` call are now redundant for a tenant-scoped request,
+  because the predicate is in the statement.
+- **Why it is left in place:** removing them is an optimisation with its own falsification burden,
+  not part of this change. lane-3 left them deliberately for the same reason and said so at
+  handover. Deleting them here would ship an unfalsified behaviour change inside a diff whose
+  stated purpose is a one-field wire addition.
+- **Status:** UNCONFIRMED — a separate unit if anyone wants it, with its own evidence.
