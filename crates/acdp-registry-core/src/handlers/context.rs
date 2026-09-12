@@ -1079,11 +1079,11 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
             // in the binary, which copies cfg into caps, and wrong for any other
             // wiring. That is GAP 3 in `tests/common/mod.rs`, and it already cost
             // this repo one anonymous-disclosure bug on `/log/entries`.
-            let anonymous_public_reads = state.server.capabilities().anonymous_public_reads;
-            if requester.is_none() && !anonymous_public_reads {
+            let public_arm_open = state.server.capabilities().anonymous_public_reads;
+            if requester.is_none() && !public_arm_open {
                 return Err(acdp::error::AcdpError::NotAuthorized(
                     "anonymous search requires authentication \
-                     (registry caps: anonymous_public_reads=false)"
+                     (registry caps: public_arm_open=false)"
                         .into(),
                 )
                 .into());
@@ -1091,12 +1091,7 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
             state
                 .server
                 .store()
-                .search_in_tenant(
-                    &params,
-                    requester.as_ref(),
-                    anonymous_public_reads,
-                    Some(tenant),
-                )
+                .search_in_tenant(&params, requester.as_ref(), public_arm_open, Some(tenant))
                 .await?
         } else {
             let server = state.server.clone();

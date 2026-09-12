@@ -89,9 +89,9 @@ impl RegistryStore for MemoryStore {
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<SearchResponse, AcdpError> {
-        self.inner.search(params, requester, anonymous_public_reads)
+        self.inner.search(params, requester, public_arm_open)
     }
 }
 
@@ -109,7 +109,7 @@ impl ExtendedRegistryStore for MemoryStore {
         _cursor: Option<&str>,
         _requester: Option<&AgentDid>,
         _tenant: Option<&str>,
-        _anonymous_public_reads: bool,
+        _public_arm_open: bool,
     ) -> Result<Page<FullContext>, AcdpError> {
         // The protocol-library InMemoryStore deliberately doesn't expose
         // its internal map; admin listing isn't supported on this backend.

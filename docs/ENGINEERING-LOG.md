@@ -31,6 +31,46 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-U (lane-1) — the store parameter is named for what the predicate consumes -->
+
+### Changed
+
+- **The store's disclosure parameter is renamed `anonymous_public_reads` -> `public_arm_open`,
+  at every trait method, implementation and call site.** No behaviour change. The old name
+  described one caller's situation rather than what the predicate reads: the public arm is
+  `public_arm_open || requester.is_some()`, and `handlers/admin.rs` passes `true` for a caller who
+  is authenticated but unnamed. Under the old name that read as a bypass, and **three readers in a
+  row — an audit, the coordinating session, and another lane — took it for one.**
+
+- **Both struct fields keep their names, and that is the load-bearing part of the diff.**
+  `AuthConfig.anonymous_public_reads` is a config-file key, and
+  `CapabilitiesDocument.anonymous_public_reads` is canonical per RFC-ACDP-0007 §3.3 and lives in
+  the external `acdp` crate. `server/src/main.rs` is the translation point between them and is
+  untouched. The field names are the vocabulary the spec and deployed configs fixed; only the
+  parameter was free to change.
+
+### Fixed
+
+- **The config key had no guard, and this unit proved it the hard way.** The mechanical rename
+  renamed the serde field. It **compiled**, `clippy --all-targets -D warnings` passed on **six**
+  feature configurations, and 28 test suites stayed green — because every other use in the repo
+  sets the field programmatically and moved with it. Nothing in the codebase observed the contract
+  with deployed `registry.toml` files. `anonymous_public_reads_is_a_stable_config_key` now
+  deserialises the literal key, which is the only way to observe the name serde matches on, and it
+  fails against exactly that rename.
+
+- **A correction to the hazard as it was described.** The risk was stated as `#[serde(default)]`
+  causing an old key to be *ignored*, so a registry would boot at `false` while the operator
+  believed otherwise — silent. `AuthConfig` also carries `#[serde(deny_unknown_fields)]`, so the
+  old key instead **fails to parse and the registry refuses to start**. The conclusion is
+  unchanged, the mechanism is not, and a doc that gets the mechanism wrong is the harder defect to
+  find later.
+
+- **A stale doc citation in `tests/common/mod.rs`** named a test another lane had renamed. Fixed —
+  and only that one. The three other occurrences, in `ASSUMPTIONS.md` and this file, are **dated
+  records** that correctly name the test as it stood on that date; editing them would falsify the
+  record rather than update it.
+
 <!-- unit H-A2-w (lane-1) — total_estimate returns for tenant-scoped callers -->
 
 ### Changed

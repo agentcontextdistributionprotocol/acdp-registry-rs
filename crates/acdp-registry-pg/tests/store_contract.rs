@@ -1199,7 +1199,7 @@ mod visibility_sql {
                     "total_estimate must equal the §4.5-visible count: role={role} anon_reads={anon_reads}"
                 );
 
-                // ── list_contexts × anonymous_public_reads (REG-11 Phase 2) ──
+                // ── list_contexts × public_arm_open (REG-11 Phase 2) ──
                 let page = store
                     .list_contexts(50, None, requester.as_ref(), Some(&tenant), anon_reads)
                     .await
