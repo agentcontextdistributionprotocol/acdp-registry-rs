@@ -124,7 +124,7 @@ rejected with `403 not_authorized`.
 **Three** bearer parsers coexist and no two of them agree. Each is deliberate,
 and the differences below are pinned by tests — `extract_bearer_accepts_two_casings_and_trims`
 (`crates/acdp-registry-auth/src/service.rs`), `bearer_scheme_is_case_sensitive`
-and `rejects_token_with_extra_whitespace` (`handlers/admin.rs:882-902`), and
+and `rejects_token_with_extra_whitespace` (`handlers/admin.rs`), and
 `metrics_bearer_parser_shape_is_pinned`
 (`crates/acdp-registry-server/tests/metrics_integration.rs`). The differences
 were undocumented rather than accidental, and stating them is what this section
@@ -138,9 +138,9 @@ differences in the same commit that documents them.
 
 | Route group | Parser | Scheme prefixes accepted | Trims the token? | Unrecognised header shape |
 |---|---|---|---|---|
-| `/contexts/*`, `/lineages/*`, and the other ordinary read/publish routes | `extract_bearer` (`crates/acdp-registry-auth/src/service.rs:400-405`) | `Bearer ` **and** `bearer ` | yes | treated as **anonymous** |
-| `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs:707-735`) | `Bearer ` only | **no** | rejected with **403** `{"error": "admin-only"}` (`admin.rs:761-765`) |
-| `/metrics` | inline in `metrics_endpoint` (the `strip_prefix("Bearer ")` chain, `crates/acdp-registry-core/src/metrics.rs:124-128`) | `Bearer ` only | yes | rejected with **401** + a `WWW-Authenticate` challenge (the `WWW_AUTHENTICATE` early return in `metrics_endpoint`, `metrics.rs:141-149`) |
+| `/contexts/*`, `/lineages/*`, and the other ordinary read/publish routes | `extract_bearer` (`crates/acdp-registry-auth/src/service.rs`) | `Bearer ` **and** `bearer ` | yes | treated as **anonymous** |
+| `/admin/*` | `require_admin_bearer` (`crates/acdp-registry-core/src/handlers/admin.rs`) | `Bearer ` only | **no** | rejected with **403** `{"error": "admin-only"}` (the `AdminAuthError::Forbidden` arm in `crates/acdp-registry-core/src/handlers/admin.rs`) |
+| `/metrics` | inline in `metrics_endpoint` (the `strip_prefix("Bearer ")` chain, `crates/acdp-registry-core/src/metrics.rs`) | `Bearer ` only | yes | rejected with **401** + a `WWW-Authenticate` challenge (the `WWW_AUTHENTICATE` early return in `metrics_endpoint`, `crates/acdp-registry-core/src/metrics.rs`) |
 
 The `/metrics` parser is a hybrid of the other two: case-sensitive on the scheme
 like the admin one, trimming like the lax one. It is also the only one of the
@@ -159,7 +159,7 @@ one parser is merely more permissive than the others, not more conformant.
 
 ### Unrecognised means anonymous on the ordinary routes
 
-`caller_from_headers` (`crates/acdp-registry-core/src/handlers/context.rs:1350-1367`)
+`caller_from_headers` (`crates/acdp-registry-core/src/handlers/context.rs`)
 returns `Ok(None)` — an anonymous caller — in three cases:
 
 - `auth.enabled = false`, regardless of what the client sent;
@@ -198,7 +198,7 @@ suspecting the token.
 
 On `/admin/*` the same inputs return `403` — absent, non-UTF-8, and unrecognised
 headers are all refused, and an empty `auth.admin_tokens` list disables the routes
-outright (`admin.rs:712`).
+outright (the `allowed.is_empty()` arm of `require_admin_bearer`, `crates/acdp-registry-core/src/handlers/admin.rs`).
 
 ### What each parser accepts
 
@@ -232,7 +232,8 @@ response status itself.
 
 Both behaviours on the admin side are pinned by tests, so loosening either is a
 deliberate reviewed change rather than a refactor: `bearer_scheme_is_case_sensitive`
-(`admin.rs:882-891`) and `rejects_token_with_extra_whitespace` (`admin.rs:894-902`).
+and `rejects_token_with_extra_whitespace` (both in
+`crates/acdp-registry-core/src/handlers/admin.rs`).
 
 #### Trailing whitespace depends on the HTTP version
 
@@ -262,7 +263,7 @@ works on some routes and not others.
 
 `GET /metrics` does not go through the ACDP auth pipeline at all. It is mounted
 on the un-authenticated, un-rate-limited `aux` router
-(`crates/acdp-registry-core/src/lib.rs:154-156`), so no bearer it receives is
+(it is merged into `aux` in `build_router`, `crates/acdp-registry-core/src/lib.rs`), so no bearer it receives is
 ever validated as an ACDP token — no signature check, no `exp`, no revocation
 lookup, no tenant resolution. The handler applies its own gate instead: a
 constant-time comparison against a configured shared secret, via the same
@@ -270,13 +271,13 @@ constant-time comparison against a configured shared secret, via the same
 (`crates/acdp-registry-core/src/secure_compare.rs`).
 
 The gate is applied only when `metrics.bearer_token` is non-blank
-(`crates/acdp-registry-core/src/metrics.rs:122-123`); the configured value and
+(`crates/acdp-registry-core/src/metrics.rs`); the configured value and
 the presented one are both trimmed before comparison (`:122`, `:128`). Three
 consequences follow, and they are the ones that surprise people:
 
 - **An empty `metrics.bearer_token` leaves `/metrics` open**, to anyone who can
   reach the port. This is the shipped default
-  (`crates/acdp-registry-types/src/config.rs:701`) and it is deliberate — the
+  (the `bearer_token` default in `crates/acdp-registry-types/src/config.rs`) and it is deliberate — the
   endpoint is meant to be reachable from a trusted scrape network without ACDP
   credentials. It is not an oversight, but it is a decision your deployment
   inherits by default.

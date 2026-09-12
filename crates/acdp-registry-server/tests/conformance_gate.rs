@@ -140,9 +140,9 @@ fn every_wire_code_the_code_emits_is_documented() {
 /// 2. DIRECTIONALITY, the same caveat lane-1 recorded for
 ///    `every_route_in_the_core_router_is_classified`: this fails on a route that
 ///    EXISTS but is undocumented. It does NOT fail on a documented route that
-///    has been deleted from the router — for that, a wire test that actually calls the
-/// endpoint is the only real guard. Two different failure modes; this one covers
-/// the direction that has actually bitten twice.
+///    has been deleted from the router — for that, a wire test that actually
+///    calls the endpoint is the only real guard. Two different failure modes;
+///    this one covers the direction that has actually bitten twice.
 #[test]
 fn every_mounted_route_is_documented() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -257,5 +257,235 @@ fn every_mounted_route_is_documented() {
          operator meets first — /livez in particular, because documenting /healthz \
          as \"liveness\" is what wires a storage-gated probe to a k8s livenessProbe \
          and restart-loops healthy pods during a database outage."
+    );
+}
+
+/// `docs/MULTI-TENANCY.md` tells clients the search refill loop is capped at a
+/// specific number of inner pages. That number is a promise about paging
+/// behaviour — a client that trusts a stale one under-drains its results — and
+/// until this test it was a hand-typed literal in prose with nothing tying it to
+/// `SEARCH_REFILL_MAX_PAGES`.
+///
+/// Rule 48: ship the number in a form a command regenerates. The constant is
+/// private to `acdp-registry-core`, so this reads it from source rather than
+/// importing it; the scan is guarded so a rename fails loudly instead of
+/// silently skipping the comparison.
+#[test]
+fn documented_search_refill_cap_matches_the_constant() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+
+    let src_path = root.join("crates/acdp-registry-core/src/handlers/context.rs");
+    let src = std::fs::read_to_string(&src_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", src_path.display()));
+
+    const DECL: &str = "const SEARCH_REFILL_MAX_PAGES: usize = ";
+    let i = src.find(DECL).unwrap_or_else(|| {
+        panic!(
+            "SEARCH_REFILL_MAX_PAGES is no longer declared in {} — this test can \
+             no longer check the documented cap, and docs/MULTI-TENANCY.md still \
+             states a number. Repoint the scan or drop the claim.",
+            src_path.display()
+        )
+    });
+    let rest = &src[i + DECL.len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let cap: usize = digits.parse().unwrap_or_else(|e| {
+        panic!("could not parse SEARCH_REFILL_MAX_PAGES value from {digits:?}: {e}")
+    });
+    assert!(cap > 0, "a zero refill cap would disable the loop entirely");
+
+    let doc_path = root.join("docs/MULTI-TENANCY.md");
+    let doc = std::fs::read_to_string(&doc_path).expect("read MULTI-TENANCY.md");
+
+    // Guard the anchor as well as the number: if the prose is rewritten so this
+    // sentence disappears, the `contains` below would pass vacuously forever.
+    assert!(
+        doc.contains("SEARCH_REFILL_MAX_PAGES"),
+        "docs/MULTI-TENANCY.md no longer names SEARCH_REFILL_MAX_PAGES, so this \
+         test is checking nothing. Restore the reference or delete this test."
+    );
+    assert!(
+        doc.contains(&format!("**{cap}** today")),
+        "docs/MULTI-TENANCY.md does not state the current refill cap of {cap} \
+         (expected the literal \"**{cap}** today\"). A client that trusts a stale \
+         cap stops paging early and silently under-drains its results."
+    );
+}
+
+/// Walk `crates/**/*.rs` and concatenate. Used as a presence corpus, not for
+/// parsing — a symbol that appears nowhere in any Rust source is certainly a
+/// stale citation; one that appears somewhere might still be cited in the wrong
+/// file, which this does not claim to catch.
+fn rust_source_corpus(dir: &std::path::Path, out: &mut String) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            rust_source_corpus(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                out.push_str(&s);
+                out.push('\n');
+            }
+        }
+    }
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// `docs/AUTHENTICATION.md` is the densest source-citing document in the repo:
+/// it explains why three bearer parsers disagree, and every claim is anchored to
+/// a specific function. It used to anchor them with LINE NUMBERS — thirteen of
+/// them — which is the most rot-prone citation form there is, because nothing
+/// reports a pin that has slipped.
+///
+/// Two had already slipped when this test was written:
+/// `context.rs:1350-1367` for `caller_from_headers` (really at 1362, pointing
+/// instead at the tail of an unrelated handler) and `lib.rs:154-156` for the
+/// `/metrics` mount (really ~110 lines away — that range is the `auth`
+/// subrouter). Both read as precise and were wrong, which is worse than vague.
+///
+/// So the pins were replaced with symbol names, and this test enforces the new
+/// form. Rule 48: the fact is now shipped in a shape a command can check.
+///
+/// LIMIT, stated: presence is checked against the whole-workspace corpus, so
+/// this catches a symbol that no longer exists ANYWHERE — a rename or a
+/// deletion. It does not catch a symbol that still exists but has moved to a
+/// different file than the one cited.
+#[test]
+fn authentication_doc_cites_symbols_that_exist_and_never_line_numbers() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let doc_path = root.join("docs/AUTHENTICATION.md");
+    let doc = std::fs::read_to_string(&doc_path).expect("read AUTHENTICATION.md");
+
+    // Collect every backtick-delimited span once; all three checks read from it.
+    let mut spans: Vec<&str> = Vec::new();
+    let mut rest = doc.as_str();
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        match after.find('`') {
+            Some(close) => {
+                spans.push(&after[..close]);
+                rest = &after[close + 1..];
+            }
+            None => break,
+        }
+    }
+    assert!(
+        spans.len() > 100,
+        "only {} backticked spans found in {} — the scanner is broken, so every \
+         check below would pass vacuously",
+        spans.len(),
+        doc_path.display()
+    );
+
+    // 1. No line-number pins, in any form, anywhere in the document. This is the
+    //    rule that prevents the drift from coming back; the two checks after it
+    //    only validate what replaced them.
+    let pins: Vec<&&str> = spans
+        .iter()
+        .filter(|s| {
+            s.split(".rs:")
+                .skip(1)
+                .any(|tail| tail.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .collect();
+    assert!(
+        pins.is_empty(),
+        "docs/AUTHENTICATION.md cites source by line number: {pins:?}. Line pins \
+         rot silently — two of the original thirteen were already pointing at \
+         unrelated code. Cite the function or test by name instead; this test \
+         then checks that the name still exists."
+    );
+
+    // 2. Every cited source file exists.
+    let cited_paths: Vec<&&str> = spans
+        .iter()
+        .filter(|s| s.starts_with("crates/") && s.ends_with(".rs"))
+        .collect();
+    assert!(
+        cited_paths.len() >= 8,
+        "only {} crate source paths cited — expected the document to reference at \
+         least 8; the scanner or the document changed shape: {cited_paths:?}",
+        cited_paths.len()
+    );
+    let gone: Vec<&&&str> = cited_paths
+        .iter()
+        .filter(|p| !root.join(p).exists())
+        .collect();
+    assert!(
+        gone.is_empty(),
+        "docs/AUTHENTICATION.md cites source files that do not exist: {gone:?}"
+    );
+
+    // 3. Every backticked snake_case identifier still exists in the workspace.
+    let mut corpus = String::new();
+    rust_source_corpus(&root.join("crates"), &mut corpus);
+    assert!(
+        corpus.len() > 100_000,
+        "source corpus is only {} bytes — the walk is broken and check 3 would \
+         report every identifier as missing (or, worse, pass vacuously if the \
+         document were empty)",
+        corpus.len()
+    );
+
+    let mut idents: Vec<&str> = Vec::new();
+    for s in &spans {
+        let ok = s.len() >= 4
+            && s.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+            && s.chars().all(is_ident_char);
+        if ok && !idents.contains(s) {
+            idents.push(s);
+        }
+    }
+    assert!(
+        idents.len() >= 20,
+        "only {} backticked identifiers extracted — expected at least 20: \
+         {idents:?}",
+        idents.len()
+    );
+    for required in [
+        "caller_from_headers",
+        "require_admin_bearer",
+        "extract_bearer",
+    ] {
+        assert!(
+            idents.contains(&required),
+            "`{required}` is no longer cited in AUTHENTICATION.md — either the \
+             document stopped explaining the parser it names, or the extraction \
+             is broken: {idents:?}"
+        );
+    }
+
+    let stale: Vec<&&str> = idents
+        .iter()
+        .filter(|id| {
+            !corpus.match_indices(*id).any(|(i, _)| {
+                let before = corpus[..i].chars().next_back();
+                let after = corpus[i + id.len()..].chars().next();
+                !before.is_some_and(is_ident_char) && !after.is_some_and(is_ident_char)
+            })
+        })
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "docs/AUTHENTICATION.md cites identifiers that exist nowhere in \
+         crates/**/*.rs: {stale:?}. A renamed or deleted function leaves the \
+         prose around it describing behaviour nothing implements."
     );
 }
