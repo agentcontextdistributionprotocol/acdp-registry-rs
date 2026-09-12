@@ -66,8 +66,33 @@ pub fn spawn_revocation_pollers(feeds: Vec<RevocationFeedConfig>, store: Arc<dyn
     }
 }
 
+/// The HTTP client the poller fetches feeds with.
+///
+/// **E2: this used to be a bare `reqwest::Client`.** A revocation feed is fetched
+/// by the registry itself and the response is attacker-influenceable by whoever
+/// controls the peer, so a redirect is an SSRF primitive: reqwest follows up to
+/// **10 redirects by default**, letting a hostile or compromised peer bounce the
+/// poller — carrying its `Authorization: Bearer <admin_token>` — at an internal
+/// address. `safe_client` pins `redirect(Policy::none())`, rustls, a 5s connect
+/// timeout, and a fresh connection per request so the `SafeDnsResolver` re-checks
+/// every time instead of trusting a once-resolved IP. The webhook crate one
+/// directory over has done this since its delivery path was written.
+///
+/// **Behaviour change worth knowing:** the resolver also refuses feeds whose host
+/// resolves into a private, loopback or link-local range. That is deliberate and
+/// matches what webhook delivery already enforces, but a peer registry reachable
+/// only on an internal hostname will now be refused rather than polled. See
+/// `ASSUMPTIONS.md`.
+///
+/// Parameterised by policy so the guard below can exercise **this** constructor
+/// against a loopback server rather than asserting on a hand-built client that
+/// production never uses.
+fn poller_client(policy: &acdp::safe_http::SsrfPolicy) -> Result<Client, acdp::error::AcdpError> {
+    acdp::safe_http::safe_client(policy, Duration::from_secs(15))
+}
+
 async fn poll_loop(cfg: RevocationFeedConfig, store: Arc<dyn RevocationStore>) {
-    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
+    let client = match poller_client(&acdp::safe_http::SsrfPolicy::default()) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "revocation poller: failed to build HTTP client");
@@ -356,5 +381,76 @@ mod tests {
         assert!(store
             .is_revoked("good", crate::tombstone_cutoff(Utc::now(), 0))
             .unwrap());
+    }
+
+    /// **E2 — the poller must not follow a redirect.**
+    ///
+    /// A revocation feed is fetched by the registry carrying an admin bearer
+    /// token. With reqwest's default policy (up to 10 hops) a hostile peer could
+    /// answer `302 -> http://169.254.169.254/...` and the poller would follow it.
+    ///
+    /// The assertion is on the MECHANISM — the 302 is returned to us unfollowed —
+    /// not on "polling failed", which would also pass against a poller that
+    /// cannot reach anything at all. The plain-client half is the differential
+    /// that proves the fixture actually redirects.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn poller_client_does_not_follow_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 1024];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let resp = if req.starts_with("GET /moved") {
+                    "HTTP/1.1 302 Found\r\nLocation: /landed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    let body = "{\"entries\":[]}";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        // Loopback is refused by the production policy by design, so the guard
+        // opens exactly that one field and nothing else — every other forbidden
+        // range still applies. This is the same constructor production calls.
+        let policy = acdp::safe_http::SsrfPolicy {
+            allow_loopback_resolved: true,
+            ..Default::default()
+        };
+        let url = format!("http://localhost:{}/moved", addr.port());
+
+        let safe = poller_client(&policy).expect("build poller client");
+        let resp = safe.get(&url).send().await.expect("request completes");
+        assert_eq!(
+            resp.status().as_u16(),
+            302,
+            "the poller's client must hand the redirect back unfollowed; following it is the \
+             SSRF primitive this fix removes"
+        );
+
+        // DIFFERENTIAL: a default client DOES follow it. Without this, the
+        // assertion above would also pass against a server that never redirects,
+        // or a client that cannot connect at all.
+        let plain = Client::builder().build().expect("plain client");
+        let followed = plain.get(&url).send().await.expect("request completes");
+        assert_eq!(
+            followed.status().as_u16(),
+            200,
+            "fixture precondition: a default reqwest client follows this redirect to the \
+             landing page — if it does not, the test above proves nothing"
+        );
     }
 }
