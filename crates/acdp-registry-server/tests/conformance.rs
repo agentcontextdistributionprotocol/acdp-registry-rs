@@ -8993,6 +8993,95 @@ const PARTIAL_DIRECT: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// **Compile-checked** companion to `COVERED`'s `Direct(...)` lists and
+/// `PARTIAL_DIRECT` (#216, unit H-F).
+///
+/// The two anti-vacuity guards below search this file's own text for a function
+/// name and for the letters of `assert`. #216 states the ceiling, and this unit
+/// **measured all six of its listed defeats rather than trusting them** -- every
+/// one reproduces against a registered test:
+///
+/// | mutation | the two guards |
+/// |---|---|
+/// | body replaced with `assert!(true)` | green |
+/// | only the token `assert`, in a line comment | green |
+/// | only `/* assert */` | green |
+/// | `EXPECTED_` + `asserted` in one comment line (PARTIAL_DIRECT) | green |
+/// | `#[ignore]` placed ABOVE `#[test]` -- test never runs | green |
+/// | whole function wrapped in `/* ... */` -- 68 tests became 67 | green |
+///
+/// The last two are the severe ones: the test does not execute at all and the
+/// text guard cannot tell, because **commented-out source is still source**.
+///
+/// This table fixes that half by changing the MECHANISM rather than the
+/// substring (#216 lists "tightening the substring predicates" as a non-goal).
+/// Each entry expands to `(stringify!(name), name as fn())`, so the string and
+/// the function are the same token by construction and cannot drift apart, and
+/// the *function* must exist for this file to compile at all. Commenting a
+/// registered test out, deleting it, or renaming it is now a **compile error**
+/// rather than a passing text search.
+///
+/// WHAT THIS STILL DOES NOT CATCH, stated because a guard whose reach is left
+/// unstated gets trusted past it: a test that exists, compiles, runs, and
+/// asserts nothing -- the first four rows. No text or symbol oracle can; that
+/// needs a mutation oracle, which is why #216 is narrowed here and not closed.
+/// `#[ignore]` above `#[test]` is also not caught by this table (the function is
+/// still a real function); the CI step added by this unit catches that instead.
+macro_rules! direct_fn {
+    ($f:ident) => {
+        (stringify!($f), $f as fn())
+    };
+}
+
+/// Every test function named by `COVERED`'s `Direct(...)` lists or by
+/// `PARTIAL_DIRECT`, as a compiler-resolved function item. Order follows the
+/// tables; duplicates are collapsed, because one test may legitimately cover two
+/// families (`did_key_golden_vector_accepted_and_gated` covers `sig` and `dk`).
+#[rustfmt::skip]
+const DIRECT_FNS: &[(&str, fn())] = &[
+    direct_fn!(vis001_restricted_denied_as_404_replays_via_shape_d),
+    direct_fn!(vis002_search_excludes_restricted_and_router_rebuilds_on_capability_toggle),
+    direct_fn!(vis003_search_response_emits_matches_not_results),
+    direct_fn!(vis004_private_audience_retrieval_allowed_replays_via_shape_d),
+    direct_fn!(vis005_private_audience_search_excluded_via_derived_from),
+    direct_fn!(vis006_search_match_public_visibility_disclosure_replays_via_shape_d),
+    direct_fn!(vis007_search_match_restricted_visibility_disposition),
+    direct_fn!(vis008_lineage_endpoint_visibility_replays_via_shape_d),
+    direct_fn!(vis008_mutated_lineage_version_order_fails_replay),
+    direct_fn!(vis009_anonymous_public_reads_gates_anonymous_not_authenticated),
+    direct_fn!(anc001_well_formed_anchor_is_accepted_and_round_trips),
+    direct_fn!(anc002_malformed_anchor_content_hash_is_rejected),
+    direct_fn!(anc003_empty_anchors_array_is_rejected_with_established_ordering),
+    direct_fn!(can_vectors_reproduce_canonical_form_and_hash),
+    direct_fn!(can007_registry_created_at_millisecond_truncation),
+    direct_fn!(lin_vectors_reproduce_lineage_derivation),
+    direct_fn!(caps_vectors_validate_capabilities_document),
+    direct_fn!(idem001_004_publish_idempotency_key_lifecycle_and_restart_durability),
+    direct_fn!(idem005_no_support_ignores_idempotency_key_header),
+    direct_fn!(idem_playground_branch_honors_supports_idempotency_key_gate),
+    direct_fn!(idem_playground_branch_writes_no_idempotency_record_when_gated_off),
+    direct_fn!(wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted),
+    direct_fn!(meta001_003_metadata_depth_and_size_caps_enforced),
+    direct_fn!(data_ref001_007_publish_path_rejections_enforced),
+    direct_fn!(body001_002_origin_registry_hostname_never_did_form),
+    direct_fn!(status001_004_served_status_matches_open_enum_pattern),
+    direct_fn!(schema_vectors_openness_and_absent_vs_null_enforced),
+    direct_fn!(sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_publish),
+    direct_fn!(sig001_signature_byte_perturbation_is_rejected),
+    direct_fn!(sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected),
+    direct_fn!(did_key_golden_vector_accepted_and_gated),
+    direct_fn!(rev001_key_revocation_context_golden_accepted_and_self_signed_rejected),
+    direct_fn!(dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver),
+    direct_fn!(did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets),
+    direct_fn!(err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing),
+    direct_fn!(rate001_publish_rate_limit_trips_429_with_retry_after),
+    direct_fn!(cur001_002_expired_and_malformed_cursors_are_distinguished),
+    direct_fn!(rcpt001_registry_receipt_golden_recomputed_and_remintable),
+    direct_fn!(lhr001_lineage_head_receipt_golden_recomputed_and_remintable),
+    direct_fn!(log001_leaf_root_and_inclusion_golden_recomputed),
+    direct_fn!(log003_consistency_proof_golden_recomputed)
+];
+
 /// This file's own source, embedded at compile time so
 /// `covered_direct_families_have_present_test_functions` can check
 /// test-function presence by pure self-inspection -- no `ACDP_SPEC_DIR`
@@ -9060,7 +9149,18 @@ fn source_has_present_test_fn(name: &str) -> bool {
 /// satisfiable by text that computes nothing.
 ///
 /// So these guards catch WHOLESALE GUTTING and deletion. They are not, and cannot be
-/// made into, proof that a test asserts something real. That property needs a mutation
+/// made into, proof that a test asserts something real.
+///
+/// **#216 / H-F update — the DELETION half no longer rests on this mechanism.**
+/// `DIRECT_FNS` now registers every name in `COVERED`'s `Direct(...)` lists and
+/// in `PARTIAL_DIRECT` as a compiler-resolved function item, bound to the tables
+/// by exact set equality in `direct_fns_matches_the_coverage_tables_exactly`.
+/// Deleting, renaming, or commenting out a registered test is therefore a
+/// **compile error** (measured: `error[E0425]`), and `#[ignore]` in either
+/// attribute order is caught by a CI step that asks the test harness rather than
+/// the source. What remains un-oracled is only the first class above -- a test
+/// that exists, runs, and asserts nothing -- which is why these text guards are
+/// kept as a cheap first line rather than retired, and why #216 stays open. That property needs a mutation
 /// oracle -- break the code under test and observe the test go red (`cargo-mutants` or
 /// a fault-injection harness over `src/`) -- not a text oracle. Tracked on #216 rather
 /// than patched a fourth time (it was on #130 until that issue closed; the mutation
@@ -12787,4 +12887,74 @@ fn this_file_cites_constructs_and_never_line_numbers() {
              it. The citation is now as wrong as the line numbers it replaced."
         );
     }
+}
+
+/// #216 / H-F: bind the compile-checked `DIRECT_FNS` table to the string tables
+/// by **exact set equality**, so the compiler's knowledge of which test
+/// functions exist becomes a property of `COVERED` and `PARTIAL_DIRECT`.
+///
+/// Why this closes the presence half that a substring search cannot: **this test
+/// never reads its own source.** It compares two in-memory tables. There is no
+/// text for a mutation to satisfy — the letters of a function name in a comment
+/// are invisible to it, and a function commented out of existence fails to
+/// compile before this test ever runs.
+///
+/// Equality in both directions, never a subset (Rule 64 — an enumeration, not a
+/// total):
+/// - a name in `COVERED`/`PARTIAL_DIRECT` but not in `DIRECT_FNS` means a
+///   registered test the compiler was never asked about;
+/// - a name in `DIRECT_FNS` but not in the tables means a stale entry that would
+///   keep compiling after coverage was legitimately withdrawn.
+///
+/// Rule 71 does not bite here, and it is worth saying why rather than claiming
+/// immunity: the trap is a guard asserting a precondition on text it could
+/// itself contain. This guard reads no text at all, so its preconditions are
+/// over table contents the compiler produced.
+#[test]
+fn direct_fns_matches_the_coverage_tables_exactly() {
+    use std::collections::BTreeSet;
+
+    let mut from_tables: BTreeSet<&str> = BTreeSet::new();
+    for (_, mechanisms) in COVERED {
+        for mechanism in *mechanisms {
+            if let CoverageMechanism::Direct(names) = mechanism {
+                from_tables.extend(names.iter().copied());
+            }
+        }
+    }
+    for (_, names) in PARTIAL_DIRECT {
+        from_tables.extend(names.iter().copied());
+    }
+
+    let from_fns: BTreeSet<&str> = DIRECT_FNS.iter().map(|(name, _)| *name).collect();
+
+    // Preconditions over the tables themselves, not over any text.
+    assert!(
+        !from_tables.is_empty(),
+        "COVERED and PARTIAL_DIRECT between them name no Direct test functions, \
+         so both sides of the comparison below are empty and it proves nothing"
+    );
+    assert_eq!(
+        from_fns.len(),
+        DIRECT_FNS.len(),
+        "DIRECT_FNS lists the same name twice; `direct_fn!` makes the string and \
+         the function one token, so a duplicate name is a duplicate entry and \
+         hides how many tests are really registered"
+    );
+
+    let unregistered: Vec<&&str> = from_tables.difference(&from_fns).collect();
+    assert!(
+        unregistered.is_empty(),
+        "these tests are named by COVERED/PARTIAL_DIRECT but absent from \
+         DIRECT_FNS, so the compiler is never asked whether they exist and a \
+         text search is all that stands behind them: {unregistered:?}"
+    );
+
+    let stale: Vec<&&str> = from_fns.difference(&from_tables).collect();
+    assert!(
+        stale.is_empty(),
+        "these entries are in DIRECT_FNS but named by neither COVERED nor \
+         PARTIAL_DIRECT — coverage was withdrawn from the tables while the \
+         compile-time entry kept it looking registered: {stale:?}"
+    );
 }

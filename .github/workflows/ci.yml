@@ -257,6 +257,44 @@ jobs:
           cargo test --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --test pg_integration
+      # #216 / H-F: `#[ignore]` written ABOVE `#[test]` de-registers a test while
+      # leaving it textually intact, so `conformance.rs`'s own text guards see a
+      # present, attribute-wearing function and pass. Measured: the test reports
+      # `ignored`, 68 tests become 67 executed, and both guards stay green.
+      #
+      # This asks the TEST HARNESS rather than the source: `--ignored --list`
+      # enumerates what the compiled binary actually marked as ignored. That is
+      # mechanism output, so no comment or string literal can satisfy it, and it
+      # needs no list of test names to compare against.
+      #
+      # No conformance test may be ignored AT ALL. That is deliberately stricter
+      # than "no registered test may be ignored": it needs no name list, and a
+      # genuine need to ignore one has to edit this step, which is visible in
+      # review. The conformance suite is a spec-obligation ratchet; a silently
+      # skipped obligation is the failure mode it exists to prevent.
+      - name: conformance suite has no ignored tests (#216 — the #[ignore] defeat)
+        run: |
+          set -euo pipefail
+          out="$(cargo test --locked -p acdp-registry-server \
+                   --features storage-sqlite,playground \
+                   --test conformance -- --ignored --list)"
+          echo "$out"
+          # Find the summary line FIRST and fail if it is absent: a build failure
+          # or a changed libtest output format must not read as "zero ignored".
+          summary="$(printf '%s\n' "$out" | grep -E '^[0-9]+ tests?, [0-9]+ benchmark' || true)"
+          if [ -z "$summary" ]; then
+            echo "::error::could not find libtest's summary line in the output above;" \
+                 "this check cannot conclude anything, so it fails rather than passing"
+            exit 1
+          fi
+          count="$(printf '%s\n' "$summary" | grep -oE '^[0-9]+')"
+          if [ "$count" -ne 0 ]; then
+            echo "::error::$count conformance test(s) are #[ignore]d. A conformance" \
+                 "test that never runs still satisfies the file's own text guards," \
+                 "so the spec obligation silently stops being checked. Un-ignore it," \
+                 "or delete it and update COVERED/PARTIAL_DIRECT."
+            exit 1
+          fi
       # NAME IS DELIBERATELY NARROW. This step does NOT test the memory
       # storage backend, and the old name ("cargo test (memory)") implied it
       # did. Measured: under these flags all four integration files are
