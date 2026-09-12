@@ -547,6 +547,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   commitment; narrowing to `pub(crate)` later is a one-line mechanical change that the
   compiler fully verifies. Nothing is foreclosed.
 - **Status:** CHANGED -> CONFIRMED (2026-09-10). Reconciled to `pub(crate)`; see `DECISIONS.md` entry 5. The kept-`pub` rationale did not survive analysis.
+
 ## `predecessor_admission` enforcement: store-level coverage, not end-to-end wiring
 
 - **Plan:** `plans/u-001-acdp-0.10.0-predecessor-admission.md` (U-001)
@@ -583,6 +584,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   is advertised to producers as retryable and invites a retry loop. The wart is pre-existing
   and repo-wide (every `row_to_context` decode has it); fixing it is its own unit, not
   something to smuggle into a dependency bump. Reversible in one line.
+
 ## `WEBHOOK_SCHEMA_VERSION` stays `"1.0"` across the `event_id` wire rename
 
 - **Plan:** `plans/u-002-webhook-duplicate-event-id.md`
@@ -907,6 +909,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   by line. This is the second time in two units that a docs-only edit invalidated a pin in a
   file the editing lane was not allowed to touch.
 - **Status:** UNCONFIRMED
+
 ## W3-U1 — #192/#193: validating playground config at both doors (2026-09-10, lane-1)
 
 - **UNCONFIRMED — a deliberate departure from a written acceptance criterion.** The unit
@@ -2019,6 +2022,195 @@ bump.
   shipping rather than alongside.
 - **Status:** CONFIRMED (2026-09-12) — code minted per ruling, upstream issue filed, precedent
   recorded, marker deleted.
+
+
+## H-A / P8 — A2: tenant-scoped search omits `total_estimate`
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P8)
+- **Assumed:** that a caller asserting `X-Tenant-Id` must not learn the size of the population
+  outside their tenant, and that `total_estimate` — computed in the store, before the handler's
+  post-query tenant filter — disclosed exactly that.
+- **Chose:** omit the key when `requested_tenant.is_some()`. Not recomputed: an honest
+  tenant-scoped count needs the predicate in the store's SQL, a different change in a different
+  crate. `skip_serializing_if` makes the key ABSENT rather than `null`/`0`, so "withheld" cannot
+  be misread as "none found".
+- **Deliberately not unconditional.** An un-scoped caller is entitled to the count, and omitting
+  it for everyone passes the tenant test while breaking conformance's `want_total_estimate` and
+  the vis-007 `total_estimate == 0` fixture. Pinned by
+  `search_still_reports_total_estimate_without_tenant`.
+
+### CORRECTION to the plan's description of the residual attack
+
+> **This section is ITSELF corrected — see "CORRECTED — an earlier version of this entry
+> overstated it" further down, under the P9 heading.** The measurement below is right about the
+> fixture and wrong about the generalization: the refill loop has TWO exits, and this section
+> only accounts for one. Kept unedited because the reasoning is the record.
+
+The plan states a tenant-pinned caller "can walk cursors at `limit=1`" to recover foreign
+`ctx_id`s. **Measured: at `limit=1` nothing leaks.** Every anchor returned at `limit=1` is one of
+the caller's own rows.
+
+The refill loop is why. A foreign anchor only escapes when `accumulated` reaches `target` on the
+page whose last raw row is foreign. With `target == 1` a store page is one row, so a foreign row
+is dropped by the retain, `accumulated` stays below `target`, the loop refills, and the
+foreign-anchored cursor is consumed internally. **The filter that hides the row also hides the
+anchor.** At `target >= 2` a page can hold an own row followed by a foreign one, `accumulated`
+reaches `target` there, the loop stops, and that cursor is returned. Confirmed at `limit=2`;
+`limit=3` returned no cursor at all for the fixture.
+
+This matters beyond pedantry: anyone reproducing the finding at the size the plan names would
+conclude the leak does not exist. The marker test pins `limit=2`.
+
+- **Blast radius if wrong:** a client that depended on `total_estimate` under a tenant header now
+  sees the key absent. That is the intended behaviour change and it is in the engineering log.
+- **Status:** UNCONFIRMED — A2 ships PARTIAL by design. The cursor oracle remains open and is
+  asserted by `search_cursor_oracle_remains_open_for_tenant_scoped_caller`; A2 must not be
+  described as closed until the store-side predicate lands and that test is deliberately deleted.
+  **The `limit=1` claim in this section is superseded** by the correction under P9: a foreign
+  anchor also escapes at ANY limit once the refill loop exhausts `SEARCH_REFILL_MAX_PAGES`,
+  because `cursor` is assigned before that break. This fixture is too small to reach that exit.
+
+## H-A P9 (A4) — `/log/entries` answers a page with one visibility query
+
+- **Assumption:** passing `anonymous_public_reads: true` to `visible_ctx_ids` from
+  `/log/entries` preserves the endpoint's existing behaviour, rather than ignoring the
+  operator's configuration.
+- **Why it holds, measured rather than reasoned:** the call this replaces went through
+  `RegistryServer::retrieve`, which does not consult that flag. Probed on the wire with
+  `auth.enabled = true` and `anonymous_public_reads = false`, an anonymous
+  `GET /contexts/{ctx_id}` on a public context still returns 200. So passing the config value
+  — the obvious-looking thing, and what a future reader will reach for — would make
+  `/log/entries` STRICTER than the retrieve it is defined to mirror, and would break
+  RFC-ACDP-0012 §8.3's own rule that `leaf` is present exactly where the requester could
+  retrieve the context. The flag gates `search`/`list_contexts`, which is how
+  `docs/ARCHITECTURE.md` and `docs/MULTI-TENANCY.md` describe it.
+- **Blast radius if wrong:** public leaves would disappear from the log for anonymous
+  auditors on a deployment that sets the flag — a silent transparency regression, not an error.
+- **Status:** **RETRACTED — the claim above is FALSE and the probe that "confirmed" it was
+  invalid.** Kept in full, unedited, because the reasoning is the record. The retraction is the
+  section headed "RETRACTION of the `anonymous_public_reads: true` assumption above", two
+  entries further down in this same P9 block.
+
+- **Assumption:** the old handler-side tenant fallback
+  (`tenant_of_ctx(...).unwrap_or_else(|| "default")`) had no behaviour to preserve.
+- **Why it holds:** two independent reasons, both verified. (1) `tenant_id` is
+  `TEXT NOT NULL DEFAULT 'default'` (`crates/acdp-registry-sqlite/migrations/007_tenant_id.sql:11`),
+  so `tenant_of_ctx` returns `None` only for a row that does not exist — and such a row already
+  failed the visibility check above it. (2) `"default"` is a RESERVED sentinel:
+  `reject_reserved_tenant` (`handlers/context.rs:190`) refuses it from the header AND from a
+  token claim, so `requested_tenant` is never `Some("default")` and the comparison was
+  unreachable in the affirmative. Probed: `X-Tenant-Id: default` on `/log/entries` returns 400
+  `schema_violation` "'default' is a reserved tenant sentinel".
+- **Note on the plan:** this phase's plan asked for a test that a missing row "still resolves to
+  `default`". Written to that premise it would have asserted nothing. The test that ships
+  (`log_entries_rejects_the_reserved_default_tenant`) pins (2) instead — the property that
+  actually makes `AND tenant_id = ?` safe, since the untenanted bucket cannot be named.
+- **Status:** CONFIRMED.
+
+- **Assumption (NOT an equivalence — recorded because it is a real behaviour change):** the
+  reordering is boolean-identical on the **success path only**.
+- **Why:** these are fallible store reads. Today a per-record error could surface only for rows
+  that were already visible — the old loop never asked about a row it was about to hide. The
+  batched call covers the whole page including invisible rows, so a store error can now surface
+  on a page where it previously could not.
+- **Blast radius:** a page that used to return 200 with some leaves omitted can now return 500.
+  Strictly more honest, but it is a change, and calling this a pure refactor would be wrong.
+- **Status:** **CORRECTED TWICE — the "Why" and "Blast radius" above are FALSE, and so was the
+  first correction.** Both kept unedited; the corrected statement is in this bullet, not
+  elsewhere.
+  - The original claim — a store error could surface "only for rows that were already visible" —
+    is false. `server.retrieve` **was** the visibility check, so the old path ran a full
+    `RegistryStore::get` (events, `reconcile_retraction`, `body_json` decode) on EVERY record.
+  - The first correction said the change therefore runs in **both** directions, with
+    `tenant_of_ctx` newly reachable on hidden rows. Also false, and it was adopted without being
+    checked against any implementation. There is none where it holds: SQLite and Postgres never
+    call `tenant_of_ctx` from `visible_ctx_ids` (the predicate is `AND tenant_id = ?` in the same
+    statement), and the default trait impl gates it behind
+    `if !retrieve_visible(…) { continue; }` — the identical gate the old handler had.
+  - **The correct statement:** the change is one-directional. Strictly **fewer** classes of store
+    error can reach the caller than before, because the batched query is
+    `SELECT ctx_id FROM contexts WHERE …` and never deserializes a body or reads events. The
+    "strictly more honest" framing had it backwards.
+  - **Scope, stated because the two failures above were both over-generalizations.** "Fewer" is a
+    property of the SQLite and Postgres *overrides*, not of `visible_ctx_ids` as a trait method:
+    the default impl still runs a full `get` per id. It holds for every backend that can serve
+    `/log/entries` today (`MemoryStore` does not override `log_entries`, so the route is
+    `NotImplemented` there), but not necessarily for an external implementor of this published
+    trait that overrides `log_entries` and not `visible_ctx_ids`.
+  - Worth keeping for its own sake: a correction is not self-verifying. The first one was written
+    to fix a false claim and was itself false, and it read as more trustworthy *because* it was a
+    correction.
+
+### RETRACTION of the `anonymous_public_reads: true` assumption above
+
+- **What was claimed:** that passing a literal `true` preserved `/log/entries` behaviour, and
+  that passing the configured value would make the endpoint *stricter* than the retrieve it
+  mirrors. Status was recorded as "CONFIRMED by wire probe".
+- **What is actually true:** the opposite direction. `RegistryServer::retrieve` ->
+  `can_retrieve` gates its public arm on `self.caps.anonymous_public_reads || requester.is_some()`
+  — off the `CapabilitiesDocument` baked in at `try_new`, **not** off `RegistryConfig`. The
+  binary copies `cfg.auth.anonymous_public_reads` into caps
+  (`crates/acdp-registry-server/src/main.rs`), and `AuthConfig::default()` ships that flag
+  `false` (`crates/acdp-registry-types/src/config.rs`). So on the shipped default a hardcoded
+  `true` **discloses** every public `leaf` to an anonymous caller that the old code refused —
+  and because `auth.enabled` also defaults to `false`, on that config every caller is anonymous.
+- **Why the probe was invalid, which is the part worth remembering:** it flipped
+  `cfg.auth.anonymous_public_reads` and observed a 200. The default test harness hardcodes
+  `caps.anonymous_public_reads: true` (`tests/http_integration.rs`), and the caps/config split is
+  *already documented in this repo* as GAP 3 (`tests/common/mod.rs`). The probe therefore
+  measured the harness's own split and could not have returned anything else. A measurement that
+  cannot fail is not evidence, and calling it a "wire probe" made it read as stronger than the
+  reasoning it replaced.
+- **How it was caught:** the pre-merge verification gate, reading the code rather than trusting
+  the claim. Not by a test — no test could see it, because every test in the suite inherits the
+  harness caps.
+- **Fix:** the flag is read from `state.server.capabilities().anonymous_public_reads`, the same
+  field `retrieve` reads, so the two are equal by construction rather than equal while config and
+  caps agree. `log_entries_honours_anonymous_public_reads_from_caps` overrides the CAPS and fails
+  against the hardcoded value; the disclosure was reproduced before the fix was written.
+- **Status:** CONFIRMED (the corrected statement), with a regression test that has been shown to
+  fail without the fix.
+
+- **Assumption (CORRECTED — an earlier version of this entry overstated it):** the `/search`
+  cursor oracle is closed at `limit=1`.
+- **What is true:** the anchor escapes whenever the refill loop stops on a page whose last *raw*
+  scanned row is foreign. At `limit=1` the loop keeps refilling, so the filter that hides the row
+  also consumes its anchor — that much was measured correctly. But the loop also stops when it
+  exhausts `SEARCH_REFILL_MAX_PAGES` (6), and `cursor = resp.next_cursor` is assigned *before*
+  that break (`handlers/context.rs`), so with enough consecutive foreign pages a foreign anchor
+  escapes at `limit=1` too. The honest statement is "at `limit>=2`, and at any `limit` once the
+  refill budget is exhausted" — not "never at `limit=1`". Generalising "every time" from one
+  six-row fixture was the error.
+- **Status:** UNCONFIRMED — A2 remains PARTIAL. `docs/HTTP-API.md` and the call-site comment now
+  state the corrected version.
+
+- **Assumption (latent, accepted knowingly):** dropping the `CtxId::parse` guard is safe.
+- **Context:** the old per-record path parsed each `ctx_id` and returned "not visible" for an
+  unparseable one before any lookup. `visible_ctx_ids` matches raw strings in SQL, so a
+  `log_leaves` row whose `ctx_id` is not a valid `CtxId` but which has a matching `contexts` row
+  would now yield a `leaf` where it previously would not.
+- **Why accepted:** unreachable today — `ctx_id`s are registry-minted through `CtxId`, and a leaf
+  only exists for a row that was committed through publish. Re-adding the guard means parsing
+  per record, which is the cost this phase exists to remove.
+- **What would make it reachable:** a migration or import path that writes `contexts` rows
+  without minting through `CtxId`. Anything of that kind must revisit this.
+- **Status:** UNCONFIRMED — recorded so it is a known latent rather than a rediscovery.
+
+- **Record that would otherwise not ship: how P9's planned acceptance criteria were actually
+  met.** `plans/` is gitignored (the literal `plans/` entry in `.gitignore`; not cited by line,
+  because the merge in this very PR moved it), so the plan's own status block is
+  worktree-local and no reviewer sees it. The load-bearing part, in a tracked file:
+  - *Criterion (2) as written* asked for `tenants_of_ctxs` "exactly once per tenant-scoped page".
+    It is called **zero** times: the tenant predicate rides inside the single `visible_ctx_ids`
+    query rather than beside it. That is better than the criterion asked for, so the criterion is
+    superseded, not missed. The `CountingStore` counts `tenants_of_ctxs` anyway and pins it at
+    zero — meaning a future variant that satisfies the criterion *as written*, with two queries
+    per page, now fails. Falsified against a mutation that adds exactly that second query.
+  - *Criterion (3)* — "a ctx_id absent from the map still resolves to `default`" — was **not met
+    and no test was written**, because its premise is unreachable (see the two reasons in the
+    tenant entry above). `log_entries_rejects_the_reserved_default_tenant` ships instead.
+- **Status:** CONFIRMED.
+
 ## E1's cutoff is threaded through the trait, not the store constructors
 
 - **Plan:** `plans/h-e-auth-webhook-quartet.md` (H-E Phase 1)
