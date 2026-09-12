@@ -1571,7 +1571,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   evidence rather than actioned here.
 
 
-## H-A / P3 — #218 resolved: `/metrics` answers `no-store` on both arms
+## H-A / P3 — #218 resolved: `/metrics` answers `no-store` on every arm (200, 401, 405)
 
 - **Plan:** plans/h-a-wire-surface-observability.md (phase P3)
 - **Assumed:** that `/metrics` being authorization-relative (200-vs-401 gates on

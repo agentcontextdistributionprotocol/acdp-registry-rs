@@ -43,8 +43,8 @@ two `/admin/{contexts,pinned-keys}` routes are compiled in only with the
 
 Every ACDP data and auth endpoint returns `application/acdp+json` — on both
 success bodies and error envelopes (RFC-ACDP-0007 §4). `/.well-known/jwks.json`
-returns `application/jwk-set+json`; `/healthz` and `/admin/*` return plain
-operational JSON.
+returns `application/jwk-set+json`; `/healthz`, `/livez` and `/admin/*` return
+plain operational JSON.
 
 All requests pass through, outermost first: a media-type backstop that stamps
 `application/acdp+json` on any response that set none; request-id assignment
@@ -84,11 +84,14 @@ rate limiter (`[rate_limit]`): it admits or rejects a request with `429` +
 > no-store`. The three `/.well-known/*` documents are requester-invariant and
 > keep `Cache-Control: public, max-age=300` — `public` is the half that
 > matters: it is the deliberate opposite of `private` above, not an omission.
+> (`/.well-known/did.json`'s **404** arm is the one exception inside that group:
+> it answers `no-store`, because a cached miss outlives the configuration change
+> that would fix it. The document's own `200` arm is `public` like the others.)
 >
 > Two exceptions, stated rather than left to be discovered. (`GET /metrics` was
-> a third until #218 closed: it now answers `no-store` on both its 200 and its
-> 401 arm, the 401 being the one that mattered — a cached 401 is what a shared
-> cache would hand an authorized scraper.)
+> a third until #218 closed: it now answers `no-store` on **every** arm — 200,
+> 401 and 405 — the 401 being the one that mattered, since a cached 401 is what
+> a shared cache would hand an authorized scraper.)
 >
 > - **`GET /log/checkpoint` answers `private`** even though the checkpoint itself
 >   is requester-invariant. It inherits the data-plane posture by group
@@ -160,8 +163,11 @@ this is where consumers resolve the receipt verification key
 (`did:web:<authority>` resolves to exactly this URL). The active signing
 key appears in `verificationMethod` **and** `assertionMethod`; retired keys
 (`[[receipt.retired_keys]]`) appear in `verificationMethod` only, per the
-RFC-ACDP-0010 §9 retention rule. `Cache-Control: public, max-age=300`. `404` when no
-receipt key is configured. See [RECEIPTS.md](RECEIPTS.md).
+RFC-ACDP-0010 §9 retention rule. `Cache-Control: public, max-age=300` on the
+`200` arm. `404` when no receipt key is configured — and **that arm answers
+`no-store`**, not `public`: a cached 404 would keep hiding the document from
+every resolver that saw the miss once an operator configures a key.
+See [RECEIPTS.md](RECEIPTS.md).
 
 ### `GET /healthz`
 
@@ -233,8 +239,14 @@ So: **readiness probe → `/healthz`. Liveness probe → `/livez`.** Pointing bo
 
 ### `GET /metrics` *(FEAT-10)*
 
-Answers `Cache-Control: no-store` on **both** the `200` and the `401` arm: its
-content is authorization-relative, so a shared cache must never store either.
+Answers `Cache-Control: no-store` on **every** arm — `200`, `401` and `405`:
+its content is authorization-relative, so a shared cache must never store any of
+them. The guarantee is unconditional on purpose, and the `405` is the load-bearing
+part of it: a `405` is produced by the router *before any handler runs*, so only a
+route-scoped layer can reach it. Stating the guarantee as "the 200 and the 401"
+would let a refactor to a handler-set header satisfy this sentence verbatim while
+silently dropping an arm — `metrics_is_never_cacheable` pins all three so that
+refactor reddens instead.
 
 Prometheus text exposition (`Content-Type: text/plain; version=0.0.4`). Mounted
 only when `metrics.enabled = true` (`404` otherwise). Deliberately outside the

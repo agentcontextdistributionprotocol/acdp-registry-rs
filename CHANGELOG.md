@@ -11,9 +11,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Cache posture: `/metrics` and the `did.json` 404 arm were uncacheable in principle and
   unlabelled in practice; `/healthz` was doing two jobs under one name.** Three fixes.
 
-  `GET /metrics` now answers `Cache-Control: no-store` on **both** the 200 and the 401 arm,
+  `GET /metrics` now answers `Cache-Control: no-store` on **every** arm — 200, 401 and 405 —
   closing #218. The 401 is the arm that mattered: a cached 401 is what a shared cache would
-  hand to an authorized scraper. The directive is attached to that route alone, not to the
+  hand to an authorized scraper. The 405 is the arm that fixes the mechanism in place: the
+  router emits it before any handler runs, so a handler-set header could not reach it. The directive is attached to that route alone, not to the
   group it shares with the `/.well-known/*` documents — applying it group-wide was tried and
   demonstrated to clobber `jwks.json`'s `public, max-age=300`.
 

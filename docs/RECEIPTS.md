@@ -134,8 +134,8 @@ would mask the document from every resolver that saw the miss once an operator
 adds a key.)
 
 `GET /metrics` is requester-relative — it gates on `metrics.bearer_token`, so
-its 200-vs-401 depends on the caller — and now answers `no-store` on both arms
-(#218). The directive is attached to that route alone, not to the group it
+its 200-vs-401 depends on the caller — and now answers `no-store` on every arm:
+200, 401 and 405 (#218). The directive is attached to that route alone, not to the group it
 shares with the `/.well-known/*` documents, which keep `public, max-age=300`.
 
 ### What this does not buy you
