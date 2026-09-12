@@ -2312,3 +2312,62 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 - **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md, unit H-N. Opus-settled; the caret
   requirement `"11"` means `cargo update` can break it without a manifest change, which is a wider
   exposure than first written, and it still fails loudly and locally.
+
+## H-H-w — wiring the tenant predicate into `/contexts/search`
+
+- **Plan:** unit H-H-w (lane-3), closing the residual E2 that H-H's `search_in_tenant` was built for.
+- **Assumed:** that `search_in_tenant` existed, worked, and was dormant — i.e. that this unit was
+  wiring rather than building.
+- **Verified before designing, per Rule 87, rather than taken from the assignment.** All three cited
+  call sites are correct by content: `sqlite/src/store.rs:164` and `pg/src/store.rs:127` both
+  delegate to `search_inner(params, requester, anon, tenant)`; the default at
+  `store/src/lib.rs:430` is **fail-closed** (a non-reserved `Some(tenant)` returns an empty response
+  rather than falling through to an unscoped `search`). Dormancy confirmed too: every reference
+  outside the definitions is a doc comment, a unit test, a parity test, or a test wrapper — no
+  production caller. **Status: CONFIRMED.**
+
+- **Assumption (the one that would have shipped a security regression):** that
+  `RegistryServer::search` is a thin wrapper over `RegistryStore::search`, so swapping in the
+  store's tenant-scoped entry preserves behaviour.
+- **FALSE, and checked rather than assumed.** `acdp-server-0.13.1`
+  (`src/registry/server.rs:937`) rejects an anonymous search with **403 `not_authorized`** when
+  `caps.anonymous_public_reads` is false, *before* delegating — normative per RFC-ACDP-0008 §6.3 and
+  fixture `vis-009`, and deliberately not an empty `200`, because an empty 200 still confirms the
+  registry exists and that the query ran. `search_in_tenant` is a store entry point with no such
+  gate, so the obvious wiring silently downgrades a normative 403 to an empty 200.
+- **Chose:** leave the untenanted path on `server.search` **untouched** (no behaviour change at all
+  for the common case) and replicate the gate on the new tenant path only, reading
+  `anonymous_public_reads` from `state.server.capabilities()` — the same field `server.search`
+  reads, so the two agree by construction. `state.config.auth.anonymous_public_reads` is the trap:
+  right in the binary, which copies cfg into caps, wrong for any other wiring. That is GAP 3, and it
+  already cost this repo one anonymous-disclosure bug on `/log/entries`.
+- **Status:** CONFIRMED.
+
+- **Assumption (checked because the default impl is fail-closed, which hides regressions as
+  emptiness):** that routing tenant-scoped search through `search_in_tenant` does not break the
+  `storage-memory` build, whose `MemoryStore` overrides none of the tenancy methods and therefore
+  inherits a default that returns **zero rows** for any real tenant.
+- **Why it holds, and it is not my doing:** #137 already refuses the combination at startup —
+  `main.rs` bails when the memory backend is configured with tenancy, precisely so a registry does
+  not boot answering every tenant-scoped read with zero rows. Independently, `MemoryStore` reports
+  `"default"` for every row, `"default"` is `RESERVED_TENANT`, and `reject_reserved_tenant` refuses
+  it from both a header and a token claim — so no caller can assert the only tenant that backend
+  reports. A tenant-scoped search is therefore unreachable on a shipped memory deployment, and the
+  fail-closed default is not reachable through the wire.
+- **Blast radius if wrong:** tenant-scoped search on a memory build would silently return nothing
+  rather than erroring — fail-closed, so no disclosure, but functionally broken and invisible.
+- **Status:** CONFIRMED.
+
+- **Assumption (recorded as an OPEN decision, deliberately not settled by this unit):** that
+  `total_estimate` should remain omitted for a tenant-scoped request.
+- **What changed under it.** It was omitted because it was **wrong** — the store counted before the
+  handler applied the tenant predicate. `search_inner` puts `AND tenant_id = ?` in the same
+  statement as `COUNT(*) OVER ()`, so once the request is served by `search_in_tenant` the count is
+  **tenant-scoped and honest**. The original justification no longer exists.
+- **Chose:** keep omitting it, and rewrite the *reason* in `docs/HTTP-API.md` to say it is now
+  withheld **conservatively rather than necessarily**. Re-enabling it is wire-visible on an endpoint
+  another lane documented this same wave, so it is a decision for the leader and not a side effect
+  of a wiring unit. Documenting (b) without implementing it would have left the docs describing code
+  that does not exist — the failure this unit's second half exists to remove.
+- **Status:** UNCONFIRMED — the behaviour is deliberate and the docs match the code as shipped, but
+  the *decision* is open and should be closed explicitly rather than by inertia.
