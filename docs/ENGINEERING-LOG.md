@@ -54,6 +54,61 @@ hold entries from several releases. Use the commands.
   to adopt the code. Decision 16 in `DECISIONS.md` records the standing precedent — this repo may
   mint a wire code when the canon lacks an honest one, provided the name follows the canon's
   idiom and an upstream issue is filed.
+<!-- unit H-E (lane-2) — the auth/webhook quartet. All four audit findings
+     confirmed real with exact citations, which inverted the expectation the
+     assign was written with. -->
+
+### Fixed
+
+- **A revoked token was accepted again for up to 30 seconds after its own expiry.**
+  `JwtSigner::validate` accepts a token until `exp + leeway` (default 30s) — that is what leeway is
+  for — but every revocation backend judged the tombstone against a bare `now`, so it went cold at
+  `exp`. In the window `(exp, exp + leeway]` the token still decoded **and** the revocation check had
+  already gone false. Revocation un-revoked itself.
+
+  Not an authentication bypass: a control lapsing inside a window, which is narrower and is what the
+  evidence supports. One helper, `tombstone_cutoff(now, leeway)`, now owns the rule, and **both**
+  halves of the lifecycle take it — the check and the eviction. Fixing only the check would have left
+  eviction deleting the row at `expires_at`, defeating revocation through the other door while a
+  check-only test stayed green. The evictor reads the leeway from the signer rather than re-reading
+  config, because a validator and an evictor disagreeing about the window is precisely the defect
+  being fixed.
+
+- **The revocation poller followed redirects.** Feeds were fetched with a bare `reqwest::Client`,
+  which follows up to ten redirects, so a hostile or compromised peer could bounce the poller — with
+  the admin bearer token it uses to read the feed — at an internal address. It now uses
+  `acdp::safe_http::safe_client`, as webhook delivery already did.
+
+  **Operator-visible consequence:** `safe_client` installs a DNS resolver that refuses hosts
+  resolving into private, loopback or link-local ranges, so a peer registry reachable only on an
+  internal hostname will now be refused rather than polled. Deliberate and consistent with webhook
+  delivery. Note also what `safe_client` does *not* do: it consults its policy only for DNS, so
+  `allow_http` and `reject_ip_literals` are unenforced — an `http://` or IP-literal feed URL still
+  works, and an IP literal bypasses the resolver check entirely.
+
+- **The challenge nonce was logged at INFO.** The event stays and now carries `agent_id`, which is
+  what an operator correlates on. Severity is hygiene rather than exploitability — the nonce is the
+  value the agent must *sign*, so disclosure alone forges nothing without the agent's key — but it is
+  a short-TTL credential-shaped value and logs are routinely shipped off-box.
+
+### Added
+
+- **Opt-in replay protection for webhooks — offered, not enforced.** `X-ACDP-Signature` covers the
+  body alone, so a captured delivery can be replayed forever, and because `X-ACDP-Event-Id` is
+  deliberately stable across retries a replay is indistinguishable from a retry. Deliveries now also
+  carry `X-ACDP-Timestamp` and `X-ACDP-Signature-Timestamped`, the latter covering
+  `"<timestamp>." + body`.
+
+  **`X-ACDP-Signature` is unchanged** and is now pinned by a test, because it is a documented public
+  contract every deployed receiver verifies; widening it would break all of them. An unsigned
+  timestamp would be rewritable and therefore worthless, which is why there is a second signature
+  rather than just a header.
+
+  **This does not close the replay hole on its own.** A receiver that ignores the new headers is
+  exactly as exposed as before — the registry cannot make a receiver check freshness. Adoption means
+  verifying the second signature and bounding the timestamp. Documented that way in
+  `WEBHOOKS.md` deliberately: "the registry now has replay protection" would be false on the day it
+  shipped.
 
 <!-- unit H-I-s (lane-2) — batched retrieval-visibility for the audit log,
      storage half. PARTIAL BY DESIGN: nothing calls it until H-I-w wires the
