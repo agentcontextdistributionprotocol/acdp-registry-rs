@@ -37,55 +37,26 @@ use acdp_registry_types::error::{WireError, WireErrorBody};
 
 /// A rejection rendered as an RFC-ACDP-0007 §5 envelope **at its original
 /// status**.
-pub enum AcdpRejection {
-    /// Rendered as a §5 envelope at `status`.
-    Enveloped {
-        status: StatusCode,
-        code: &'static str,
-        message: String,
-    },
-    /// Passed through to axum's own rendering, unchanged.
-    ///
-    /// **Used for exactly one case: the 415 from a missing or wrong
-    /// `Content-Type`.** Not an oversight and not a design preference -- the
-    /// §5 code for a 415 is an open question escalated to the project owner,
-    /// because the canonical registry
-    /// (`acdp_primitives::error::AcdpError::from_wire_error`) has 25 codes and
-    /// none of them describes a media-type failure, so answering one means
-    /// minting a code the canon lacks. That is a policy question about this
-    /// repo's relationship to upstream, not a technical one.
-    ///
-    /// `WireErrorBody::code` is a required `String`, so there is no
-    /// "envelope without a code" option to fall back on. Until the question is
-    /// settled this case keeps the behaviour it has always had; the status is
-    /// 415 either way, so nothing observable moves when the ruling lands except
-    /// the body gaining an envelope.
-    Passthrough(Response),
+pub struct AcdpRejection {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
 }
 
 impl IntoResponse for AcdpRejection {
     fn into_response(self) -> Response {
-        match self {
-            // Built from the public `WireError`/`WireErrorBody` rather than a
-            // hand-rolled `json!`, so the envelope shape -- including `details`
-            // being ABSENT rather than `null` -- cannot drift from what
-            // `RegistryError::into_response` emits.
-            AcdpRejection::Enveloped {
-                status,
-                code,
-                message,
-            } => {
-                let body = WireError {
-                    error: WireErrorBody {
-                        code: code.to_string(),
-                        message,
-                        details: None,
-                    },
-                };
-                (status, Json(body)).into_response()
-            }
-            AcdpRejection::Passthrough(resp) => resp,
-        }
+        // Built from the public `WireError`/`WireErrorBody` rather than a
+        // hand-rolled `json!`, so the envelope shape -- including `details`
+        // being ABSENT rather than `null` -- cannot drift from what
+        // `RegistryError::into_response` emits.
+        let body = WireError {
+            error: WireErrorBody {
+                code: self.code.to_string(),
+                message: self.message,
+                details: None,
+            },
+        };
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -102,15 +73,7 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(v)) => Ok(AcdpJson(v)),
-            // HELD pending a ruling on the §5 code for 415 -- see
-            // `AcdpRejection::Passthrough`. Everything else is enveloped now:
-            // stamping `application/acdp+json` onto plain text with no
-            // `error.code` is a live conformance defect and fixing 400/422/query
-            // does not depend on the open question.
-            Err(rej) if matches!(rej, JsonRejection::MissingJsonContentType(_)) => {
-                Err(AcdpRejection::Passthrough(rej.into_response()))
-            }
-            Err(rej) => Err(AcdpRejection::Enveloped {
+            Err(rej) => Err(AcdpRejection {
                 // The rejection's OWN status, never a hard-coded 400. Both
                 // rejection enums are `#[non_exhaustive]`, so the catch-all arm
                 // below is mandatory -- and `JsonRejection::BytesRejection`
@@ -139,7 +102,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match axum::extract::Query::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Query(v)) => Ok(AcdpQuery(v)),
-            Err(rej) => Err(AcdpRejection::Enveloped {
+            Err(rej) => Err(AcdpRejection {
                 status: rej.status(),
                 code: query_code(&rej),
                 message: "invalid query string".to_string(),
@@ -159,6 +122,25 @@ fn json_code(rej: &JsonRejection) -> &'static str {
         // A body that is not JSON, or is JSON that does not fit the target
         // shape. Both are `schema_violation` per the status/code table:
         // "Malformed body, missing field, schema mismatch."
+        // The one code here OUTSIDE the canonical 25-code RFC-ACDP-0007 §5
+        // registry, minted deliberately rather than by oversight.
+        //
+        // The canon has no code for a media-type failure, and
+        // `WireErrorBody::code` is a required `String`, so there is no
+        // "envelope without a code" to fall back on. The nearest canonical
+        // option, `schema_violation`, is documented as "malformed body, missing
+        // field, schema mismatch" -- and on a 415 the body was never parsed at
+        // all, so it would state something false, make 415 indistinguishable
+        // from 400 at the code level, and become unfixable once clients coded
+        // against `AcdpError::SchemaViolation`.
+        //
+        // An unrecognised code costs strictly less: `from_wire_error` routes it
+        // to `AcdpError::Registry(wire)`, explicitly "for forward
+        // compatibility", keeping the 415 and the message and losing only the
+        // typed variant. The name follows the canon's own `unsupported_*`
+        // idiom. Divergence tracked upstream as acdp-rs#268; see DECISIONS.md
+        // for the standing precedent this set.
+        JsonRejection::MissingJsonContentType(_) => "unsupported_media_type",
         JsonRejection::JsonDataError(_) | JsonRejection::JsonSyntaxError(_) => "schema_violation",
         // `BytesRejection` is body-length territory and arrives as 413.
         JsonRejection::BytesRejection(_) => "payload_too_large",
@@ -202,8 +184,21 @@ fn json_message(rej: &JsonRejection) -> &'static str {
         JsonRejection::JsonDataError(_) => {
             "request body does not match the schema for this endpoint"
         }
+        // The ruling specified this message VERBATIM, so it is pinned here as a
+        // literal rather than taken from `rej.body_text()`. Same string axum
+        // emits today, but ours now: if axum rewords its rejection, the wire
+        // does not silently follow.
+        //
+        // NOTE, raised with the coordinator rather than acted on unilaterally:
+        // this message names only `application/json`, while RFC-ACDP-0007
+        // mandates `application/acdp+json`. Both are accepted (axum's `Json`
+        // matches any `+json` structured suffix, pinned by
+        // `the_acdp_media_type_is_accepted_not_rejected`), so the message is
+        // INCOMPLETE rather than false -- a client following it literally sends
+        // a media type that works but is not the one the RFC names. A one-line
+        // change if the recommendation is taken.
         JsonRejection::MissingJsonContentType(_) => {
-            "expected Content-Type: application/acdp+json (application/json is also accepted)"
+            "Expected request with `Content-Type: application/json`"
         }
         JsonRejection::BytesRejection(_) => "request body exceeds the configured limit",
         _ => "request body could not be read",

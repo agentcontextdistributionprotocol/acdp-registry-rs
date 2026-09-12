@@ -8163,6 +8163,24 @@ async fn extractor_rejections_return_the_rfc0007_envelope() {
             "schema_violation",
         ),
         (
+            "no Content-Type at all",
+            "POST",
+            "/auth/challenge",
+            None,
+            r#"{"agent_id":"did:web:a.test:x"}"#,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+        ),
+        (
+            "wrong Content-Type",
+            "POST",
+            "/auth/challenge",
+            Some("text/plain"),
+            r#"{"agent_id":"did:web:a.test:x"}"#,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+        ),
+        (
             "valid JSON, wrong shape",
             "POST",
             "/auth/challenge",
@@ -8251,119 +8269,6 @@ async fn extractor_rejections_return_the_rfc0007_envelope() {
     }
 }
 
-/// MARKER TEST — delete this deliberately when the 415 ruling lands.
-///
-/// A3 envelopes extractor rejections at their original status. The 415 from a
-/// missing or wrong `Content-Type` is the one case **not** enveloped, and this
-/// test exists so that gap is visible in the suite rather than remembered.
-///
-/// Why it is held: `WireErrorBody::code` is a required `String`, so enveloping
-/// a 415 means choosing a §5 `code`. The canonical registry
-/// (`acdp_primitives::error::AcdpError::from_wire_error`) has exactly 25 codes
-/// and none describes a media-type failure, and this repo has never emitted a
-/// code outside that set — all 24 it emits are inside it. So answering means
-/// minting a code the canon lacks, which is a policy question about this
-/// project's relationship to upstream rather than a technical one. It is with
-/// the project owner, with a recommendation (`unsupported_media_type`) recorded
-/// in `ASSUMPTIONS.md`.
-///
-/// **What this asserts, and what it does not.** It pins the parts that are true
-/// under either ruling: the status is 415 and the media type is not what gets
-/// rejected. It also pins the CURRENT un-enveloped body — that assertion is
-/// pinning a known defect on purpose, so that the moment the ruling is applied
-/// this test goes RED and forces a deliberate deletion, instead of the hold
-/// quietly outliving the question.
-///
-/// **If you are reading this because this test just failed:** the 415 envelope
-/// almost certainly landed. That is the expected outcome. Move the two 415 rows
-/// into `extractor_rejections_return_the_rfc0007_envelope` with the ruled code
-/// and delete this test.
-#[tokio::test]
-async fn marker_the_415_rejection_is_not_yet_enveloped_pending_a_ruling() {
-    let mut cfg = config(true);
-    cfg.auth.enabled = true;
-    let h = harness_from_config(cfg).await;
-
-    for (case, ct) in [
-        ("no Content-Type", None),
-        ("wrong Content-Type", Some("text/plain")),
-    ] {
-        let mut b = Request::builder().method("POST").uri("/auth/challenge");
-        if let Some(c) = ct {
-            b = b.header("content-type", c);
-        }
-        let resp = h
-            .router
-            .clone()
-            .oneshot(
-                b.body(Body::from(r#"{"agent_id":"did:web:a.test:x"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // True under either ruling: the STATUS is 415 and always was. A3 never
-        // proposed changing it, only the body.
-        assert_eq!(
-            resp.status(),
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "[{case}] a wrong Content-Type must remain a 415, ruling or no ruling",
-        );
-
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
-            .await
-            .unwrap();
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        assert!(
-            v.pointer("/error/code").is_none(),
-            "[{case}] the 415 now carries a §5 error.code, so the ruling has landed. \
-             This marker has done its job: move the 415 rows into \
-             `extractor_rejections_return_the_rfc0007_envelope` and DELETE this test. \
-             body = {text}",
-        );
-    }
-
-    // And the thing that must never regress while this is held: the RFC's own
-    // media type is accepted, so it is not what 415s. Verified on the wire
-    // rather than assumed -- `application/acdp+json` matches axum's `+json`
-    // structured-suffix check.
-    let ok = h
-        .router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/auth/challenge")
-                .header("content-type", "application/acdp+json")
-                .body(Body::from(r#"{"agent_id":"did:web:a.test:x"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        ok.status(),
-        StatusCode::OK,
-        "the RFC-mandated `application/acdp+json` must be ACCEPTED, not 415'd",
-    );
-}
-
-/// A3: the rejection's OWN status survives, including the one that is not 400.
-///
-/// `AcdpJson`'s catch-all must carry `rej.status()`, never a hard-coded 400.
-/// `JsonRejection` is `#[non_exhaustive]`, so a catch-all arm is mandatory, and
-/// `JsonRejection::BytesRejection` wraps a `LengthLimitError` whose status is
-/// **413**. A hard-coded 400 there would silently downgrade an oversized body
-/// on `/auth/*` from 413 to 400 -- an observable status change on exactly the
-/// path the 413-envelope work exists to make conformant, and one that would
-/// falsify this phase's "no status changes" claim while every other test
-/// stayed green.
-///
-/// Both framings are asserted because they take DIFFERENT paths to the same
-/// status, and only one of them goes through `AcdpJson` at all:
-/// with `Content-Length`, `RequestBodyLimitLayer` short-circuits on the header
-/// before any handler runs; without it, the limit is enforced while the body is
-/// read, which is what surfaces as `BytesRejection` inside the extractor.
 #[tokio::test]
 async fn an_oversized_auth_body_stays_413_through_the_extractor() {
     let mut cfg = config(true);
@@ -8415,4 +8320,43 @@ async fn an_oversized_auth_body_stays_413_through_the_extractor() {
             "[{case}] must carry the §5 payload_too_large code: body = {text}"
         );
     }
+}
+
+/// The RFC-mandated media type must be ACCEPTED, not 415'd.
+///
+/// Rehomed from the 415 marker test when that marker was deleted on the ruling.
+/// It is the assertion in that test which was never about the ruling: whichever
+/// `error.code` a 415 carries, `application/acdp+json` must not produce one.
+///
+/// Worth pinning because it holds by a non-obvious mechanism — axum's `Json`
+/// accepts any `+json` structured suffix, so `application/acdp+json` passes a
+/// check nominally written for `application/json`. A future extractor that
+/// tightened to an exact match would 415 every conformant ACDP client, and
+/// nothing else in the suite would notice.
+#[tokio::test]
+async fn the_acdp_media_type_is_accepted_not_rejected() {
+    let mut cfg = config(true);
+    cfg.auth.enabled = true;
+    let h = harness_from_config(cfg).await;
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/challenge")
+                .header("content-type", "application/acdp+json")
+                .body(Body::from(r#"{"agent_id":"did:web:a.test:x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "`application/acdp+json` is the media type RFC-ACDP-0007 mandates; it must \
+         never be the thing that gets 415'd",
+    );
 }
