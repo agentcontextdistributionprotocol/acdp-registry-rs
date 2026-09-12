@@ -1049,21 +1049,72 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
         iterations += 1;
         params.cursor = cursor.clone();
 
-        let server = state.server.clone();
-        let req_owned = requester.clone();
-        // `server.search` is synchronous, so it runs on the blocking pool.
-        // We move `params` in and hand it back out with the result, which
-        // lets the loop reuse it next iteration without requiring
-        // `SearchParams: Clone` — keeps this crate decoupled from an
-        // upstream derive.
-        let (result, returned_params) = tokio::task::spawn_blocking(move || {
-            let r = server.search(&params, req_owned.as_ref());
-            (r, params)
-        })
-        .await
-        .map_err(|e| RegistryError::Internal(format!("join: {e}")))?;
-        params = returned_params;
-        let resp = result?;
+        // H-H-w: when a tenant is asserted, scan INSIDE the tenant.
+        //
+        // The store's keyset `next_cursor` is anchored on the last row the scan
+        // touched, so the only way a returned cursor cannot disclose a foreign
+        // `(created_at, ctx_id)` is for the scan never to see one. No amount of
+        // post-filtering achieves that: the handler can drop a foreign ROW from
+        // the page but the anchor was already computed from it.
+        // `ExtendedRegistryStore::search_in_tenant` (H-H) puts the tenant
+        // predicate in the same statement as the keyset and the count; it shipped
+        // merged-and-dormant because nothing called it until here.
+        let resp = if let Some(tenant) = requested_tenant.as_deref() {
+            // `RegistryServer::search` is NOT a thin wrapper over the store, and
+            // this is the half that is easy to lose. Before delegating it rejects
+            // an anonymous search with **403 `not_authorized`** when the registry
+            // does not allow anonymous reads (`acdp-server`'s BUG-01,
+            // RFC-ACDP-0008 §6.3, fixture `vis-009`) — deliberately NOT an empty
+            // `200`, because an empty 200 still confirms the registry exists and
+            // that the query ran.
+            //
+            // `search_in_tenant` is a STORE entry point and carries no such gate,
+            // so routing through it means carrying the gate here or silently
+            // downgrading a normative 403 to an empty 200.
+            //
+            // Read from `capabilities()` — the same field
+            // `RegistryServer::search` reads — so the two agree BY CONSTRUCTION
+            // rather than agreeing while config and caps happen to match.
+            // `state.config.auth.anonymous_public_reads` is the trap: it is right
+            // in the binary, which copies cfg into caps, and wrong for any other
+            // wiring. That is GAP 3 in `tests/common/mod.rs`, and it already cost
+            // this repo one anonymous-disclosure bug on `/log/entries`.
+            let anonymous_public_reads = state.server.capabilities().anonymous_public_reads;
+            if requester.is_none() && !anonymous_public_reads {
+                return Err(acdp::error::AcdpError::NotAuthorized(
+                    "anonymous search requires authentication \
+                     (registry caps: anonymous_public_reads=false)"
+                        .into(),
+                )
+                .into());
+            }
+            state
+                .server
+                .store()
+                .search_in_tenant(
+                    &params,
+                    requester.as_ref(),
+                    anonymous_public_reads,
+                    Some(tenant),
+                )
+                .await?
+        } else {
+            let server = state.server.clone();
+            let req_owned = requester.clone();
+            // `server.search` is synchronous, so it runs on the blocking pool.
+            // We move `params` in and hand it back out with the result, which
+            // lets the loop reuse it next iteration without requiring
+            // `SearchParams: Clone` — keeps this crate decoupled from an
+            // upstream derive.
+            let (result, returned_params) = tokio::task::spawn_blocking(move || {
+                let r = server.search(&params, req_owned.as_ref());
+                (r, params)
+            })
+            .await
+            .map_err(|e| RegistryError::Internal(format!("join: {e}")))?;
+            params = returned_params;
+            result?
+        };
 
         // First page sets the estimate; we don't try to aggregate across
         // pages because the upstream estimate is already a hint.
