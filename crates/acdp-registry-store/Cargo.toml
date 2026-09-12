@@ -24,3 +24,10 @@ chrono              = { workspace = true }
 serde               = { workspace = true }
 serde_json          = { workspace = true }
 tokio               = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `search_in_tenant`'s default impl is `async`, so its unit tests need a
+# runtime. The dependency above is optional (behind `test-support`, for
+# `parity`); this one is unconditional but dev-only, so it never reaches a
+# downstream build.
+tokio = { workspace = true }

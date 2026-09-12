@@ -1566,3 +1566,65 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 ||||||| b57934d
 - **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
   evidence rather than actioned here.
+
+## `search_in_tenant`'s default treats the backend as untenanted rather than refusing
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 1)
+- **Assumed:** the new trait method must be *defaulted*, not required — and what the default
+  does is a security decision rather than a compatibility formality.
+- **Measured first:** `ExtendedRegistryStore` has exactly three implementors, and one of them
+  is `MemoryStore` at `crates/acdp-registry-server/src/memory_ext.rs:99`, in a crate outside
+  this lane's claim. A required method would not compile and could not be fixed from here.
+  `MemoryStore` overrides **no** tenant method, so it inherits `tenant_of_ctx`'s default of
+  `Some("default")`.
+- **Chose:** follow the precedent `tenant_of_ctx` set in its own doc — satisfy the trait
+  "without claiming a wrong answer". `None` and `Some(RESERVED_TENANT)` delegate to
+  `RegistryStore::search`; any other tenant returns the empty page with `total_estimate: 0`
+  and no cursor. On a backend where every row is `default`, both answers are *correct* under
+  the one contract the method states: `Some(t)` means exactly the rows whose tenant is `t`.
+- **Alternatives:** (a) delegate unconditionally — rejected outright; it hands tenant A's rows
+  to a caller asking for tenant B, which is a silent cross-tenant disclosure in the default
+  path, the worst possible place for one. (b) `Err(NotImplemented)`, which has real precedent
+  in `MemoryStore::list_contexts` — rejected because a correct answer genuinely exists here,
+  so refusing would break the memory backend the moment H-H-w wires the handler.
+- **Blast radius if wrong:** a future backend that records tenants but forgets to override
+  would serve the default's answer. Bounded by the doc comment stating the override
+  obligation, and by both SQL backends overriding it in phases 2–3. Reversible in one commit.
+- **Status:** UNCONFIRMED
+
+## The store does NOT re-enforce the reserved-tenant rejection
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 1)
+- **Assumed:** `RESERVED_TENANT`'s doc says `"default"` MUST NOT be assertable as a real
+  tenant, so `search_in_tenant` might owe a second check.
+- **Verified, not assumed:** it already has exactly one enforcement point —
+  `reject_reserved_tenant` at `crates/acdp-registry-core/src/handlers/context.rs:189`, which
+  refuses it from header or token, so untenanted rows stay reachable only through the
+  *absence* of an assertion. So `Some(RESERVED_TENANT)` cannot arrive from the HTTP path.
+- **Chose:** do not duplicate the check in the storage layer. It is an authorization
+  judgement, and `list_contexts` applies its predicate for any `Some` — adding a rejection to
+  `search_in_tenant` alone would manufacture exactly the kind of path divergence unit H-B
+  existed to remove.
+- **Alternatives:** reject it in the store as defence in depth — rejected as an auth decision
+  in the wrong layer, and inconsistent with the sibling method.
+- **Blast radius if wrong:** a non-HTTP caller (a background job, a future transport) passing
+  `Some("default")` would receive the untenanted bucket. On the SQL backends that is
+  `WHERE tenant_id = 'default'` — the untenanted bucket precisely, not everything — so the
+  exposure is the aliasing `RESERVED_TENANT` warns about, reachable only by bypassing the
+  handler. Cheap to add later if a second caller ever appears.
+- **Status:** UNCONFIRMED
+
+## `tokio` added as an unconditional dev-dependency of `acdp-registry-store`
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 1)
+- **Assumed:** testing an `async` default impl needs a runtime, and the existing `tokio` dep
+  is optional behind `test-support` so it is not available to a plain `cargo test`.
+- **Chose:** add `[dev-dependencies] tokio = { workspace = true }`. Dev-dependencies never
+  reach a downstream build, and the workspace already pins `features = ["full"]`, so this adds
+  no new feature surface and nothing to the shipped artifact.
+- **Alternatives:** (a) hand-poll the future with a no-op waker to avoid the dep — rejected as
+  obscure for no gain; (b) put the tests behind `test-support` — rejected, it would mean the
+  default impl's guard does not run in a normal `cargo test`, which is where it matters most.
+- **Blast radius if wrong:** none to consumers; a dev-only dependency on a crate already in
+  the tree.
+- **Status:** UNCONFIRMED
