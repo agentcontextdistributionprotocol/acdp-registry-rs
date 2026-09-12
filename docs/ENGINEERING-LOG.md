@@ -31,6 +31,115 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-A, phase P9 (lane-1) — /log/entries answers a page with one visibility query -->
+
+### Fixed
+
+- **Security (anonymous disclosure): `/log/entries` would have echoed every public `leaf` to an
+  unauthenticated caller on the shipped default configuration.** Caught by this repo's own
+  verification gate before merge, not in production — recorded because the way it survived
+  three tracked files is the part worth keeping. The batched rewrite below passed a hardcoded
+  `anonymous_public_reads: true`, justified by a "wire probe" that flipped
+  `cfg.auth.anonymous_public_reads` and observed a 200. That probe measured nothing.
+  `RegistryServer::retrieve` gates on `self.caps`, **not** on `RegistryConfig` — this repo
+  already documents that split as GAP 3 in `crates/acdp-registry-server/tests/common/mod.rs` —
+  and the default test harness hardcodes `caps.anonymous_public_reads: true`. So the 200 came
+  from the caps value the probe never touched. Since `AuthConfig::default()` ships
+  `anonymous_public_reads: false` *and* `auth.enabled: false`, on the default config every
+  caller is anonymous and every public leaf would have been disclosed. The flag is now read
+  from `state.server.capabilities()` — the same field `retrieve` reads — so the batched call
+  equals the per-record retrieve **by construction** rather than only while config and caps
+  agree. `log_entries_honours_anonymous_public_reads_from_caps` overrides the caps, which is
+  the only thing that moves the real predicate, and it fails on the hardcoded value.
+
+### Changed
+
+- **`GET /log/entries` answers a whole page with one visibility query.** It resolved `leaf`
+  visibility one record at a time: a blocking `RegistryServer::retrieve` dispatch per entry,
+  plus — under an `X-Tenant-Id` header — a `tenant_of_ctx` per entry. On a full 256-record page
+  (RFC-ACDP-0012 §8.3 RECOMMENDS a cap of at least 256) that is 256 blocking-pool dispatches and
+  up to 512 store round-trips to answer one request. It is now a single
+  `ExtendedRegistryStore::visible_ctx_ids` call, which both SQL backends override with one
+  query. That method has been merged and dormant since #246; the plan for this phase predates
+  it and prescribed a three-part workaround on the explicit grounds that a batched store method
+  was out of scope. That premise expired, so the workaround was not built.
+
+- **Responses are byte-identical on the SUCCESS path only, for a given
+  `anonymous_public_reads` — two things change, and one of them changes a status code.** The
+  earlier version of this sentence claimed byte-identity flatly and hedged with "but this is not
+  a pure refactor", which narrows the wrong property: it qualifies refactor-ness while leaving
+  byte-identity standing, so a reader who notices the hedge still comes away believing something
+  false. `ASSUMPTIONS.md` had the four words that do the work — "on the success path only" — and
+  this entry had dropped them. First, the flag above: get it wrong and the bytes differ
+  enormously, which is the whole of the security entry. Second, which store errors can reach
+  the caller — and the change is one-directional:
+
+  **No longer able to surface: everything `RegistryStore::get` does.** The old path ran
+  `server.retrieve` — and therefore a full `get`, including `events_for_ctx`,
+  `reconcile_retraction` and `body_json` deserialization — on *every* record, because that call
+  **was** the visibility check. The batched query is `SELECT ctx_id FROM contexts WHERE …`, so a
+  decode failure or an events-table error on any row of the page used to 500 the request and now
+  cannot.
+
+  **Scope of that claim.** It is a property of the two SQL overrides, which is every backend that
+  can serve this endpoint today — `MemoryStore` does not override `log_entries`, so
+  `/log/entries` is `NotImplemented` there before this code is reached. It is *not* a property of
+  `visible_ctx_ids` as a trait method: the default impl still runs a full `get` per id, so an
+  external implementor that overrides `log_entries` but not `visible_ctx_ids` would see an
+  unchanged error surface, not a smaller one.
+
+  **Nothing is newly able to surface.** Two earlier drafts of this entry got this wrong in
+  opposite ways, so the reasoning is spelled out rather than asserted. The first said a store
+  error could reach the caller "only for rows that were already visible", which is false —
+  `get` ran on every row. The second corrected that but claimed the change ran in **both**
+  directions, with `tenant_of_ctx` newly reachable on hidden rows. Also false, in every
+  implementation: the SQLite and Postgres overrides never call `tenant_of_ctx` at all (the
+  predicate is `AND tenant_id = ?` inside the same statement), and the default trait impl still
+  gates it behind `if !retrieve_visible(…) { continue; }` — the identical gate the old handler
+  had. So the honest net is one-directional: strictly **fewer** classes of store error can
+  surface than before, and the earlier "strictly more honest" framing had it backwards.
+
+- **The guard is the deliverable.** The improvement is invisible in the response, so nothing in
+  the suite could have noticed a revert. A `CountingStore` test wrapper counts `get`,
+  `visible_ctx_ids`, `tenant_of_ctx` and `tenants_of_ctxs`; the tests pin one batched query and
+  zero per-record reads with and without a tenant header, pin that no separate tenant lookup is
+  paid for either, and pin that the reserved `default` sentinel is refused before any row is
+  read. Every assertion was falsified individually against a mutation violating it alone,
+  rather than as a group — the first failing assertion masks every one below it.
+
+<!-- unit H-A, phase P8 (lane-1) — tenant-scoped search stops reporting a cross-tenant count -->
+
+### Fixed
+
+- **Security (cross-tenant disclosure, partial): a tenant-scoped search reported a population
+  count for rows across every tenant.** `total_estimate` is produced by the store, which counts
+  §4.5-visible rows *before* the tenant predicate is applied — tenant narrowing happens
+  afterwards, in the handler, as a post-query filter. So a caller asserting `X-Tenant-Id`
+  received the number of matches across the whole registry while seeing only their own rows: an
+  O(1) population count for data they cannot read.
+
+  The key is now **omitted entirely** for a tenant-scoped request. Omitted rather than
+  recomputed, because an honest tenant-scoped count needs the predicate in the store's SQL, which
+  is a different change in a different crate. `Option<u64>` with `skip_serializing_if` means the
+  key is *absent* rather than `null` or `0`, so a client cannot read "withheld" as "none found".
+  An un-scoped caller still receives it — removing it for everyone would have passed a naive
+  "tenant caller sees no count" test while breaking conformance, which is why
+  `search_still_reports_total_estimate_without_tenant` exists.
+
+  **This is partial and is not described as closed.** `next_cursor` is unsigned plaintext base64
+  of `{mint_ms}:{anchor_ms}:{ctx_id}` anchored on the last row the *store scanned*, which may
+  belong to another tenant, so foreign `ctx_id`s and their ordering remain recoverable by paging.
+  The fix moves that from one request to one request per row; it does not remove it. Closing it
+  requires the tenant predicate in the store's search SQL.
+  `search_cursor_oracle_remains_open_for_tenant_scoped_caller` asserts the residue, so "partial"
+  is machine-checked rather than a sentence someone has to re-read, and it fails deliberately
+  when the underlying fix lands.
+
+  Two claims that were overstated have been corrected rather than carried forward. The code
+  comment described the cursor as "a low-grade ordering/existence oracle" where "no context DATA
+  leaks" — a `ctx_id` is a durable identifier, not low-grade, and "no data" was true only of
+  bodies. And `docs/HTTP-API.md` stated `total_estimate` was "the count of §4.5-visible matches
+  for the caller", which was exactly the falsified claim.
 <!-- unit H-P (lane-3) — H-G's last two items. Both claims were about a property no
      test could see, and in both cases a test NAMED for that property already existed. -->
 
@@ -135,6 +244,7 @@ hold entries from several releases. Use the commands.
   to adopt the code. Decision 16 in `DECISIONS.md` records the standing precedent — this repo may
   mint a wire code when the canon lacks an honest one, provided the name follows the canon's
   idiom and an upstream issue is filed.
+
 <!-- unit H-E (lane-2) — the auth/webhook quartet. All four audit findings
      confirmed real with exact citations, which inverted the expectation the
      assign was written with. -->
@@ -243,6 +353,7 @@ hold entries from several releases. Use the commands.
   It had been written inline inside `list_contexts`, so the batched method above would have made
   a *fourth* copy of the §4.5 rule. Extracting it and pointing both methods at the one
   expression keeps the count at three, and matches the structure SQLite already had.
+
 <!-- unit H-A, phase P7 (lane-1) — extractor rejections speak the §5 envelope -->
 
 ### Fixed

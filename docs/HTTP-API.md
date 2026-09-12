@@ -396,11 +396,35 @@ Query parameters (all optional):
 
 Response: a `SearchResponse` — `{ matches: [...], total_estimate, next_cursor }`.
 Visibility (RFC-ACDP-0008 §4.5) is enforced in the SQL `WHERE` clause on both
-backends, and `total_estimate` is the count of §4.5-visible matches for the
-caller. Tenant narrowing is post-filtered with a bounded refill loop (up to 6
+backends. Tenant narrowing is post-filtered with a bounded refill loop (up to 6
 inner pages), so a page may return fewer than `limit` rows near the end of a
 result set even though `next_cursor` is set — keep paging until `next_cursor`
 is absent.
+
+**`total_estimate` is omitted entirely for a tenant-scoped request.** It is the
+count of §4.5-visible matches for the caller *across all tenants*, because the
+count is taken in the store before the tenant predicate is applied in the
+handler. Returning it to a tenant-asserting caller would report a population
+size for rows that caller cannot see, so the key is **absent** — not `null`, and
+not `0`. A request that asserts no tenant — no `X-Tenant-Id` **and** no `tenant`
+claim in a bearer token, since `tenant_for_request` resolves both — still carries it.
+
+> **Residual, stated rather than left to be discovered.** Omitting the count
+> does not close the underlying leak. `next_cursor` is unsigned plaintext base64
+> of `{mint_ms}:{anchor_ms}:{ctx_id}` anchored on the last row the store
+> *scanned*, which may belong to another tenant.
+>
+> The anchor escapes whenever the refill loop stops on a page whose last raw row
+> is foreign. Measured, that is **not** what happens at `limit=1`: the loop keeps
+> refilling, so the filter that hides the row also consumes its anchor. It is what
+> happens at `limit≥2`, where the loop stops on reaching `target` with a foreign
+> row last scanned — and also at any `limit` once the loop exhausts its
+> `SEARCH_REFILL_MAX_PAGES` (6) budget, since the cursor is assigned before the
+> break. So a tenant-scoped caller can still recover foreign `ctx_id`s and their
+> ordering, a row or a few rows at a time rather than a population count in one
+> request. This moves the oracle from O(1) to O(n); it does not remove it.
+> Closing it requires the tenant predicate in the store's search SQL so the scan
+> never sees another tenant's rows in the first place.
 
 ### `GET /lineages/{lineage_id}`
 
