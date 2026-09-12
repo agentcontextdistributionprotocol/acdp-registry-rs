@@ -98,6 +98,8 @@ Then:
 curl http://localhost:8443/.well-known/acdp.json
 curl http://localhost:8443/healthz
 # {"status":"ok","storage":true,"version":"<version>"}
+curl http://localhost:8443/livez
+# {"status":"ok","version":"<version>"}
 ```
 
 `version` identifies the running build. A locally built binary reports the bare
@@ -141,7 +143,8 @@ Selected routes (the full surface, including request/response shapes, is in
 | GET    | `/.well-known/acdp.json`          | Capabilities document. |
 | GET    | `/.well-known/jwks.json`          | JWKS (EdDSA public key; empty for HS256). |
 | GET    | `/.well-known/did.json`           | Registry DID document (when a receipt key is configured). |
-| GET    | `/healthz`                        | Storage liveness + the running build's `version`. |
+| GET    | `/livez`                          | Process **liveness** — always `200` while the process is up; never touches storage. |
+| GET    | `/healthz`                        | Storage **readiness** + the running build's `version`; `503` when the backend is down. |
 | GET    | `/metrics`                        | Prometheus metrics (when `metrics.enabled`). |
 | POST   | `/contexts`                       | Publish (full RFC-ACDP-0003 §2.1 pipeline). |
 | GET    | `/contexts/{ctx_id}`              | Retrieve full context. |

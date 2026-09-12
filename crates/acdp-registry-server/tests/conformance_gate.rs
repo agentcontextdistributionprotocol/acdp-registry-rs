@@ -119,3 +119,143 @@ fn every_wire_code_the_code_emits_is_documented() {
          added — which is why this check is derived rather than maintained."
     );
 }
+
+/// CHARTER Rule 48 again, for the other hand-kept set in the docs: the route
+/// tables. `README.md` listed `/healthz` as "Storage liveness" and carried no
+/// `/livez` row at all after #239 split the two — a route can be mounted and
+/// documented nowhere, and a prose table has no signal for the row nobody added.
+///
+/// Every `.route("...")` path mounted in `acdp-registry-core/src/lib.rs` must
+/// appear in `docs/HTTP-API.md` (the reference) — and the handful a new operator
+/// meets first must also appear in `README.md`.
+///
+/// TWO STATED LIMITS, because a guard whose reach is undocumented gets trusted
+/// past it:
+///
+/// 1. The doc check is `contains`, so a nested path documented alone satisfies
+///    its parent (`/contexts/{ctx_id}/body` in the docs also satisfies
+///    `/contexts/{ctx_id}`). Acceptable — documenting a child while omitting the
+///    parent is not the drift that has occurred here — but it is not exact.
+///
+/// 2. DIRECTIONALITY, the same caveat lane-1 recorded for
+///    `every_route_in_the_core_router_is_classified`: this fails on a route that
+///    EXISTS but is undocumented. It does NOT fail on a documented route that
+///    has been deleted from the router — for that, a wire test that actually calls the
+/// endpoint is the only real guard. Two different failure modes; this one covers
+/// the direction that has actually bitten twice.
+#[test]
+fn every_mounted_route_is_documented() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+
+    let lib_rs = root.join("crates/acdp-registry-core/src/lib.rs");
+    let src = std::fs::read_to_string(&lib_rs)
+        .unwrap_or_else(|e| panic!("read {}: {e}", lib_rs.display()));
+
+    // Scan `.route(` and then skip whitespace to the opening quote — rustfmt
+    // splits long calls across lines, so `.route("` as a literal misses them.
+    // That is not hypothetical: `/.well-known/did.json` is mounted in exactly
+    // that wrapped form and the first version of this scanner never saw it,
+    // while a `>= 15` floor happily passed at 19. A floor cannot catch
+    // under-counting by one, so the mechanism guard below is an EQUALITY
+    // against the number of `.route(` calls in the file.
+    // Strip comments first: this file's own doc prose mentions `.route(...)`,
+    // and counting that as a mount makes the equality below unsatisfiable.
+    // A `//` inside a string literal is not a comment, hence the quote parity.
+    let src: String = src
+        .lines()
+        .map(|line| match line.find("//") {
+            Some(i) if line[..i].matches('"').count() % 2 == 0 => &line[..i],
+            _ => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let src = src.as_str();
+
+    let calls = src.matches(".route(").count();
+    let mut found: Vec<String> = Vec::new();
+    for (i, _) in src.match_indices(".route(") {
+        let rest = &src[i + 7..];
+        let Some(q) = rest.find('"') else { continue };
+        // Only whitespace may sit between `(` and the path literal; anything
+        // else means this is a `.route(` we do not understand, and the
+        // equality assertion below will catch it rather than silently skip it.
+        if !rest[..q].chars().all(char::is_whitespace) {
+            continue;
+        }
+        let after = &rest[q + 1..];
+        let Some(end) = after.find('"') else { continue };
+        found.push(after[..end].to_string());
+    }
+
+    assert_eq!(
+        found.len(),
+        calls,
+        "route extraction parsed {} of the {calls} `.route(` calls in {} — the \
+         scanner is silently skipping mounts, so the checks below under-cover \
+         by exactly the routes it missed. Parsed: {found:?}",
+        found.len(),
+        lib_rs.display()
+    );
+
+    let mut routes: Vec<String> = Vec::new();
+    for r in &found {
+        if r.starts_with('/') && !routes.iter().any(|e| e == r) {
+            routes.push(r.clone());
+        }
+    }
+    routes.sort();
+    assert_eq!(
+        routes.len(),
+        found.len(),
+        "extracted a non-path or a duplicate route literal; parsed {found:?}"
+    );
+
+    // Named members, because an equality alone still passes if BOTH the router
+    // and the scanner lose a route together.
+    for required in ["/healthz", "/livez", "/contexts", "/.well-known/did.json"] {
+        assert!(
+            routes.iter().any(|r| r == required),
+            "route extraction did not find `{required}`, which is certainly \
+             mounted — the scanner is broken: {routes:?}"
+        );
+    }
+
+    // `{ctx_id}`-style params are spelled the same way in the docs, so a plain
+    // substring check is enough and stays robust to table formatting.
+    let api = std::fs::read_to_string(root.join("docs/HTTP-API.md")).expect("read HTTP-API.md");
+    let undocumented: Vec<&String> = routes
+        .iter()
+        .filter(|r| !api.contains(r.as_str()))
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "these routes are mounted in acdp-registry-core/src/lib.rs but appear \
+         nowhere in docs/HTTP-API.md: {undocumented:?}"
+    );
+
+    // README is the operator's first contact: the unauthenticated probes and the
+    // core publish/retrieve surface must be discoverable there too.
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("read README.md");
+    let readme_must_list = [
+        "/livez",
+        "/healthz",
+        "/contexts/search",
+        "/.well-known/acdp.json",
+    ];
+    let missing: Vec<&str> = readme_must_list
+        .iter()
+        .copied()
+        .filter(|r| !readme.contains(r))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "README.md's endpoint table is missing {missing:?}. These are the routes an \
+         operator meets first — /livez in particular, because documenting /healthz \
+         as \"liveness\" is what wires a storage-gated probe to a k8s livenessProbe \
+         and restart-loops healthy pods during a database outage."
+    );
+}
