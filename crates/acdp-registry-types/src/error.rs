@@ -289,6 +289,7 @@ impl From<serde_json::Error> for RegistryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acdp::types::primitives::ContentHash;
 
     fn acdp(e: AcdpError) -> RegistryError {
         RegistryError::Acdp(e)
@@ -323,6 +324,71 @@ mod tests {
         assert_eq!(
             acdp(AcdpError::Canonicalization("x".into())).wire_code(),
             "hash_mismatch"
+        );
+    }
+
+    /// H-M / H-G: the **`HashMismatch` / `RemoteHashMismatch` arm** of the wire-code
+    /// match, and its `400` status.
+    ///
+    /// The audit that produced this item claimed `hash_mismatch` "appears only in
+    /// comments across all test trees." That was **wrong** — `wire_codes_match_rfc0007_s5`
+    /// above asserts the string. But the correction mattered more than the refutation:
+    /// that assertion covers the **`Canonicalization`** arm, which maps to
+    /// `hash_mismatch` only because `canonicalization_failed` is not in the
+    /// RFC-ACDP-0007 §5 registry. The arm that exists *because* §5 registers
+    /// `hash_mismatch` — the one carrying an actual hash comparison — was asserted
+    /// **nowhere in the repository**: re-derived at edit time, `HashMismatch` and
+    /// `RemoteHashMismatch` appeared only in this file's two match arms and in no
+    /// test anywhere.
+    ///
+    /// So the audit's conclusion was false and its underlying gap was real, which is
+    /// why this is a separate test rather than another line in the one above: the two
+    /// arms are distinct claims and collapsing them is what hid the gap.
+    ///
+    /// Both variants are asserted, not just one. They are deliberately different
+    /// shapes — `HashMismatch` is a struct variant carrying the two hashes it
+    /// compared (locally detected), `RemoteHashMismatch` a tuple variant carrying a
+    /// remote registry's message verbatim (producer-side) — so a mutation that
+    /// rewrites one arm and not the other cannot hide behind the sibling.
+    #[test]
+    fn hash_mismatch_arm_maps_both_variants_to_hash_mismatch_and_400() {
+        let local = acdp(AcdpError::HashMismatch {
+            stored: ContentHash::parse(format!("sha256:{}", "a".repeat(64))).unwrap(),
+            recomputed: ContentHash::parse(format!("sha256:{}", "b".repeat(64))).unwrap(),
+        });
+        assert_eq!(
+            local.wire_code(),
+            "hash_mismatch",
+            "the locally-detected HashMismatch arm no longer maps to the \
+             RFC-ACDP-0007 §5 code `hash_mismatch`"
+        );
+        assert_eq!(
+            local.http_status(),
+            400,
+            "a content_hash mismatch is a client-side fault (§5 category), so it \
+             must be 400 — not 500, which would tell a producer to retry a request \
+             that can never succeed"
+        );
+
+        let remote = acdp(AcdpError::RemoteHashMismatch(
+            "registry recomputed a different content_hash".into(),
+        ));
+        assert_eq!(
+            remote.wire_code(),
+            "hash_mismatch",
+            "the RemoteHashMismatch arm no longer maps to `hash_mismatch`"
+        );
+        assert_eq!(remote.http_status(), 400);
+
+        // The sibling code must stay DISTINCT: `data_ref_hash_mismatch` is a
+        // different §5 entry, and collapsing the two would make a DataRef fault
+        // indistinguishable from a body-hash fault to any client branching on the
+        // code. Asserted here because this test is what a future edit to the arm
+        // above will be read against.
+        assert_ne!(
+            acdp(AcdpError::DataRefHashMismatch("x".into())).wire_code(),
+            local.wire_code(),
+            "data_ref_hash_mismatch collapsed into hash_mismatch"
         );
     }
 
