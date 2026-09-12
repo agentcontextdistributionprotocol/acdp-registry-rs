@@ -12427,3 +12427,136 @@ async fn log003_consistency_proof_golden_recomputed() {
          failure mode this ratchet exists to prevent"
     );
 }
+
+// ── C2: the published receipt key must be the signing key ──────────────
+//
+// RFC-ACDP-0010 §8 step 1 has a consumer verify a receipt's signature
+// against the registry's receipt public key, which it obtains by
+// resolving `did:web:<authority>` — i.e. by reading
+// `GET /.well-known/did.json`. That contract holds only if the key the
+// registry PUBLISHES is the key it SIGNS with, and until this test
+// nothing anywhere asserted the two were the same.
+//
+// Measured, not argued: setting `receipt.rs:100` to `&[0u8; 32]` — so the
+// registry publishes an all-zero key while still signing with the real one
+// — left the entire workspace suite green at 524 passed / 0 failed,
+// byte-identical to baseline. The three tests that look like they cover
+// this do not:
+//
+//   * `receipt.rs:221` is the only read of `publicKeyMultibase` in the
+//     repo and asserts `starts_with('z')` + resolvability — all-zeros
+//     satisfies both;
+//   * `did_json_serves_receipt_key_and_404s_without_one` asserts fragment
+//     *ids*, never a key value;
+//   * `did_key_publish_mints_verifiable_receipt` verifies against
+//     `receipt_public_key()`, derived from the TEST'S OWN SEED rather
+//     than from the served document — so it cannot observe a divergence
+//     between what is signed and what is served.
+//
+// This test therefore takes its verification key ONLY from the served
+// bytes. Deriving it from the local seed would reproduce exactly the
+// blindness above one level up.
+
+const C2_RECEIPT_SEED: [u8; 32] = [9u8; 32];
+
+/// Receipts-enabled router: the DID document is only served when a receipt
+/// signing key is configured, and `did:key` must be accepted so a producer
+/// can publish without a network resolver.
+async fn receipt_key_harness() -> axum::Router {
+    use base64::engine::general_purpose::STANDARD as C2B64;
+    use base64::Engine as _;
+
+    let mut cfg = config();
+    cfg.receipt.signing_key_seed_b64 = C2B64.encode(C2_RECEIPT_SEED);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+
+    let mut c = caps();
+    c.acdp_version = "0.2.0".into();
+    c.supported_did_methods = vec!["did:web".into(), "did:key".into()];
+
+    common::build_harness_with_webhook(
+        cfg,
+        c,
+        AUTHORITY,
+        common::StoreMode::Memory,
+        None,
+        None,
+    )
+    .await
+    .router
+}
+
+/// A receipt minted by the registry MUST verify against the key a consumer
+/// resolves from the registry's own `/.well-known/did.json`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn receipt_verifies_against_the_key_served_at_did_json() {
+    use acdp::types::receipt::RegistryReceipt;
+
+    let router = receipt_key_harness().await;
+
+    // Mint a real receipt through the public publish path.
+    let p = Producer::new_did_key(SigningKey::from_bytes(&[77u8; 32]));
+    let req = p
+        .publish_request()
+        .title("c2 served-key binding")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = common::publish(&router, &req, None).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    let receipt = RegistryReceipt::from_value(&v["registry_receipt"])
+        .expect("a receipts-advertising registry returns a closed-schema receipt");
+
+    // Resolve the key the way a consumer does: from the SERVED document.
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/did.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let doc = common::body_to_json(resp).await;
+
+    // Pick the ACTIVE entry by id, never by index: indexing would assert
+    // position, and the contract is about identity.
+    let active_id = doc["assertionMethod"][0]
+        .as_str()
+        .expect("assertionMethod[0] is a string id");
+    let entry = doc["verificationMethod"]
+        .as_array()
+        .expect("verificationMethod array")
+        .iter()
+        .find(|m| m["id"] == active_id)
+        .unwrap_or_else(|| panic!("no verificationMethod entry matches {active_id}: {doc}"));
+    let mb = entry["publicKeyMultibase"]
+        .as_str()
+        .expect("publicKeyMultibase is a string");
+
+    let served_key = match acdp::did::key::resolve_did_key(&format!("did:key:{mb}"))
+        .expect("the published multibase must resolve")
+    {
+        acdp::did::DidKeyMaterial::Ed25519(k) => k,
+        other => panic!("published receipt key is not Ed25519: {other:?}"),
+    };
+
+    // The whole point: verify with the SERVED key, not a local one.
+    receipt
+        .verify_signature_with_key(Some(&served_key), None)
+        .expect(
+            "the receipt does NOT verify against the key served at \
+             /.well-known/did.json: the registry is publishing a key it does not \
+             sign with, so every receipt it mints is unverifiable for any consumer \
+             following RFC-ACDP-0010 §8",
+        );
+
+    assert_eq!(
+        receipt.signature.key_id,
+        format!("did:web:{AUTHORITY}#receipt-key-1"),
+        "the receipt must name the same key id the DID document declares active"
+    );
+}

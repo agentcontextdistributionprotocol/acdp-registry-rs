@@ -224,4 +224,50 @@ mod tests {
             acdp::did::key::resolve_did_key(&format!("did:key:{mb}")).expect("resolvable");
         assert!(matches!(material, acdp::did::DidKeyMaterial::Ed25519(_)));
     }
+
+    /// RFC-ACDP-0010 §8: a consumer verifies a receipt with the key it
+    /// resolves from the registry's DID document. That only works if the
+    /// key we PUBLISH is the key we SIGN with.
+    ///
+    /// Nothing asserted that before: the sibling test above checks only
+    /// that `publicKeyMultibase` starts with `z` and resolves, which any
+    /// 32 bytes satisfy — including all zeros. Replacing the published
+    /// key with `&[0u8; 32]` left the entire workspace suite green
+    /// (524 passed, byte-identical to baseline) while no consumer could
+    /// have verified a single receipt.
+    ///
+    /// Asserts the RELATIONSHIP, not a pinned constant: a hardcoded
+    /// multibase would still pass if signing and publishing drifted
+    /// together.
+    #[test]
+    fn did_document_publishes_the_key_it_signs_with() {
+        let cfg = cfg_with_seed();
+        let key = load_signing_key(&cfg).expect("seed loads");
+        let doc = build_did_document(&cfg, "registry.test").expect("doc");
+
+        // Resolve the ACTIVE entry by id — never by index. Indexing tests
+        // position; the contract is about identity.
+        let active_id = doc["assertionMethod"][0]
+            .as_str()
+            .expect("assertionMethod[0] is a string id");
+        let vm = doc["verificationMethod"]
+            .as_array()
+            .expect("verificationMethod array");
+        let active = vm
+            .iter()
+            .find(|m| m["id"] == active_id)
+            .unwrap_or_else(|| panic!("no verificationMethod entry matches {active_id}"));
+
+        let published = active["publicKeyMultibase"]
+            .as_str()
+            .expect("publicKeyMultibase is a string");
+        let signing = ed25519_multibase(&key.verifying_key_bytes());
+
+        assert_eq!(
+            published, signing,
+            "the DID document publishes a key the registry does NOT sign with: \
+             every receipt it mints would fail verification for any consumer \
+             following RFC-ACDP-0010 §8"
+        );
+    }
 }
