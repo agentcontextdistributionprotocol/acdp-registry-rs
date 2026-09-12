@@ -1734,35 +1734,45 @@ fn parse_opt_rfc3339(s: &Option<String>) -> Result<Option<DateTime<Utc>>, AcdpEr
     Ok(Some(dt.with_timezone(&Utc)))
 }
 
-/// FTS5 input sanitization.
+/// FTS5 input sanitization, and the query half of SQLite/Postgres `q=` parity.
 ///
-/// Tokenizes the input on Unicode whitespace, quotes each token as an
-/// FTS5 string literal, and joins with implicit AND (the default FTS5
-/// operator). That makes `q=foo bar` match documents containing BOTH
-/// `foo` and `bar`, which is also what Postgres `plainto_tsquery` does
-/// with its terms.
+/// Tokenizes on Unicode whitespace, drops stopwords, quotes each surviving
+/// token as an FTS5 string literal, and joins with implicit AND (the default
+/// FTS5 operator) — so `q=foo bar` matches documents containing BOTH terms,
+/// which is what Postgres `plainto_tsquery` does with its terms too.
 ///
-/// **The two backends do NOT agree on result sets for the same query, and
-/// this comment used to claim they did.** Term conjunction is the only part
-/// that matches. FTS5 here uses the default `unicode61` tokenizer — no
-/// stemmer, no stopword list (`migrations/002_fts5.sql`) — while Postgres
-/// runs `plainto_tsquery('english', …)` over an `english` tsvector, which
-/// applies snowball stemming and drops stopwords
-/// (`acdp-registry-pg/migrations/002_fts.sql`). Measured on both engines:
+/// Per-token quoting neutralizes FTS5 operator syntax (`NOT`, `AND`, `OR`,
+/// `NEAR`, column filters, `^`, `+`, `-`, `(`, `)`); embedded `"` characters
+/// are doubled per FTS5 string-literal rules. Quoting is preserved
+/// deliberately: it was measured that the `porter` stemmer still applies
+/// inside a quoted phrase, so stemming and operator-neutralization are not in
+/// tension and there is no reason to weaken the quoting.
 ///
-/// | query | sqlite | pg |
-/// |---|---|---|
-/// | `q=running` against "run report" | 0 rows | 1 row (stems to `run`) |
-/// | `q=the` against "the quarterly figures" | 1 row | 0 rows (stopword; the tsquery is empty) |
+/// # Parity with Postgres
 ///
-/// Reconciling them is a deliberate semantics choice with user-visible
-/// consequences, tracked separately rather than smuggled into this comment:
-/// matching Postgres means an approximate stemmer (FTS5 `porter` is not
-/// snowball `english`) plus a stopword list, so the resulting parity would
-/// be pinned per-word rather than structural. Until that lands, treat `q=`
-/// as backend-specific and do not assume a query returns the same rows on
-/// both. `acdp_registry_store::parity` is where any such guarantee gets
-/// enforced once it exists.
+/// **SQLite was brought to Postgres's semantics, not the other way round.**
+/// Postgres is the production backend and stemming is better search
+/// behaviour, so degrading it to reach agreement would have been a real
+/// product regression; the cost instead lands on SQLite's FTS index, which is
+/// derived data rebuilt from `contexts`.
+///
+/// Two mechanisms had to be matched, and they are matched in two different
+/// places:
+///
+/// * **Stemming** — migration `013_fts5_porter.sql` switches `contexts_fts` to
+///   `tokenize = 'porter unicode61'`. Handled at index+query time by FTS5.
+/// * **Stopwords** — porter does NOT drop them (measured), so they are dropped
+///   here, on the query side, using `acdp_registry_store::fulltext`.
+///
+/// # The limit, stated rather than implied
+///
+/// FTS5 `porter` and Postgres's snowball `english` are **different
+/// implementations** and will not agree on every word in the language. The
+/// parity suite therefore pins the *mechanisms* (a stemmed match, a stopword
+/// query, case, punctuation) rather than claiming stemmer identity, and
+/// the stopword list is verified against Postgres's own oracle instead of
+/// being trusted as a hand-copied table. See
+/// `acdp_registry_store::parity::assert_fulltext_parity`.
 ///
 /// Per-token quoting neutralizes FTS5 operator syntax (`NOT`, `AND`,
 /// `OR`, `NEAR`, column filters, `^`, `+`, `-`, `(`, `)`); embedded
@@ -1771,6 +1781,11 @@ fn fts5_escape(q: &str) -> String {
     let tokens: Vec<String> = q
         .split_whitespace()
         .filter(|t| !t.is_empty())
+        // Stopword removal, matching `plainto_tsquery('english', …)`. Compared
+        // case-insensitively because Postgres lowercases before consulting the
+        // list; `to_lowercase` (not `to_ascii_lowercase`) so a non-ASCII token
+        // is not silently treated as a different word.
+        .filter(|t| !acdp_registry_store::fulltext::is_pg_english_stopword(t))
         .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
         .collect();
     if tokens.is_empty() {
@@ -1819,10 +1834,52 @@ mod tests {
 
     #[test]
     fn fts5_escape_quotes_operator_keywords() {
-        // `NOT`, `AND`, `OR`, `NEAR` are FTS5 operators; quoting them
-        // turns them into literal token searches instead of letting a
-        // caller inject operator syntax.
-        assert_eq!(fts5_escape("NOT hack"), "\"NOT\" \"hack\"");
+        // `NOT`, `AND`, `OR`, `NEAR` are FTS5 operators, and a caller must not
+        // be able to inject operator syntax through `q=`.
+        //
+        // Three of those four keywords are also PostgreSQL `english`
+        // stopwords, so they are now DROPPED before quoting rather than
+        // quoted — which is exactly what Postgres does, verified against the
+        // server:
+        //
+        //     plainto_tsquery('english', 'NOT hack')  ->  'hack'
+        //
+        // This test previously asserted `"NOT" "hack"`, which was the
+        // divergent behaviour. Dropping is strictly safer than quoting here:
+        // the caller cannot obtain operator semantics either way, and with
+        // `OR` removed they cannot even widen the query to a disjunction.
+        assert_eq!(fts5_escape("NOT hack"), "\"hack\"");
+        assert_eq!(fts5_escape("foo OR bar"), "\"foo\" \"bar\"");
+        assert_eq!(fts5_escape("foo AND bar"), "\"foo\" \"bar\"");
+
+        // `NEAR` is the one FTS5 operator that is NOT a stopword — Postgres
+        // keeps it (`plainto_tsquery('english', 'NEAR hack')` -> `'near' &
+        // 'hack'`), so it survives tokenization and quoting is what stops it
+        // being read as an operator. This assertion carries the
+        // operator-neutralization property now that the other three are
+        // dropped before they ever reach the quoter.
+        assert_eq!(fts5_escape("NEAR hack"), "\"NEAR\" \"hack\"");
+
+        // Non-keyword operator characters are not stopwords, so they are still
+        // quoted rather than dropped.
+        assert_eq!(fts5_escape("^foo"), "\"^foo\"");
+        assert_eq!(fts5_escape("(bar)"), "\"(bar)\"");
+    }
+
+    #[test]
+    fn fts5_escape_all_stopword_query_yields_the_empty_sentinel() {
+        // Postgres produces an empty tsquery for a stopword-only query
+        // (`plainto_tsquery('english', 'AND OR NOT')` -> `''`), which matches
+        // nothing. SQLite must reach the same result, and an empty FTS5
+        // expression is a syntax error rather than an empty match — hence the
+        // sentinel token, which cannot appear in any indexed document.
+        assert_eq!(fts5_escape("the"), "\"__acdp_empty_query__\"");
+        assert_eq!(fts5_escape("AND OR NOT"), "\"__acdp_empty_query__\"");
+        assert_eq!(fts5_escape("of the and a"), "\"__acdp_empty_query__\"");
+
+        // A stopword next to a real term must leave the real term working —
+        // the whole query is not discarded just because part of it was.
+        assert_eq!(fts5_escape("the report"), "\"report\"");
     }
 
     #[test]

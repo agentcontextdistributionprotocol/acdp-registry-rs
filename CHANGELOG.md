@@ -8,6 +8,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Search: `q=` returned different results on SQLite and Postgres, and a code comment
+  claimed it did not.** SQLite indexed with FTS5's default `unicode61` tokenizer — no
+  stemmer, no stopwords — while Postgres used `plainto_tsquery('english', …)` over an
+  `english` tsvector, which stems and drops stopwords. Measured on both engines:
+
+  | query | sqlite (before) | pg |
+  |---|---|---|
+  | `q=running` against "run report" | 0 rows | 1 row |
+  | `q=the` against "the quarterly figures" | 1 row | 0 rows |
+
+  **Postgres's semantics win, and SQLite was raised to them.** Postgres is the production
+  backend and stemming is better search behaviour, so degrading it to reach agreement would
+  have been a product regression rather than a fix. The cost lands on SQLite's FTS index,
+  which is derived data rebuilt from `contexts` — reversible, and no context data is touched.
+
+  Two mechanisms, matched in two places: migration `013_fts5_porter.sql` switches
+  `contexts_fts` to `tokenize = 'porter unicode61'` (stemming), and `fts5_escape` drops
+  stopwords query-side because porter does not (measured). **This changes user-visible search
+  results on SQLite:** inflected queries now match, and stopword-only queries now match
+  nothing.
+
+  Three of FTS5's four operator keywords (`NOT`, `AND`, `OR`) are themselves English
+  stopwords, so they are now dropped before quoting rather than quoted — which is exactly
+  what Postgres does (`plainto_tsquery('english', 'NOT hack')` → `'hack'`). That is strictly
+  safer: a caller cannot obtain operator semantics either way, and with `OR` removed they
+  cannot widen a query to a disjunction. `NEAR` is the one keyword Postgres keeps, so it is
+  still quoted, and it now carries the operator-neutralization property in the tests.
+
+  **The honest limit:** FTS5 `porter` and Postgres's snowball `english` are different
+  implementations and will not agree on every word in the language. The parity suite pins the
+  *mechanisms* — a stemmed match happens, stopwords are dropped, dropping them does not empty
+  the rest of the query, terms are AND-ed, case folds — rather than claiming stemmer
+  identity, which would be the same kind of overclaim as the comment this removes.
+
+  The stopword list is PostgreSQL 16's own `tsearch_data/english.stop` (127 entries) and is
+  **verified against Postgres at test time** rather than trusted as a hand-copied table: the
+  pg suite asserts every entry is still a stopword according to the server. A hand-maintained
+  list whose staleness nobody notices was the failure mode worth designing out.
+
 - **Search: `data_period_start_after` / `data_period_end_before` returned wrong results on
   SQLite.** The two predicates compared RFC 3339 timestamps **lexicographically as TEXT**,
   because they read out of `body_json` (chrono serde output — `Z` suffix, 0/3/6/9 fractional

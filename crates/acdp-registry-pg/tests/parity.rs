@@ -46,3 +46,64 @@ async fn data_period_filters_match_the_cross_backend_contract() {
     let store = store(&url).await;
     parity::assert_data_period_filter_parity(&store, "pg").await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fulltext_matches_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    parity::assert_fulltext_parity(&store, "pg").await;
+}
+
+/// The stopword list SQLite filters with is a hand-copied table, and the
+/// characteristic failure of such tables is that nobody notices when they go
+/// stale. So check it against the only authority that matters: Postgres.
+///
+/// For every entry, `to_tsvector('english', w)` must come back empty — that is
+/// exactly what makes `plainto_tsquery` yield an empty query for it, which is
+/// the behaviour SQLite is imitating. If Postgres ever stops treating one of
+/// these as a stopword, this reddens instead of search quietly skewing.
+///
+/// The converse — Postgres *gaining* a stopword this list lacks — cannot be
+/// checked from SQL, because their list is a file the server does not expose.
+/// That residual gap is documented on the constant rather than papered over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_stopword_list_still_matches_postgres() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+
+    let mut disagreements: Vec<String> = Vec::new();
+    for word in acdp_registry_store::fulltext::PG_ENGLISH_STOPWORDS {
+        let (is_empty,): (bool,) =
+            sqlx::query_as("SELECT to_tsvector('english', $1) = ''::tsvector")
+                .bind(*word)
+                .fetch_one(store.pool())
+                .await
+                .expect("ask postgres whether the word is a stopword");
+        if !is_empty {
+            disagreements.push((*word).to_string());
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "PG_ENGLISH_STOPWORDS has drifted from PostgreSQL's own english.stop —          these entries are NOT stopwords according to this server, so SQLite is          dropping terms Postgres keeps: {disagreements:?}"
+    );
+
+    // The negative direction, so the test cannot pass by the list being empty
+    // or the query being vacuous.
+    for word in ["running", "report", "quarterly", "figures"] {
+        let (is_empty,): (bool,) =
+            sqlx::query_as("SELECT to_tsvector('english', $1) = ''::tsvector")
+                .bind(word)
+                .fetch_one(store.pool())
+                .await
+                .expect("ask postgres");
+        assert!(
+            !is_empty,
+            "{word:?} must NOT be a stopword; if it is, this test's oracle is              not measuring what it claims to"
+        );
+        assert!(
+            !acdp_registry_store::fulltext::is_pg_english_stopword(word),
+            "{word:?} must not be in PG_ENGLISH_STOPWORDS"
+        );
+    }
+}
