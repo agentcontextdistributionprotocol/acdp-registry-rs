@@ -197,9 +197,15 @@ the per-crate `CHANGELOG.md` files), so the bare string is shared by every
 build of a given release and the `+g<shortsha>` suffix is what carries build
 identity.
 
-`<version>` above is deliberately not a literal: pinning it here is what
-made this table wrong in the first place, and the argument does not depend
-on the number.
+**`<version>` is the SAME value in both rows** — that is the whole point of
+the table. Two builds of one release carry an identical package version and
+are told apart only by the `+g<shortsha>` suffix, which is why the second
+row cannot uniquely identify a build.
+
+It is deliberately a placeholder rather than a literal: this table named a
+real version once and that is exactly how it went stale. The contrast it
+teaches does not depend on which number it is, only on the two rows sharing
+one.
 
 `acdp-control-plane` serves the same flat `version` string shape on its own
 `/healthz`. The two are two precision levels of one contract, not two
