@@ -84,9 +84,11 @@ rate limiter (`[rate_limit]`): it admits or rejects a request with `429` +
 > no-store`. The three `/.well-known/*` documents are requester-invariant and
 > keep `Cache-Control: public, max-age=300` — `public` is the half that
 > matters: it is the deliberate opposite of `private` above, not an omission.
-> (`/.well-known/did.json`'s **404** arm is the one exception inside that group:
-> it answers `no-store`, because a cached miss outlives the configuration change
-> that would fix it. The document's own `200` arm is `public` like the others.)
+> (`/.well-known/did.json`'s **404** arm is the one arm in that group answering a
+> *different* directive: `no-store`, because a cached miss outlives the
+> configuration change that would fix it. The document's own `200` arm is
+> `public` like the others. The group's `405` arms emit no directive at all,
+> which is why this says "different" rather than "the only exception".)
 >
 > Two exceptions, stated rather than left to be discovered. (`GET /metrics` was
 > a third until #218 closed: it now answers `no-store` on **every** arm — 200,
@@ -242,8 +244,10 @@ So: **readiness probe → `/healthz`. Liveness probe → `/livez`.** Pointing bo
 Answers `Cache-Control: no-store` on **every** arm — `200`, `401` and `405`:
 its content is authorization-relative, so a shared cache must never store any of
 them. The guarantee is unconditional on purpose, and the `405` is the load-bearing
-part of it: a `405` is produced by the router *before any handler runs*, so only a
-route-scoped layer can reach it. Stating the guarantee as "the 200 and the 401"
+part of it: a `405` is produced by the router *before any handler runs*, so a
+handler-set header cannot reach it — only a layer can. That layer must then be
+scoped to this route rather than applied group-wide, because `aux` also carries
+the `/.well-known/*` documents. Two separate constraints, both load-bearing. Stating the guarantee as "the 200 and the 401"
 would let a refactor to a handler-set header satisfy this sentence verbatim while
 silently dropping an arm — `metrics_is_never_cacheable` pins all three so that
 refactor reddens instead.
