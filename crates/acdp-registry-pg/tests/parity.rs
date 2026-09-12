@@ -204,3 +204,13 @@ async fn the_search_filter_indexes_exist() {
         "both search-filter indexes must exist after migration 013"
     );
 }
+
+/// H-I-s: a batched visibility check must answer exactly what N individual
+/// retrieve checks answer — same assertion SQLite runs, so a divergence between
+/// the two backends fails both suites.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batched_visibility_matches_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    parity::assert_batched_visibility_parity(&store, "pg").await;
+}
