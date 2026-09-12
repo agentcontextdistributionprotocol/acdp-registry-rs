@@ -1186,29 +1186,24 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
         }
     }
 
-    // A2: `total_estimate` comes from the STORE's count, which is §4.5-visible
-    // but NOT tenant-scoped -- the tenant predicate is applied post-query, in
-    // this handler, after the count has already been taken. So for a
-    // tenant-asserting caller the number describes rows across every tenant,
-    // and returning it hands that caller a population count for data they
-    // cannot see and must not know the size of.
+    // A2 is now closed at the source rather than by withholding. This block
+    // used to null `total_estimate` for any tenant-asserting caller, because the
+    // store counted §4.5-visible rows BEFORE the tenant predicate ran -- the
+    // filter lived here, post-query -- so the number described rows across every
+    // tenant and handed that caller a population count for data they cannot see.
     //
-    // Omitted rather than recomputed: an honest tenant-scoped count needs the
-    // predicate in the store's SQL, which is a different change in a different
-    // crate. `Option<u64>` with `skip_serializing_if` means `None` omits the
-    // KEY entirely rather than sending `null`, so a client cannot mistake
-    // "withheld" for "zero".
+    // `search_in_tenant` (H-H) moved the predicate into the WHERE clause, and
+    // `COUNT(*) OVER ()` rides the same scan (`acdp-registry-sqlite/src/store.rs`,
+    // `acdp-registry-pg/src/store.rs`). The count is therefore tenant-correct by
+    // construction, computed on the caller's own rows, with no extra query. There
+    // is no longer a cross-tenant number to withhold: withholding it now hides a
+    // figure the caller is entitled to and which discloses nothing.
     //
-    // Deliberately NOT unconditional: an un-scoped caller is entitled to the
-    // count, and removing it for everyone would break conformance's
-    // `want_total_estimate` while still passing a naive "tenant caller sees no
-    // count" test. `search_still_reports_total_estimate_without_tenant` pins
-    // that half.
-    let total_estimate = if requested_tenant.is_some() {
-        None
-    } else {
-        total_estimate
-    };
+    // So the omission is removed rather than narrowed, and `total_estimate`
+    // flows for every caller. `search_reports_a_tenant_scoped_total_estimate`
+    // pins that the number is the TENANT's count and not the registry's -- the
+    // distinction this whole finding was about, and the one a test asserting
+    // mere presence would miss.
 
     Ok(SearchResponse {
         matches: accumulated,

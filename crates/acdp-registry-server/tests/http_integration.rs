@@ -8440,23 +8440,42 @@ async fn the_acdp_media_type_is_accepted_not_rejected() {
     );
 }
 
-/// A2: a tenant-scoped search must not report a cross-tenant population count.
+/// A2, closed: a tenant-scoped search reports the TENANT's count.
 ///
-/// `total_estimate` is produced by the STORE, which counts §4.5-visible rows
-/// before the tenant predicate is applied — the tenant filter runs in the
-/// handler, post-query. So for a tenant-asserting caller the number describes
-/// rows across every tenant, i.e. a population size for data that caller cannot
-/// see and must not learn the size of.
+/// This test is the inversion of `search_omits_total_estimate_for_tenant_scoped_caller`,
+/// which asserted the opposite and was correct while it lived. The old
+/// behaviour withheld `total_estimate` from any tenant-asserting caller because
+/// the store counted §4.5-visible rows BEFORE the tenant predicate ran — the
+/// filter was applied post-query, in the handler — so the number described the
+/// whole registry and disclosed a population size the caller must not learn.
 ///
-/// The key must be **absent**, not `null` and not `0`. `Option<u64>` with
-/// `skip_serializing_if` is what guarantees that, and a client must not be able
-/// to mistake "withheld" for "none found".
+/// `search_in_tenant` moved the predicate into the WHERE clause and
+/// `COUNT(*) OVER ()` rides the same scan, so the count is now tenant-correct by
+/// construction. Withholding it would hide a figure the caller is entitled to.
+/// Per the tripwire's own instruction, it is inverted in the commit that makes
+/// it false rather than deleted or quietly relaxed.
+///
+/// **Presence is not the assertion.** A test that only checked the key exists
+/// would pass against two different bugs, so the fixture is built to separate
+/// the number from both:
+///
+/// | value | meaning | fixture |
+/// |---|---|---|
+/// | 2 | the tenant's count — correct | `tenant-a` has 2 matching rows |
+/// | 5 | the registry's count — the disclosure this finding was about | 5 rows match `q=est` across tenants |
+/// | 1 | the page size — a handler setting it from `matches.len()` | `limit=1` returns 1 row |
+///
+/// The three are deliberately distinct, so no single wrong implementation can
+/// produce the expected number by coincidence.
 #[tokio::test]
-async fn search_omits_total_estimate_for_tenant_scoped_caller() {
+async fn search_reports_a_tenant_scoped_total_estimate() {
     let h = harness(true).await;
     for (seed, tenant, title) in [
         (31u8, "tenant-a", "est-alpha"),
+        (34u8, "tenant-a", "est-delta"),
         (32u8, "tenant-b", "est-bravo"),
+        (35u8, "tenant-b", "est-echo"),
+        (36u8, "tenant-b", "est-foxtrot"),
     ] {
         let req = producer(seed)
             .publish_request()
@@ -8474,7 +8493,7 @@ async fn search_omits_total_estimate_for_tenant_scoped_caller() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/contexts/search?q=est")
+                .uri("/contexts/search?q=est&limit=1")
                 .header("X-Tenant-Id", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8484,16 +8503,23 @@ async fn search_omits_total_estimate_for_tenant_scoped_caller() {
     assert_eq!(resp.status(), StatusCode::OK);
     let v = body_to_json(resp).await;
 
-    assert!(
-        v.get("total_estimate").is_none(),
-        "the KEY must be absent for a tenant-scoped caller -- `null` or `0` would \
-         both be readable as 'none found' rather than 'withheld': {v}"
+    // `total_estimate` is `Option<u64>` with `skip_serializing_if`, so an absent
+    // key and a null are indistinguishable on the wire. Asserting the NUMBER
+    // covers both, where `.is_some()` would not distinguish present-and-null.
+    assert_eq!(
+        v.get("total_estimate").and_then(|t| t.as_u64()),
+        Some(2),
+        "a tenant-scoped caller must receive their OWN count: 2 is `tenant-a`'s \
+         matching rows. 5 would be the registry-wide count -- the cross-tenant \
+         disclosure this finding was about. 1 would be the page size, i.e. a \
+         handler reporting `matches.len()` rather than the store's total. \
+         Absent means the omission is still in place: {v}"
     );
-    // The request must still WORK, or the test would pass against a handler that
-    // simply broke tenant search.
-    assert!(
-        v["matches"].as_array().is_some_and(|m| !m.is_empty()),
-        "tenant-scoped search must still return the caller's own rows: {v}"
+    assert_eq!(
+        v["matches"].as_array().map(Vec::len),
+        Some(1),
+        "limit=1, so the count must exceed the page -- otherwise this test \
+         cannot tell a real total from `matches.len()`: {v}"
     );
 }
 

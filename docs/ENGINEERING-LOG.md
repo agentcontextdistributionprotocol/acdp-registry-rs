@@ -31,6 +31,40 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-A2-w (lane-1) — total_estimate returns for tenant-scoped callers -->
+
+### Changed
+
+- **`GET /contexts/search` now returns `total_estimate` to a tenant-scoped caller, and the number
+  is that tenant's count.** Additive and wire-visible: a response that previously omitted the key
+  for any request asserting a tenant now carries it. No field changed meaning for an un-scoped
+  caller, and nothing was removed.
+
+- **Why it was withheld, and why that reason expired.** The count came from the store, which
+  counted §4.5-visible rows *before* the tenant predicate ran — the filter lived in the handler,
+  post-query — so the number described rows across every tenant and handed a tenant-scoped caller
+  a population size for data it could not see. `search_in_tenant` moved the predicate into the
+  same statement as the keyset and the count, so `COUNT(*) OVER ()` rides a scan that only ever
+  sees the caller's own rows. There is no cross-tenant number left to withhold, and withholding
+  one would hide a figure the caller is entitled to.
+
+### Fixed
+
+- **`docs/HTTP-API.md` stated the opposite, and its stated REASON was false independently of its
+  claim.** It explained the omission as "the count is taken in the store before the tenant
+  predicate is applied in the handler", which stopped being true when the predicate moved. Both
+  halves are rewritten rather than just the conclusion — a correct claim resting on a false
+  mechanism is the harder defect to notice later.
+
+- **The assertion that guarded the old behaviour was inverted, not deleted.**
+  `search_omits_total_estimate_for_tenant_scoped_caller` was a tripwire naming its own removal
+  condition, and this is the commit that makes it false, so it changes here and nowhere else. It
+  is now `search_reports_a_tenant_scoped_total_estimate`, and it asserts the **value**: presence
+  alone would pass against a handler reporting the registry-wide count and against one reporting
+  `matches.len()`. The fixture makes those three numbers distinct (2, 5, 1) and each wrong value
+  was produced by a real mutation. `search_still_reports_total_estimate_without_tenant` was left
+  untouched and kept passing throughout, which is what shows the change did not go too wide.
+
 <!-- unit H-H-w (lane-3) — wiring H-H's dormant tenant predicate into /contexts/search.
      The fix a doc sentence said still needed building. -->
 
