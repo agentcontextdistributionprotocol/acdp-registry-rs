@@ -32,3 +32,6 @@ reqwest        = { workspace = true }
 
 [dev-dependencies]
 ed25519-dalek  = { version = "3.0", features = ["rand_core"] }
+# Used only by the E4 guard, which captures what actually reaches a log sink
+# rather than asserting on the shape of a `tracing` call.
+tracing-subscriber = { workspace = true }

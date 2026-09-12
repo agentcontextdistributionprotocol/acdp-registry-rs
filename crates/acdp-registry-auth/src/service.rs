@@ -87,7 +87,12 @@ impl AuthService {
                 expires_at,
             })
             .await?;
-        tracing::info!(nonce = %nonce, "challenge issued");
+        // E4: the nonce is not logged. It is the value the agent must SIGN, so
+        // disclosure alone forges nothing — but it is a secret-shaped, short-TTL
+        // credential and logs are routinely shipped somewhere the registry does
+        // not control. `agent_id` is what an operator actually correlates on, so
+        // the event stays useful without carrying the challenge itself.
+        tracing::info!(agent_id = %agent_id, "challenge issued");
         Ok(AuthChallenge {
             nonce,
             registry_authority: self.authority.clone(),
