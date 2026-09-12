@@ -2290,3 +2290,39 @@ reaches the signer. A `leeway_seconds()` accessor is the cheaper guarantee.
 follow-up blocks the ship. Two items are recorded as follow-ups that block nothing: a config knob if
 an operator needs private-range revocation feeds, and the `conformance_gate` false positive that
 flags `#[cfg(test)]` env reads inside `src/` as operator configuration.
+
+## Unit H-N — the JWT issuer assertion (lane-2, 2026-09-12)
+
+One `UNCONFIRMED` entry from `plans/h-n-jwt-issuer-assertion.md`. Low blast radius, test-only,
+reversible in a commit — **settled by Opus, not brought to the human.**
+
+**Timing deviation, declared:** `/drive` reconciles *before* the single PR so code cannot ship
+carrying an unresolved one-way door. This entry was reconciled **after** #251 merged. Stating it
+rather than letting the ordering imply otherwise. It is defensible only because the entry is not a
+one-way door — no schema, no wire contract, no production code, and the failure mode is a red test —
+but the reconcile was still owed and the sequence was wrong.
+
+### The issuer guard asserts on `jsonwebtoken`'s Display string — CONFIRMED (Opus)
+
+`rejects_token_from_a_different_issuer` proves *which* guard rejected the token by asserting
+`err.to_string().contains("InvalidIssuer")`, coupling a test to a dependency's error *rendering*.
+
+**Premises re-verified rather than reasoned about:**
+- The error kind is genuinely unrecoverable at this surface — `AuthError::TokenInvalid(String)`
+  (`lib.rs:64`), reached through the single `map_err(|e| AuthError::TokenInvalid(e.to_string()))`
+  at `jwt.rs:246`. There is no typed channel to assert on instead.
+- `jsonwebtoken = "11"` (workspace `Cargo.toml:59`), locked at `11.0.0`.
+
+**Confirmed, with the coupling's real exposure stated rather than minimised.** `"11"` is a caret
+requirement, so `cargo update` can move within `11.x` **without any manifest change** — this can
+break on routine dependency maintenance, not only on a deliberate major bump. That is a larger
+surface than "a future upgrade might rename it."
+
+It is still the right trade, because of *how* it breaks: the test goes red locally with a message
+naming exactly what happened and quoting the new text, and the fix is one string. Nothing ships
+wrong; a maintainer is told. The alternatives are worse in kind, not just in cost — asserting only
+`is_err()` is the very defect the test exists to avoid (mutation M3 showed a signer that rejects
+*everything* would satisfy it), and widening `AuthError` to carry a `jsonwebtoken` kind would leak a
+dependency's type into this crate's public error enum for the benefit of one test.
+
+**Summary: 1 confirmed, 0 changed, 0 deferred, settled by Opus, 0 needing the human.**
