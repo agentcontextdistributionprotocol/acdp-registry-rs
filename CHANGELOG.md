@@ -8,6 +8,44 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Search: `data_period_start_after` / `data_period_end_before` returned wrong results on
+  SQLite.** The two predicates compared RFC 3339 timestamps **lexicographically as TEXT**,
+  because they read out of `body_json` (chrono serde output — `Z` suffix, 0/3/6/9 fractional
+  digits) while the bound was bound as `to_rfc3339()` (`+00:00` suffix). Two different
+  serializers for the same instant, and since `'+'`(0x2B) `< '.'`(0x2E) `<` digits `<
+  'Z'`(0x5A), a stored whole-second value sorted *after* a bound naming that very same
+  instant. Measured directly in sqlite3:
+
+  ```
+  '2026-01-01T00:00:00Z' <= '2026-01-01T00:00:00+00:00'   ->  0
+  ```
+
+  So an inclusive upper bound **excluded** a context whose period ended exactly on it, and
+  the mirror case **wrongly included** one that started before a lower bound. Postgres was
+  always correct — it casts to `timestamptz`. **This changes user-visible search results on
+  SQLite: queries that silently returned the wrong set now return the right one.**
+
+  Fixed by comparing numerically via `unixepoch(…, 'subsec')` on both sides, which
+  normalizes suffix and fractional width together. Binding a `Z`-normalized string instead
+  would *not* have been enough — `'…00Z'` still sorts after `'…00.500Z'`. The fix is
+  query-side only: no migration, and `body_json` is untouched because its exact bytes are
+  the `content_hash` preimage.
+
+  `created_at` / `expires_at` filters were checked and are **not** affected — both their
+  stored and bound sides go through `to_rfc3339()`, so their lexical order does hold. That
+  was measured rather than assumed by analogy.
+
+### Added
+
+- **A cross-backend parity suite (`acdp_registry_store::parity`), so storage divergence
+  fails a test instead of shipping.** The bug above survived a green CI because the
+  conformance suite is SQLite-only and *neither* backend's contract suite exercised a single
+  search filter — 114 stored rows across the pg suite carried zero `data_period` values.
+  Assertions now live once, generic over `ExtendedRegistryStore`, and each backend
+  contributes a thin `tests/parity.rs` that runs them; a divergence fails both suites rather
+  than hiding in whichever one nobody duplicated it into. Demonstrated by reverting the fix:
+  the shared test goes red on SQLite and stays green on Postgres.
+
 - **CI: 23 Postgres contract tests reported success when no Postgres was present.** Every
   test in `crates/acdp-registry-pg/tests/store_contract.rs` opens with
   `let Some(url) = pg_url_or_skip() else { return };`, and an early `return` from a
