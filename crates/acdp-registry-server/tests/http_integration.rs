@@ -8582,9 +8582,12 @@ async fn search_cursor_oracle_remains_open_for_tenant_scoped_caller() {
         !leaked.is_empty(),
         "EXPECTED the residual leak and did not observe it. Either E2 has landed — \
          in which case this test has done its job and should be DELETED with a \
-         changelog note — or the setup stopped exercising the path (the anchor only \
-         escapes when `accumulated` reaches `target` on a page whose last raw row is \
-         foreign, which needs limit >= 2).\n\
+         changelog note — or the setup stopped exercising the path. This fixture \
+         exercises the refill loop's TARGET exit, which needs limit >= 2: the \
+         anchor escapes when `accumulated` reaches `target` on a page whose last \
+         raw row is foreign. That is not the only exit — the loop also stops on \
+         exhausting SEARCH_REFILL_MAX_PAGES, which leaks at any limit — but this \
+         fixture is too small to reach it.\n\
          foreign ids: {foreign_ids:?}\n\
          decoded anchors: {decoded_anchors:?}"
     );
@@ -9033,6 +9036,14 @@ async fn log_entries_leaf_presence_is_tenant_scoped() {
         "the tenant predicate rides inside the SAME query -- a separate batched \
          tenant lookup would be two queries per page, not one"
     );
+    assert_eq!(
+        after.2 - before.2,
+        0,
+        "and zero PER-RECORD tenant lookups. This is the branch where the old \
+         code actually made that call, so leaving it unasserted here would let a \
+         variant that batched visibility and then looked up tenants one at a \
+         time pass every other assertion in this test"
+    );
 }
 
 /// A4: the untenanted bucket is not addressable from `/log/entries`.
@@ -9136,7 +9147,7 @@ async fn log_entries_rejects_the_reserved_default_tenant() {
 /// own `caps()` helper hardcodes `anonymous_public_reads: true`, and `config()`
 /// separately opts the CONFIG in as well, while the SHIPPED default is `false`
 /// (`AuthConfig::default()` in `acdp-registry-types/src/config.rs`, copied into
-/// caps by `capabilities_for` in `acdp-registry-server/src/main.rs`). So a test
+/// caps by `build_capabilities` in `acdp-registry-server/src/main.rs`). So a test
 /// that flips
 /// `cfg.auth.anonymous_public_reads` and observes a 200 measures the harness's
 /// caps/config split and nothing about the binary.

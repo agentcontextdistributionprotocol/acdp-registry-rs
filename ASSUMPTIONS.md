@@ -547,6 +547,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   commitment; narrowing to `pub(crate)` later is a one-line mechanical change that the
   compiler fully verifies. Nothing is foreclosed.
 - **Status:** CHANGED -> CONFIRMED (2026-09-10). Reconciled to `pub(crate)`; see `DECISIONS.md` entry 5. The kept-`pub` rationale did not survive analysis.
+
 ## `predecessor_admission` enforcement: store-level coverage, not end-to-end wiring
 
 - **Plan:** `plans/u-001-acdp-0.10.0-predecessor-admission.md` (U-001)
@@ -583,6 +584,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   is advertised to producers as retryable and invites a retry loop. The wart is pre-existing
   and repo-wide (every `row_to_context` decode has it); fixing it is its own unit, not
   something to smuggle into a dependency bump. Reversible in one line.
+
 ## `WEBHOOK_SCHEMA_VERSION` stays `"1.0"` across the `event_id` wire rename
 
 - **Plan:** `plans/u-002-webhook-duplicate-event-id.md`
@@ -907,6 +909,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   by line. This is the second time in two units that a docs-only edit invalidated a pin in a
   file the editing lane was not allowed to touch.
 - **Status:** UNCONFIRMED
+
 ## W3-U1 — #192/#193: validating playground config at both doors (2026-09-10, lane-1)
 
 - **UNCONFIRMED — a deliberate departure from a written acceptance criterion.** The unit
@@ -2112,13 +2115,25 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   on a page where it previously could not.
 - **Blast radius:** a page that used to return 200 with some leaves omitted can now return 500.
   Strictly more honest, but it is a change, and calling this a pure refactor would be wrong.
-- **Status:** **CORRECTED — the "Why" and "Blast radius" above are true of `tenant_of_ctx` and
-  FALSE as a generalization.** Kept unedited; see the correction appended at the end of this
-  section. The error-surfacing change runs in both directions: the old path ran a full
-  `RegistryStore::get` (events + `body_json` decode) on EVERY record, because `server.retrieve`
-  *was* the visibility check, whereas the batched query selects `ctx_id` only — so a class of
-  errors that used to 500 a page now cannot. "Strictly more honest" was unsupported in that
-  direction.
+- **Status:** **CORRECTED TWICE — the "Why" and "Blast radius" above are FALSE, and so was the
+  first correction.** Both kept unedited; the corrected statement is in this bullet, not
+  elsewhere.
+  - The original claim — a store error could surface "only for rows that were already visible" —
+    is false. `server.retrieve` **was** the visibility check, so the old path ran a full
+    `RegistryStore::get` (events, `reconcile_retraction`, `body_json` decode) on EVERY record.
+  - The first correction said the change therefore runs in **both** directions, with
+    `tenant_of_ctx` newly reachable on hidden rows. Also false, and it was adopted without being
+    checked against any implementation. There is none where it holds: SQLite and Postgres never
+    call `tenant_of_ctx` from `visible_ctx_ids` (the predicate is `AND tenant_id = ?` in the same
+    statement), and the default trait impl gates it behind
+    `if !retrieve_visible(…) { continue; }` — the identical gate the old handler had.
+  - **The correct statement:** the change is one-directional. Strictly **fewer** classes of store
+    error can reach the caller than before, because the batched query is
+    `SELECT ctx_id FROM contexts WHERE …` and never deserializes a body or reads events. The
+    "strictly more honest" framing had it backwards.
+  - Worth keeping for its own sake: a correction is not self-verifying. The first one was written
+    to fix a false claim and was itself false, and it read as more trustworthy *because* it was a
+    correction.
 
 ### RETRACTION of the `anonymous_public_reads: true` assumption above
 
@@ -2176,7 +2191,8 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 - **Status:** UNCONFIRMED — recorded so it is a known latent rather than a rediscovery.
 
 - **Record that would otherwise not ship: how P9's planned acceptance criteria were actually
-  met.** `plans/` is gitignored (`.gitignore:42`), so the plan's own status block is
+  met.** `plans/` is gitignored (the literal `plans/` entry in `.gitignore`; not cited by line,
+  because the merge in this very PR moved it), so the plan's own status block is
   worktree-local and no reviewer sees it. The load-bearing part, in a tracked file:
   - *Criterion (2) as written* asked for `tenants_of_ctxs` "exactly once per tenant-scoped page".
     It is called **zero** times: the tenant predicate rides inside the single `visible_ctx_ids`
@@ -2188,6 +2204,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
     and no test was written**, because its premise is unreachable (see the two reasons in the
     tenant entry above). `log_entries_rejects_the_reserved_default_tenant` ships instead.
 - **Status:** CONFIRMED.
+
 ## E1's cutoff is threaded through the trait, not the store constructors
 
 - **Plan:** `plans/h-e-auth-webhook-quartet.md` (H-E Phase 1)

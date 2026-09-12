@@ -69,18 +69,23 @@ hold entries from several releases. Use the commands.
   enormously, which is the whole of the security entry. Second, which store errors can reach
   the caller — and the change runs in **both** directions, not one:
 
-  - **Newly able to surface:** `tenant_of_ctx`. The old code called it only *after* a row was
-    known visible, so an error on a hidden row could not reach the caller. The batched query
-    applies the tenant predicate to every row on the page, so now it can.
-  - **No longer able to surface:** everything `RegistryStore::get` does. The old path ran
-    `server.retrieve` — and therefore a full `get`, including `events_for_ctx` and
-    `body_json` deserialization — on *every* record, because that call **was** the visibility
-    check. The batched query selects `ctx_id` only, so a decode failure or an events-table
-    error on any row of the page used to 500 the request and now cannot.
+  **No longer able to surface: everything `RegistryStore::get` does.** The old path ran
+  `server.retrieve` — and therefore a full `get`, including `events_for_ctx`,
+  `reconcile_retraction` and `body_json` deserialization — on *every* record, because that call
+  **was** the visibility check. The batched query is `SELECT ctx_id FROM contexts WHERE …`, so a
+  decode failure or an events-table error on any row of the page used to 500 the request and now
+  cannot.
 
-  An earlier draft of this entry said "a store error could reach the caller only for rows that
-  were already visible". That is true of `tenant_of_ctx` and false of everything else, and
-  claiming the fix is "strictly more honest" was unsupported in the second direction.
+  **Nothing is newly able to surface.** Two earlier drafts of this entry got this wrong in
+  opposite ways, so the reasoning is spelled out rather than asserted. The first said a store
+  error could reach the caller "only for rows that were already visible", which is false —
+  `get` ran on every row. The second corrected that but claimed the change ran in **both**
+  directions, with `tenant_of_ctx` newly reachable on hidden rows. Also false, in every
+  implementation: the SQLite and Postgres overrides never call `tenant_of_ctx` at all (the
+  predicate is `AND tenant_id = ?` inside the same statement), and the default trait impl still
+  gates it behind `if !retrieve_visible(…) { continue; }` — the identical gate the old handler
+  had. So the honest net is one-directional: strictly **fewer** classes of store error can
+  surface than before, and the earlier "strictly more honest" framing had it backwards.
 
 - **The guard is the deliverable.** The improvement is invisible in the response, so nothing in
   the suite could have noticed a revert. A `CountingStore` test wrapper counts `get`,
@@ -123,6 +128,7 @@ hold entries from several releases. Use the commands.
   leaks" — a `ctx_id` is a durable identifier, not low-grade, and "no data" was true only of
   bodies. And `docs/HTTP-API.md` stated `total_estimate` was "the count of §4.5-visible matches
   for the caller", which was exactly the falsified claim.
+
 <!-- unit H-N (lane-2) — H-G's JWT-issuer item. The claim was TRUE and true in its
      specifics: deleting the issuer check left the whole workspace green. -->
 
@@ -174,6 +180,7 @@ hold entries from several releases. Use the commands.
   to adopt the code. Decision 16 in `DECISIONS.md` records the standing precedent — this repo may
   mint a wire code when the canon lacks an honest one, provided the name follows the canon's
   idiom and an upstream issue is filed.
+
 <!-- unit H-E (lane-2) — the auth/webhook quartet. All four audit findings
      confirmed real with exact citations, which inverted the expectation the
      assign was written with. -->
@@ -282,6 +289,7 @@ hold entries from several releases. Use the commands.
   It had been written inline inside `list_contexts`, so the batched method above would have made
   a *fourth* copy of the §4.5 rule. Extracting it and pointing both methods at the one
   expression keeps the count at three, and matches the structure SQLite already had.
+
 <!-- unit H-A, phase P7 (lane-1) — extractor rejections speak the §5 envelope -->
 
 ### Fixed
