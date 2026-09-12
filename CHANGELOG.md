@@ -246,6 +246,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The published Docker image now builds from the committed lockfile.** `--locked` on
+  `cargo chef cook` and `cargo build --release` in `docker/Dockerfile`. `Cargo.lock` was
+  tracked and in the build context but neither build step used it, so the ghcr image could
+  compile dependency versions no CI run ever tested. The pre-existing `--locked` on
+  `cargo install cargo-chef` pins the *tool*, not this repo's build — it reads as though the
+  build were already locked, which is how this stayed open, and it is now annotated to say so.
+  Verified in a real build: current lockfile compiles, a deliberately stale one fails with
+  `the lock file /app/Cargo.lock needs to be updated but --locked was passed to prevent this`.
+  Completes the half of the CI-lockfile change (#227) that was reported not-done rather than
+  closed.
+
 - **CI: supply-chain and reproducibility gates that actually assert something.**
   `[sources] unknown-registry`/`unknown-git` flipped to `deny` (free today: zero
   git-sourced and zero non-workspace path dependencies). `--locked` added to all 18
