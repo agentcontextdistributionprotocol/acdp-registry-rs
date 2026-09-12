@@ -320,6 +320,98 @@ fn documented_search_refill_cap_matches_the_constant() {
 /// parsing — a symbol that appears nowhere in any Rust source is certainly a
 /// stale citation; one that appears somewhere might still be cited in the wrong
 /// file, which this does not claim to catch.
+/// Drop `#[cfg(test)]`-gated items from a Rust source string, or return
+/// `None` if that cannot be done confidently.
+///
+/// Needed because "shipped `src/` tree" and "shipped code" are not the same
+/// set: a `#[cfg(test)] mod tests` block lives inside `src/`, so any scan of
+/// `src/` that treats what it finds as production surface reports test-only
+/// constructs as operator-facing. That is a false-positive class, and a guard
+/// that cries wolf gets routed around rather than fixed.
+///
+/// Brace-matched rather than line-based. For each attribute, whichever of `{`
+/// or `;` comes first decides: a braced item drops through its matching `}`,
+/// an unbraced one (`#[cfg(test)] use …;`) drops through the `;`.
+///
+/// **The `None` is the whole design.** This counts braces without tracking
+/// string literals, so a test containing `record("not json {", …)` — which
+/// `acdp-registry-store/src/log.rs` does today — never balances. The tempting
+/// fix is a smarter parser. The important fix is choosing which way to fail:
+/// returning a truncated string would silently delete production code from the
+/// corpus and make a documentation gate under-report, which is indistinguishable
+/// from "everything is documented". Returning `None` instead tells the caller to
+/// scan that file UNSTRIPPED, so the worst case is the original false positive —
+/// loud, and a human resolves it — never a silent miss.
+fn strip_cfg_test(src: &str) -> Option<String> {
+    const ATTR: &str = "#[cfg(test)]";
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(at) = rest.find(ATTR) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + ATTR.len()..];
+        let brace = after.find('{');
+        let semi = after.find(';');
+        match (brace, semi) {
+            // An item with a body: skip through the matching close brace.
+            (Some(open), semi) if semi.is_none_or(|s| open < s) => {
+                let bytes = after.as_bytes();
+                let mut depth = 0usize;
+                let mut end = None;
+                for (i, b) in bytes.iter().enumerate().skip(open) {
+                    match b {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(i + 1);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // Unbalanced (a brace inside a literal). Refuse rather than
+                // truncate — see the doc comment.
+                rest = &after[end?..];
+            }
+            // `#[cfg(test)] use …;` — no body, ends at the semicolon.
+            (_, Some(s)) => rest = &after[s + 1..],
+            // A guard does not count toward exhaustiveness, so this arm also
+            // catches `(Some(_), None)` when the guard above declines it.
+            _ => return None,
+        }
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// Every `.rs` file under `dir`, as separate strings.
+///
+/// Separate matters: `strip_cfg_test` must run per file. Stripping one
+/// concatenated blob lets an unbalanced block in one file swallow the files
+/// after it — which is exactly how a production `ACDP_LOG_FORMAT` read in
+/// `acdp-registry-server/src/main.rs` went missing while this guard was
+/// being written, caught only because the caller pins the variable set by
+/// equality rather than by a lower bound.
+fn rust_source_file_texts(dir: &std::path::Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            rust_source_file_texts(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                out.push(s);
+            }
+        }
+    }
+}
+
 fn rust_source_corpus(dir: &std::path::Path, out: &mut String) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -666,24 +758,113 @@ fn every_directly_read_env_var_is_documented() {
         .expect("crates/<crate>/ is two levels below the workspace root")
         .to_path_buf();
 
-    // Only shipped `src/` trees. Test files carry their own env knobs
+    // Only shipped `src/` trees — `tests/` carries its own env knobs
     // (`ACDP_REQUIRE_PG`, `ACDP_SPEC_DIR`, …) which are CI controls, not
-    // operator configuration, and have no place in the config reference —
-    // and this file's own doc comment would otherwise match the scan below.
-    let mut sources = String::new();
+    // operator configuration, and have no place in the config reference.
+    //
+    // But excluding `tests/` is NOT sufficient, which is what this guard got
+    // wrong first time round: a `#[cfg(test)] mod tests` block lives inside
+    // `src/`, so a test-only env read there was reported as undocumented
+    // operator config, complete with a message telling the author an operator
+    // could not discover it. `strip_cfg_test` removes those regions below.
+    let mut files: Vec<String> = Vec::new();
     for crate_dir in std::fs::read_dir(root.join("crates"))
         .expect("read crates/")
         .flatten()
     {
         let src = crate_dir.path().join("src");
         if src.is_dir() {
-            rust_source_corpus(&src, &mut sources);
+            rust_source_file_texts(&src, &mut files);
         }
     }
+    assert!(
+        files.len() > 20,
+        "found only {} source files under crates/*/src — the walk is broken",
+        files.len()
+    );
+    let sources: String = files.concat();
     assert!(
         sources.len() > 100_000,
         "src corpus is only {} bytes — the walk is broken",
         sources.len()
+    );
+
+    // Falsify `strip_cfg_test` on a synthetic input rather than trusting that
+    // it works because the repo happens to contain no offender today. The
+    // load-bearing case is the THIRD assertion: an over-eager stripper that
+    // swallowed everything after the first `#[cfg(test)]` would satisfy the
+    // first two and silently hide every production read below it.
+    {
+        let sample = concat!(
+            "fn prod() { std::env::var(\"ACDP_KEEP_ME\"); }\n",
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    fn t() { std::env::var(\"ACDP_DROP_ME\"); }\n",
+            "    fn nested() { if true { let _ = 1; } }\n",
+            "}\n",
+            "fn after() { std::env::var(\"ACDP_KEEP_ME_TOO\"); }\n",
+        );
+        let stripped = strip_cfg_test(sample).expect("the sample is balanced");
+        assert!(
+            !stripped.contains("ACDP_DROP_ME"),
+            "strip_cfg_test left a #[cfg(test)] body in place: {stripped}"
+        );
+        assert!(
+            stripped.contains("ACDP_KEEP_ME"),
+            "strip_cfg_test dropped production code BEFORE the test block: {stripped}"
+        );
+        assert!(
+            stripped.contains("ACDP_KEEP_ME_TOO"),
+            "strip_cfg_test dropped production code AFTER the test block — it \
+             over-stripped, which hides real operator config: {stripped}"
+        );
+
+        // And the refusal path: a brace inside a string literal must yield
+        // `None`, not a truncated string. This is the case that actually
+        // occurs (acdp-registry-store/src/log.rs) and the one whose wrong
+        // answer is silent.
+        let unbalanced = concat!(
+            "fn prod() { std::env::var(\"ACDP_KEEP_ME\"); }\n",
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    fn t() { let _ = record(\"not json {\"); }\n",
+            "}\n",
+        );
+        assert!(
+            strip_cfg_test(unbalanced).is_none(),
+            "a brace inside a string literal must make the stripper REFUSE, so \
+             the caller scans the file whole; returning a truncated string \
+             would delete production code from the corpus silently"
+        );
+    }
+
+    // Strip PER FILE, never the concatenated blob: an unbalanced block in one
+    // file must not be able to swallow the next one. A file the stripper
+    // refuses is scanned whole, which can only produce a loud false positive.
+    let raw_len = sources.len();
+    let mut refused = 0usize;
+    let sources: String = files
+        .iter()
+        .map(|f| match strip_cfg_test(f) {
+            Some(stripped) => stripped,
+            None => {
+                refused += 1;
+                f.clone()
+            }
+        })
+        .collect();
+    assert!(
+        sources.len() < raw_len,
+        "stripping removed nothing from a {raw_len}-byte corpus, so either no \
+         `#[cfg(test)]` block exists under crates/*/src (one does) or the \
+         stripper never ran; {refused} file(s) were refused"
+    );
+    assert!(
+        refused < files.len() / 4,
+        "the stripper refused {refused} of {} files — that is too many to be \
+         the known literal-brace cases, and every refused file is scanned as \
+         though its tests were production code",
+        files.len()
     );
 
     // `env::var("ACDP…")` / `env::var_os("ACDP…")`, however the path is spelled.
@@ -702,22 +883,42 @@ fn every_directly_read_env_var_is_documented() {
     }
     vars.sort();
 
-    assert!(
-        vars.len() >= 4,
-        "found only {} directly-read ACDP env vars — the scan is broken and the \
-         check below would pass vacuously: {vars:?}",
-        vars.len()
+    // An EQUALITY, not a `>= n` floor. A floor and the defect point the same
+    // way: a scanner that silently stops finding things produces FEWER items,
+    // which a lower bound accepts as long as some survive, so the guard is
+    // blind to precisely the failure it was written for. This population is
+    // small and changes rarely, so pin it exactly.
+    //
+    // Adding a directly-read `ACDP_*` env var is MEANT to fail here. That is
+    // the gate: add the name below and document it in docs/CONFIGURATION.md.
+    let expected = [
+        "ACDP_LOG_FORMAT",
+        "ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON",
+        "ACDP_REGISTRY_CONFIG",
+        "ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON",
+    ];
+    assert_eq!(
+        vars, expected,
+        "the set of directly-read ACDP env vars under crates/*/src changed.\n\
+         found:    {vars:?}\n\
+         expected: {expected:?}\n\
+         If you ADDED one: list it above and document it in \
+         docs/CONFIGURATION.md — that pairing is the whole point of this test. \
+         If one DISAPPEARED and you did not remove it, the scan or \
+         `strip_cfg_test` is broken, which is the case a `>= n` floor here \
+         used to let through."
     );
-    for required in ["ACDP_REGISTRY_CONFIG", "ACDP_LOG_FORMAT"] {
-        assert!(
-            vars.iter().any(|v| v == required),
-            "the scan did not find `{required}`, which is certainly read \
-             directly: {vars:?}"
-        );
-    }
 
     let doc = std::fs::read_to_string(root.join("docs/CONFIGURATION.md"))
         .expect("read docs/CONFIGURATION.md");
+    // Limit, stated rather than implied: this is substring containment, so a
+    // var whose name EMBEDS a documented one satisfies it (documenting
+    // `ACDP_LOG_FORMAT` would cover a hypothetical `ACDP_LOG_FORMAT_EXTRA`).
+    // Found while falsifying this assertion — renaming the doc mention to
+    // `ACDP_LOG_FORMAT_RENAMED_AWAY` left the check green, because the probe
+    // still contained the original. The set equality above is what bounds the
+    // population, so the containment check only has to answer "is this name
+    // written down somewhere", and a new name cannot arrive unnoticed.
     let undocumented: Vec<&String> = vars.iter().filter(|v| !doc.contains(v.as_str())).collect();
     assert!(
         undocumented.is_empty(),
