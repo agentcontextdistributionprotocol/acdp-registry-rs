@@ -1991,3 +1991,31 @@ bump.
   so the hold cannot outlive the question by being forgotten.
 - **Status:** UNCONFIRMED — the 415 code is with the project owner. Everything else in this
   phase is settled and shipped.
+
+
+## H-A / P7 follow-up — the 415 ruling applied: `unsupported_media_type` minted
+
+- **Resolves** the OPEN item recorded under "H-A / P7 — A3" above. That entry's status was
+  UNCONFIRMED pending a ruling; the ruling landed and this entry closes it.
+- **Decided by the project owner:** emit `unsupported_media_type` at the unchanged `415`, and
+  file an upstream issue asking the canon to adopt it. Both done — acdp-rs#268, and the standing
+  precedent is Decision 16 in `DECISIONS.md`.
+- **The marker test did its job and is gone.**
+  `marker_the_415_rejection_is_not_yet_enveloped_pending_a_ruling` pinned the un-enveloped
+  behaviour and would have failed the moment the ruling was applied, with a failure message
+  instructing its own deletion. Deleted deliberately, which is what it asked for. One assertion
+  inside it was NOT about the ruling — that `application/acdp+json` is accepted rather than
+  415'd — so it was rehomed as `the_acdp_media_type_is_accepted_not_rejected` rather than deleted
+  with its host. Worth noting because deleting a marker wholesale is the obvious move and would
+  have silently dropped a real guard.
+- **One deviation from my own preference, flagged not acted on.** The ruling specified the
+  message verbatim as `` Expected request with `Content-Type: application/json` ``. My P7 work had
+  replaced that with wording naming `application/acdp+json` first. I implemented the ruling as
+  stated. The recommendation stands and is raised with the coordinator: the ruled message names
+  only `application/json`, while RFC-ACDP-0007 mandates `application/acdp+json`. Both are
+  accepted, so the message is INCOMPLETE rather than false, and a client following it literally
+  sends a media type that works but is not the one the RFC names. Deference was cheap here
+  precisely because the message is not false; had it been false I would have raised it before
+  shipping rather than alongside.
+- **Status:** CONFIRMED (2026-09-12) — code minted per ruling, upstream issue filed, precedent
+  recorded, marker deleted.
