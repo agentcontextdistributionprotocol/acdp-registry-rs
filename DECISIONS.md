@@ -2121,3 +2121,73 @@ cost nothing but time, because the gap was pinned by a marker test that failed t
 ruling was applied and whose failure message instructed its own deletion. A gap held behind a
 failing-on-resolution marker cannot outlive the question by being forgotten; a gap held in a
 comment can.
+## Unit H-E — the auth/webhook quartet (lane-2, 2026-09-12)
+
+Four `UNCONFIRMED` entries from `plans/h-e-auth-webhook-quartet.md`, ranked by blast radius.
+
+**Tiering.** No genuine one-way door: no schema change, no migration, and the one public-surface
+change is **additive and withdrawable**. The leader settled E3's tier explicitly on a fact rather
+than a judgement — the canon has no webhook concept (`grep -ril webhook` over `acdp-primitives`
+returns nothing) and the scheme "matches GitHub's exactly" by this repo's own choice, so the registry
+owns the surface outright; the inverse of the 415 case, which needed the human precisely because that
+code sat in a canonical registry the repo does not own. So all four are Opus-tier and **none needs
+the human**. One carries real operator impact and got the most scrutiny anyway.
+
+**Method deviation, declared:** `/reconcile` asks for a fresh subagent per entry; this session does
+not spawn agents, so the analyses ran in-context. Every entry below is settled against evidence
+produced this run — a `file:line`, a measurement, or a named mutation.
+
+### 1. `safe_client` refuses private-range feed hosts — CONFIRMED (Opus), with the cost named
+
+Highest blast radius because it can break a **working** deployment, not just a wrong one. Examined
+hardest for that reason.
+
+The finding is about **redirects**: the feed URL is operator-configured, so the SSRF risk is a
+hostile *redirect target*, not an attacker-chosen URL. `redirect(Policy::none())` alone closes it.
+`safe_client` does more — it installs a DNS resolver that refuses private/loopback/link-local hosts —
+so a peer registry reachable only on an internal hostname is now refused rather than polled.
+
+Confirmed for consistency, not for strength: webhook delivery already accepts exactly this posture
+for operator-configured URLs, and two different HTTP-client postures in adjacent crates is the drift
+this repo keeps paying for. The rejected alternative (a hand-built client with redirects off and no
+resolver) would have fixed the finding with zero collateral change and is the right fallback if an
+operator hits this; a config knob to allow private ranges is a legitimate follow-up, not this unit.
+
+Also recorded, because "safe_client" reads stronger than it is: it consults its policy **only** for
+DNS. `allow_http` and `reject_ip_literals` are unenforced, so an `http://` feed still works and an
+IP-literal URL bypasses the resolver check entirely. That is true of the webhook crate too.
+
+### 2. E3 is additive and does not claim to deliver protection — CONFIRMED (Opus)
+
+`X-ACDP-Signature` stays byte-identical and is now **pinned by a test**, so the additive property is
+enforced rather than promised. Rejected: widening that header (breaks every deployed receiver); an
+unsigned timestamp alone (rewritable, therefore worthless); a config-gated scheme under one header
+name (two dialects, one name).
+
+Confirmed specifically including what is *not* claimed: the docs say the registry **offers** bound
+freshness and does not enforce it. A receiver that ignores the headers is as exposed as before.
+"The registry now has replay protection" would have been false on the day it shipped — and writing it
+would have manufactured a tenth false doc claim in the same wave that removed nine.
+
+### 3. E1's cutoff threads through the trait, not the store constructors — CONFIRMED (Opus)
+
+Settled by a claim boundary discovered **before** the code was written: the store constructors are
+called from `server/src/main.rs:699,743,760`, outside this lane and inside lane-1's in-flight PRs, so
+a constructor parameter was both a claim violation and a collision. `is_revoked` and `evict_expired`
+each have exactly one production caller, both in this crate, so the trait signatures changed instead
+and `server/` is untouched — verified by the workspace still building.
+
+Rejected: a defaulted method reading config itself, which re-derives the window independently of the
+validator and so re-creates the defect one layer down.
+
+### 4. The evictor reads leeway from the signer, not config — CONFIRMED (Opus)
+
+The two values are equal in every current wiring, so this is invisible today — which is exactly why
+it is written down. The bug being fixed *is* a validator and a revocation layer disagreeing about the
+acceptance window; deriving the value twice re-opens that class the moment wiring changes which value
+reaches the signer. A `leeway_seconds()` accessor is the cheaper guarantee.
+
+**Summary: 4 confirmed, 0 changed, 0 deferred, 4 settled by Opus, 0 needing the human.** No code
+follow-up blocks the ship. Two items are recorded as follow-ups that block nothing: a config knob if
+an operator needs private-range revocation feeds, and the `conformance_gate` false positive that
+flags `#[cfg(test)]` env reads inside `src/` as operator configuration.

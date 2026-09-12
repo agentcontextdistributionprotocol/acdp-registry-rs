@@ -355,10 +355,13 @@ validation refuses such entries outright. See
 
 ### Webhook signing secret
 
-`webhook.secret` keys the HMAC-SHA256 in `X-ACDP-Signature`. There is no
-multi-secret list and no overlap window: the registry signs with exactly one
-secret, so the moment you rotate, deliveries signed with the old secret stop
-verifying at the receiver.
+`webhook.secret` keys the HMAC-SHA256 in `X-ACDP-Signature` **and** in
+`X-ACDP-Signature-Timestamped` (the opt-in freshness signature — see
+[WEBHOOKS.md](WEBHOOKS.md#signature-scheme)). One secret keys both, so rotation
+below covers both; a receiver verifying either one is affected identically.
+There is no multi-secret list and no overlap window: the registry signs with
+exactly one secret, so the moment you rotate, deliveries signed with the old
+secret stop verifying at the receiver.
 
 Rotate from the **receiving** side, not the sending side:
 

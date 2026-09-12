@@ -13,8 +13,8 @@ pub use challenge_store::{
 };
 pub use jwt::{JwtSecret, JwtSigner};
 pub use revocation_store::{
-    InMemoryRevocationStore, PgRevocationStore, RevocationRecord, RevocationStore,
-    SqliteRevocationStore,
+    tombstone_cutoff, InMemoryRevocationStore, PgRevocationStore, RevocationRecord,
+    RevocationStore, SqliteRevocationStore,
 };
 pub use service::{extract_bearer, AuthService};
 

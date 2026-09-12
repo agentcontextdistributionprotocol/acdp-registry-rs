@@ -198,6 +198,17 @@ impl JwtSigner {
 
     /// Attach a revocation store. `validate` will reject any token whose
     /// `jti` is present and unexpired in the store.
+    /// The clock-skew tolerance this signer applies to `exp`.
+    ///
+    /// Exposed so the revocation evictor can retire tombstones against the
+    /// *validator's* window rather than re-deriving it from config. A validator
+    /// and an evictor that disagree about the window is precisely the defect
+    /// `tombstone_cutoff` exists to fix; deriving it twice would re-create that
+    /// bug one layer down.
+    pub fn leeway_seconds(&self) -> u64 {
+        self.leeway_seconds
+    }
+
     pub fn with_revocations(mut self, store: Arc<dyn RevocationStore>) -> Self {
         self.revocations = Some(store);
         self
@@ -240,7 +251,14 @@ impl JwtSigner {
             )));
         }
         if let Some(rev) = &self.revocations {
-            if rev.is_revoked(&data.claims.jti)? {
+            // The tombstone must be judged against the SAME window this
+            // validator just applied. `decode` above accepted the token with
+            // `leeway` seconds of skew tolerance, so asking the store "is this
+            // revoked as of now?" would consult a tombstone that has already
+            // been retired — and a revoked token would be accepted again in
+            // `(exp, exp + leeway]`. See `tombstone_cutoff`.
+            let cutoff = crate::tombstone_cutoff(chrono::Utc::now(), self.leeway_seconds);
+            if rev.is_revoked(&data.claims.jti, cutoff)? {
                 return Err(AuthError::TokenInvalid(format!(
                     "token jti '{}' has been revoked",
                     data.claims.jti
@@ -587,6 +605,100 @@ mod tests {
         let err = signer.validate(&token).unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)));
         assert!(err.to_string().contains("revoked"));
+    }
+
+    /// **E1 — revocation must not lapse inside the leeway window.**
+    ///
+    /// `validate` accepts a token until `exp + leeway` (that is what leeway is
+    /// for). The tombstone used to be judged against a bare `now`, so it went
+    /// cold at `exp` — leaving `(exp, exp + leeway]` a window in which a
+    /// **revoked token is accepted again after its own expiry**. Revocation
+    /// un-revoked itself.
+    ///
+    /// The token here is already 5 seconds past `exp` with 30 seconds of
+    /// leeway, i.e. squarely inside that window.
+    #[tokio::test]
+    async fn a_revoked_token_stays_revoked_inside_the_leeway_window() {
+        use crate::revocation_store::{InMemoryRevocationStore, RevocationRecord};
+        use std::sync::Arc;
+
+        let now = chrono::Utc::now().timestamp();
+        let mut claims = sample_claims();
+        claims.jti = "jti-inside-leeway".into();
+        claims.exp = now - 5; // expired 5s ago; leeway is 30s
+
+        let mk = |store: Option<Arc<InMemoryRevocationStore>>| {
+            let signer = JwtSigner::new(
+                JwtSecret::from_bytes(&[7u8; 32]),
+                "did:web:registry.test".into(),
+                "registry.test".into(),
+                30,
+            );
+            match store {
+                Some(s) => signer.with_revocations(s),
+                None => signer,
+            }
+        };
+
+        let token = mk(None).sign(&claims).expect("sign");
+
+        // FIXTURE PRECONDITION, asserted rather than assumed (Rule 67): the
+        // token must still be *inside* the acceptance window, or this test
+        // would pass for the wrong reason — rejected as expired rather than as
+        // revoked, proving nothing about revocation at all.
+        mk(None).validate(&token).expect(
+            "precondition: a token 5s past exp with 30s leeway must still be accepted, \
+             otherwise this test cannot observe the revocation window",
+        );
+
+        let store = Arc::new(InMemoryRevocationStore::new());
+        store
+            .revoke(RevocationRecord {
+                jti: claims.jti.clone(),
+                agent_did: claims.sub.clone(),
+                // The tombstone expires exactly when the token does, which is
+                // what the issuer records in production.
+                expires_at: chrono::DateTime::from_timestamp(claims.exp, 0).expect("ts"),
+            })
+            .await
+            .unwrap();
+
+        let err = mk(Some(store)).validate(&token).unwrap_err();
+        assert!(
+            err.to_string().contains("revoked"),
+            "a revoked token must stay rejected for the whole window in which it is still \
+             accepted; got {err:?}. If this reads as an expiry error instead, the tombstone was \
+             retired at `exp` while the validator still honours `exp + leeway`."
+        );
+    }
+
+    /// Leeway `0` must behave exactly as before this fix — no regression for
+    /// operators who disabled skew tolerance.
+    #[tokio::test]
+    async fn zero_leeway_keeps_the_old_boundary() {
+        use crate::revocation_store::InMemoryRevocationStore;
+        use std::sync::Arc;
+
+        let now = chrono::Utc::now().timestamp();
+        let mut claims = sample_claims();
+        claims.jti = "jti-zero-leeway".into();
+        claims.exp = now - 5;
+
+        let signer = JwtSigner::new(
+            JwtSecret::from_bytes(&[7u8; 32]),
+            "did:web:registry.test".into(),
+            "registry.test".into(),
+            0,
+        )
+        .with_revocations(Arc::new(InMemoryRevocationStore::new()));
+        let token = signer.sign(&claims).expect("sign");
+
+        let err = signer.validate(&token).unwrap_err();
+        assert!(
+            !err.to_string().contains("revoked"),
+            "with zero leeway an expired token is refused by expiry, never reaching the \
+             revocation check; got {err:?}"
+        );
     }
 
     #[tokio::test]
