@@ -1628,3 +1628,24 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** none to consumers; a dev-only dependency on a crate already in
   the tree.
 - **Status:** UNCONFIRMED
+
+## No new index for the tenant-scoped search path
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 2, assign item 5)
+- **Assumed (by the assign):** the search path needs a composite index the way
+  `list_contexts` did.
+- **Measured instead:** `EXPLAIN QUERY PLAN` over 2000 rows across 20 tenants, after
+  `ANALYZE`. Tenant-scoped: `SEARCH contexts USING INDEX idx_ctx_tenant (tenant_id=?)`.
+  Tenant-spanning: `SCAN contexts`. Both then `USE TEMP B-TREE FOR ORDER BY`.
+- **Chose:** add no migration. The predicate is already index-assisted, and the `ORDER BY`
+  cannot be index-satisfied on this query in either case because `COUNT(*) OVER ()` must
+  materialize the full matching set first — so the temp B-tree is pre-existing rather than
+  introduced here, and a new index would not remove it.
+- **Alternatives:** add a composite `(tenant_id, created_at DESC)` index — rejected: one
+  already exists (`idx_ctx_tenant_created`, migration 006/007) and the planner does not
+  choose it, so a *third* index would be redundant storage and write cost for no measured
+  gain. Notably the plan predicted that index would be the one used; it is not.
+- **Blast radius if wrong:** a busy mixed-tenant registry could see slower tenant-scoped
+  searches than necessary. Bounded: the alternative is strictly additive later, and the
+  measurement above is the baseline to re-run against. Reversible.
+- **Status:** UNCONFIRMED
