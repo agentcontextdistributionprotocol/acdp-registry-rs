@@ -667,3 +667,368 @@ where
         violations.join("\n  - ")
     );
 }
+
+// ── H-I-s: batched retrieval visibility ──────────────────────────────────────
+
+/// Publish one context with an explicit disclosure shape, into `tenant`.
+///
+/// `audience` and `contributors` are separate parameters because the entire
+/// point of one fixture below is that they are NOT interchangeable.
+#[allow(clippy::too_many_arguments)]
+async fn publish_visible<S>(
+    store: &Arc<S>,
+    seed: u8,
+    title: &str,
+    tenant: &str,
+    visibility: Visibility,
+    audience: Vec<AgentDid>,
+    contributors: Vec<AgentDid>,
+) -> String
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let p = producer(seed);
+    let mut b = p
+        .publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(visibility);
+    if !audience.is_empty() {
+        b = b.audience(audience);
+    }
+    if !contributors.is_empty() {
+        b = b.contributors(contributors);
+    }
+    let req = b.build().expect("valid publish request");
+    let s = Arc::clone(store);
+    let tenant = tenant.to_string();
+    let outcome = tokio::task::spawn_blocking(move || {
+        s.commit_publish(PublishCommit {
+            req: &req,
+            authority: AUTHORITY,
+            idempotency: None,
+            tenant: Some(&tenant),
+            receipt_minter: None,
+            predecessor_admission: None,
+        })
+    })
+    .await
+    .expect("publish task")
+    .expect("publish succeeds");
+    match outcome {
+        PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => {
+            r.ctx_id.as_str().to_string()
+        }
+    }
+}
+
+/// Retract an already-published context in place. `publish_then_retract` exists
+/// but publishes into the default tenant, and this fixture needs the retracted
+/// row inside the scoped tenant.
+async fn retract_in_place<S>(store: &Arc<S>, ctx_id: &str, seed: u8)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let event_id = ctx_id
+        .rsplit('/')
+        .next()
+        .expect("ctx_id ends in a UUID segment")
+        .to_string();
+    let event = LifecycleEvent::new(
+        event_id,
+        CtxId(ctx_id.to_string()),
+        LifecycleEventType::Retracted,
+        Utc::now(),
+        AgentDid::new(agent_did(seed)),
+        Some("parity: retracted rows stay retrievable".to_string()),
+    )
+    .expect("valid lifecycle event");
+    let s = Arc::clone(store);
+    tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&event))
+        .await
+        .expect("retract task")
+        .expect("retract succeeds");
+}
+
+/// The N-call reference: what the caller did before batching existed — read
+/// each context and apply the rule in Rust.
+///
+/// This is deliberately a **different implementation** of the same rule from the
+/// one under test: the backend answers with a SQL predicate, this answers with
+/// [`crate::retrieve_visible`] over a decoded body. A hand-written expected set
+/// could only encode what its author believed; a second implementation disagrees
+/// whenever either side is wrong, including in ways nobody anticipated.
+async fn visible_by_n_calls<S>(
+    store: &Arc<S>,
+    ctx_ids: &[&str],
+    requester: Option<&AgentDid>,
+    tenant: Option<&str>,
+    anonymous_public_reads: bool,
+) -> std::collections::HashSet<String>
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let mut out = std::collections::HashSet::new();
+    for id in ctx_ids {
+        let s = Arc::clone(store);
+        let parsed = CtxId((*id).to_string());
+        let got = tokio::task::spawn_blocking(move || s.get(&parsed))
+            .await
+            .expect("get task")
+            .expect("get ok");
+        let Some(ctx) = got else { continue };
+        if !crate::retrieve_visible(&ctx.body, requester, anonymous_public_reads) {
+            continue;
+        }
+        if let Some(want) = tenant {
+            let stored = store
+                .tenant_of_ctx(id)
+                .await
+                .expect("tenant_of_ctx ok")
+                .unwrap_or_else(|| "default".to_string());
+            if stored != want {
+                continue;
+            }
+        }
+        out.insert((*id).to_string());
+    }
+    out
+}
+
+/// **H-I-s — a batched visibility check must answer exactly what N individual
+/// retrieve checks answer.**
+///
+/// # What makes this worth a cross-backend assertion
+///
+/// The failure mode is silent in both directions. Too permissive and one
+/// tenant's audit log discloses another's `ctx_id`s; too strict and entries the
+/// caller is entitled to vanish with no error. Neither shows up as a crash, and
+/// a page of 256 ids that is wrong about one of them looks exactly like a page
+/// that is right.
+///
+/// # `retrieve` semantics, not `search` semantics
+///
+/// The fixture's load-bearing row is `private` with an `audience`. Under
+/// RFC-ACDP-0008 §4.5 an audience member MAY retrieve it — and `search`
+/// deliberately refuses that exact case, requiring ownership for `private`
+/// (conformance `vis-004`, "private/audience retrieval asymmetry"). A backend
+/// that answers this method with its search predicate therefore under-discloses,
+/// and the assertion below is what says so. A listed **contributor** who is not
+/// in the audience is refused: contributors are provenance, not authorization.
+///
+/// # Why a retracted row is in the fixture
+///
+/// §4.5 has no status clause and `retrieve` returns a retracted context, so a
+/// status filter here would look like hardening and would actually hide log
+/// entries. Included so that "helpfully" adding one fails.
+pub async fn assert_batched_visibility_parity<S>(store: &Arc<S>, backend: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    // Unique per run: these fixtures live in a persistent Postgres across runs,
+    // and in H-H an exact-count assertion against accumulated rows is exactly
+    // how I shipped a flake.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let tenant = format!("tenant-vis-{nonce}");
+
+    // One producer for every row, so `agent_id` never accidentally separates
+    // the fixtures — visibility and audience are the only distinguishing facts.
+    const OWNER: u8 = 71;
+    const AUD: u8 = 72;
+    const CONTRIB: u8 = 73;
+    const OUTSIDER: u8 = 74;
+    let owner = AgentDid::new(agent_did(OWNER));
+    let aud = AgentDid::new(agent_did(AUD));
+    let contrib = AgentDid::new(agent_did(CONTRIB));
+    let outsider = AgentDid::new(agent_did(OUTSIDER));
+
+    let public = publish_visible(
+        store,
+        OWNER,
+        &format!("vis-public-{nonce}"),
+        &tenant,
+        Visibility::Public,
+        vec![],
+        vec![],
+    )
+    .await;
+    let private_with_audience = publish_visible(
+        store,
+        OWNER,
+        &format!("vis-private-aud-{nonce}"),
+        &tenant,
+        Visibility::Private,
+        vec![aud.clone()],
+        vec![],
+    )
+    .await;
+    let private_owner_only = publish_visible(
+        store,
+        OWNER,
+        &format!("vis-private-owner-{nonce}"),
+        &tenant,
+        Visibility::Private,
+        vec![],
+        vec![],
+    )
+    .await;
+    let restricted_with_audience = publish_visible(
+        store,
+        OWNER,
+        &format!("vis-restricted-aud-{nonce}"),
+        &tenant,
+        Visibility::Restricted,
+        vec![aud.clone()],
+        vec![],
+    )
+    .await;
+    let private_with_contributor = publish_visible(
+        store,
+        OWNER,
+        &format!("vis-private-contrib-{nonce}"),
+        &tenant,
+        Visibility::Private,
+        vec![],
+        vec![contrib.clone()],
+    )
+    .await;
+    // Public, then RETRACTED. §4.5 has no status clause and `retrieve` still
+    // returns a retracted context, so this row must remain visible — a status
+    // filter added here would look like hardening and would actually hide audit
+    // entries the caller is entitled to.
+    let public_retracted = publish_visible(
+        store,
+        OWNER,
+        &format!("vis-retracted-{nonce}"),
+        &tenant,
+        Visibility::Public,
+        vec![],
+        vec![],
+    )
+    .await;
+    retract_in_place(store, &public_retracted, OWNER).await;
+
+    // A row in a DIFFERENT tenant, to prove the tenant half of the contract is
+    // applied and not merely accepted as a parameter.
+    let foreign_tenant_public = publish_visible(
+        store,
+        OWNER,
+        &format!("vis-foreign-{nonce}"),
+        &format!("tenant-other-{nonce}"),
+        Visibility::Public,
+        vec![],
+        vec![],
+    )
+    .await;
+
+    let never_stored = format!("acdp://{AUTHORITY}/00000000-0000-4000-8000-0000{nonce:08x}");
+    let ids_owned: Vec<String> = vec![
+        public.clone(),
+        private_with_audience.clone(),
+        private_owner_only.clone(),
+        restricted_with_audience.clone(),
+        private_with_contributor.clone(),
+        public_retracted.clone(),
+        foreign_tenant_public.clone(),
+        never_stored,
+        "not-a-ctx-id-at-all".to_string(),
+    ];
+    let ids: Vec<&str> = ids_owned.iter().map(String::as_str).collect();
+
+    let mut violations: Vec<String> = Vec::new();
+
+    // (a) The differential, per requester perspective. Accumulate rather than
+    // assert inside the loop, so one divergence does not hide the others.
+    for (who, requester, anon) in [
+        ("the producer", Some(&owner), false),
+        ("an audience member", Some(&aud), false),
+        ("a listed contributor", Some(&contrib), false),
+        ("an outsider", Some(&outsider), false),
+        ("an anonymous caller, anon reads ON", None, true),
+        ("an anonymous caller, anon reads OFF", None, false),
+    ] {
+        for scope in [None, Some(tenant.as_str())] {
+            let batched = store
+                .visible_ctx_ids(&ids, requester, scope, anon)
+                .await
+                .expect("visible_ctx_ids ok");
+            let reference = visible_by_n_calls(store, &ids, requester, scope, anon).await;
+            if batched != reference {
+                let only_batched: Vec<_> = batched.difference(&reference).collect();
+                let only_ref: Vec<_> = reference.difference(&batched).collect();
+                violations.push(format!(
+                    "[{backend}] batched != N-call for {who} (tenant scope {scope:?}): \n                         DISCLOSED BY THE BATCH ONLY (over-disclosure): {only_batched:?}\n                         SEEN ONLY BY THE N-CALL REFERENCE (under-disclosure): {only_ref:?}"
+                ));
+            }
+        }
+    }
+
+    // (b) The spec behaviour, stated absolutely rather than only differentially.
+    // A pure differential passes if BOTH implementations are wrong the same way;
+    // these two pin the actual §4.5 outcome per backend.
+    let as_audience = store
+        .visible_ctx_ids(&ids, Some(&aud), Some(&tenant), false)
+        .await
+        .expect("visible_ctx_ids ok");
+    if !as_audience.contains(&private_with_audience) {
+        violations.push(format!(
+            "[{backend}] an audience member could NOT retrieve the private context naming them \
+             ({private_with_audience}). Under RFC-ACDP-0008 §4.5 they MUST be able to \
+             (conformance vis-004). This is the exact case `search` refuses, so the most likely \
+             cause is that this backend answered with its SEARCH predicate instead of its \
+             LIST/retrieve one — which under-discloses."
+        ));
+    }
+    let as_contributor = store
+        .visible_ctx_ids(&ids, Some(&contrib), Some(&tenant), false)
+        .await
+        .expect("visible_ctx_ids ok");
+    if as_contributor.contains(&private_with_contributor) {
+        violations.push(format!(
+            "[{backend}] a listed CONTRIBUTOR retrieved a private context ({private_with_contributor}). \
+             Contributors are provenance, never authorization (conformance vis-004)."
+        ));
+    }
+
+    let as_outsider = store
+        .visible_ctx_ids(&ids, Some(&outsider), Some(&tenant), false)
+        .await
+        .expect("visible_ctx_ids ok");
+    if !as_outsider.contains(&public_retracted) {
+        violations.push(format!(
+            "[{backend}] a RETRACTED public context ({public_retracted}) was not retrievable. \
+             §4.5 has no status clause and `retrieve` returns retracted contexts, so filtering on \
+             status here hides log entries the caller is entitled to."
+        ));
+    }
+
+    // (c) The tenant half of the contract. A batch that applies visibility and
+    // silently ignores `tenant` passes every assertion above except this one.
+    let scoped = store
+        .visible_ctx_ids(&ids, Some(&owner), Some(&tenant), true)
+        .await
+        .expect("visible_ctx_ids ok");
+    if scoped.contains(&foreign_tenant_public) {
+        violations.push(format!(
+            "[{backend}] a request scoped to {tenant} returned {foreign_tenant_public}, which \
+             belongs to another tenant. The tenant gate is half of what this method replaces; \
+             batching only the visibility half is a cross-tenant disclosure."
+        ));
+    }
+
+    // (d) Ids the store does not hold are absent, not errors and not present.
+    if scoped.iter().any(|id| id == "not-a-ctx-id-at-all") {
+        violations.push(format!(
+            "[{backend}] an unparseable ctx_id was reported visible"
+        ));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "batched visibility diverged from the retrieve contract:\n{}",
+        violations.join("\n")
+    );
+}
