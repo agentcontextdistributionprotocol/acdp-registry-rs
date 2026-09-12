@@ -276,7 +276,8 @@
 //! JCS/hash pipeline, which this repo delegates to) and `anc-005` (consumer-
 //! side scheme-unaware-verifier tolerance -- a registry has no verifier role)
 //! are deliberately out of scope; see the doc-comments on the three tests
-//! above and the CHANGELOG for the full reasoning.
+//! above and `docs/ENGINEERING-LOG.md` for the full reasoning (that file was
+//! the root `CHANGELOG.md` until #220 retired it to a pointer).
 //!
 //! `can-*` (RFC-ACDP-0001 canonicalization & hashing vectors) is likewise
 //! not HTTP-replayable -- the family carries no request/response shape at
@@ -5357,7 +5358,7 @@ fn wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted() {
 //
 // **Deviation, following the `anc-001` precedent verbatim (see
 // `anc001_well_formed_anchor_is_accepted_and_round_trips`'s own doc comment
-// above; also `CHANGELOG.md`).** This repo's `POST /contexts` returns HTTP
+// above; also `docs/ENGINEERING-LOG.md`).** This repo's `POST /contexts` returns HTTP
 // **200** on a successful publish
 // (`crates/acdp-registry-core/src/handlers/context.rs:656`,
 // `Ok(Json(response))`), never the fixtures' own literal `201`. Every
@@ -6053,7 +6054,7 @@ async fn idem_playground_branch_writes_no_idempotency_record_when_gated_off() {
 // anc-* fixture.
 //
 // anc-004 and anc-005 are deliberately OUT OF SCOPE for this phase (see the
-// CHANGELOG entry for the same reasoning):
+// `docs/ENGINEERING-LOG.md` entry for the same reasoning):
 //   * anc-004 is a pure hash-computation golden vector (top-level `vectors`,
 //     no `expected.http_status`, no endpoint, no request) over
 //     `acdp-crypto`'s JCS/hash pipeline, which this repo delegates to via

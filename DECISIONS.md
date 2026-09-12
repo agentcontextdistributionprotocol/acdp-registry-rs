@@ -1807,3 +1807,63 @@ Prettiness is not worth an unverifiable claim about how the workspace is wired.
 
 **Rejected:** redrawing the boxes correctly. It would have been correct on the day and
 unverifiable forever after — the exact property that produced the defect.
+
+## 15. The root `CHANGELOG.md`: retired to a pointer, not split by version (H-D / D4, #220)
+
+**Context.** 3,596 lines, one `## ` heading — `## [Unreleased]` — while `0.1.0`, `0.1.1` and
+`0.1.2` have all shipped. The file therefore asserted that nothing in it had been released,
+which was false for roughly 90% of its content. Its own header also claims the file "follows
+Keep a Changelog"; a single perpetual Unreleased section does not.
+
+**What the evidence actually showed.** Attribution is derivable, not a matter of opinion:
+`git blame` each line, then bucket its commit by the earliest release tag containing it.
+
+```sh
+git blame --line-porcelain -- CHANGELOG.md | awk '/^[0-9a-f]{40} /{print $1}'
+# then, per commit: git merge-base --is-ancestor <commit> acdp-registry-server/v0.1.<n>
+```
+
+That yields 2,938 lines from `0.1.0`, 324 from `0.1.1`, 334 unreleased, and **zero** from
+`0.1.2` — consistent with the file being 2,939 lines at the `v0.1.0` tag and 3,264 at both the
+`v0.1.1` and `v0.1.2` tags.
+
+**Decision.** Retire the root file to a pointer at the authoritative records, and move the
+narrative to `docs/ENGINEERING-LOG.md` unchanged. Do **not** split it into version sections.
+
+**Reasoning — why splitting was rejected, and it is not the effort.** The `0.1.1` content is not
+appended, it is *interleaved*: seven separate runs inside the `0.1.0` body, because entries were
+inserted under pre-existing `### Category` headings rather than prepended wholesale. Two of those
+runs make a version split ill-defined rather than merely laborious:
+
+- Lines 2974–2979 are a `0.1.1` amendment written **inside a `0.1.0` paragraph**. There is no
+  assignment of those six lines to exactly one version section that leaves the paragraph intact.
+  The acceptance constraint for a split — every non-blank line lands in exactly one section — is
+  unsatisfiable there without rewriting prose that documents already-released behaviour, i.e.
+  editing the historical record to fit the format.
+- Line 3552 opens `<!-- W3-U5 (lane-1) — correcting the U-005 entry above -->`. The file contains
+  deliberate cross-version corrections. Splitting by version tears each correction away from what
+  it corrects, making the record *less* accurate, not more.
+
+**Reasoning — why a pointer is sufficient.** Release truth already has an authoritative home and
+it is in good order: `release-plz` owns the eight per-crate `CHANGELOG.md` files
+(`[workspace] changelog_update = true`), each of which carries correctly dated and linked
+`0.1.0`/`0.1.1`/`0.1.2` sections, and the GitHub Releases mirror them. Verified: all eight have a
+current `## [0.1.2]` section. The root file was duplicating that job badly and was the only
+artefact stating the falsehood. Removing the duplicate removes the contradiction.
+
+**Rule 48.** Neither the pointer nor the narrative restates a fact by hand. The per-release
+attribution is not written down at all — the command that derives it is, because a number written
+into prose here would be stale at the next release, which is precisely the defect being fixed.
+`root_changelog_stays_a_pointer` enforces the outcome: the root file must not reacquire a version
+heading, must keep pointing at both authoritative sources, and every crate must still carry a
+section for the current workspace version.
+
+**Convention change, and it affects other lanes.** New entries go to `docs/ENGINEERING-LOG.md`,
+not to `CHANGELOG.md`. Relayed to the leader as an `fyi` so it reaches lane-1 and lane-2 at their
+next phase boundary rather than as a merge conflict.
+
+**Rejected:** leaving the narrative in place under a disclaimer. The file would still be named
+`CHANGELOG.md`, still be read as the changelog by anyone arriving at the repo root, and still
+fail the format its own header claims. A disclaimer that contradicts the filename is the same
+class of defect as the diagram in decision 14 — correct text that the surrounding artefact
+undermines.

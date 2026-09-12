@@ -489,3 +489,159 @@ fn authentication_doc_cites_symbols_that_exist_and_never_line_numbers() {
          prose around it describing behaviour nothing implements."
     );
 }
+
+/// #220: the root `CHANGELOG.md` grew to thousands of lines under a single
+/// `## [Unreleased]` heading while `0.1.0`, `0.1.1` and `0.1.2` had all shipped.
+/// It was the only artefact in the repo asserting that its own released content
+/// was unreleased — the eight per-crate changelogs `release-plz` maintains were
+/// correct throughout. Decision 15 in `DECISIONS.md` records why it was retired
+/// to a pointer rather than split by version (the `0.1.1` content is interleaved
+/// into `0.1.0` entries, including an amendment written inside a `0.1.0`
+/// paragraph, so "every line lands in exactly one section" is unsatisfiable).
+///
+/// This guards the outcome in both directions: the root file must not reacquire
+/// a version heading, and the records it delegates to must still be there.
+#[test]
+fn root_changelog_stays_a_pointer() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+
+    let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).expect("read CHANGELOG.md");
+
+    // 1. No version sections. `## [Unreleased]` is the exact shape that was
+    //    retired; a `## [0.1.3]` would be the same mistake made deliberately.
+    let version_headings: Vec<&str> = changelog
+        .lines()
+        .filter(|l| l.starts_with("## [") || l.starts_with("## v"))
+        .collect();
+    assert!(
+        version_headings.is_empty(),
+        "CHANGELOG.md has reacquired version sections: {version_headings:?}. This \
+         file is a pointer — releases are per-crate and release-plz owns those \
+         files. Narrative entries belong in docs/ENGINEERING-LOG.md. See decision \
+         15 in DECISIONS.md."
+    );
+    assert!(
+        changelog.lines().count() < 100,
+        "CHANGELOG.md is {} lines. It is a pointer; it grew back.",
+        changelog.lines().count()
+    );
+
+    // 2. It must actually point somewhere. A pointer that has lost its targets
+    //    is worse than the file it replaced: no release notes and no narrative.
+    for target in [
+        "docs/ENGINEERING-LOG.md",
+        "DECISIONS.md",
+        "crates/<crate>/CHANGELOG.md",
+    ] {
+        assert!(
+            changelog.contains(target),
+            "CHANGELOG.md no longer directs readers to `{target}`"
+        );
+    }
+    assert!(
+        root.join("docs/ENGINEERING-LOG.md").exists(),
+        "docs/ENGINEERING-LOG.md is missing but CHANGELOG.md points at it — the \
+         narrative history has been lost, not relocated"
+    );
+
+    // 3. The delegated-to records must cover the version actually being built.
+    //    This is the release-truth check the retired file was failing: it is not
+    //    enough that per-crate changelogs exist, they have to be current.
+    let manifest =
+        std::fs::read_to_string(root.join("Cargo.toml")).expect("read workspace Cargo.toml");
+    let version = manifest
+        .lines()
+        .find_map(|l| {
+            let l = l.trim_start();
+            l.strip_prefix("version")?
+                .trim_start()
+                .strip_prefix('=')?
+                .trim()
+                .strip_prefix('"')?
+                .split('"')
+                .next()
+        })
+        .expect("workspace [workspace.package] version");
+    assert!(
+        version.split('.').count() == 3,
+        "parsed a workspace version of {version:?}, which is not a semver triple \
+         — the parse is wrong and the check below would be meaningless"
+    );
+
+    let heading = format!("## [{version}]");
+    let mut checked = 0usize;
+    let mut stale: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(root.join("crates"))
+        .expect("read crates/")
+        .flatten()
+    {
+        let path = entry.path().join("CHANGELOG.md");
+        if !path.exists() {
+            continue;
+        }
+        checked += 1;
+        let text = std::fs::read_to_string(&path).expect("read per-crate CHANGELOG.md");
+        if !text.contains(&heading) {
+            stale.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    assert!(
+        checked >= 8,
+        "found only {checked} per-crate changelogs — expected at least 8; the \
+         walk is broken and the staleness check below proves nothing"
+    );
+    stale.sort();
+    assert!(
+        stale.is_empty(),
+        "the workspace is at {version} but these crates' changelogs have no \
+         `{heading}` section: {stale:?}. Release notes are delegated to these \
+         files, so a gap here means the release is undocumented everywhere."
+    );
+}
+
+/// `docs/README.md` carries a "Map" table naming every document under `docs/`.
+/// Hand-kept set, no signal for the row nobody added — the same shape as the
+/// README route table and the wire-code list. `ENGINEERING-LOG.md` arrived via
+/// #220 and the table did not notice.
+///
+/// Directional, like its siblings: this catches a document that exists and is
+/// unlisted. A listed document that has been deleted is caught instead by the
+/// link being dead, which is not something this test checks.
+#[test]
+fn every_docs_page_is_listed_in_the_docs_index() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let docs = root.join("docs");
+    let index = std::fs::read_to_string(docs.join("README.md")).expect("read docs/README.md");
+
+    let mut pages: Vec<String> = std::fs::read_dir(&docs)
+        .expect("read docs/")
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            (name.ends_with(".md") && name != "README.md").then_some(name)
+        })
+        .collect();
+    pages.sort();
+
+    assert!(
+        pages.len() >= 8,
+        "found only {} documents under docs/ — the walk is broken and the check \
+         below would pass vacuously: {pages:?}",
+        pages.len()
+    );
+
+    let unlisted: Vec<&String> = pages.iter().filter(|p| !index.contains(*p)).collect();
+    assert!(
+        unlisted.is_empty(),
+        "these documents exist under docs/ but are absent from the Map table in \
+         docs/README.md, so nothing links to them: {unlisted:?}"
+    );
+}
