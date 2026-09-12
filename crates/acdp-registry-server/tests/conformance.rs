@@ -397,10 +397,11 @@
 //! character). `rate-001` -- "black-box conformance testing cannot deterministically
 //! trigger a rate limit," per its own text -- gets DIRECT coverage via
 //! `rate001_publish_rate_limit_trips_429_with_retry_after`, which is not a missing seam:
-//! `limits.publish_rate_per_minute` (`config.rs:560-561`) is a live config knob enforced
+//! `limits.publish_rate_per_minute` (`acdp-registry-types/src/config.rs`) is a live config knob enforced
 //! by the in-process fixed-window `AgentRateLimiter` (`rate_limit.rs`, wired at
-//! `state.rs:86-89`), already proven end-to-end for the sibling challenge limiter
-//! (`http_integration.rs:889-922`, `challenge_endpoint_is_rate_limited`). This test
+//! `AgentRateLimiter::new` in `acdp-registry-core/src/state.rs`), already proven
+//! end-to-end for the sibling challenge limiter (`challenge_endpoint_is_rate_limited`
+//! in `http_integration.rs`). This test
 //! exercises the SAME limiter on the publish path for real: a harness configured with
 //! `publish_rate_per_minute = 1`, one publish that succeeds, a second (different content,
 //! same producer) that trips the limiter, and asserts the REAL HTTP response -- 429,
@@ -5360,8 +5361,9 @@ fn wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted() {
 // `anc001_well_formed_anchor_is_accepted_and_round_trips`'s own doc comment
 // above; also `docs/ENGINEERING-LOG.md`).** This repo's `POST /contexts` returns HTTP
 // **200** on a successful publish
-// (`crates/acdp-registry-core/src/handlers/context.rs:656`,
-// `Ok(Json(response))`), never the fixtures' own literal `201`. Every
+// (`Ok(Json(response))`, the success return of `publish_inner` in
+// `crates/acdp-registry-core/src/handlers/context.rs`), never the fixtures'
+// own literal `201`. Every
 // status this section asserts is the CORRECTED value (200/200/409/200/200
 // for `idem-001`..`005`), not the fixture literal -- each test below also
 // asserts the fixture's OWN literal separately, as a sanity check that the
@@ -5898,7 +5900,7 @@ async fn idem005_no_support_ignores_idempotency_key_header() {
 /// (`PlaygroundConfig::default()`), which is exactly the "unpinned"
 /// precondition that routes a publish into the branch under test -- see
 /// `enforce_pinned_signature`'s `PinOutcome::Skipped` arm
-/// (`playground.rs:109-111`) for the empty-`pinned_keys` case.
+/// (`acdp-registry-core/src/playground.rs`) for the empty-`pinned_keys` case.
 ///
 /// Fails on unfixed `main`: two publishes of the same body with the same
 /// `Idempotency-Key` come back with the SAME `ctx_id` there, because the
@@ -6748,8 +6750,9 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
 /// note above this section), this one genuinely exercises code THIS repo
 /// owns and calls on the publish path: `acdp::time::trunc_ms`, the exact
 /// function `acdp-registry-sqlite`/`acdp-registry-pg`'s stores call when
-/// minting `created_at` (`crates/acdp-registry-sqlite/src/store.rs:1040`,
-/// `crates/acdp-registry-pg/src/store.rs:933`) -- reachable here as a pure
+/// minting `created_at` (the `acdp::time::trunc_ms(now)` call in
+/// `crates/acdp-registry-sqlite/src/store.rs` and
+/// `crates/acdp-registry-pg/src/store.rs`) -- reachable here as a pure
 /// function of a `DateTime<Utc>`, with no server/store/auth needed.
 ///
 /// Per vector: truncate `registry_clock_at_acceptance` (or, when absent,
@@ -7790,7 +7793,7 @@ fn schema_producer(seed: u8) -> Producer {
 /// `Option<_>` with `skip_serializing_if = "Option::is_none"`, so a `None`
 /// serializes as an OMITTED key, never a literal JSON `null`. Reaching the
 /// registry's own rejection path (`serde_json::from_slice::<PublishRequest>`
-/// in `acdp-registry-core`'s `handlers/context.rs:322-323`, which maps any
+/// in `acdp-registry-core`'s `handlers/context.rs`, which maps any
 /// deserialization failure to `AcdpError::SchemaViolation` -> HTTP 400 /
 /// `schema_violation`, BEFORE hash/signature verification or
 /// `validate_post_schema` ever run) requires posting raw JSON instead.
@@ -7868,7 +7871,7 @@ type SchemaBodyPatch = (&'static str, fn(&mut Value, &Value));
 /// PRODUCE is exactly a shape a strict consumer parsing this registry's own
 /// output would never have to reject, and a shape a strict consumer WOULD
 /// reject is exactly a shape this registry's own `serde_json::from_slice::
-/// <PublishRequest>` (`handlers/context.rs:322`) or `CapabilitiesDocument`
+/// <PublishRequest>` (`handlers/context.rs`) or `CapabilitiesDocument`
 /// deserialization also rejects, for the identical closed-schema /
 /// non-nullable-optional reason.
 ///
@@ -8990,6 +8993,95 @@ const PARTIAL_DIRECT: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// **Compile-checked** companion to `COVERED`'s `Direct(...)` lists and
+/// `PARTIAL_DIRECT` (#216, unit H-F).
+///
+/// The two anti-vacuity guards below search this file's own text for a function
+/// name and for the letters of `assert`. #216 states the ceiling, and this unit
+/// **measured all six of its listed defeats rather than trusting them** -- every
+/// one reproduces against a registered test:
+///
+/// | mutation | the two guards |
+/// |---|---|
+/// | body replaced with `assert!(true)` | green |
+/// | only the token `assert`, in a line comment | green |
+/// | only `/* assert */` | green |
+/// | `EXPECTED_` + `asserted` in one comment line (PARTIAL_DIRECT) | green |
+/// | `#[ignore]` placed ABOVE `#[test]` -- test never runs | green |
+/// | whole function wrapped in `/* ... */` -- 68 tests became 67 | green |
+///
+/// The last two are the severe ones: the test does not execute at all and the
+/// text guard cannot tell, because **commented-out source is still source**.
+///
+/// This table fixes that half by changing the MECHANISM rather than the
+/// substring (#216 lists "tightening the substring predicates" as a non-goal).
+/// Each entry expands to `(stringify!(name), name as fn())`, so the string and
+/// the function are the same token by construction and cannot drift apart, and
+/// the *function* must exist for this file to compile at all. Commenting a
+/// registered test out, deleting it, or renaming it is now a **compile error**
+/// rather than a passing text search.
+///
+/// WHAT THIS STILL DOES NOT CATCH, stated because a guard whose reach is left
+/// unstated gets trusted past it: a test that exists, compiles, runs, and
+/// asserts nothing -- the first four rows. No text or symbol oracle can; that
+/// needs a mutation oracle, which is why #216 is narrowed here and not closed.
+/// `#[ignore]` above `#[test]` is also not caught by this table (the function is
+/// still a real function); the CI step added by this unit catches that instead.
+macro_rules! direct_fn {
+    ($f:ident) => {
+        (stringify!($f), $f as fn())
+    };
+}
+
+/// Every test function named by `COVERED`'s `Direct(...)` lists or by
+/// `PARTIAL_DIRECT`, as a compiler-resolved function item. Order follows the
+/// tables; duplicates are collapsed, because one test may legitimately cover two
+/// families (`did_key_golden_vector_accepted_and_gated` covers `sig` and `dk`).
+#[rustfmt::skip]
+const DIRECT_FNS: &[(&str, fn())] = &[
+    direct_fn!(vis001_restricted_denied_as_404_replays_via_shape_d),
+    direct_fn!(vis002_search_excludes_restricted_and_router_rebuilds_on_capability_toggle),
+    direct_fn!(vis003_search_response_emits_matches_not_results),
+    direct_fn!(vis004_private_audience_retrieval_allowed_replays_via_shape_d),
+    direct_fn!(vis005_private_audience_search_excluded_via_derived_from),
+    direct_fn!(vis006_search_match_public_visibility_disclosure_replays_via_shape_d),
+    direct_fn!(vis007_search_match_restricted_visibility_disposition),
+    direct_fn!(vis008_lineage_endpoint_visibility_replays_via_shape_d),
+    direct_fn!(vis008_mutated_lineage_version_order_fails_replay),
+    direct_fn!(vis009_anonymous_public_reads_gates_anonymous_not_authenticated),
+    direct_fn!(anc001_well_formed_anchor_is_accepted_and_round_trips),
+    direct_fn!(anc002_malformed_anchor_content_hash_is_rejected),
+    direct_fn!(anc003_empty_anchors_array_is_rejected_with_established_ordering),
+    direct_fn!(can_vectors_reproduce_canonical_form_and_hash),
+    direct_fn!(can007_registry_created_at_millisecond_truncation),
+    direct_fn!(lin_vectors_reproduce_lineage_derivation),
+    direct_fn!(caps_vectors_validate_capabilities_document),
+    direct_fn!(idem001_004_publish_idempotency_key_lifecycle_and_restart_durability),
+    direct_fn!(idem005_no_support_ignores_idempotency_key_header),
+    direct_fn!(idem_playground_branch_honors_supports_idempotency_key_gate),
+    direct_fn!(idem_playground_branch_writes_no_idempotency_record_when_gated_off),
+    direct_fn!(wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted),
+    direct_fn!(meta001_003_metadata_depth_and_size_caps_enforced),
+    direct_fn!(data_ref001_007_publish_path_rejections_enforced),
+    direct_fn!(body001_002_origin_registry_hostname_never_did_form),
+    direct_fn!(status001_004_served_status_matches_open_enum_pattern),
+    direct_fn!(schema_vectors_openness_and_absent_vs_null_enforced),
+    direct_fn!(sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_publish),
+    direct_fn!(sig001_signature_byte_perturbation_is_rejected),
+    direct_fn!(sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected),
+    direct_fn!(did_key_golden_vector_accepted_and_gated),
+    direct_fn!(rev001_key_revocation_context_golden_accepted_and_self_signed_rejected),
+    direct_fn!(dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver),
+    direct_fn!(did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets),
+    direct_fn!(err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing),
+    direct_fn!(rate001_publish_rate_limit_trips_429_with_retry_after),
+    direct_fn!(cur001_002_expired_and_malformed_cursors_are_distinguished),
+    direct_fn!(rcpt001_registry_receipt_golden_recomputed_and_remintable),
+    direct_fn!(lhr001_lineage_head_receipt_golden_recomputed_and_remintable),
+    direct_fn!(log001_leaf_root_and_inclusion_golden_recomputed),
+    direct_fn!(log003_consistency_proof_golden_recomputed)
+];
+
 /// This file's own source, embedded at compile time so
 /// `covered_direct_families_have_present_test_functions` can check
 /// test-function presence by pure self-inspection -- no `ACDP_SPEC_DIR`
@@ -9057,7 +9149,18 @@ fn source_has_present_test_fn(name: &str) -> bool {
 /// satisfiable by text that computes nothing.
 ///
 /// So these guards catch WHOLESALE GUTTING and deletion. They are not, and cannot be
-/// made into, proof that a test asserts something real. That property needs a mutation
+/// made into, proof that a test asserts something real.
+///
+/// **#216 / H-F update — the DELETION half no longer rests on this mechanism.**
+/// `DIRECT_FNS` now registers every name in `COVERED`'s `Direct(...)` lists and
+/// in `PARTIAL_DIRECT` as a compiler-resolved function item, bound to the tables
+/// by exact set equality in `direct_fns_matches_the_coverage_tables_exactly`.
+/// Deleting, renaming, or commenting out a registered test is therefore a
+/// **compile error** (measured: `error[E0425]`), and `#[ignore]` in either
+/// attribute order is caught by a CI step that asks the test harness rather than
+/// the source. What remains un-oracled is only the first class above -- a test
+/// that exists, runs, and asserts nothing -- which is why these text guards are
+/// kept as a cheap first line rather than retired, and why #216 stays open. That property needs a mutation
 /// oracle -- break the code under test and observe the test go red (`cargo-mutants` or
 /// a fault-injection harness over `src/`) -- not a text oracle. Tracked on #216 rather
 /// than patched a fourth time (it was on #130 until that issue closed; the mutation
@@ -11275,12 +11378,15 @@ fn rate_producer(seed: u8) -> Producer {
 /// registry, so this fixture is informative... implementers MUST self-test
 /// by submitting publishes faster than their advertised limit." This is NOT
 /// a missing seam: `limits.publish_rate_per_minute`
-/// (`acdp-registry-types/src/config.rs:560-561`) is a live config knob
+/// (`acdp-registry-types/src/config.rs`) is a live config knob
 /// enforced by the in-process fixed-window `AgentRateLimiter`
 /// (`acdp-registry-core/src/rate_limit.rs`, wired at
-/// `acdp-registry-core/src/state.rs:86-89`) that the publish handler
-/// already checks (`acdp-registry-core/src/handlers/context.rs:391-398`,
-/// keyed on the signing `agent_id`, before the expensive verify/persist
+/// `AgentRateLimiter::new` in `acdp-registry-core/src/state.rs`) that the publish
+/// handler already checks (the `limiter.peek(req.agent_id.as_str())` call in
+/// `acdp-registry-core/src/handlers/context.rs` --
+/// a `peek`, deliberately not a `check`, so an unverified `agent_id` cannot
+/// spend another agent's budget; keyed on the signing `agent_id`, before the
+/// expensive verify/persist
 /// pipeline) and that emits `RegistryError::RateLimited` ->
 /// 429/`rate_limited`/`Retry-After`
 /// (`acdp-registry-types/src/error.rs`) -- already proven end-to-end for
@@ -12517,14 +12623,18 @@ async fn log003_consistency_proof_golden_recomputed() {
 // registry PUBLISHES is the key it SIGNS with, and until this test
 // nothing anywhere asserted the two were the same.
 //
-// Measured, not argued: setting `receipt.rs:100` to `&[0u8; 32]` — so the
+// Measured, not argued: setting the published-key argument of
+// `verification_method_entry` in `crates/acdp-registry-core/src/receipt.rs`
+// (`&key.verifying_key_bytes()`) to `&[0u8; 32]` — so the
 // registry publishes an all-zero key while still signing with the real one
 // — left the entire workspace suite green at 524 passed / 0 failed,
 // byte-identical to baseline. The three tests that look like they cover
 // this do not:
 //
-//   * `receipt.rs:221` is the only read of `publicKeyMultibase` in the
-//     repo and asserts `starts_with('z')` + resolvability — all-zeros
+//   * `did_document_retains_retired_keys_in_verification_method_only`
+//     (`crates/acdp-registry-core/src/receipt.rs`) held the only read of
+//     `publicKeyMultibase` in the repo and asserted `starts_with('z')` +
+//     resolvability — all-zeros
 //     satisfies both;
 //   * `did_json_serves_receipt_key_and_404s_without_one` asserts fragment
 //     *ids*, never a key value;
@@ -12631,5 +12741,220 @@ async fn receipt_verifies_against_the_key_served_at_did_json() {
         receipt.signature.key_id,
         format!("did:web:{AUTHORITY}#receipt-key-1"),
         "the receipt must name the same key id the DID document declares active"
+    );
+}
+
+/// H-K: this file may not cite source by line number.
+///
+/// It carried 14 such citations and **four were already wrong** when this test
+/// was written — not fragile, wrong: `challenge_endpoint_is_rate_limited` had
+/// moved 239 lines from its cited range, the two `acdp::time::trunc_ms` call
+/// sites 141 and 94, and `Ok(Json(response))` 54. A line number is a claim that
+/// decays on every edit to a file this one does not own, and nothing reported
+/// the decay.
+///
+/// **The one that survived is the lesson.** The `Ok(Json(response))` citation
+/// quoted its target text alongside the number. The number rotted exactly like
+/// the others, but the quote still resolves under `grep`, so that citation
+/// degraded to *searchable* while a bare `file:line` degrades to *wrong and
+/// silent*. Every citation here now names its construct and drops the number,
+/// which is the surviving half rather than a new convention.
+///
+/// SCOPE, and why it needs no path exception: only **comment** lines are
+/// scanned. A `file.rs:NNN` inside a string literal is data, not a citation —
+/// this file deliberately feeds a synthetic `panic at src/store` path (with a
+/// line number) to
+/// `sanitizes_internal_error_details` to prove such a path never reaches a
+/// client, and converting it would destroy the test. Comment-versus-code is the
+/// real distinction between a citation and a fixture, so drawing the line there
+/// is principled, not an allowlist.
+///
+/// The marker pattern is built at runtime so this doc comment cannot match
+/// itself — the same reason `no_tracked_file_contains_a_conflict_marker` builds
+/// its markers rather than writing them.
+#[test]
+fn this_file_cites_constructs_and_never_line_numbers() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conformance.rs");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+
+    // `.rs` + ':' + digit, assembled so the literal never appears in this file.
+    let needle = format!("{}{}", ".rs", ':');
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut comment_lines = 0usize;
+    let mut non_comment_hits = 0usize;
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim_start();
+        let is_comment = t.starts_with("//") || t.starts_with("/*") || t.starts_with('*');
+        if !is_comment {
+            if line
+                .match_indices(needle.as_str())
+                .any(|(at, _)| line[at + needle.len()..].starts_with(|c: char| c.is_ascii_digit()))
+            {
+                non_comment_hits += 1;
+            }
+            continue;
+        }
+        comment_lines += 1;
+        for (at, _) in line.match_indices(needle.as_str()) {
+            let after = &line[at + needle.len()..];
+            if after.starts_with(|c: char| c.is_ascii_digit()) {
+                offenders.push(format!("{}: {}", i + 1, line.trim()));
+                break;
+            }
+        }
+    }
+
+    // Guard the scan itself, by named members rather than a floor (Rule 55/64):
+    // a floor cannot detect a scan that silently matched nothing, which is what
+    // a broken comment test or a changed needle produces.
+    assert!(
+        comment_lines > 1000,
+        "only {comment_lines} comment lines seen in {} — the scan is broken, so \
+         the check below would pass vacuously",
+        path.display()
+    );
+    // The comment-only scoping must be doing real work: at least one NON-comment
+    // line has to match the pattern, or the scoping is untested and could be
+    // dropped without any test noticing.
+    //
+    // This deliberately counts matches found by the scan itself rather than
+    // asserting a fixture's text. The first version checked
+    // `text.contains("panic at src/store")` and passed vacuously — satisfied by
+    // this very doc comment rather than by the fixture, which is the
+    // assert-the-mechanism-not-the-symptom failure in miniature.
+    assert!(
+        non_comment_hits >= 1,
+        "no non-comment line matches the pattern, so the comment-only scoping is \
+         exercised by nothing and could be deleted silently. The fixture that \
+         exercises it is the synthetic panic path fed to \
+         `sanitizes_internal_error_details`."
+    );
+
+    assert!(
+        offenders.is_empty(),
+        "these comments cite source by line number:\n  {}\n\nLine numbers decay \
+         on every edit to a file this one does not own, silently: four of the \
+         original fourteen were already pointing at unrelated code. Name the \
+         construct — the function, the test, the call — and drop the number.",
+        offenders.join("\n  ")
+    );
+
+    // The constructs the conversion introduced must still exist. Named members,
+    // because this asserts specific claims rather than completeness; the
+    // no-line-pins rule above is what enforces completeness.
+    // conformance.rs -> tests -> <crate> -> crates -> workspace root
+    let root = path
+        .ancestors()
+        .nth(4)
+        .expect("crates/<crate>/tests/<file> is four below the workspace root");
+    for (construct, file) in [
+        (
+            "fn challenge_endpoint_is_rate_limited",
+            "crates/acdp-registry-server/tests/http_integration.rs",
+        ),
+        (
+            "acdp::time::trunc_ms",
+            "crates/acdp-registry-sqlite/src/store.rs",
+        ),
+        (
+            "acdp::time::trunc_ms",
+            "crates/acdp-registry-pg/src/store.rs",
+        ),
+        (
+            "Ok(Json(response))",
+            "crates/acdp-registry-core/src/handlers/context.rs",
+        ),
+        (
+            "fn publish_inner",
+            "crates/acdp-registry-core/src/handlers/context.rs",
+        ),
+        (
+            "fn verification_method_entry",
+            "crates/acdp-registry-core/src/receipt.rs",
+        ),
+        (
+            "PinOutcome::Skipped",
+            "crates/acdp-registry-core/src/playground.rs",
+        ),
+    ] {
+        let body =
+            std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"));
+        assert!(
+            body.contains(construct),
+            "this file cites `{construct}` in `{file}`, which no longer contains \
+             it. The citation is now as wrong as the line numbers it replaced."
+        );
+    }
+}
+
+/// #216 / H-F: bind the compile-checked `DIRECT_FNS` table to the string tables
+/// by **exact set equality**, so the compiler's knowledge of which test
+/// functions exist becomes a property of `COVERED` and `PARTIAL_DIRECT`.
+///
+/// Why this closes the presence half that a substring search cannot: **this test
+/// never reads its own source.** It compares two in-memory tables. There is no
+/// text for a mutation to satisfy — the letters of a function name in a comment
+/// are invisible to it, and a function commented out of existence fails to
+/// compile before this test ever runs.
+///
+/// Equality in both directions, never a subset (Rule 64 — an enumeration, not a
+/// total):
+/// - a name in `COVERED`/`PARTIAL_DIRECT` but not in `DIRECT_FNS` means a
+///   registered test the compiler was never asked about;
+/// - a name in `DIRECT_FNS` but not in the tables means a stale entry that would
+///   keep compiling after coverage was legitimately withdrawn.
+///
+/// Rule 71 does not bite here, and it is worth saying why rather than claiming
+/// immunity: the trap is a guard asserting a precondition on text it could
+/// itself contain. This guard reads no text at all, so its preconditions are
+/// over table contents the compiler produced.
+#[test]
+fn direct_fns_matches_the_coverage_tables_exactly() {
+    use std::collections::BTreeSet;
+
+    let mut from_tables: BTreeSet<&str> = BTreeSet::new();
+    for (_, mechanisms) in COVERED {
+        for mechanism in *mechanisms {
+            if let CoverageMechanism::Direct(names) = mechanism {
+                from_tables.extend(names.iter().copied());
+            }
+        }
+    }
+    for (_, names) in PARTIAL_DIRECT {
+        from_tables.extend(names.iter().copied());
+    }
+
+    let from_fns: BTreeSet<&str> = DIRECT_FNS.iter().map(|(name, _)| *name).collect();
+
+    // Preconditions over the tables themselves, not over any text.
+    assert!(
+        !from_tables.is_empty(),
+        "COVERED and PARTIAL_DIRECT between them name no Direct test functions, \
+         so both sides of the comparison below are empty and it proves nothing"
+    );
+    assert_eq!(
+        from_fns.len(),
+        DIRECT_FNS.len(),
+        "DIRECT_FNS lists the same name twice; `direct_fn!` makes the string and \
+         the function one token, so a duplicate name is a duplicate entry and \
+         hides how many tests are really registered"
+    );
+
+    let unregistered: Vec<&&str> = from_tables.difference(&from_fns).collect();
+    assert!(
+        unregistered.is_empty(),
+        "these tests are named by COVERED/PARTIAL_DIRECT but absent from \
+         DIRECT_FNS, so the compiler is never asked whether they exist and a \
+         text search is all that stands behind them: {unregistered:?}"
+    );
+
+    let stale: Vec<&&str> = from_fns.difference(&from_tables).collect();
+    assert!(
+        stale.is_empty(),
+        "these entries are in DIRECT_FNS but named by neither COVERED nor \
+         PARTIAL_DIRECT — coverage was withdrawn from the tables while the \
+         compile-time entry kept it looking registered: {stale:?}"
     );
 }
