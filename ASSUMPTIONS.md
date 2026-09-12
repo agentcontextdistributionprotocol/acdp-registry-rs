@@ -1939,3 +1939,55 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** a shared error in the Rust rule would be invisible to the
   differential. Bounded as above, and the absolute assertions are the load-bearing part.
 - **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #3.
+
+## H-A / P7 — A3: extractor rejections get the §5 envelope at their original status
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P7)
+- **Measured before changing anything** (real router, auth enabled): malformed body -> 400;
+  missing/wrong `Content-Type` -> 415; schema mismatch -> 422; `?limit=abc` -> 400. All four
+  already carried `application/acdp+json` over PLAIN TEXT with no `error.code`. Also confirmed
+  `application/acdp+json` is ACCEPTED (200), so the RFC-mandated media type is not what 415s.
+- **Chose:** a local `AcdpRejection` implementing `IntoResponse` directly, with `AcdpJson<T>` /
+  `AcdpQuery<T>` newtypes using it as their `Rejection`. Envelope built from the public
+  `WireError`/`WireErrorBody` so the shape -- including `details` ABSENT rather than `null` --
+  cannot drift from `RegistryError::into_response`.
+- **Alternatives:** (a) map onto `RegistryError` -- rejected, it has no 415-bearing variant so
+  415 and 422 would both collapse to 400, which would be an artifact of the mechanism rather
+  than a decision; (b) `impl From<JsonRejection> for RegistryError` -- the orphan rule forces it
+  into `acdp-registry-types`, a different crate than the problem; (c) `axum-extra`'s
+  `WithRejection` -- not a dependency, and adding one enters the `deny.toml` gate for something
+  solvable in forty lines locally.
+
+### DIVERGENCE: the plan's prescribed shape contradicts the plan's own acceptance criterion
+
+The plan specifies `AcdpRejection(rej.status(), code_for(&rej), rej.body_text())`. Its
+acceptance criterion 2 says **no response body may contain "Failed to parse", "Failed to
+deserialize", or a serde type path**. `rej.body_text()` returns exactly those strings -- so the
+prescribed shape guarantees the criterion fails. Implemented AC2; messages are this registry's
+own and stable. Beyond AC2 there is an independent reason: axum's and serde's wording is theirs
+to change, so echoing it onto the wire grows an accidental contract that breaks on a dependency
+bump.
+
+### OPEN — escalated, NOT decided here: the §5 `code` for a 415
+
+- **The question:** enveloping a 415 requires a `code`, because `WireErrorBody::code` is a
+  required `String` -- there is no "envelope without a code".
+- **Why it is not mine to settle:** the canonical registry
+  (`acdp_primitives::error::AcdpError::from_wire_error`) is 25 closed codes and none describes a
+  media-type failure. This repo emits 24 codes and **every one is inside that set** -- verified
+  by set difference, which is empty. So answering means minting a code the canon lacks: a policy
+  question about this project's relationship to upstream, not a technical one.
+- **Recommendation on record:** `unsupported_media_type`. An unrecognised code routes to
+  `AcdpError::Registry(wire)`, documented as "for forward compatibility", preserving status and
+  message and losing only the typed variant. The canonical alternative, `schema_violation`, is
+  documented as "malformed body, missing field, schema mismatch" -- and on a 415 the body was
+  never parsed, so it would state something false, make 415 indistinguishable from 400 at the
+  code level, and be unfixable later without a breaking change once clients code against
+  `AcdpError::SchemaViolation`. The canon also already has an `unsupported_*` family
+  (`unsupported_algorithm`), so the name is in its own idiom.
+- **Held, visibly.** The 415 keeps its existing un-enveloped body until the ruling.
+  `marker_the_415_rejection_is_not_yet_enveloped_pending_a_ruling` pins the current behaviour and
+  fails the moment the ruling is applied, with a failure message instructing its own deletion --
+  so the hold cannot outlive the question by being forgotten.
+- **Status:** UNCONFIRMED — the 415 code is with the project owner. Everything else in this
+  phase is settled and shipped.

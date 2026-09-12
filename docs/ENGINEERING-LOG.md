@@ -83,6 +83,38 @@ hold entries from several releases. Use the commands.
   It had been written inline inside `list_contexts`, so the batched method above would have made
   a *fourth* copy of the §4.5 rule. Extracting it and pointing both methods at the one
   expression keeps the count at three, and matches the structure SQLite already had.
+<!-- unit H-A, phase P7 (lane-1) — extractor rejections speak the §5 envelope -->
+
+### Fixed
+
+- **Extractor rejections answered `Content-Type: application/acdp+json` over a plain-text body
+  with no `error.code`.** A malformed body, a wrong `Content-Type`, a schema mismatch or an
+  unparseable query value were all rejected by axum before any handler ran, and the outermost
+  media-type backstop then stamped the ACDP media type onto axum's prose. So the wire promised an
+  ACDP error envelope and delivered a parser message — and that message leaked serde type paths,
+  internal struct field names, and byte offsets (`Failed to deserialize the JSON body into the
+  target type: agent_id: invalid type: integer 123, expected a string at line 1 column 15`).
+
+  All four now answer a real RFC-ACDP-0007 §5 envelope **at their original status**: `400`
+  malformed body, `422` schema mismatch, `400` bad query value, and `413` for an oversized body
+  that reaches the extractor. Messages are now this registry's own, stable, and describe the
+  request rather than the parser — axum's and serde's text is theirs to change, so echoing it
+  grows an accidental wire contract that breaks on a dependency bump.
+
+  **Statuses are preserved, not collapsed.** Mapping these onto the internal error type would
+  have forced `415` and `422` down to `400`, because that type has no 415-bearing variant. That
+  would have been an artifact of the mechanism rather than a decision, so the mechanism was
+  changed instead: a local rejection type carrying the rejection's own status. The catch-all arm
+  carries `rej.status()` for the same reason — `JsonRejection` is `#[non_exhaustive]` and its
+  `BytesRejection` variant is a **413**, so a hard-coded 400 would have downgraded an oversized
+  body on `/auth/*` while every other test stayed green.
+
+  **Still outstanding:** the `415` from a missing or wrong `Content-Type` is *not* yet enveloped.
+  Enveloping it requires choosing a §5 `code`; the canonical 25-code registry has none for a
+  media-type failure, and this repo has never emitted a code outside that registry. The question
+  is policy, not engineering, and it is with the project owner. The status is `415` either way.
+  `marker_the_415_rejection_is_not_yet_enveloped_pending_a_ruling` fails the moment the ruling is
+  applied, so the gap cannot quietly outlive the question.
 
 <!-- unit H-A, phases P4 + P5 (lane-1) — rate-limit scope taxonomy, and the
      publish bucket charged on success rather than on an unverified attempt -->

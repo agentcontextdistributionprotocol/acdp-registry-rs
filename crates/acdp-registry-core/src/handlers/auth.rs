@@ -12,6 +12,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::extract::AcdpJson;
 use crate::metrics::RateLimitScope;
 use crate::state::AppState;
 
@@ -22,7 +23,7 @@ pub struct ChallengeRequest {
 
 pub async fn issue_challenge<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
-    Json(req): Json<ChallengeRequest>,
+    AcdpJson(req): AcdpJson<ChallengeRequest>,
 ) -> Result<Json<AuthChallenge>, RegistryError> {
     // Rate-limit the unauthenticated challenge endpoint per requested
     // `agent_id`. Without this, a caller can flood `/auth/challenge` to
@@ -65,7 +66,7 @@ pub async fn issue_challenge<S: ExtendedRegistryStore + 'static>(
 
 pub async fn issue_token<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
-    Json(req): Json<TokenRequest>,
+    AcdpJson(req): AcdpJson<TokenRequest>,
 ) -> Result<Json<TokenResponse>, RegistryError> {
     let resp = state.auth.issue_token(req).await?;
     Ok(Json(resp))
@@ -90,7 +91,7 @@ pub struct RevokeRequest {
 pub async fn revoke_token<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
-    Json(req): Json<RevokeRequest>,
+    AcdpJson(req): AcdpJson<RevokeRequest>,
 ) -> Result<Response, RegistryError> {
     // 503 when the revocation store isn't wired — match the doc contract
     // above. In current binaries `state.auth.revocations` is always

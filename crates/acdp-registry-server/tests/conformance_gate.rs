@@ -727,3 +727,143 @@ fn every_directly_read_env_var_is_documented() {
          no way to discover them short of reading the source."
     );
 }
+
+/// H-J: no tracked file may contain a merge-conflict marker.
+///
+/// This family has produced five incidents. The most recent pair is the reason
+/// the scope below is "every tracked file" and not a list: #238 swept
+/// `ASSUMPTIONS.md`, left two diff3 base markers behind in `CHANGELOG.md`, and
+/// reported success — the sweep's scope was one file, and nothing could tell it
+/// that the mechanism reached further. Those two survived a `git mv` into
+/// `docs/ENGINEERING-LOG.md` before being caught by hand.
+///
+/// Three markers, and the third is the one that actually bit us twice: seven
+/// `<`, seven `>`, and seven `|` — the diff3 base marker, which ordinary
+/// conflict resolution rarely produces and which is therefore the one a
+/// hand-written check omits.
+///
+/// **The marker bytes are built at runtime, never written as literals.** If this
+/// file contained the marker text it would match itself, and the fix for that
+/// would be excepting this path — the hand-maintained allowlist this guard
+/// exists to eliminate. Constructing them means no path needs an exception, so
+/// the guard genuinely has none.
+///
+/// Scans **bytes**, not UTF-8: the repository has no binary tracked files today,
+/// and a guard that starts erroring the day someone adds a PNG is a guard that
+/// gets weakened rather than fixed.
+#[test]
+fn no_tracked_file_contains_a_conflict_marker() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+
+    // Derive the file set from git, never from a glob someone maintains
+    // (Rule 48). `-z` so paths with spaces or newlines survive intact.
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "-z"])
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "could not run `git ls-files` in {}: {e}. This guard derives its \
+                 scope from git on purpose; it does not fall back to a glob, \
+                 because a fallback scope is how the last sweep missed a file.",
+                root.display()
+            )
+        });
+    assert!(
+        out.status.success(),
+        "`git ls-files` failed in {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let listed: Vec<&[u8]> = out
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    // Named members rather than a count floor (Rule 55/64): a floor cannot
+    // detect an enumeration that silently came back short, which is exactly what
+    // a broken `ls-files` invocation produces.
+    let listed_paths: Vec<String> = listed
+        .iter()
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    for required in ["Cargo.toml", "README.md", "docs/ENGINEERING-LOG.md"] {
+        assert!(
+            listed_paths.iter().any(|p| p == required),
+            "`git ls-files` did not list `{required}`, which is certainly \
+             tracked — the enumeration is broken, so every check below would \
+             pass vacuously ({} paths listed)",
+            listed_paths.len()
+        );
+    }
+
+    // Seven of the byte, at line start, followed by a space or end-of-line.
+    // Git emits exactly seven; requiring the boundary keeps a markdown
+    // blockquote or table row from reading as a marker.
+    const RUN: usize = 7;
+    // One of each, so this literal cannot match itself (see the doc comment).
+    let marker_bytes = *b"<>|";
+
+    let mut findings: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+
+    for path in &listed_paths {
+        let full = root.join(path);
+        let Ok(bytes) = std::fs::read(&full) else {
+            // A listed-but-unreadable path is reported, never silently skipped:
+            // silent skipping is the failure mode this whole unit is about.
+            missing.push(path.clone());
+            continue;
+        };
+        scanned += 1;
+        for (i, line) in bytes.split(|&b| b == b'\n').enumerate() {
+            for &m in &marker_bytes {
+                let run = line.iter().take_while(|&&b| b == m).count();
+                let bounded = match line.get(RUN) {
+                    None => true,
+                    Some(&b) => b == b' ' || b == b'\r',
+                };
+                if run == RUN && bounded {
+                    let marker = String::from_utf8(vec![m; RUN]).expect("ascii");
+                    findings.push(format!("{path}:{}: {marker}", i + 1));
+                }
+            }
+        }
+    }
+
+    // Equality, not a floor: proves the loop visited every path git listed.
+    assert_eq!(
+        scanned + missing.len(),
+        listed_paths.len(),
+        "scanned {scanned} + {} unreadable != {} listed — the loop skipped \
+         paths, so a marker could sit in one of them and this test would still \
+         pass",
+        missing.len(),
+        listed_paths.len()
+    );
+    assert!(
+        missing.is_empty(),
+        "these paths are tracked but could not be read, so they went unscanned: \
+         {missing:?}"
+    );
+
+    // Enumerate the offenders; a count would say a marker exists without saying
+    // where, and the finding IS the set.
+    assert!(
+        findings.is_empty(),
+        "merge-conflict markers found in tracked files:\n  {}\n\nThese reach \
+         `main` as ordinary-looking content — a conflicted region resolved by \
+         hand leaves the base marker behind most often, and nothing else in the \
+         build notices. Delete the marker lines and check the surrounding \
+         region kept the right side of the conflict.",
+        findings.join("\n  ")
+    );
+}
