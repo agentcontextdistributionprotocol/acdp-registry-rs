@@ -97,11 +97,11 @@ Then:
 ```bash
 curl http://localhost:8443/.well-known/acdp.json
 curl http://localhost:8443/healthz
-# {"status":"ok","storage":true,"version":"0.1.2"}
+# {"status":"ok","storage":true,"version":"<version>"}
 ```
 
 `version` identifies the running build. A locally built binary reports the bare
-package version (`0.1.2`); an image built by CI reports `0.1.2+g<shortsha>`,
+package version; an image built by CI reports `<version>+g<shortsha>`,
 which is what actually pins it to a commit. Treat the string as opaque — see
 [HTTP-API.md](docs/HTTP-API.md#the-version-field-117).
 

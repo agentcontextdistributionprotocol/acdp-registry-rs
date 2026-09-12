@@ -186,16 +186,20 @@ What it contains depends on how the binary was built:
 
 | Build | `version` | Uniquely identifies the build? |
 |---|---|---|
-| Image built by `.github/workflows/docker.yml` | `0.1.2+g<shortsha>` | Yes |
-| `cargo build`, `cargo run`, `docker compose up --build`, or any other build that injects no commit | `0.1.2` | **No** |
+| Image built by `.github/workflows/docker.yml` | `<version>+g<shortsha>` | Yes |
+| `cargo build`, `cargo run`, `docker compose up --build`, or any other build that injects no commit | `<version>` | **No** |
 
 The commit is injected at compile time through the `ACDP_BUILD_SHA` build ARG.
 Outside `docker.yml` it is unset and the field degrades to the bare package
 version, which every such build shares. Every workspace crate inherits the
-single workspace version (`0.1.2` today, released via release-plz — see the
-per-crate `CHANGELOG.md` files), so the bare string is shared by every build
-of a given release and the `+g<shortsha>` suffix is what carries build
+single workspace version from `Cargo.toml` (released via release-plz — see
+the per-crate `CHANGELOG.md` files), so the bare string is shared by every
+build of a given release and the `+g<shortsha>` suffix is what carries build
 identity.
+
+`<version>` above is deliberately not a literal: pinning it here is what
+made this table wrong in the first place, and the argument does not depend
+on the number.
 
 `acdp-control-plane` serves the same flat `version` string shape on its own
 `/healthz`. The two are two precision levels of one contract, not two
@@ -598,7 +602,7 @@ Operational snapshot. Always shipped.
 
 ```json
 {
-  "build":       { "version": "0.1.2+g83de685c2f26", "commit": "83de685c2f26",
+  "build":       { "version": "<version>+g83de685c2f26", "commit": "83de685c2f26",
                    "storage_impl": "acdp_registry_sqlite::store::SqliteStore" },
   "storage":     { "healthy": true },
   "idempotency": { "records": 128 },
