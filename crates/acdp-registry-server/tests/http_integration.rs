@@ -7520,6 +7520,51 @@ fn mounted_route_call_count(src: &str) -> usize {
         .sum()
 }
 
+/// The route-registration forms in `src` whose path argument is NOT a string
+/// literal -- the ones [`mounted_route_paths`] silently skips.
+///
+/// The equality assertion below already FAILS when one of these exists, because
+/// the scanned count drops below the call count. What it cannot do is say WHICH
+/// route, and "26 != 27" sends the reader to diff two lists by hand. This exists
+/// so the failure names the form it could not interpret.
+///
+/// Written as the exact INVERSE of [`mounted_route_paths`] -- same scan, same
+/// "is the first non-whitespace token a quote" test, opposite branch taken -- so
+/// the two cannot disagree about what counts as a literal. A first draft scanned
+/// line by line instead and reported seven false positives: `lib.rs` registers
+/// seven routes with `.route(` at the end of one line and the path on the next,
+/// and a per-line scan sees an empty argument. Whitespace here includes the
+/// newline, which is the whole reason the shared scan shape matters.
+///
+/// Comment lines are excluded on the same grounds as [`mounted_route_call_count`]:
+/// `lib.rs` describes this very test in prose, and that prose must not be
+/// reported as a defect in the code it describes.
+fn non_literal_route_forms(src: &str) -> Vec<String> {
+    let code: String = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = Vec::new();
+    let mut rest = code.as_str();
+    while let Some(i) = rest.find(".route(") {
+        let after = &rest[i + ".route(".len()..];
+        rest = after;
+        let Some(q) = after.find('"') else { break };
+        // Literal: everything between `(` and the next quote is whitespace --
+        // newlines included, so a wrapped registration is still a literal.
+        if !after[..q].chars().any(|c| !c.is_whitespace()) {
+            continue;
+        }
+        let form: String = after
+            .chars()
+            .take_while(|c| *c != ',' && *c != ')')
+            .collect();
+        out.push(format!(".route({}, ...)", form.trim()));
+    }
+    out
+}
+
 /// Routes that intentionally sit OUTSIDE the `data` group, each with the reason
 /// it is not requester-relative-cacheable. Adding a route to the core router
 /// without adding it here (or to `DATA_PLANE_ROUTES`) fails the test below --
@@ -7636,7 +7681,41 @@ fn every_route_in_the_core_router_is_classified() {
         "the source scan interpreted a different number of routes than the router \
          actually mounts. Either the parser has stopped matching the router's syntax \
          (making this whole test vacuous), or a route was mounted with a non-literal \
-         path and is silently unclassified.",
+         path and is silently unclassified. Non-literal forms found: {:?}",
+        non_literal_route_forms(CORE_ROUTER_SRC),
+    );
+
+    // 4. REVERSE containment for NON_DATA_ROUTES: every tabled route must still
+    //    be mounted.
+    //
+    //    Assertion 2 runs one way only -- mounted ⊆ classified -- so it notices a
+    //    route added without a posture and is blind to the opposite: a route
+    //    DELETED from the router while its row stays in the table. That row then
+    //    documents a posture for a URL this server does not serve, and every
+    //    assertion here keeps passing, because a table entry matching nothing
+    //    subtracts nothing from `unclassified`.
+    //
+    //    DATA_PLANE_ROUTES does not need this: assertion 1 compares it to the
+    //    `data` group with `assert_eq!` on two sets, which already fails in both
+    //    directions. NON_DATA_ROUTES has no such partner, and this is it.
+    //
+    //    Deliberately NOT a count: `NON_DATA_ROUTES.len() == mounted - tabled`
+    //    would pass if one row went stale while another was added, which is
+    //    exactly what happens when a route is renamed.
+    let mounted_anywhere: std::collections::BTreeSet<String> =
+        mounted_route_paths(CORE_ROUTER_SRC).into_iter().collect();
+    let phantom: Vec<&str> = NON_DATA_ROUTES
+        .iter()
+        .map(|(p, _)| *p)
+        .filter(|p| !mounted_anywhere.contains(*p))
+        .collect();
+    assert!(
+        phantom.is_empty(),
+        "these paths are classified in NON_DATA_ROUTES but the core router does not \
+         mount them: {phantom:?} -- either the route was removed and its row should \
+         go with it, or it was renamed and the row was left pointing at the old \
+         path. A row that matches no route is not harmless: it reads as coverage, \
+         and it silently shrinks what assertion 2 is able to catch.",
     );
 }
 

@@ -31,6 +31,34 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-A, phase P10 (lane-1) — the route-classification guard names what it cannot parse -->
+
+### Fixed
+
+- **A route deleted from the core router while its `NON_DATA_ROUTES` row remained was invisible
+  to every assertion.** The classification test ran `mounted ⊆ classified` in one direction only,
+  so it noticed a route added without a cache posture and was blind to the opposite. A row
+  matching no route is not inert: it reads as coverage, and it silently widens what a later route
+  reusing that path would inherit. `DATA_PLANE_ROUTES` never had this gap — assertion 1 compares
+  it to the `data` group with `assert_eq!` on two sets, which fails both ways — so this closes
+  the one table that had no partner. Deliberately not a count: `len() == mounted - tabled` would
+  pass if one row went stale while another was added, which is precisely what a rename does.
+
+- **The equality assertion reddened on a non-literal route path but would not say which one.**
+  It reported "26 != 27" and left the reader to diff two lists by hand. It now names the form it
+  could not interpret, e.g. `.route(DEBUG_PATH, ...)`.
+
+### Changed
+
+- **Recorded because the bug was in this phase's own new code.** The first draft of the scanner
+  that names non-literal forms worked line by line and reported seven false positives: `lib.rs`
+  registers seven routes with `.route(` at the end of one line and the path on the next, and a
+  per-line scan sees an empty argument. That is the same line-wrap failure that defeated a grep
+  earlier in this unit, written again hours later in a different medium — knowing the failure
+  mode did not prevent repeating it. The scanner is now the exact **inverse** of
+  `mounted_route_paths`: same scan, same whitespace test, opposite branch, so the two cannot
+  disagree about what a literal is instead of agreeing by inspection.
+
 <!-- unit H-A, phase P9 (lane-1) — /log/entries answers a page with one visibility query -->
 
 ### Fixed
