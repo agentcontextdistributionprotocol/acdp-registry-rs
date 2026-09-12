@@ -1791,7 +1791,8 @@ mod tests {
         // that is already outside its window AND structurally broken is inert
         // today (pinned_for skips it) and refuses after W3-U1. A rotated-out
         // entry should be deleted, not left broken — but this is a config that
-        // boots today and will not after, so it is called out in the CHANGELOG.
+        // boots today and will not after, so it is called out in
+        // `docs/ENGINEERING-LOG.md` (the root `CHANGELOG.md` until #220).
         let mut p = pinned("did:web:a.test:alice", "ed25519", "not base64!!".into());
         p.valid_until = Some(1_000); // long past
         let cfg = cfg_with_pin(p);

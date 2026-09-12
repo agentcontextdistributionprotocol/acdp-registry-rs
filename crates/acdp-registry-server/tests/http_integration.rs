@@ -7647,7 +7647,8 @@ async fn well_known_capabilities_keeps_public_caching_and_does_not_vary_on_autho
 #[tokio::test]
 async fn every_well_known_document_keeps_public_caching() {
     // All THREE requester-invariant discovery documents, not just the one.
-    // `CHANGELOG.md` and `docs/RECEIPTS.md` both state that a test pins this;
+    // `docs/ENGINEERING-LOG.md` (the root `CHANGELOG.md` until #220) and
+    // `docs/RECEIPTS.md` both state that a test pins this;
     // until this test existed that sentence covered `/.well-known/acdp.json`
     // alone, which is the overstated-guarantee defect #190 exists to correct.
     let h = harness(true).await;
