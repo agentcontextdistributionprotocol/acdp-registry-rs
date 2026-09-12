@@ -15,6 +15,13 @@
 //! asserts: that **setting the knob actually reaches the predicate**, through one
 //! call that cannot set only half of it.
 
+// This binary reaches the HTTP surface through `common`, whose harness is
+// SQLite-backed, so it cannot compile under `--no-default-features --features
+// storage-pg` or `storage-memory`. `http_integration.rs` and `conformance.rs`
+// carry the identical gate for the identical reason. Omitting it broke three CI
+// legs that a default-feature `cargo test --workspace` cannot reach.
+#![cfg(feature = "storage-sqlite")]
+
 mod common;
 
 use acdp::crypto::SigningKey;
