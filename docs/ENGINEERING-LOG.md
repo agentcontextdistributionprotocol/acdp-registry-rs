@@ -31,6 +31,59 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-P (lane-3) — H-G's last two items. Both claims were about a property no
+     test could see, and in both cases a test NAMED for that property already existed. -->
+
+### Fixed
+
+- **`Retry-After` reported a range, never a value.** Three separate copies of
+  `WINDOW.saturating_sub(elapsed).as_secs().max(1)` exist in `rate_limit.rs`
+  (`check_global_at`, `peek_at`, `check_at`). Replacing the subtraction with
+  `elapsed.saturating_sub(WINDOW)` at all three pins every `Retry-After` to exactly **1
+  second** and left all 24 tests in the module green, plus the HTTP integration assertion. A
+  client throttled for a full minute would be told to come back in one second, retrying ~60×
+  more often than intended — under precisely the load the limiter exists to shed.
+
+  Three tests looked like they covered this and none did.
+  `peek_retry_after_matches_check` pins `peek == check`, which is internal consistency between
+  two paths and silent when both share one wrong arithmetic. `allows_up_to_limit_then_rejects`
+  and the integration test both assert `(1..=60).contains(&retry)` — a range spanning every
+  value the function can return. And `retry_after_never_reports_zero` *does* assert an exact
+  value, but at 59.5s in, where the expected answer **is** the clamp floor: the module's one
+  exact assertion sat at the single point where a wrong mechanism produces the right number.
+
+  `retry_after_reports_the_seconds_actually_remaining` asserts the remaining seconds at five
+  points across the window, on all three paths, with the expectation derived from the
+  documented 60s contract rather than from `WINDOW` (computing both sides from one constant
+  lets a change move them together). Falsified per site: mutating each of the three
+  arithmetic copies individually fails it at a **different** assertion line, so no one path's
+  coverage is masking another's.
+
+  **Partly refuting the audit that raised it:** the 1s floor is *not* an unasserted comment.
+  `retry_after_never_reports_zero` pins it exactly. What was missing was every other point in
+  the window.
+
+- **The constant-time compare had a test named for non-short-circuiting that could not
+  detect short-circuiting.** `ct_eq_does_not_short_circuit_on_position` asserted only return
+  values, and a short-circuiting comparison returns identical values for every input.
+  Measured: replacing `ct_eq`'s body with `a == b` — the exact comparison the helper exists to
+  avoid — left all three tests green. The claim that "every input reaches the fold" was
+  stated in the test's own doc comment and asserted nowhere.
+
+  The property is *work performed*, so it cannot be asserted on a result. The fold now lives
+  in a private `ct_fold` generic over an iterator of byte pairs, which lets
+  `ct_fold_consumes_every_pair` pass a counting iterator and assert every pair was consumed
+  even when the **first** pair already differs — deterministic, where a wall-clock timing
+  test on a shared runner is a flake that eventually gets deleted rather than fixed. It also
+  asserts the fold is still correct, so a loop that consumes everything and computes nothing
+  fails too.
+
+  `ct_eq` is `ct_fold`'s only caller, so a rewrite that stops folding makes it dead code.
+  Verified rather than assumed: CI's `cargo clippy --locked --workspace --all-targets -- -D
+  warnings` exits **101** with `function ct_fold is never used`. `--all-targets` is what makes
+  that work, by compiling the lib target separately from the test target — the test module's
+  use of `ct_fold` does not keep it alive in the lib's own compilation.
+
 <!-- unit H-N (lane-2) — H-G's JWT-issuer item. The claim was TRUE and true in its
      specifics: deleting the issuer check left the whole workspace green. -->
 

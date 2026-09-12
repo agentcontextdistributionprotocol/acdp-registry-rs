@@ -578,6 +578,116 @@ mod tests {
         assert_eq!(retry, 1, "sub-second remainder must clamp to 1s");
     }
 
+    /// H-P item 1 — the `Retry-After` **value**, not merely its range.
+    ///
+    /// **What already existed, and why none of it pinned the number.**
+    ///
+    /// - `peek_retry_after_matches_check` pins `peek == check`. That is internal
+    ///   consistency between two paths, and it is silent if both share one wrong
+    ///   arithmetic — which they do: `WINDOW.saturating_sub(elapsed)…max(1)` is
+    ///   written out three separate times, in `check_global_at`, `peek_at` and
+    ///   `check_at`.
+    /// - `allows_up_to_limit_then_rejects` asserts `(1..=60).contains(&retry)`,
+    ///   and the HTTP integration test asserts the same range on the real
+    ///   header. A range that spans every value the function can return rules
+    ///   out nothing.
+    /// - `retry_after_never_reports_zero` *does* assert an exact value — but at
+    ///   59.5s in, where the expected answer is the clamp floor. A wrong
+    ///   mechanism reaches the right number there by accident, so the one exact
+    ///   assertion in the module is the one least able to detect a wrong
+    ///   mechanism.
+    ///
+    /// **Measured before writing this.** Replacing `WINDOW.saturating_sub(elapsed)`
+    /// with `elapsed.saturating_sub(WINDOW)` at all three sites pins every
+    /// `Retry-After` to exactly 1 second, and leaves all 24 tests in this module
+    /// green plus the integration assertion. A client throttled for a full
+    /// minute is told to come back in one second, so it retries roughly 60×
+    /// more often than intended — under precisely the load the limiter exists
+    /// to shed. This test fails on that mutation at the first sample.
+    ///
+    /// Varies `elapsed` (through the explicit `now` argument, so no wall-clock
+    /// dependence) and asserts the remaining seconds each time, which is the
+    /// value the branch actually computes.
+    #[test]
+    fn retry_after_reports_the_seconds_actually_remaining() {
+        // Derived from the wire contract — a 60-second window — and
+        // deliberately NOT from `WINDOW`. Computing the expectation from the
+        // same constant the code reads would let a change to it move both
+        // sides together and assert nothing.
+        const CONTRACT_WINDOW_SECS: u64 = 60;
+        assert_eq!(
+            WINDOW.as_secs(),
+            CONTRACT_WINDOW_SECS,
+            "the documented window changed; Retry-After is a wire contract, so \
+             update the docs and the expectations below deliberately"
+        );
+
+        // (elapsed into the window, seconds a client should be told to wait).
+        // Truncating division is intended: 14.5s remaining reports 14.
+        let samples: [(u64, u64); 5] = [
+            (0, 60),
+            (1_000, 59),
+            (20_000, 40),
+            (45_500, 14),
+            // The clamp, kept here so this test covers the floor too — but it
+            // is the four rows above that make the test non-vacuous.
+            (59_500, 1),
+        ];
+
+        for (elapsed_ms, expected) in samples {
+            let at = Duration::from_millis(elapsed_ms);
+
+            // Path 1: `check_at` — the write path a real request takes.
+            let rl = AgentRateLimiter::new(1);
+            let t0 = Instant::now();
+            assert!(rl.check_at("a", t0).is_ok(), "first call is within budget");
+            let got = rl
+                .check_at("a", t0 + at)
+                .expect_err("second call is over a limit of 1");
+            assert_eq!(
+                got, expected,
+                "check_at: {elapsed_ms}ms into a {CONTRACT_WINDOW_SECS}s window \
+                 a client must be told to wait {expected}s, got {got}s"
+            );
+
+            // Path 2: `peek_at` — the read-only path, reached through
+            // `record_at` so the bucket exists without `check_at` having run.
+            let rl = AgentRateLimiter::new(1);
+            let t0 = Instant::now();
+            rl.record_at("a", t0);
+            let got = rl
+                .peek_at("a", t0 + at)
+                .expect_err("recorded count is at the limit of 1");
+            assert_eq!(
+                got, expected,
+                "peek_at: {elapsed_ms}ms in must report {expected}s, got {got}s"
+            );
+        }
+
+        // Path 3: the process-global ceiling. Asserted with a tolerance rather
+        // than exactly, because `with_global_ceiling` stamps the global
+        // bucket's `window_start` from `Instant::now()` at construction instead
+        // of accepting it — so the elapsed this path measures is mine plus an
+        // uncontrolled construction delta. A tolerance is honest here; an exact
+        // assertion would be a flake waiting for a loaded machine. It still
+        // excludes the always-clamp mutation, which is the point.
+        let rl = AgentRateLimiter::with_global_ceiling(1_000, 1);
+        let t0 = Instant::now();
+        assert!(
+            rl.check_global_at(t0).is_ok(),
+            "first call is within budget"
+        );
+        let got = rl
+            .check_global_at(t0 + Duration::from_secs(20))
+            .expect_err("second call is over a global limit of 1");
+        assert!(
+            (38..=40).contains(&got),
+            "check_global_at: 20s into a {CONTRACT_WINDOW_SECS}s window a client \
+             must be told to wait ~40s, got {got}s — a value of 1 means the \
+             remaining-time arithmetic collapsed to the clamp floor"
+        );
+    }
+
     #[test]
     fn prune_evicts_only_stale_buckets() {
         let rl = AgentRateLimiter::new(10);
