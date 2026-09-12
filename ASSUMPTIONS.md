@@ -1671,3 +1671,23 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** test-only. A clock moving backwards between runs could collide,
   which needs a same-nanosecond collision to matter.
 - **Status:** UNCONFIRMED
+
+## `cursor.rs`'s disclosure claim is made per-dimension rather than restored
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 4)
+- **Assumed:** that once the predicate moved into SQL, the original claim — a cursor holds
+  only "an identifier the requester was already shown" — could simply be restored.
+- **Chose:** not to restore it. It is true for §4.5 visibility (in SQL on both backends, so
+  the scan never touches a row the requester may not see) and true for tenancy **only for
+  callers of `search_in_tenant`**. The HTTP handler still calls the protocol-level
+  `RegistryStore::search` and filters afterwards, so on the live path the claim remains false.
+  The docs now state the guarantee per dimension and name the mechanism: a cursor discloses
+  nothing beyond what the *scan that produced it* was allowed to see.
+- **Alternatives:** (a) restore the original sentence — rejected: it would be false for the
+  deployed path, and a subtly-false comment is worse than a known-false one because it reads
+  as verified; (b) delete the paragraph — rejected: the anchor-vs-served distinction is
+  exactly what a future reader needs in order not to reintroduce this.
+- **Blast radius if wrong:** documentation only, but it is the doc a future filter author will
+  read when deciding whether their filter can run post-query. Getting it wrong reintroduces
+  the leak.
+- **Status:** UNCONFIRMED
