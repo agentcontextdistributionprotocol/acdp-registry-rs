@@ -1620,6 +1620,49 @@ async fn search_returns_published_context() {
     assert_eq!(matches[0]["title"], "findme");
 }
 
+/// REGRESSION: an unauthenticated `?limit=` used to size `Vec::with_capacity`
+/// with no upper bound (`handlers/context.rs`: `.max(1)` is a floor, not a cap),
+/// so this single request asked the allocator for
+/// `u32::MAX * size_of::<SearchResult>()` and aborted the process.
+///
+/// This test is the falsification: revert the handler's
+/// `.clamp(1, SEARCH_LIMIT_MAX)` back to `.max(1)` and the test binary dies on
+/// the allocation rather than reporting a failed assertion. The store-side
+/// `.min(100)` does NOT make this pass — it runs after the accumulator is
+/// allocated.
+///
+/// Note there is no auth header: `caller_from_headers` returns `Ok(None)` for an
+/// anonymous caller, so the allocation was reachable pre-auth.
+#[tokio::test]
+async fn search_limit_is_clamped_and_cannot_drive_an_unbounded_allocation() {
+    let h = harness(true).await;
+    let app = &h.router;
+
+    // u32::MAX — the value that aborted the process before the clamp landed.
+    let (status, v) = get_json(app, "/contexts/search?limit=4294967295").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a huge limit must be clamped and served, not rejected or fatal: {v}"
+    );
+    let matches = v["matches"].as_array().expect("matches array");
+    assert!(
+        matches.len() <= 100,
+        "limit must be clamped to the store cap (100), got {} matches",
+        matches.len()
+    );
+
+    // A value over the cap but small enough to allocate either way: this arm
+    // still passes with the bug present, so it is documentation of the contract
+    // rather than the guard. The u32::MAX arm above is the guard.
+    let (status, _) = get_json(app, "/contexts/search?limit=1000").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The floor must survive the change from `.max(1)` to `.clamp(1, _)`.
+    let (status, _) = get_json(app, "/contexts/search?limit=0").await;
+    assert_eq!(status, StatusCode::OK, "limit=0 must floor to 1, not panic");
+}
+
 #[tokio::test]
 async fn search_rejects_malformed_cursor_with_invalid_cursor() {
     // Cursors are opaque base64("mint_ms:anchor_ms:ctx_id") strings minted by
