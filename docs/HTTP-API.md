@@ -12,6 +12,7 @@ The complete inbound surface of `acdp-registry`. Routes are assembled in
 | GET  | `/.well-known/jwks.json`         | none        | always |
 | GET  | `/.well-known/did.json`          | none        | always (404 unless `[receipt]` configured) |
 | GET  | `/healthz`                       | none        | always |
+| GET  | `/livez`                         | none        | always |
 | GET  | `/metrics`                       | optional scrape bearer | `metrics.enabled` |
 | POST | `/contexts`                      | producer signature | always |
 | GET  | `/contexts/{ctx_id}`             | optional bearer | always |
@@ -42,8 +43,8 @@ two `/admin/{contexts,pinned-keys}` routes are compiled in only with the
 
 Every ACDP data and auth endpoint returns `application/acdp+json` — on both
 success bodies and error envelopes (RFC-ACDP-0007 §4). `/.well-known/jwks.json`
-returns `application/jwk-set+json`; `/healthz` and `/admin/*` return plain
-operational JSON.
+returns `application/jwk-set+json`; `/healthz`, `/livez` and `/admin/*` return
+plain operational JSON.
 
 All requests pass through, outermost first: a media-type backstop that stamps
 `application/acdp+json` on any response that set none; request-id assignment
@@ -78,18 +79,22 @@ rate limiter (`[rate_limit]`): it admits or rejects a request with `429` +
 > `/lineages/{lineage_id}/current`, `GET /log/checkpoint`, `GET /log/proof` and
 > `GET /log/entries`, plus the publish/retract/republish `POST`s — answers with
 > `Cache-Control: private` and `Vary: authorization, x-tenant-id`, so a shared
-> cache cannot reuse one requester's view for another. `/auth/*`, `/admin/*` and
-> `GET /healthz` answer `Cache-Control: no-store`. The three `/.well-known/*`
-> documents are requester-invariant and keep `Cache-Control: public,
-> max-age=300` — `public` is the half that matters: it is the deliberate
-> opposite of `private` above, not an omission.
+> cache cannot reuse one requester's view for another. `/auth/*`, `/admin/*`,
+> `GET /healthz`, `GET /livez` and `GET /metrics` answer `Cache-Control:
+> no-store`. The three `/.well-known/*` documents are requester-invariant and
+> keep `Cache-Control: public, max-age=300` — `public` is the half that
+> matters: it is the deliberate opposite of `private` above, not an omission.
+> (`/.well-known/did.json`'s **404** arm is the one arm in that group answering a
+> *different* directive: `no-store`, because a cached miss outlives the
+> configuration change that would fix it. The document's own `200` arm is
+> `public` like the others. The group's `405` arms emit no directive at all,
+> which is why this says "different" rather than "the only exception".)
 >
-> Two exceptions, stated rather than left to be discovered:
+> Two exceptions, stated rather than left to be discovered. (`GET /metrics` was
+> a third until #218 closed: it now answers `no-store` on **every** arm — 200,
+> 401 and 405 — the 401 being the one that mattered, since a cached 401 is what
+> a shared cache would hand an authorized scraper.)
 >
-> - **`GET /metrics` emits no cache directive.** It gates on
->   `metrics.bearer_token`, so its 200-vs-401 *is* authorization-relative. It sits
->   outside the #205 posture; tracked as #218. Scrapers do not cache, but
->   do not put a shared cache in front of it either.
 > - **`GET /log/checkpoint` answers `private`** even though the checkpoint itself
 >   is requester-invariant. It inherits the data-plane posture by group
 >   membership. That is conservative, not wrong — it forgoes shared caching of a
@@ -160,12 +165,17 @@ this is where consumers resolve the receipt verification key
 (`did:web:<authority>` resolves to exactly this URL). The active signing
 key appears in `verificationMethod` **and** `assertionMethod`; retired keys
 (`[[receipt.retired_keys]]`) appear in `verificationMethod` only, per the
-RFC-ACDP-0010 §9 retention rule. `Cache-Control: public, max-age=300`. `404` when no
-receipt key is configured. See [RECEIPTS.md](RECEIPTS.md).
+RFC-ACDP-0010 §9 retention rule. `Cache-Control: public, max-age=300` on the
+`200` arm. `404` when no receipt key is configured — and **that arm answers
+`no-store`**, not `public`: a cached 404 would keep hiding the document from
+every resolver that saw the miss once an operator configures a key.
+See [RECEIPTS.md](RECEIPTS.md).
 
 ### `GET /healthz`
 
-Storage liveness, plus the identity of the running build.
+Storage **readiness**, plus the identity of the running build. Readiness, not
+liveness: see [`GET /livez`](#get-livez) below for why the distinction is
+load-bearing and which probe belongs on which.
 
 `200` with `{"status":"ok","storage":true,"version":"..."}` when the backend
 responds, `503` with `{"status":"degraded","storage":false,"version":"..."}`
@@ -201,7 +211,46 @@ For the commit on its own — and for which storage implementation was compiled
 in — see the `build` group on
 [`GET /admin/status`](#get-adminstatus), which is bearer-gated.
 
+### `GET /livez`
+
+**Liveness.** Always `200`, never touches storage. `Cache-Control: no-store`.
+
+```json
+{ "status": "ok", "version": "<opaque build identifier>" }
+```
+
+`version` is the same field, with the same normative rules, as
+[`GET /healthz`'s](#the-version-field-117) — non-empty, human-readable, and
+**opaque to consumers**. It is repeated here so a liveness probe's logs identify
+the build without a second, storage-touching request. `status` is always the
+literal `"ok"`: a `/livez` that can answer at all is alive by definition, so
+there is no degraded arm to report.
+
+#### Why this is separate from `/healthz`
+
+`/healthz` is **readiness** — it answers `503` while the database is
+unreachable, which is exactly right for gating traffic and gating a deploy. It
+is exactly wrong for a liveness probe: a liveness probe that sees `503` restarts
+the process, and a process cannot fix an unreachable database by restarting. The
+restart loop that follows also discards the in-memory webhook queue on every
+cycle, and that queue has no outbox and no replay.
+
+So: **readiness probe → `/healthz`. Liveness probe → `/livez`.** Pointing both at
+`/healthz` turns a database outage into data loss. See
+[RAILWAY.md](../docker/RAILWAY.md#healthcheck) for the deployment-side note.
+
 ### `GET /metrics` *(FEAT-10)*
+
+Answers `Cache-Control: no-store` on **every** arm — `200`, `401` and `405`:
+its content is authorization-relative, so a shared cache must never store any of
+them. The guarantee is unconditional on purpose, and the `405` is the load-bearing
+part of it: a `405` is produced by the router *before any handler runs*, so a
+handler-set header cannot reach it — only a layer can. That layer must then be
+scoped to this route rather than applied group-wide, because `aux` also carries
+the `/.well-known/*` documents. Two separate constraints, both load-bearing. Stating the guarantee as "the 200 and the 401"
+would let a refactor to a handler-set header satisfy this sentence verbatim while
+silently dropping an arm — `metrics_is_never_cacheable` pins all three so that
+refactor reddens instead.
 
 Prometheus text exposition (`Content-Type: text/plain; version=0.0.4`). Mounted
 only when `metrics.enabled = true` (`404` otherwise). Deliberately outside the

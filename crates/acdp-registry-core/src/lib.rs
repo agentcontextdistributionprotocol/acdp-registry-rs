@@ -192,7 +192,12 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
             "/.well-known/did.json",
             get(handlers::registry_did_document::<S>),
         )
-        .route("/healthz", get(handlers::health::<S>));
+        .route("/healthz", get(handlers::health::<S>))
+        // Storage READINESS is `/healthz` (503 when the store is down).
+        // Process LIVENESS is `/livez` (always 200). Wiring a k8s
+        // livenessProbe at `/healthz` restart-loops healthy pods through a DB
+        // outage and discards the in-memory webhook queue each cycle.
+        .route("/livez", get(handlers::livez));
 
     // #205: operational internals behind an admin token -- never cacheable.
     // Grouped rather than layered onto `aux` wholesale, because `aux` also
@@ -243,7 +248,27 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
     // `aux` group so a Prometheus scraper reaches it unimpeded; the handler
     // applies its own optional `metrics.bearer_token` gate.
     if metrics_enabled {
-        aux = aux.route("/metrics", get(metrics::metrics_endpoint::<S>));
+        // #218: `no-store` on THIS route only. Not on `aux` wholesale -- `aux`
+        // also carries `/.well-known/jwks.json` and `/.well-known/did.json`,
+        // which set their own `public, max-age=300` on the 200 arm.
+        //
+        // `overriding`, not `if_not_present`, for the same reason as `/admin/*`
+        // above: the guarantee written into `docs/HTTP-API.md` is unconditional,
+        // so the layer must be too.
+        //
+        // A `route_layer` covers the 401 arm (emitted inside the handler when
+        // `metrics.bearer_token` rejects) and the 405 arm as well -- which is
+        // the point, since a cached 401 handed to an authorized scraper is the
+        // worse half of this bug. `/metrics` content is authorization-relative:
+        // 200-vs-401 depends on the caller.
+        aux = aux.merge(
+            Router::new()
+                .route("/metrics", get(metrics::metrics_endpoint::<S>))
+                .route_layer(SetResponseHeaderLayer::overriding(
+                    axum::http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                )),
+        );
     }
 
     let mut app = acdp.merge(aux).merge(admin).with_state(state);

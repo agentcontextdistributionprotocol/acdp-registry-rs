@@ -1562,8 +1562,6 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   request-id pair and lose the id on 408s with no test failing. Bounded: the 413 guard covers the
   same layer boundary, so the regression would have to be specific to the timeout layer alone.
 - **Status:** UNCONFIRMED
-||||||| 26860a5
-||||||| b57934d
 - **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
   evidence rather than actioned here.
 
@@ -1691,3 +1689,46 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   read when deciding whether their filter can run post-query. Getting it wrong reintroduces
   the leak.
 - **Status:** UNCONFIRMED
+
+## H-A / P3 — #218 resolved: `/metrics` answers `no-store` on every arm (200, 401, 405)
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P3)
+- **Assumed:** that `/metrics` being authorization-relative (200-vs-401 gates on
+  `metrics.bearer_token`) makes it unsafe for a shared cache, and that the 401 arm matters more
+  than the 200 arm.
+- **Chose:** attach `no-store` with a `route_layer` on a one-route sub-router merged into `aux`,
+  using `overriding`. `route_layer` covers the 401 and 405 arms, which a handler-side header
+  would not. Scoped to the route rather than the group because `aux` also carries
+  `/.well-known/jwks.json` and `/.well-known/did.json`, which keep `public, max-age=300`.
+- **Alternatives:** (a) `.layer()` on `aux` wholesale — rejected, and *demonstrated* to clobber
+  jwks.json's `public, max-age=300`; (b) setting the header in the handler — rejected, misses
+  the 405 arm; (c) `if_not_present` — rejected, the documented guarantee is unconditional so the
+  layer must be too, matching `/admin/*`.
+- **Blast radius if wrong:** a scraper that relied on caching `/metrics` sees more origin hits.
+  Prometheus does not cache. Reversible in one commit.
+- **Status:** CONFIRMED — closes #218. The classification row was **replaced**, not deleted: the
+  prior guidance in `http_integration.rs` and in this file said deleting it "is how the fix
+  announces itself", which is wrong and was demonstrated to fail the build with
+  `["/metrics"] -- carry no declared cache posture`. Both places corrected.
+
+## H-A / P3 — the prescribed falsification for A7's route-scoping could not fire
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P3, Tests + falsification)
+- **Assumed:** that `every_well_known_document_keeps_public_caching` in `http_integration.rs`
+  could serve as the guard proving the `/metrics` `no-store` is route-scoped rather than
+  group-scoped, by reddening when the layer is applied to `aux` wholesale.
+- **Chose:** it cannot, and this was verified rather than reasoned. That harness runs with
+  `metrics.enabled = false`, so the entire `if metrics_enabled { .. }` block — the code the
+  mutation edits — never executes there. I applied the mutation with an assert that it landed,
+  confirmed by reading the changed lines back, and the test still passed. A probe aimed at code
+  its harness never runs. The real guard,
+  `metrics_no_store_is_scoped_to_the_route_not_the_aux_group`, lives in
+  `metrics_integration.rs` where metrics are on, and reddens with
+  `left: Some("no-store") / right: Some("public, max-age=300")`.
+- **Alternatives:** build a metrics-enabled config inside `http_integration.rs` — possible but
+  wrong home; that file's harness deliberately has metrics off and `metrics_integration.rs`
+  already owns this surface.
+- **Blast radius if wrong:** none — the working guard exists and is falsified. Recorded because
+  the *plan* asserted a falsification that could not fire, which is the same defect class this
+  unit exists to remove, one level up: an unfireable probe presented as evidence.
+- **Status:** CONFIRMED
