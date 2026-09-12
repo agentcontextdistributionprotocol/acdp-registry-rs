@@ -6,6 +6,9 @@
 # `acdp` is consumed from crates.io, so the build context is just this repo.
 
 FROM rust:1.88-bookworm AS chef
+# NOTE: this --locked pins cargo-chef THE TOOL's own dependency resolution.
+# It says nothing about how this repo is built -- easy to misread as "the
+# build is already locked". The two build steps below carry their own.
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
@@ -17,7 +20,7 @@ FROM chef AS builder
 ARG STORAGE_FEATURE=storage-pg
 # Only recipe.json is needed to compile (and cache) the dependency graph.
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json \
+RUN cargo chef cook --release --locked --recipe-path recipe.json \
         --no-default-features --features "${STORAGE_FEATURE}" \
         -p acdp-registry-server
 # The build SHA is declared AFTER `cargo chef cook` on purpose: its value
@@ -33,7 +36,7 @@ ARG ACDP_BUILD_SHA
 ENV ACDP_BUILD_SHA=${ACDP_BUILD_SHA}
 # Bring in the real sources and build the actual binary.
 COPY . .
-RUN cargo build --release \
+RUN cargo build --release --locked \
         --no-default-features --features "${STORAGE_FEATURE}" \
         -p acdp-registry-server
 RUN strip /app/target/release/acdp-registry
