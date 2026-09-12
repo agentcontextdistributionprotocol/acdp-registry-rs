@@ -783,9 +783,9 @@ where
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<acdp::types::search::SearchResponse, acdp::error::AcdpError> {
-        self.0.search(params, requester, anonymous_public_reads)
+        self.0.search(params, requester, public_arm_open)
     }
     fn idempotency_lookup(
         &self,
@@ -839,10 +839,10 @@ where
         cursor: Option<&str>,
         requester: Option<&AgentDid>,
         tenant: Option<&str>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<crate::Page<acdp::types::body::FullContext>, acdp::error::AcdpError> {
         self.0
-            .list_contexts(limit, cursor, requester, tenant, anonymous_public_reads)
+            .list_contexts(limit, cursor, requester, tenant, public_arm_open)
             .await
     }
     /// Delegated on purpose — see the type's docs.
@@ -894,7 +894,7 @@ async fn visible_by_n_calls<S>(
     ctx_ids: &[&str],
     requester: Option<&AgentDid>,
     tenant: Option<&str>,
-    anonymous_public_reads: bool,
+    public_arm_open: bool,
 ) -> std::collections::HashSet<String>
 where
     S: ExtendedRegistryStore + 'static,
@@ -908,7 +908,7 @@ where
             .expect("get task")
             .expect("get ok");
         let Some(ctx) = got else { continue };
-        if !crate::retrieve_visible(&ctx.body, requester, anonymous_public_reads) {
+        if !crate::retrieve_visible(&ctx.body, requester, public_arm_open) {
             continue;
         }
         if let Some(want) = tenant {

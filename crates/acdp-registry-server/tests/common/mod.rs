@@ -225,7 +225,7 @@ pub async fn build_harness_with_webhook(
 /// `Arc<AuthService>` alive so [`SeededHarness::rebuild`] can produce a
 /// NEW `Router` (and, when `caps` changes, a NEW `RegistryServer`) against
 /// a different `RegistryConfig`/`CapabilitiesDocument` (e.g. to flip
-/// `anonymous_public_reads` for one scenario, per `vis-002`/`vis-009`'s
+/// `public_arm_open` for one scenario, per `vis-002`/`vis-009`'s
 /// `registry_capabilities_subset`) WITHOUT losing already-seeded state --
 /// the seeded contexts live in the SQLite store, which `rebuild` clones
 /// (cheap: `SqliteStore` is pool-backed) rather than recreates.
@@ -284,7 +284,7 @@ impl SeededHarness {
     /// underlying store data.
     ///
     /// GAP 3 (REG-10 Phase 8 fixer pass): `RegistryServer::search` /
-    /// `::retrieve` gate `anonymous_public_reads` (and every other
+    /// `::retrieve` gate `public_arm_open` (and every other
     /// capability-driven authorization decision) off `self.caps` -- the
     /// `CapabilitiesDocument` baked in at `RegistryServer::try_new` /
     /// `RegistryServer::new` time, NOT off `RegistryConfig` -- so an
@@ -293,8 +293,8 @@ impl SeededHarness {
     /// (and therefore the SAME, unchanged `caps`), could never actually
     /// change authorization-relevant behavior. `vis-002`/`vis-009`-style
     /// scenarios (`registry_capabilities_subset` overriding
-    /// `anonymous_public_reads`) would have silently kept exercising the
-    /// harness's ORIGINAL `anonymous_public_reads` regardless of the
+    /// `public_arm_open`) would have silently kept exercising the
+    /// harness's ORIGINAL `public_arm_open` regardless of the
     /// override, which `seeded_harness_rebuild_changes_router_behavior_and_preserves_seeded_state`
     /// (`conformance.rs`) now proves directly.
     ///
@@ -302,7 +302,7 @@ impl SeededHarness {
     /// store (`SqliteStore` is pool-backed -- cloning it shares the same
     /// underlying connections/data, it does not create a second database)
     /// combined with the new `caps`. This is what actually makes the new
-    /// `anonymous_public_reads` value take effect, while every context
+    /// `public_arm_open` value take effect, while every context
     /// published before the rebuild remains readable afterward.
     pub fn rebuild(&mut self, cfg: RegistryConfig, caps: CapabilitiesDocument) {
         let store = self.server.store().clone();
@@ -354,12 +354,12 @@ fn wire_server(
     }
 }
 
-/// Set `anonymous_public_reads` on **both** the config and the capabilities
+/// Set `public_arm_open` on **both** the config and the capabilities
 /// document from one input, returning them for a harness constructor.
 ///
 /// # Why this exists — the two knobs look redundant and are not
 ///
-/// `RegistryServer::retrieve` / `::search` gate `anonymous_public_reads` off the
+/// `RegistryServer::retrieve` / `::search` gate `public_arm_open` off the
 /// `CapabilitiesDocument` baked in at `RegistryServer::try_new`, **not** off
 /// `RegistryConfig` (documented as GAP 3 on [`SeededHarness::rebuild`]). So a
 /// test that flips `cfg.auth.anonymous_public_reads` and observes a 200 has
@@ -379,7 +379,7 @@ fn wire_server(
 ///
 /// It does not *enforce* the invariant on callers that set the fields directly.
 /// A `debug_assert` in the shared wiring would have, but it would also have
-/// reddened `admin_list_returns_rows_under_the_shipped_disclosure_default` in
+/// reddened `admin_list_returns_public_rows_for_an_unnamed_admin_requester` in
 /// `http_integration.rs` — a file this lane does not own — where
 /// `config_shipped_disclosure_default` sets the config flag and leaves caps at
 /// `true`. That divergence is currently harmless because `admin_list` reads the

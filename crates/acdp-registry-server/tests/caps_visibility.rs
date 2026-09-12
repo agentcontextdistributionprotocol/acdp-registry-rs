@@ -1,6 +1,6 @@
 //! H-O: the harness invariant that makes every `caps=false` test trustworthy.
 //!
-//! `RegistryServer` gates `anonymous_public_reads` off the `CapabilitiesDocument`
+//! `RegistryServer` gates `public_arm_open` off the `CapabilitiesDocument`
 //! baked in at `try_new`, **not** off `RegistryConfig`. A test that flips the
 //! config value and observes a 200 has measured the harness's caps/config split
 //! and nothing about the binary — the invalid "wire probe" that let a shipping
@@ -39,7 +39,7 @@ use common::{
 
 const AUTHORITY: &str = "registry.test";
 
-/// Base capabilities with `anonymous_public_reads` **deliberately left `true`**,
+/// Base capabilities with `public_arm_open` **deliberately left `true`**,
 /// matching every other `caps()` helper in this crate's tests. The point of this
 /// file is that callers move it through [`with_anonymous_public_reads`] rather
 /// than by hand, so the base value is the permissive one on purpose: a test that
@@ -176,7 +176,7 @@ fn the_helper_sets_both_knobs_not_just_one() {
 /// Rule 80 applied to this helper rather than discovered afterwards — a probe
 /// that varies a value the code does not read cannot fail, so the value set here
 /// is traced to the branch it must flip: `can_retrieve`'s public arm is
-/// `anonymous_public_reads || requester.is_some()`, false for an anonymous
+/// `public_arm_open || requester.is_some()`, false for an anonymous
 /// caller, so a PUBLIC context becomes unretrievable.
 ///
 /// Both directions in one test on purpose. The `false` half alone would pass
@@ -192,7 +192,7 @@ async fn the_caps_knob_reaches_the_retrieve_predicate_in_both_directions() {
     assert_eq!(
         allowed,
         StatusCode::OK,
-        "control: with anonymous_public_reads TRUE an anonymous caller must be \
+        "control: with public_arm_open TRUE an anonymous caller must be \
          able to retrieve a public context — if this is not 200 the `false` \
          assertion below proves nothing, because a harness that refuses \
          everything would satisfy it"
@@ -205,7 +205,7 @@ async fn the_caps_knob_reaches_the_retrieve_predicate_in_both_directions() {
     assert_eq!(
         refused,
         StatusCode::NOT_FOUND,
-        "with anonymous_public_reads FALSE — the SHIPPED default, on which \
+        "with public_arm_open FALSE — the SHIPPED default, on which \
          `auth.enabled` is also false so EVERY caller is anonymous — a public \
          context must not be retrievable. A 200 here means the harness built a \
          permissive registry while the caller asked for a narrowed one, and \

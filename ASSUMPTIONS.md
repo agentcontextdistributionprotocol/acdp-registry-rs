@@ -2462,3 +2462,36 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   handover. Deleting them here would ship an unfalsified behaviour change inside a diff whose
   stated purpose is a one-field wire addition.
 - **Status:** UNCONFIRMED — a separate unit if anyone wants it, with its own evidence.
+
+## H-U — the store parameter is renamed for what the predicate consumes
+
+- **Assumption:** renaming the parameter is behaviour-neutral, and the two struct fields must not
+  move with it.
+- **The boundary, and the reason is not the one this unit was handed.** The hazard was described
+  as: `types/src/config.rs`'s field is `#[serde(default)]`, so after a rename an old key would be
+  **ignored rather than rejected** and the registry would boot at `false` while the operator
+  believed they set `true` — a silent disclosure-posture change. **Measured, that is not what
+  happens.** `AuthConfig` also carries `#[serde(deny_unknown_fields)]` (`config.rs:304`), so a
+  config naming the old key **fails to parse and the registry refuses to start**, naming the
+  unknown field. Still a breaking change for every deployed config, so the conclusion stands — but
+  the failure is loud, not silent, and the severity is different.
+- **Status:** CONFIRMED, with the mechanism corrected.
+
+- **Assumption:** the serde key needed a guard, and the compiler was not one.
+- **Evidence, from this unit's own diff:** the mechanical rename **did** rename the serde field.
+  It compiled, `clippy --all-targets -D warnings` passed on **six** feature configurations, and 28
+  test suites stayed green — because every other use in the repo sets the field programmatically
+  and was renamed in lockstep. Nothing observed the wire contract with deployed `registry.toml`
+  files. `anonymous_public_reads_is_a_stable_config_key` now asserts the KEY by deserialising it,
+  which is the only way to observe the name serde matches on, and it fails against exactly the
+  rename that produced this finding.
+- **Status:** CONFIRMED by falsification.
+
+- **Assumption:** `admin_sees_public_arm = true` is unchanged, and the test guarding it actually
+  ran.
+- **Why the second half needed checking:** the guard is `#[cfg(feature = "playground")]`, so
+  `cargo test --workspace` never compiles it. A 28-suite green says **nothing** about it. Run under
+  `--features playground` it passes, and flipping the value to `false` reddens it with an empty
+  listing — the rejected first draft of #133.
+- **Status:** CONFIRMED under the configuration named, which is the only configuration in which the
+  claim means anything.
