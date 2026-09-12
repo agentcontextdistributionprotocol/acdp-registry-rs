@@ -40,6 +40,251 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so the envelope would have to say `internal_error` — worse than silence, because it
   misattributes a client-side timeout to a server fault. Minting a `request_timeout` code
   is a change to the shared §5 registry and is tracked separately.
+||||||| 26860a5
+
+- **SQLite swallowed a corrupt `contributors` column and skipped an admission check while
+  reporting success.** The predecessor's `contributors` was decoded with
+  `.ok().and_then(...).unwrap_or_default()`, so an unreadable value became an empty list. That
+  is not cosmetic: `contributors` feeds the RFC-ACDP-0014 §4 predecessor-admission check, so a
+  legitimate contributor was refused with `SupersededTarget::NotFound` **while the check
+  itself reported success**. Postgres already errored here (`TEXT[]` decoded with `?`), so this
+  was a backend divergence as well as a silent wrong answer. SQLite now fails loudly.
+
+  The finding that surfaced this claimed it contradicted the existing test
+  `admission_is_not_skipped_when_the_predecessor_body_is_undecodable`. It does not — that test
+  corrupts `body_json`, a different field. It establishes the principle rather than covering
+  the case, which is why this ships with its own test.
+
+- **SQLite relied on sqlx's implicit busy timeout.** `commit_publish` holds `BEGIN IMMEDIATE`
+  across the receipt-minter callback, so a writer can legitimately hold the write lock for as
+  long as that callback plus an fsync takes; a concurrent writer waiting less than that
+  surfaced `SQLITE_BUSY` as a 500 with no retry — a spurious failure under ordinary
+  contention. The timeout is now set explicitly and named. Mapping busy to a retryable 503 is
+  a separate change in a different crate and is not included.
+
+- **Postgres narrowed `version` to `i32`, where SQLite used `i64`.** `PublishRequest.version`
+  is a client-supplied `u32`; Postgres bound it `as i32` (wrapping above 2^31-1, silently,
+  since Rust's `as` truncates rather than panicking) with an `INTEGER` column to match.
+  `contexts.version` is now `BIGINT` and the casts are `i64::from`, so the two backends agree
+  by construction rather than by both being narrow.
+
+  **Scope, stated precisely:** this is a parity fix and defence in depth, **not** a live
+  exploit closed. The finding called it unreachable "because `put()` has no production
+  callers", which was wrong — the casts were in `commit_publish` and the row INSERT, both on
+  the live publish path. It is nonetheless unreachable, for a different and measured reason:
+  the request builder requires `version == 1` for a first publish and `prev + 1` for a
+  supersession, so a publish carrying 3_000_000_000 is refused before the store sees it on
+  both backends. Reaching 2^31 would take ~2 billion sequential supersessions.
+
+### Added
+
+- **Indexes on `contexts(domain)` and `contexts(expires_at)` in both backends.** Both columns
+  are used by `GET /contexts/search` filters and neither was indexed, so both filters were
+  full scans. The `expires_at` index is partial (`WHERE expires_at IS NOT NULL`), matching the
+  predicate the query actually writes. The `data_period` filters remain scans deliberately —
+  they read out of `body_json` through a conversion, so indexing them needs an expression or
+  generated column, which is a schema decision with no measured volume behind it yet.
+
+- **Retrieval could serve a context as `active` while also serving its `retracted` event.**
+  `get()` and `lineage()` read the context row and its lifecycle events as **two separate
+  queries with no shared snapshot**, on *both* backends. A retraction committing between the
+  two reads produced a response carrying `registry_state.status: "active"` alongside a
+  `retracted` lifecycle event — contradicting the RFC-ACDP-0013 §7.2 precedence
+  (`retracted > superseded > expired > active`) that both backends' `row_to_context` is
+  documented to guarantee. A consumer trusting `status` would act on withdrawn data.
+
+  Unlike the search bugs above, this one was present on **both** SQLite and Postgres; it is
+  not a divergence but a shared defect.
+
+  Fixed by reconciling the row-derived status against the events actually loaded, in one
+  shared helper (`acdp_registry_store::lifecycle::reconcile_retraction`) applied at all four
+  call sites. Retraction wins from either source, so the served pair is **self-consistent by
+  construction** — a future read path that forgets to take a snapshot cannot reintroduce the
+  contradiction. Failing closed is deliberate and asymmetric: being briefly stale about a
+  republish is safe, serving `active` for retracted data is not.
+
+  A transaction-per-read would also have fixed it and was the first design; reconciliation
+  was chosen because it fixes the shape rather than the one call site. Two preconditions were
+  checked against the code before relying on the cheaper fix — `lifecycle_events` has no
+  `DELETE` in either backend (append-only), and the event and the denormalized flag are
+  written in the same transaction — so the event log can never be missing a retraction the
+  flag knows about.
+
+- **Search: `q=` returned different results on SQLite and Postgres, and a code comment
+  claimed it did not.** SQLite indexed with FTS5's default `unicode61` tokenizer — no
+  stemmer, no stopwords — while Postgres used `plainto_tsquery('english', …)` over an
+  `english` tsvector, which stems and drops stopwords. Measured on both engines:
+
+  | query | sqlite (before) | pg |
+  |---|---|---|
+  | `q=running` against "run report" | 0 rows | 1 row |
+  | `q=the` against "the quarterly figures" | 1 row | 0 rows |
+
+  **Postgres's semantics win, and SQLite was raised to them.** Postgres is the production
+  backend and stemming is better search behaviour, so degrading it to reach agreement would
+  have been a product regression rather than a fix. The cost lands on SQLite's FTS index,
+  which is derived data rebuilt from `contexts` — reversible, and no context data is touched.
+
+  Two mechanisms, matched in two places: migration `013_fts5_porter.sql` switches
+  `contexts_fts` to `tokenize = 'porter unicode61'` (stemming), and `fts5_escape` drops
+  stopwords query-side because porter does not (measured). **This changes user-visible search
+  results on SQLite:** inflected queries now match, and stopword-only queries now match
+  nothing.
+
+  Three of FTS5's four operator keywords (`NOT`, `AND`, `OR`) are themselves English
+  stopwords, so they are now dropped before quoting rather than quoted — which is exactly
+  what Postgres does (`plainto_tsquery('english', 'NOT hack')` → `'hack'`). That is strictly
+  safer: a caller cannot obtain operator semantics either way, and with `OR` removed they
+  cannot widen a query to a disjunction. `NEAR` is the one keyword Postgres keeps, so it is
+  still quoted, and it now carries the operator-neutralization property in the tests.
+
+  **The honest limit:** FTS5 `porter` and Postgres's snowball `english` are different
+  implementations and will not agree on every word in the language. The parity suite pins the
+  *mechanisms* — a stemmed match happens, stopwords are dropped, dropping them does not empty
+  the rest of the query, terms are AND-ed, case folds — rather than claiming stemmer
+  identity, which would be the same kind of overclaim as the comment this removes.
+
+  The stopword list is PostgreSQL 16's own `tsearch_data/english.stop` (127 entries) and is
+  **verified against Postgres at test time** rather than trusted as a hand-copied table: the
+  pg suite asserts every entry is still a stopword according to the server. A hand-maintained
+  list whose staleness nobody notices was the failure mode worth designing out.
+
+- **Search: `data_period_start_after` / `data_period_end_before` returned wrong results on
+  SQLite.** The two predicates compared RFC 3339 timestamps **lexicographically as TEXT**,
+  because they read out of `body_json` (chrono serde output — `Z` suffix, 0/3/6/9 fractional
+  digits) while the bound was bound as `to_rfc3339()` (`+00:00` suffix). Two different
+  serializers for the same instant, and since `'+'`(0x2B) `< '.'`(0x2E) `<` digits `<
+  'Z'`(0x5A), a stored whole-second value sorted *after* a bound naming that very same
+  instant. Measured directly in sqlite3:
+
+  ```
+  '2026-01-01T00:00:00Z' <= '2026-01-01T00:00:00+00:00'   ->  0
+  ```
+
+  So an inclusive upper bound **excluded** a context whose period ended exactly on it, and
+  the mirror case **wrongly included** one that started before a lower bound. Postgres was
+  always correct — it casts to `timestamptz`. **This changes user-visible search results on
+  SQLite: queries that silently returned the wrong set now return the right one.**
+
+  Fixed by comparing numerically via `unixepoch(…, 'subsec')` on both sides, which
+  normalizes suffix and fractional width together. Binding a `Z`-normalized string instead
+  would *not* have been enough — `'…00Z'` still sorts after `'…00.500Z'`. The fix is
+  query-side only: no migration, and `body_json` is untouched because its exact bytes are
+  the `content_hash` preimage.
+
+  `created_at` / `expires_at` filters were checked and are **not** affected — both their
+  stored and bound sides go through `to_rfc3339()`, so their lexical order does hold. That
+  was measured rather than assumed by analogy.
+
+### Added
+
+- **A cross-backend parity suite (`acdp_registry_store::parity`), so storage divergence
+  fails a test instead of shipping.** The bug above survived a green CI because the
+  conformance suite is SQLite-only and *neither* backend's contract suite exercised a single
+  search filter — 114 stored rows across the pg suite carried zero `data_period` values.
+  Assertions now live once, generic over `ExtendedRegistryStore`, and each backend
+  contributes a thin `tests/parity.rs` that runs them; a divergence fails both suites rather
+  than hiding in whichever one nobody duplicated it into. Demonstrated by reverting the fix:
+  the shared test goes red on SQLite and stays green on Postgres.
+
+- **CI: 23 Postgres contract tests reported success when no Postgres was present.** Every
+  test in `crates/acdp-registry-pg/tests/store_contract.rs` opens with
+  `let Some(url) = pg_url_or_skip() else { return };`, and an early `return` from a
+  `#[tokio::test]` is a **pass** — so an absent database was indistinguishable from a
+  passing one in CI output. Measured on the same binary, both exiting 0 and both printing
+  `23 passed`: **0.01s** with `ACDP_REGISTRY_TEST_PG_URL` unset versus **0.62s** with it
+  set. A 62x gap behind an identical green summary, and nothing in the log to tell them
+  apart. Deleting or mis-spelling the URL in `ci.yml` would have taken the required `tests`
+  job permanently and invisibly green on zero Postgres assertions.
+
+  Fixed by `ACDP_REQUIRE_PG`, mirroring the `ACDP_REQUIRE_CONFORMANCE` gate this repo
+  already built for the same bug class and never applied here: when set, a missing
+  `ACDP_REGISTRY_TEST_PG_URL` panics instead of skipping. It is set on the two CI steps
+  that provide a Postgres service. The gate is deliberately **opt-in rather than
+  unconditional**, because `cargo test --workspace` runs this suite with no database on
+  purpose — an unconditional panic would break a step that is correct as written.
+
+  Currently gates the 23 tests in `acdp-registry-pg`; the 11 in
+  `acdp-registry-server/tests/pg_integration.rs` hold a second copy of the helper and are
+  covered by the same CI env var once that copy is updated.
+
+- **Two CI guards that were never guarding, plus three claims that were false.**
+  Unit H-C. Every finding below was reproduced by experiment before being fixed —
+  the audit that produced them could not compile or run anything, and running them
+  refuted part of what it reported.
+
+  **The receipt key the registry published was never checked against the key it
+  signs with.** RFC-ACDP-0010 §8 has a consumer verify a receipt against the key it
+  resolves from `/.well-known/did.json`. Setting `receipt.rs:100` to `&[0u8; 32]` —
+  publishing an all-zero key while still signing with the real one, so no consumer
+  could verify any receipt — left the workspace suite at 524 passed / 0 failed,
+  byte-identical to baseline. The only existing read of `publicKeyMultibase`
+  asserted `starts_with('z')`; the HTTP test asserted fragment ids; and the
+  receipt-verifying test used a key derived from its own seed rather than the served
+  document. Two guards added, each falsified against that mutation; the end-to-end
+  one takes its verification key only from the served bytes.
+
+  **A wrongdir `ACDP_SPEC_DIR` silently disabled four conformance ratchets even
+  under require-mode.** `spec_families()` returned `None` on a missing
+  `registries/profiles.json` without consulting `require_conformance()`, unlike its
+  neighbour `spec_fixtures()`. It now asserts.
+
+  Narrower claim than it first appears, and the correction matters: this does **not**
+  make CI catch a wrongdir spec directory — CI already caught it. The run was failed
+  by `registry_advertisable_profiles_matches_spec_derived_set`, which gates on
+  `spec_root()` alone, proceeds, and dies in `read_json`. **The last tripwire was one
+  test being inconsistent with its four neighbours**, so the obvious tidy-up — making
+  all five skip uniformly — would have produced exactly the fully-green failure the
+  audit imagined. That trap is now documented at the test itself, which keeps an
+  independent require-mode check rather than sharing one.
+
+  Also fixed there: a bare-fixtures `ACDP_SPEC_DIR` in default mode used to fail hard
+  via that same panic, despite being a layout `resolve_fixture_dir` explicitly
+  supports. And `replays_spec_fixtures_when_present` was not skipping but *degrading*
+  — bucketing fixtures by filename heuristic instead of spec-declared families while
+  reporting ok. The silently-affected set was six tests, not five.
+
+### Changed
+
+- **CI: supply-chain and reproducibility gates that actually assert something.**
+  `[sources] unknown-registry`/`unknown-git` flipped to `deny` (free today: zero
+  git-sourced and zero non-workspace path dependencies). `--locked` added to all 18
+  CI cargo invocations that resolve dependencies, so a build can no longer silently
+  use versions the lockfile never pinned.
+
+  Two settings were deliberately **not** flipped, each for a measured reason.
+  `yanked` stays `warn` because `deny` fails today — this workspace already depends
+  on two yanked crates (`spin`, `wnaf`) and nobody noticed, which is the finding
+  rather than a reason to shrug; clearing them needs a `Cargo.lock` update and should
+  land in the same change that flips the setting. `[bans] multiple-versions` stays
+  `warn` because duplicate versions exist today and are normal in a Rust graph.
+
+- **CI: the memory test step was renamed, not fixed, and the name now says so.**
+  `cargo test (memory)` → `cargo test (memory build; storage backend NOT covered)`.
+  Under those flags all four integration files are cfg-gated away and report 0 tests
+  each; the 71 that run are config validation and workspace scans, none touching
+  `MemoryStore`. **The fix the finding proposed cannot work**:
+  `acdp-registry-server` is bin-only, `MemoryStore` lives in a module of that binary,
+  and integration tests link only against a lib target — a probe importing it fails
+  with `error[E0433]: unresolved module or unlinked crate`. Covering `MemoryStore`
+  requires a test module inside `memory_ext.rs` or a crate restructure; neither is in
+  this change. A `MemoryStore::get` that always returned `Ok(None)` still passes this
+  step. It is now labelled accurately rather than left overclaiming.
+
+- **CI: coverage gained a floor** (`--fail-under-lines 75`), where before it rendered
+  a summary and uploaded lcov while asserting nothing and could only ratchet down
+  invisibly. 75 is deliberately conservative: the local baseline is 79.91% lines, but
+  that run had no Postgres, so CI's figure will be higher than the number the floor
+  was derived from. This fails the coverage *job*; it does not block a merge, because
+  `coverage` is not a required check.
+
+- **CI: `acdp-registry-types` is now built and tested at `feat=[]` deliberately**
+  (closes #221), with a correction #221 does not carry — that configuration was
+  *already* compiled there incidentally, by `cargo test -p acdp-registry-pg`, which
+  declares the dependency `default-features = false`. A stale comment in `ci.yml`
+  claiming otherwise has been corrected. The incidental coverage depends on that step
+  keeping its `-p` form, since `--workspace` unifies features.
+||||||| 26860a5
 
 - **Security (availability): `GET /contexts/search?limit=` could abort the registry
   process from an unauthenticated request.** The handler sized its accumulator with
@@ -51,8 +296,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to the same cap the stores enforce. Regression test landed deliberately red first, so
   the PR's own CI history shows it catching the live defect.
 
-
-### Changed
 
 - **Wire behaviour: the registry now emits a cache posture on requester-relative
   responses** (#205, the wire half of #190). Additive response headers — no

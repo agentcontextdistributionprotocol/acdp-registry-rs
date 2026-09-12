@@ -5,7 +5,15 @@
 //! check, and migration runner.
 
 pub mod cursor;
+pub mod fulltext;
+pub mod lifecycle;
 pub mod log;
+
+/// Cross-backend parity assertions shared by every backend's test suite.
+/// Gated so nothing here ships in a normal build; see the module docs for
+/// why the assertions live here instead of being duplicated per backend.
+#[cfg(feature = "test-support")]
+pub mod parity;
 
 use acdp::error::AcdpError;
 use acdp::registry::RegistryStore;

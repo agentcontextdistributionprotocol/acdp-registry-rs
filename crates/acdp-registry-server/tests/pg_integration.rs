@@ -47,10 +47,42 @@ use tower::ServiceExt;
 
 const AUTHORITY: &str = "registry.test";
 
+/// True when `ACDP_REQUIRE_PG` is set to any value, including the empty
+/// string — matches `acdp-registry-pg/tests/store_contract.rs`'s
+/// `require_pg` and `conformance.rs`'s `require_conformance` byte-for-byte.
+/// Do not "improve" this to a truthiness check: `ACDP_REQUIRE_PG=0`
+/// enabling require-mode is the established behaviour of its siblings, and
+/// having the three disagree is worse than having any one be surprising.
+fn require_pg() -> bool {
+    std::env::var("ACDP_REQUIRE_PG").is_ok()
+}
+
+/// Postgres URL from `ACDP_REGISTRY_TEST_PG_URL`, or `None` (skip) when
+/// unset. Under `ACDP_REQUIRE_PG` the `None` path panics instead.
+///
+/// Same defect #228 fixed in `store_contract.rs`, in this file: an early
+/// `return` from a `#[tokio::test]` is a **pass**, so with the URL unset
+/// every test here reported `ok` having asserted nothing and never opened a
+/// connection. Measured on this suite: 11 passed in 0.01s with require-mode
+/// SET and no database — indistinguishable in CI output from 11 tests that
+/// exercised a real one.
+///
+/// This file needed its own fix rather than inheriting #228's.
+/// `ci.yml`'s pg step sets `ACDP_REQUIRE_PG` and runs BOTH
+/// `cargo test -p acdp-registry-pg` and this suite, so without this the two
+/// would disagree under one environment variable: store_contract.rs failing
+/// loudly while pg_integration.rs stayed silently green. A require-mode that
+/// covers some of the tests it names is worse than none, because it reads
+/// as covering all of them.
 fn pg_url_or_skip() -> Option<String> {
     match std::env::var("ACDP_REGISTRY_TEST_PG_URL") {
         Ok(u) => Some(u),
         Err(_) => {
+            assert!(
+                !require_pg(),
+                "ACDP_REQUIRE_PG is set but ACDP_REGISTRY_TEST_PG_URL is not — these tests \
+                 would report success without ever opening a connection"
+            );
             eprintln!("ACDP_REGISTRY_TEST_PG_URL unset; skipping pg integration");
             None
         }
