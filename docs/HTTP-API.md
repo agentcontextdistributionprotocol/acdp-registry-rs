@@ -114,7 +114,7 @@ Capabilities document. `Cache-Control: public, max-age=300`.
 {
   "acdp_version": "0.5.0",
   "registry_did": "did:web:registry.example.com",
-  "supported_signature_algorithms": ["ed25519"],
+  "supported_signature_algorithms": ["ed25519", "ecdsa-p256"],
   "supported_did_methods": ["did:web"],
   "profiles": ["acdp-registry-core", "acdp-registry-discovery"],
   "limits": {
@@ -127,6 +127,8 @@ Capabilities document. `Cache-Control: public, max-age=300`.
 
 `supported_did_methods` mirrors `auth.did_methods`; `profiles` mirrors
 `registry.profiles`; `limits` mirrors the `[limits]` config section.
+`supported_signature_algorithms` mirrors nothing — it is fixed by the build
+(`crates/acdp-registry-server/src/main.rs:1187`) and is not configurable.
 
 `acdp_version` is unconditionally `"0.5.0"` (RFC-ACDP-0016 §10 — anchors
 handling has no admin-config gate, so its version claim always wins), but
@@ -184,14 +186,16 @@ What it contains depends on how the binary was built:
 
 | Build | `version` | Uniquely identifies the build? |
 |---|---|---|
-| Image built by `.github/workflows/docker.yml` | `0.1.0+g<shortsha>` | Yes |
-| `cargo build`, `cargo run`, `docker compose up --build`, or any other build that injects no commit | `0.1.0` | **No** |
+| Image built by `.github/workflows/docker.yml` | `0.1.2+g<shortsha>` | Yes |
+| `cargo build`, `cargo run`, `docker compose up --build`, or any other build that injects no commit | `0.1.2` | **No** |
 
 The commit is injected at compile time through the `ACDP_BUILD_SHA` build ARG.
 Outside `docker.yml` it is unset and the field degrades to the bare package
-version, which every such build shares. The package version is currently a
-placeholder `0.1.0` for all workspace crates, so the `+g<shortsha>` suffix is
-what carries build identity today.
+version, which every such build shares. Every workspace crate inherits the
+single workspace version (`0.1.2` today, released via release-plz — see the
+per-crate `CHANGELOG.md` files), so the bare string is shared by every build
+of a given release and the `+g<shortsha>` suffix is what carries build
+identity.
 
 `acdp-control-plane` serves the same flat `version` string shape on its own
 `/healthz`. The two are two precision levels of one contract, not two
@@ -594,7 +598,7 @@ Operational snapshot. Always shipped.
 
 ```json
 {
-  "build":       { "version": "0.1.0+g83de685c2f26", "commit": "83de685c2f26",
+  "build":       { "version": "0.1.2+g83de685c2f26", "commit": "83de685c2f26",
                    "storage_impl": "acdp_registry_sqlite::store::SqliteStore" },
   "storage":     { "healthy": true },
   "idempotency": { "records": 128 },
