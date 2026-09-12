@@ -47,6 +47,16 @@ async fn data_period_filters_match_the_cross_backend_contract() {
     parity::assert_data_period_filter_parity(&store, "pg").await;
 }
 
+/// H-H: a tenant-scoped search must not leak a foreign tenant's rows — not in
+/// the page, not in `total_estimate`, and not through the cursor anchor. Same
+/// assertion body SQLite runs, so a divergence fails both suites.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tenant_scoped_search_matches_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    parity::assert_tenant_scoped_search_parity(&store, "pg").await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fulltext_matches_the_cross_backend_contract() {
     let Some(url) = pg_url_or_skip() else { return };

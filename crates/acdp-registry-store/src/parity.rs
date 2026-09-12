@@ -529,21 +529,36 @@ where
     S: ExtendedRegistryStore + 'static,
 {
     const SEED: u8 = 241;
-    const TENANT_A: &str = "tenant-a";
-    const TENANT_B: &str = "tenant-b";
     const GROUP: usize = 3;
     const LIMIT: u32 = 2;
 
+    // Tenant names are UNIQUE PER RUN, and that is load-bearing rather than
+    // tidiness. This assertion checks an exact `total_estimate`, so it is
+    // sensitive to rows left behind by earlier runs — and Postgres is a
+    // PERSISTENT fixture, unlike SQLite's fresh tempfile. With fixed names the
+    // second run against the same database saw 6 rows in `tenant-a`, the third
+    // 9, and the assertion failed for a reason that had nothing to do with the
+    // defect under test. The sibling assertions in this module dodge that by
+    // testing membership rather than counts; this one cannot, so it isolates by
+    // namespace instead.
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let tenant_a = format!("tenant-a-{run}");
+    let tenant_b = format!("tenant-b-{run}");
+    let (tenant_a, tenant_b) = (tenant_a.as_str(), tenant_b.as_str());
+
     let mut a_ids = Vec::new();
     for i in 0..GROUP {
-        a_ids.push(publish_in_tenant(store, SEED, &format!("tenant a row {i}"), TENANT_A).await);
+        a_ids.push(publish_in_tenant(store, SEED, &format!("tenant a row {i}"), tenant_a).await);
     }
     // Strictly separate the two groups in `created_at` (millisecond
     // resolution), so tenant B reliably sorts first. See the doc above.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let mut b_ids = Vec::new();
     for i in 0..GROUP {
-        b_ids.push(publish_in_tenant(store, SEED, &format!("tenant b row {i}"), TENANT_B).await);
+        b_ids.push(publish_in_tenant(store, SEED, &format!("tenant b row {i}"), tenant_b).await);
     }
 
     let params = SearchParams {
@@ -552,7 +567,7 @@ where
         ..Default::default()
     };
     let resp = store
-        .search_in_tenant(&params, None, true, Some(TENANT_A))
+        .search_in_tenant(&params, None, true, Some(tenant_a))
         .await
         .unwrap_or_else(|e| panic!("[{backend}] search_in_tenant must not error: {e:?}"));
 
@@ -561,7 +576,7 @@ where
         let id = m.ctx_id.as_str().to_string();
         assert!(
             !b_ids.contains(&id),
-            "[{backend}] a tenant-{TENANT_A} search returned {TENANT_B}'s row {id}"
+            "[{backend}] a search scoped to {tenant_a} returned {tenant_b}'s row {id}"
         );
     }
 
@@ -570,7 +585,7 @@ where
     // foreign row is indistinguishable from a correct one until you decode it.
     let cursor = resp.next_cursor.as_deref().unwrap_or_else(|| {
         panic!(
-            "[{backend}] expected a next_cursor: {GROUP} rows exist in {TENANT_A} and limit is \
+            "[{backend}] expected a next_cursor: {GROUP} rows exist in {tenant_a} and the limit is \
              {LIMIT}, so the page must be resumable. Without a cursor this assertion cannot \
              observe the defect it exists to catch."
         )
@@ -580,8 +595,8 @@ where
         .unwrap_or_else(|| panic!("[{backend}] next_cursor decoded to None"));
     assert!(
         !b_ids.contains(&anchor_id),
-        "[{backend}] next_cursor is anchored on {TENANT_B}'s row {anchor_id} — a tenant-{TENANT_A} \
-         caller must never receive a token encoding another tenant's (created_at, ctx_id). This is \
+        "[{backend}] next_cursor is anchored on {tenant_b}'s row {anchor_id} — a caller scoped to {tenant_a} \
+         must never receive a token encoding another tenant's (created_at, ctx_id). This is \
          SECURITY follow-up #14: the row itself was filtered out, but its position leaked."
     );
     assert!(
@@ -596,7 +611,7 @@ where
     assert_eq!(
         resp.total_estimate,
         Some(GROUP as u64),
-        "[{backend}] total_estimate must count only {TENANT_A}'s {GROUP} rows. Counting all \
+        "[{backend}] total_estimate must count only {tenant_a}'s {GROUP} rows. Counting all \
          {} rows is a cross-tenant count oracle — the A2 finding — and it is what a \
          post-query filter produces, because the count was computed before the filter ran.",
         GROUP * 2
@@ -606,7 +621,7 @@ where
     // cursor. Without this, (a)-(c) would also pass an implementation that
     // ignored `tenant` and happened to be scanning only A's rows.
     let empty = store
-        .search_in_tenant(&params, None, true, Some("tenant-with-no-rows"))
+        .search_in_tenant(&params, None, true, Some("tenant-with-no-rows-at-all"))
         .await
         .unwrap_or_else(|e| panic!("[{backend}] search_in_tenant must not error: {e:?}"));
     assert!(

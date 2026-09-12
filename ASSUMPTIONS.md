@@ -1649,3 +1649,25 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   searches than necessary. Bounded: the alternative is strictly additive later, and the
   measurement above is the baseline to re-run against. Reversible.
 - **Status:** UNCONFIRMED
+
+## The tenant parity fixture isolates by unique tenant name, not by cleanup
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 3)
+- **Assumed initially (WRONG):** that a fixed pair of tenant names was fine, because every
+  other assertion in `parity.rs` uses fixed seeds.
+- **What actually happened:** the pg suite went red on the second and third runs —
+  `total_estimate` `Some(9)` where `Some(3)` was expected. Postgres is a **persistent**
+  fixture, so rows accumulate; SQLite hid it behind a fresh tempfile per run. The sibling
+  assertions survive this only because they test *membership* (`search_contains`) rather than
+  an exact count, which this one cannot do — the tenant-scoped count IS the property under
+  test.
+- **Chose:** derive both tenant names from a nanosecond timestamp so each run occupies its own
+  namespace. Verified by three consecutive pg runs, then re-falsified to confirm the isolation
+  did not weaken the guard.
+- **Alternatives:** (a) delete the fixture's rows afterwards — rejected: a failing assertion
+  would skip the cleanup and poison the next run, which is how a flake becomes permanent;
+  (b) assert `>=` instead of `==` — rejected, it would no longer detect a cross-tenant count
+  oracle, which is the A2 finding this exists to pin.
+- **Blast radius if wrong:** test-only. A clock moving backwards between runs could collide,
+  which needs a same-nanosecond collision to matter.
+- **Status:** UNCONFIRMED
