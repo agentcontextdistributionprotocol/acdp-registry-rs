@@ -84,6 +84,20 @@ pub async fn admin_list<S: ExtendedRegistryStore + 'static>(
     // SQL arms require a non-NULL requester DID, which an admin token
     // never supplies.
     let admin_requester: Option<&acdp::types::primitives::AgentDid> = None;
+    // `true` here is a TRANSLATION, not a policy choice, and not this route
+    // ignoring `anonymous_public_reads`. The store parameter is named for one
+    // caller's use case; what the predicate actually consumes is "does the
+    // public arm evaluate true for this caller". With `requester = None` that
+    // arm is `(? IS NOT NULL OR ?anon)`, which collapses to `?anon` alone — so
+    // `true` is the ONLY representable way to say *authenticated but unnamed*
+    // in a vocabulary that has no term for it.
+    //
+    // Do not "fix" this to read the flag. Honouring it here is the rejected
+    // first draft of #133: on the shipped default (`false`) it zero-rows every
+    // admin listing on every default-configured registry. RFC-ACDP-0008 §6.3
+    // scopes the flag to *unauthenticated* requests, and an admin bearer is
+    // authenticated — so the flag does not reach this path by design, not by
+    // omission.
     let admin_sees_public_arm = true;
     // Plan §7: push the tenant filter into SQL so the page-size invariant
     // holds — a caller asking for `?limit=50` now gets up to 50 rows for
