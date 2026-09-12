@@ -8,6 +8,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **CI: 23 Postgres contract tests reported success when no Postgres was present.** Every
+  test in `crates/acdp-registry-pg/tests/store_contract.rs` opens with
+  `let Some(url) = pg_url_or_skip() else { return };`, and an early `return` from a
+  `#[tokio::test]` is a **pass** — so an absent database was indistinguishable from a
+  passing one in CI output. Measured on the same binary, both exiting 0 and both printing
+  `23 passed`: **0.01s** with `ACDP_REGISTRY_TEST_PG_URL` unset versus **0.62s** with it
+  set. A 62x gap behind an identical green summary, and nothing in the log to tell them
+  apart. Deleting or mis-spelling the URL in `ci.yml` would have taken the required `tests`
+  job permanently and invisibly green on zero Postgres assertions.
+
+  Fixed by `ACDP_REQUIRE_PG`, mirroring the `ACDP_REQUIRE_CONFORMANCE` gate this repo
+  already built for the same bug class and never applied here: when set, a missing
+  `ACDP_REGISTRY_TEST_PG_URL` panics instead of skipping. It is set on the two CI steps
+  that provide a Postgres service. The gate is deliberately **opt-in rather than
+  unconditional**, because `cargo test --workspace` runs this suite with no database on
+  purpose — an unconditional panic would break a step that is correct as written.
+
+  Currently gates the 23 tests in `acdp-registry-pg`; the 11 in
+  `acdp-registry-server/tests/pg_integration.rs` hold a second copy of the helper and are
+  covered by the same CI env var once that copy is updated.
+
 - **Two CI guards that were never guarding, plus three claims that were false.**
   Unit H-C. Every finding below was reproduced by experiment before being fixed —
   the audit that produced them could not compile or run anything, and running them
@@ -84,6 +105,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   declares the dependency `default-features = false`. A stale comment in `ci.yml`
   claiming otherwise has been corrected. The incidental coverage depends on that step
   keeping its `-p` form, since `--workspace` unifies features.
+||||||| 26860a5
 
 - **Security (availability): `GET /contexts/search?limit=` could abort the registry
   process from an unauthenticated request.** The handler sized its accumulator with
@@ -95,8 +117,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to the same cap the stores enforce. Regression test landed deliberately red first, so
   the PR's own CI history shows it catching the live defect.
 
-
-### Changed
 
 - **Wire behaviour: the registry now emits a cache posture on requester-relative
   responses** (#205, the wire half of #190). Additive response headers — no

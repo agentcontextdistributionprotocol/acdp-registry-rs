@@ -251,6 +251,7 @@ jobs:
       - name: cargo test (postgres)
         env:
           ACDP_REGISTRY_TEST_PG_URL: postgres://acdp:acdp@localhost:5432/acdp_registry
+          ACDP_REQUIRE_PG: "1"
         run: |
           cargo test --locked -p acdp-registry-pg
           cargo test --locked -p acdp-registry-server \
@@ -399,6 +400,7 @@ jobs:
       - name: cargo llvm-cov
         env:
           ACDP_REGISTRY_TEST_PG_URL: postgres://acdp:acdp@localhost:5432/acdp_registry
+          ACDP_REQUIRE_PG: "1"
         run: |
           cargo llvm-cov --locked --workspace --lcov --output-path lcov.info \
             --fail-under-lines 75
