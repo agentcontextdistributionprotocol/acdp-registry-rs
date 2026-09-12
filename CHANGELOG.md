@@ -8,6 +8,38 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Cache posture: `/metrics` and the `did.json` 404 arm were uncacheable in principle and
+  unlabelled in practice; `/healthz` was doing two jobs under one name.** Three fixes.
+
+  `GET /metrics` now answers `Cache-Control: no-store` on **every** arm — 200, 401 and 405 —
+  closing #218. The 401 is the arm that mattered: a cached 401 is what a shared cache would
+  hand to an authorized scraper. The 405 is the arm that fixes the mechanism in place: the
+  router emits it before any handler runs, so a handler-set header could not reach it. The directive is attached to that route alone, not to the
+  group it shares with the `/.well-known/*` documents — applying it group-wide was tried and
+  demonstrated to clobber `jwks.json`'s `public, max-age=300`.
+
+  `GET /.well-known/did.json`'s **404 arm** now answers `no-store`. That 404 means "no receipt
+  signing key is configured" and flips to 200 on an operator action, so a heuristically cached
+  404 masks the newly available document from every resolver that saw the miss, with no way for
+  the operator to observe or flush it. `no-store` rather than a short `max-age` because the 404
+  carries no `ETag` to revalidate against.
+
+  **New `GET /livez`** — always 200, never touches storage, `no-store`. `/healthz` reports
+  storage *readiness* and 503s during a database outage, which is right for a load balancer and
+  catastrophic for a Kubernetes `livenessProbe`: it restart-loops a process that is alive and
+  cannot fix the database by restarting, discarding the in-memory webhook queue each cycle.
+  Nothing in this repo wired `/healthz` that way, so this was a latent trap rather than a live
+  bug — but `docker/RAILWAY.md` told operators to point Railway's healthcheck at `/healthz`
+  without mentioning the 503 arm, and that half is fixed too.
+
+  Guards falsified, not merely added. The `did.json` assertion previously **pinned the defect**
+  as intended behaviour ("the 404 arm sets no Cache-Control"); it is now inverted. The `/livez`
+  guard is a wire test against a closed storage pool, because the route-classification test is a
+  source scan that fails on routes present-but-unclassified and never on the reverse — deleting
+  `/livez` entirely leaves it green, which was confirmed by deleting it. The `/metrics`
+  classification row was **replaced**, not deleted: the prior comment claimed deleting it was
+  "how the fix announces itself", and deleting it was shown to fail the build instead.
+
 - **Observability: the registry minted `x-request-id` values that reached no response,
   and middleware-generated `413`s carried no error envelope.** Two defects in the
   middleware stack, both in `build_router`.

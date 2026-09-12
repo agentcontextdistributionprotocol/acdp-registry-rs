@@ -125,7 +125,15 @@ Railway needs to pull from GHCR. Either:
 
 ### Healthcheck
 
-Point Railway's healthcheck at **`/healthz`**.
+Point Railway's healthcheck at **`/healthz`** — it reports storage
+**readiness** and answers `503` when the database is unreachable, which is what
+you want for gating traffic and for gating a deploy.
+
+**Do not point a *liveness* probe at `/healthz`.** It returns `503` during a
+database outage, so a liveness probe there restarts a process that is perfectly
+alive and cannot fix the database by restarting — and every restart discards the
+in-memory webhook queue, which has no outbox and no replay. Use **`/livez`** for
+liveness: it always answers `200` and never touches storage.
 
 ## Local parity
 

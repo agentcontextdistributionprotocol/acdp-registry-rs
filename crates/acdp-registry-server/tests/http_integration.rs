@@ -2647,6 +2647,115 @@ async fn search_visibility_filter_narrows_results() {
 }
 
 #[tokio::test]
+async fn livez_is_always_200_and_never_cacheable_even_when_storage_is_down() {
+    // The WHOLE POINT of splitting /livez from /healthz: during a storage
+    // outage /healthz must 503 (take the pod out of rotation) while /livez must
+    // stay 200 (do not restart a process that is alive and cannot fix the DB by
+    // restarting). Wiring a k8s livenessProbe at /healthz restart-loops healthy
+    // pods and discards the in-memory webhook queue on every cycle.
+    //
+    // This is a WIRE test on purpose. `every_route_in_the_core_router_is_classified`
+    // cannot serve as the guard here: it is a source scan that fails on routes
+    // present-but-unclassified and never on the reverse, so deleting /livez
+    // entirely leaves it green.
+    let db = tempfile::Builder::new()
+        .prefix("acdp-livez-")
+        .suffix(".sqlite")
+        .tempfile()
+        .unwrap();
+    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    store.migrate().await.unwrap();
+    store.pool().close().await; // storage is now dead
+
+    let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
+    let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+    let secret = JwtSecret::from_bytes(&[42u8; 32]);
+    let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
+    let resolver = Arc::new(WebResolver::new());
+    let auth = Arc::new(AuthService::new(
+        AuthConfig::default(),
+        challenges,
+        signer,
+        resolver,
+        AUTHORITY.into(),
+    ));
+    let state = AppStateInner::new(server, auth, None, config(true), None);
+    let app = build_router(state);
+
+    // /healthz reports READINESS: storage is down, so 503.
+    let health = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        health.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "/healthz must still report storage readiness (503) -- the split must not \
+         weaken it",
+    );
+
+    // /livez reports process LIVENESS: alive regardless of storage.
+    let live = app
+        .oneshot(
+            Request::builder()
+                .uri("/livez")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        live.status(),
+        StatusCode::OK,
+        "/livez must be 200 even when storage is down -- a livenessProbe here must \
+         not restart-loop a healthy pod through a DB outage",
+    );
+    assert_eq!(
+        live.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "/livez must be no-store -- a cached 200 from a dead process is exactly the \
+         failure a liveness probe exists to rule out",
+    );
+
+    // The BODY is part of the contract too, and is asserted here because
+    // `docs/HTTP-API.md` now publishes it. `status` is the literal "ok" with no
+    // degraded arm -- a /livez that can answer at all is alive by definition --
+    // and `version` carries build identity so a probe's logs identify the build
+    // without a second, storage-touching request. `version` is asserted
+    // non-empty rather than equal to a literal: it is opaque by contract
+    // (`docs/HTTP-API.md` #117), and pinning its value here would re-assert the
+    // packaging rule that `healthz_version_*` already owns.
+    let body = axum::body::to_bytes(live.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json.get("status").and_then(|v| v.as_str()),
+        Some("ok"),
+        "/livez must report status \"ok\" -- it has no degraded arm",
+    );
+    let version = json.get("version").and_then(|v| v.as_str());
+    assert!(
+        version.is_some_and(|v| !v.is_empty()),
+        "/livez must carry a non-empty opaque `version`, same field and rules as \
+         /healthz; got {version:?}",
+    );
+    assert!(
+        json.get("storage").is_none(),
+        "/livez must NOT report storage -- reporting it would recreate exactly the \
+         readiness/liveness conflation the split exists to remove; got {json}",
+    );
+}
+
+#[tokio::test]
 async fn health_503_when_storage_pool_closed() {
     // BUG-05: /healthz returns 503 + status "degraded" when the storage
     // health check fails. Realised by closing the SQLite pool out from
@@ -7421,17 +7530,23 @@ const NON_DATA_ROUTES: &[(&str, &str)] = &[
         "/admin/pinned-keys/reload",
         "admin ops (playground): no-store",
     ),
-    // Liveness -- `no-store` from the handler, on both arms.
-    ("/healthz", "liveness: no-store from the handler"),
-    // KNOWN GAP, tracked separately: `/metrics` gates on
-    // `metrics.bearer_token`, so its 200-vs-401 IS authorization-relative, and
-    // it emits no cache directive today. Listed here as an explicit exemption
-    // rather than silently omitted -- tracked as #218. Deleting this line is how
-    // the fix announces itself.
-    (
-        "/metrics",
-        "EXEMPT: known gap, no directive emitted (follow-up issue)",
-    ),
+    // Storage READINESS -- `no-store` from the handler, on both arms. This row
+    // was labelled "liveness" for as long as the endpoint was, which is the
+    // confusion the /livez split exists to remove; relabelled deliberately.
+    ("/healthz", "storage readiness: no-store from the handler"),
+    // Process LIVENESS -- always 200, `no-store` from the handler.
+    ("/livez", "liveness: no-store from the handler"),
+    // Scrape endpoint -- `no-store`, overriding, on both the 200 and the 401
+    // arm. Authorization-relative: 200-vs-401 gates on `metrics.bearer_token`.
+    // Closed #218.
+    //
+    // NOTE for whoever fixes the next entry like this: the old comment here said
+    // "deleting this line is how the fix announces itself". That was wrong and
+    // would have broken the build. `NON_DATA_ROUTES` is a CLASSIFICATION table,
+    // not an exemption list -- assertion 2 below fails on any mounted route
+    // absent from BOTH tables, so a deleted row reads as "carries no declared
+    // posture". The row gets REPLACED with a real posture, never removed.
+    ("/metrics", "scrape endpoint: no-store"),
 ];
 
 #[test]
@@ -7590,11 +7705,23 @@ async fn every_well_known_document_keeps_public_caching() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert!(
+    // This assertion used to pin the DEFECT as intended behaviour: it asserted
+    // the 404 arm carried NO directive, with a comment describing that as
+    // "pre-existing behaviour, pinned so a change is a visible failure". The
+    // mechanism worked exactly as designed -- it just pinned the wrong side.
+    //
+    // A 404 here means "no receipt signing key is configured", which flips to
+    // 200 on an operator action. A shared cache holding a heuristically-cached
+    // 404 masks the newly available document from every resolver that saw the
+    // miss, and the operator has no way to observe or flush that. Same shape as
+    // `/healthz`: staleness here is the failure the endpoint exists to rule out.
+    assert_eq!(
         resp.headers()
             .get(axum::http::header::CACHE_CONTROL)
-            .is_none(),
-        "the did.json 404 arm sets no Cache-Control",
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "the did.json 404 arm must be no-store -- a cached 404 masks a newly \
+         configured receipt key from every resolver that saw the miss",
     );
 }
 

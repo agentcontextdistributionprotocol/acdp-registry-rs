@@ -2,8 +2,10 @@
 //!
 //! These run in their own test binary (separate process) so the
 //! process-global `metrics` recorder is isolated from other integration
-//! tests. All assertions live in a single `#[tokio::test]` so accumulated
-//! counter values are deterministic within the process.
+//! tests. The counter-accumulation assertions live in a single `#[tokio::test]`
+//! so accumulated values are deterministic within the process; the tests that
+//! assert only on response headers or mounting build their own harness and are
+//! independent of that ordering.
 
 #![cfg(feature = "storage-sqlite")]
 
@@ -359,6 +361,176 @@ async fn metrics_endpoint_exposes_request_and_domain_series() {
         1.0,
         "one per-IP rejection counted"
     );
+}
+
+#[tokio::test]
+async fn metrics_no_store_is_scoped_to_the_route_not_the_aux_group() {
+    // The `no-store` for `/metrics` must be attached with a `route_layer` on a
+    // one-route sub-router, NOT with `.layer()` on `aux` wholesale -- `aux` also
+    // carries `/.well-known/jwks.json` and `/.well-known/did.json`, which are
+    // requester-INVARIANT and keep `public, max-age=300`. A group-wide override
+    // would silently make those uncacheable.
+    //
+    // THIS TEST HAS TO LIVE HERE, and the reason is worth recording. The obvious
+    // place is `every_well_known_document_keeps_public_caching` in
+    // `http_integration.rs`, and the plan prescribed exactly that. It cannot
+    // work: that harness runs with `metrics.enabled = false`, so the whole
+    // `if metrics_enabled { .. }` block is never executed there and a mutation
+    // inside it has nothing to observe. The prescribed falsification was
+    // verified to pass against the defect -- a probe aimed at code its harness
+    // never runs.
+    let mut cfg = metrics_config();
+    cfg.metrics.bearer_token = String::new(); // gate off; we only care about headers
+    let h = harness(cfg).await;
+
+    for (path, want) in [
+        ("/.well-known/jwks.json", "public, max-age=300"),
+        ("/.well-known/acdp.json", "public, max-age=300"),
+    ] {
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some(want),
+            "{path} is requester-invariant and must keep `{want}` -- the /metrics \
+             no-store must be scoped to its own route, not applied to the aux group",
+        );
+    }
+
+    // And the scrape endpoint itself is still no-store, in the same build.
+    let (_, _, _) = scrape(&h.router).await;
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "/metrics must be no-store in the same build that keeps the well-known \
+         documents cacheable",
+    );
+}
+
+#[tokio::test]
+async fn metrics_is_never_cacheable() {
+    // #218. `/metrics` is authorization-relative -- 200 vs 401 depends on the
+    // caller's bearer token -- so a shared cache must never store it.
+    //
+    // This test lives here rather than in `http_integration.rs` because that
+    // file's harness has `metrics: Default::default()` (enabled = false), so
+    // `/metrics` is not mounted there at all. It *could* build its own
+    // metrics-enabled config; it simply should not, since this file already
+    // owns the metrics surface.
+    //
+    // Both arms are asserted, and the 401 is the MORE important one: a cached
+    // 401 is what a shared cache would hand to an authorized scraper.
+    let mut cfg = metrics_config();
+    cfg.metrics.bearer_token = "scrape-secret".into();
+    let h = harness(cfg).await;
+
+    // 401 arm -- no token.
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "/metrics 401 arm must be no-store -- a cached 401 is what a shared cache \
+         would hand to an authorized scraper",
+    );
+
+    // 200 arm -- correct token.
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .header("authorization", "Bearer scrape-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "/metrics 200 arm must be no-store -- its content is authorization-relative",
+    );
+
+    // 405 arm -- the arm that JUSTIFIES the design. `ASSUMPTIONS.md` records
+    // that a handler-set header was rejected precisely because it misses this
+    // arm: a 405 is produced by the router before any handler runs, so only a
+    // `route_layer` can reach it. Without this assertion, a future refactor to
+    // a handler-set header leaves every other test in this file green while
+    // silently dropping the property the rationale is built on -- a guard
+    // weaker than the reasoning it is supposed to protect.
+    for method in ["POST", "DELETE"] {
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/metrics")
+                    .header("authorization", "Bearer scrape-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method} /metrics should be 405",
+        );
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "/metrics 405 arm ({method}) must be no-store -- it is emitted by the \
+             router before any handler runs, so a handler-set header would miss it",
+        );
+    }
 }
 
 #[tokio::test]
