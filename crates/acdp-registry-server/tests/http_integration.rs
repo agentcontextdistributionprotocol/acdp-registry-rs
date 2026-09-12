@@ -7505,6 +7505,21 @@ fn mounted_route_paths(src: &str) -> Vec<String> {
     out
 }
 
+/// How many `.route(` calls the router source actually makes, counted WITHOUT
+/// interpreting them -- the denominator `mounted_route_paths` is checked against.
+///
+/// Comment lines are excluded because `lib.rs` mentions `.route(...)` inside a
+/// comment describing this very test; counting it would make the two sides
+/// disagree by one forever. A `.route(` in a TRAILING comment on a code line
+/// would still be counted, and that is deliberate: it reddens loudly rather than
+/// being silently absorbed, which is the whole point of this assertion.
+fn mounted_route_call_count(src: &str) -> usize {
+    src.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .map(|l| l.matches(".route(").count())
+        .sum()
+}
+
 /// Routes that intentionally sit OUTSIDE the `data` group, each with the reason
 /// it is not requester-relative-cacheable. Adding a route to the core router
 /// without adding it here (or to `DATA_PLANE_ROUTES`) fails the test below --
@@ -7595,12 +7610,33 @@ fn every_route_in_the_core_router_is_classified() {
          Cache-Control header at all, which is the defect #190/#205 exist to prevent.",
     );
 
-    // Guard the guard: a scan that silently matched nothing would make both
-    // assertions above vacuously true.
-    assert!(
-        mounted_route_paths(CORE_ROUTER_SRC).len() >= DATA_PLANE_ROUTES.len() + 10,
-        "the source scan found implausibly few routes -- the parser has probably stopped \
-         matching the router's syntax, which would make this whole test vacuous",
+    // Guard the guard. This was a FLOOR (`>= DATA_PLANE_ROUTES.len() + 10`) and a
+    // floor cannot do this job: under-counting is the only failure a broken
+    // scanner produces, and a lower bound is structurally blind to it. A sibling
+    // lane shipped a scanner that matched 19 of 27 routes and sailed through a
+    // `>= 15` floor, reporting six never-checked routes as covered.
+    //
+    // Equality against a count derived from the SAME source, by a different and
+    // deliberately dumber method, is what actually holds. It fails in both
+    // directions:
+    //
+    //   - scanner stops matching the router's syntax  -> scanned < calls -> RED
+    //   - a route is mounted with a NON-LITERAL path  -> scanned < calls -> RED
+    //
+    // That second case is A10's other half. `mounted_route_paths` silently
+    // `continue`s when the token after `.route(` is not a quote, so
+    // `const P: &str = "/debug"; .route(P, get(h))` is invisible to it -- the
+    // route exists, is never classified, and no test notices. Under equality it
+    // is loud. If you are reading this because the assertion failed, that is
+    // probably why: a route was added whose path is not a string literal, and it
+    // needs either a literal or an explicit entry here.
+    assert_eq!(
+        mounted_route_paths(CORE_ROUTER_SRC).len(),
+        mounted_route_call_count(CORE_ROUTER_SRC),
+        "the source scan interpreted a different number of routes than the router \
+         actually mounts. Either the parser has stopped matching the router's syntax \
+         (making this whole test vacuous), or a route was mounted with a non-literal \
+         path and is silently unclassified.",
     );
 }
 
