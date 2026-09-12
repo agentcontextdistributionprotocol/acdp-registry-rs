@@ -2371,3 +2371,31 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   that does not exist — the failure this unit's second half exists to remove.
 - **Status:** UNCONFIRMED — the behaviour is deliberate and the docs match the code as shipped, but
   the *decision* is open and should be closed explicitly rather than by inertia.
+## The caps/config invariant is made unrepresentable for new callers, not enforced for existing ones
+
+- **Plan:** plans/h-o-caps-testability.md
+- **Assumed.** `with_anonymous_public_reads` gives callers one input that sets both
+  `cfg.auth.anonymous_public_reads` and `caps.anonymous_public_reads`. It does **not** enforce the
+  invariant on the 75 existing construction sites that set the fields directly.
+- **Chose** the constructive form because the enforcing form is not mine to ship. A `debug_assert`
+  in `wire_server` / `build_harness_with_webhook` would make divergence fatal — and would redden
+  `admin_list_returns_rows_under_the_shipped_disclosure_default` in `http_integration.rs`, where
+  `config_shipped_disclosure_default` sets the config flag and leaves caps at `true`. That file is
+  lane-1's for PR6. Breaking another lane's test to enforce an invariant that is available
+  constructively to every new caller is not a trade this unit gets to make.
+- **Alternatives rejected.** (a) The `debug_assert`, above — correct in kind, out of scope in
+  practice; it is the right follow-up once the divergent site is resolved, and I have reported it as
+  a claim-request rather than acting on it. (b) A newtype carrying both values, which would require
+  editing all 75 call sites, 73 of them in files I do not own. (c) Doing nothing on the grounds that
+  the one divergence is currently harmless — true today only because `admin_list` reads the flag
+  from neither source, which is itself a latent defect rather than a guarantee.
+- **Blast radius if wrong:** a caller can still hand-set one field and get the other's behaviour,
+  which is the original defect class. The mitigation is that the correct path is now shorter than
+  the incorrect one, and that `the_helper_sets_both_knobs_not_just_one` fails loudly if the helper
+  itself ever stops setting both.
+- **Measured, not assumed — the guards are asymmetric and the asymmetry is the evidence:** dropping
+  the caps half reddens **both** the unit guard and the end-to-end test; dropping the config half
+  reddens **only** the unit guard, because caps is the field the predicate actually reads. That
+  directional result is what shows the end-to-end test measures caps rather than config, and it is
+  why the config half needs its own assertion to be protected at all.
+- **Status:** UNCONFIRMED
