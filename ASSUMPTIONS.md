@@ -1732,3 +1732,24 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   the *plan* asserted a falsification that could not fire, which is the same defect class this
   unit exists to remove, one level up: an unfireable probe presented as evidence.
 - **Status:** CONFIRMED
+
+## Guarantees are falsified per assertion, via accumulation rather than separate tests
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 5, CHARTER rules 51–52)
+- **Assumed initially (WRONG):** that one test asserting four related properties was adequate
+  coverage of those four properties.
+- **What the audit found:** `assert!` aborts at the first failure, so only 2 of phase 1's 4
+  assertions had ever been shown to fail, and `matches.is_empty()` was **structurally
+  unfalsifiable** — the sentinel returned no rows, so no mutation could make it fail.
+- **Chose:** two different remedies for two different shapes. For the unit tests, **one test per
+  guarantee** — cheap, and a single mutation then produces four independent verdicts. For the
+  shared cross-backend assertion, **accumulate violations and report them all at once**, because
+  splitting it would have meant 4 public functions × 2 backends and a thin-caller file that is
+  supposed to stay thin.
+- **Alternatives:** split the parity assertion into one function per guarantee — rejected: it
+  multiplies the per-backend caller boilerplate the module's own docs warn against, and
+  accumulation achieves the same property (every guarantee evaluated every run) with a strictly
+  better failure message.
+- **Blast radius if wrong:** a guarantee could regress while the suite stays green. Bounded by
+  the recorded mutation matrix, which shows all six guarantees firing on both backends.
+- **Status:** UNCONFIRMED

@@ -571,71 +571,99 @@ where
         .await
         .unwrap_or_else(|e| panic!("[{backend}] search_in_tenant must not error: {e:?}"));
 
+    // Every guarantee below is EVALUATED on every run, and violations are
+    // collected rather than asserted one at a time. `assert!` aborts the test at
+    // the first failure, so four guarantees behind four asserts means one verdict
+    // for four promises and three that may never have executed (CHARTER rule 51).
+    // Accumulating them means a single mutation reports exactly which guarantees
+    // it broke — which is both a stronger proof that each is live and a far more
+    // useful failure message.
+    let mut violations: Vec<String> = Vec::new();
+
     // (a) No foreign row may appear in the page itself.
-    for m in &resp.matches {
-        let id = m.ctx_id.as_str().to_string();
-        assert!(
-            !b_ids.contains(&id),
-            "[{backend}] a search scoped to {tenant_a} returned {tenant_b}'s row {id}"
-        );
+    let leaked: Vec<&str> = resp
+        .matches
+        .iter()
+        .map(|m| m.ctx_id.as_str())
+        .filter(|id| b_ids.iter().any(|b| b == id))
+        .collect();
+    if !leaked.is_empty() {
+        violations.push(format!(
+            "(a) page content: a search scoped to {tenant_a} returned {tenant_b}'s rows {leaked:?}"
+        ));
     }
 
-    // (b) The cursor anchor — the actual defect. Assert the anchored row's
+    // (b) The cursor anchor — the actual defect. Check the anchored row's
     // IDENTITY, not merely that a cursor came back: a cursor anchored on a
     // foreign row is indistinguishable from a correct one until you decode it.
-    let cursor = resp.next_cursor.as_deref().unwrap_or_else(|| {
-        panic!(
-            "[{backend}] expected a next_cursor: {GROUP} rows exist in {tenant_a} and the limit is \
-             {LIMIT}, so the page must be resumable. Without a cursor this assertion cannot \
-             observe the defect it exists to catch."
-        )
-    });
-    let (_, anchor_id) = decode_cursor(cursor)
-        .unwrap_or_else(|e| panic!("[{backend}] next_cursor must decode: {e:?}"))
-        .unwrap_or_else(|| panic!("[{backend}] next_cursor decoded to None"));
-    assert!(
-        !b_ids.contains(&anchor_id),
-        "[{backend}] next_cursor is anchored on {tenant_b}'s row {anchor_id} — a caller scoped to {tenant_a} \
-         must never receive a token encoding another tenant's (created_at, ctx_id). This is \
-         SECURITY follow-up #14: the row itself was filtered out, but its position leaked."
-    );
-    assert!(
-        a_ids.contains(&anchor_id),
-        "[{backend}] next_cursor anchor {anchor_id} belongs to neither tenant in this fixture — \
-         the anchor must be one of the caller's own rows"
-    );
+    match resp.next_cursor.as_deref() {
+        None => violations.push(format!(
+            "(b) cursor absent: {GROUP} rows exist in {tenant_a} and the limit is {LIMIT}, so the \
+             page must be resumable. With no cursor this guarantee cannot be observed at all, \
+             which is a failure of the fixture as much as of the code."
+        )),
+        Some(cursor) => match decode_cursor(cursor) {
+            Err(e) => violations.push(format!("(b) next_cursor did not decode: {e:?}")),
+            Ok(None) => violations.push("(b) next_cursor decoded to None".to_string()),
+            Ok(Some((_, anchor_id))) => {
+                if b_ids.contains(&anchor_id) {
+                    violations.push(format!(
+                        "(b) CURSOR ANCHOR: next_cursor is anchored on {tenant_b}'s row \
+                         {anchor_id} — a caller scoped to {tenant_a} must never receive a token \
+                         encoding another tenant's (created_at, ctx_id). This is SECURITY \
+                         follow-up #14: the row itself was filtered out, but its position leaked."
+                    ));
+                } else if !a_ids.contains(&anchor_id) {
+                    violations.push(format!(
+                        "(b) anchor {anchor_id} belongs to neither tenant in this fixture — it \
+                         must be one of the caller's own rows"
+                    ));
+                }
+            }
+        },
+    }
 
     // (c) total_estimate must be the TENANT-scoped count, not the global one.
     // `COUNT(*) OVER ()` rides the same scan, so this is the observable proof
     // that the predicate is in the WHERE clause rather than applied afterwards.
-    assert_eq!(
-        resp.total_estimate,
-        Some(GROUP as u64),
-        "[{backend}] total_estimate must count only {tenant_a}'s {GROUP} rows. Counting all \
-         {} rows is a cross-tenant count oracle — the A2 finding — and it is what a \
-         post-query filter produces, because the count was computed before the filter ran.",
-        GROUP * 2
-    );
+    if resp.total_estimate != Some(GROUP as u64) {
+        violations.push(format!(
+            "(c) total_estimate is {:?}, must be Some({GROUP}) — only {tenant_a}'s rows. Counting \
+             ANY row outside that tenant is a cross-tenant count oracle (the A2 finding), and it \
+             is exactly what a post-query filter produces, because the count was computed before \
+             the filter ran. Note the observed number can exceed this fixture's own row count: on \
+             a persistent backend the agent_id filter also matches earlier runs' rows, which is \
+             itself a demonstration that the oracle grows with the table.",
+            resp.total_estimate
+        ));
+    }
 
-    // (d) The mirror: a tenant with no rows must see nothing and offer no
-    // cursor. Without this, (a)-(c) would also pass an implementation that
-    // ignored `tenant` and happened to be scanning only A's rows.
+    // (d) The mirror. Without it, (a)-(c) would also pass an implementation that
+    // ignored `tenant` entirely and happened to be scanning only A's rows.
     let empty = store
         .search_in_tenant(&params, None, true, Some("tenant-with-no-rows-at-all"))
         .await
         .unwrap_or_else(|e| panic!("[{backend}] search_in_tenant must not error: {e:?}"));
+    if !empty.matches.is_empty() {
+        violations.push(format!(
+            "(d) a tenant with no rows matched {} contexts",
+            empty.matches.len()
+        ));
+    }
+    if empty.total_estimate != Some(0) {
+        violations.push(format!(
+            "(d) a tenant with no rows reported total_estimate {:?}, must be Some(0)",
+            empty.total_estimate
+        ));
+    }
+    if empty.next_cursor.is_some() {
+        violations.push("(d) a tenant with no rows must not receive a cursor".to_string());
+    }
+
     assert!(
-        empty.matches.is_empty(),
-        "[{backend}] a tenant with no rows matched {} contexts",
-        empty.matches.len()
-    );
-    assert_eq!(
-        empty.total_estimate,
-        Some(0),
-        "[{backend}] a tenant with no rows must have total_estimate 0"
-    );
-    assert!(
-        empty.next_cursor.is_none(),
-        "[{backend}] a tenant with no rows must not receive a cursor"
+        violations.is_empty(),
+        "[{backend}] {} tenant-scoping guarantee(s) violated:\n  - {}",
+        violations.len(),
+        violations.join("\n  - ")
     );
 }

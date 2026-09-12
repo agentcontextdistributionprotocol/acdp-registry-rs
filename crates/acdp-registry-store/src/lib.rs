@@ -377,8 +377,9 @@ mod default_search_in_tenant_tests {
     use acdp::registry::store::{PublishCommit, PublishCommitOutcome};
     use acdp::registry::{IdempotencyRecord, LifecycleCommitOutcome};
     use acdp::types::body::Body;
-    use acdp::types::primitives::{ContentHash, CtxId, LineageId};
+    use acdp::types::primitives::{ContentHash, ContextType, CtxId, LineageId, Status, Visibility};
     use acdp::types::publish::PublishResponse;
+    use acdp::types::search::SearchResult;
     use chrono::{DateTime, Utc};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -386,6 +387,27 @@ mod default_search_in_tenant_tests {
     /// assertion can only mean "the delegate branch ran".
     const SENTINEL_TOTAL: u64 = 4242;
     const SENTINEL_CURSOR: &str = "SENTINEL-DELEGATED-TO-SEARCH";
+    const SENTINEL_CTX: &str = "acdp://sentinel.invalid/00000000-0000-0000-0000-00000000beef";
+
+    /// One recognizable row, so that "did a foreign-tenant request return rows?"
+    /// is a question the sentinel can actually answer. With an empty `matches`
+    /// the emptiness assertion was structurally unfalsifiable — no mutation of
+    /// the default could ever make it fail — which is an assertion masquerading
+    /// as a guard (CHARTER rule 51).
+    fn sentinel_row() -> SearchResult {
+        SearchResult {
+            ctx_id: CtxId(SENTINEL_CTX.to_string()),
+            lineage_id: LineageId("sentinel-lineage".to_string()),
+            agent_id: AgentDid::new("did:web:sentinel.invalid".to_string()),
+            title: "sentinel".to_string(),
+            summary: None,
+            context_type: ContextType::DataSnapshot,
+            domain: None,
+            created_at: DateTime::<Utc>::from_timestamp(0, 0).expect("epoch"),
+            status: Status::Active,
+            visibility: Some(Visibility::Public),
+        }
+    }
 
     /// A backend that records tenants for nothing and overrides no
     /// `ExtendedRegistryStore` method — the shape `search_in_tenant`'s default
@@ -417,7 +439,7 @@ mod default_search_in_tenant_tests {
         ) -> Result<SearchResponse, AcdpError> {
             self.search_calls.fetch_add(1, Ordering::SeqCst);
             Ok(SearchResponse {
-                matches: Vec::new(),
+                matches: vec![sentinel_row()],
                 total_estimate: Some(SENTINEL_TOTAL),
                 next_cursor: Some(SENTINEL_CURSOR.to_string()),
             })
@@ -537,11 +559,8 @@ mod default_search_in_tenant_tests {
         assert_eq!(s.calls(), 1);
     }
 
-    /// The branch that matters. A foreign tenant must yield the empty page
-    /// **without consulting the store at all** — not a filtered version of its
-    /// rows, and not a query whose results are discarded afterwards.
-    #[tokio::test]
-    async fn a_foreign_tenant_yields_an_empty_page_and_never_touches_the_store() {
+    /// Helper: the default's answer for a tenant this backend cannot hold.
+    async fn foreign_tenant_response() -> (UntenantedBackend, SearchResponse) {
         let s = UntenantedBackend::new();
         let r = s
             .search_in_tenant(
@@ -552,29 +571,61 @@ mod default_search_in_tenant_tests {
             )
             .await
             .expect("search_in_tenant ok");
+        (s, r)
+    }
 
-        // Assert the MECHANISM, not just emptiness: the sentinel must be absent
-        // from every field it could have leaked through. `matches.is_empty()`
-        // alone would also pass against an implementation that queried the
-        // store and then dropped the rows — which still leaks the cursor.
-        // Call count FIRST, deliberately: it is the strongest claim here, and an
-        // assertion that never runs because an earlier one short-circuited is an
-        // assertion no falsification has exercised.
+    // One guarantee per test, deliberately. These four were originally four
+    // asserts in ONE test, which meant a single mutation reported one verdict for
+    // four promises and the three after the first were never evaluated (CHARTER
+    // rule 51). Split, a single mutation reddens all four independently, so each
+    // is demonstrably a guard rather than decoration.
+    //
+    // Rule 52: the line under test is `search_in_tenant`'s DEFAULT body, and it
+    // demonstrably executes here — `UntenantedBackend` overrides the method
+    // nowhere, and mutating that default reddens every test below. The overriding
+    // path is covered separately, by the SQL backends' parity suite.
+
+    /// The strongest claim: a tenant the backend cannot hold must not even reach
+    /// the store. A query whose rows are discarded afterwards still leaks a cursor.
+    #[tokio::test]
+    async fn a_foreign_tenant_never_consults_the_store() {
+        let (s, _r) = foreign_tenant_response().await;
         assert_eq!(
             s.calls(),
             0,
             "the store must never be consulted for a tenant it cannot hold — a call here means \
              the implementation is post-filtering, which is the defect, not the fix"
         );
-        assert!(r.matches.is_empty(), "a foreign tenant must match no rows");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_tenant_returns_no_rows() {
+        let (_s, r) = foreign_tenant_response().await;
+        let ids: Vec<&str> = r.matches.iter().map(|m| m.ctx_id.as_str()).collect();
+        assert!(
+            r.matches.is_empty(),
+            "a foreign tenant must match no rows, got {ids:?} — the sentinel ctx_id appearing \
+             here is the page-level leak"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_tenant_reports_a_zero_total() {
+        let (_s, r) = foreign_tenant_response().await;
         assert_eq!(
             r.total_estimate,
             Some(0),
             "total_estimate must be 0, not the sentinel {SENTINEL_TOTAL} — a non-zero total is \
              itself a count oracle over another tenant's rows"
         );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_tenant_receives_no_cursor() {
+        let (_s, r) = foreign_tenant_response().await;
         assert_eq!(
-            r.next_cursor, None,
+            r.next_cursor.as_deref(),
+            None,
             "next_cursor must be absent; the sentinel cursor leaking here is exactly the \
              cross-tenant anchor disclosure this method exists to prevent"
         );
