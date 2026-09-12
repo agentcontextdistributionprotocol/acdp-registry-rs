@@ -31,6 +31,52 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-A, phases P4 + P5 (lane-1) — rate-limit scope taxonomy, and the
+     publish bucket charged on success rather than on an unverified attempt -->
+
+### Changed
+
+- **`acdp_registry_rate_limit_rejections_total` now distinguishes a global challenge-ceiling
+  rejection from a per-agent one.** **This changes the meaning of an existing label.** A
+  `/auth/challenge` rejection caused by the process-global ceiling was previously recorded as
+  `scope="challenge_per_agent"` — the same label as one noisy agent. It is now
+  `scope="challenge_global"`.
+
+  **If you alert on `challenge_per_agent`, that series will drop** by whatever share of its
+  volume was actually global-ceiling rejections; the missing volume reappears under
+  `challenge_global`. Splitting them is the point: the two mean opposite things. A per-agent
+  rejection is one caller to throttle. A global rejection is a flood rotating `agent_id` to
+  defeat the per-key limit — the precise attack the global ceiling was added for (#24), which
+  the collapsed label rendered invisible by making it look like ordinary per-agent noise.
+
+  The `scope` values are now generated from a single list rather than written out at each call
+  site, so the emitted set, the `ALL` constant and the documented set cannot drift apart. This
+  taxonomy had already drifted twice: `lifecycle_per_agent` was emitted but undocumented, while
+  the `metrics.rs` docstring advertised a `challenge_global` that nothing emitted.
+
+### Fixed
+
+- **Security: the per-agent publish budget was charged against an UNVERIFIED `agent_id`.** The
+  publish limiter ran `check` — which tests and charges in one step — before the verify/persist
+  pipeline, at a point where `req.agent_id` is whatever the caller wrote in the body. Two
+  consequences, both reachable without any credential: an unauthenticated caller could **spend
+  another agent's budget** by naming them, and could **grow the limiter's bucket map without
+  bound** by naming a fresh id each request, because the map key was attacker-controlled.
+
+  `check` is now split. `peek` runs in the same place, answers the only question that position
+  needs — "is this agent already over budget?" — and **never writes**: no insert, and no window
+  rollover, so a caller who never earns a charge leaves no trace. `record` charges on the success
+  path, where the `agent_id` has been verified. The 429, its `Retry-After`, and the
+  `publish_per_agent` metric are unchanged.
+
+  Two consequences are stated rather than left to be discovered. The enforced bound is now
+  `limit + concurrent in-flight publishes for that agent`, not `limit + 1`, because peek and
+  charge are separated by the whole pipeline; reserving to close that was rejected because a
+  reservation must live somewhere, and that somewhere is the attacker-keyed map entry this change
+  exists to remove. And a publish that fails *late* is no longer throttled at all — disclosed and
+  tracked as #242 rather than papered over, because both available fixes are worse than the gap
+  (see the issue).
+
 <!-- #240 (lane-2) — merged to main while this file was being retired from CHANGELOG.md -->
 
 ### Fixed

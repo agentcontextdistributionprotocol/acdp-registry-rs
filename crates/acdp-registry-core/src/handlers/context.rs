@@ -384,13 +384,35 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         .filter(|s| !s.is_empty() && s.len() <= 256)
         .map(str::to_string);
 
-    // REG-P1-3: per-agent publish rate limit (RFC-ACDP-0008 §4.3). Checked
-    // here — after the body parses so we know the signing agent, before the
-    // expensive verify/persist pipeline. The limiter is keyed by the signing
-    // `agent_id`, so one noisy producer can't starve others.
+    // REG-P1-3: per-agent publish rate limit (RFC-ACDP-0008 §4.3). Tested
+    // here — after the body parses so we know the CLAIMED signing agent, before
+    // the expensive verify/persist pipeline. The limiter is keyed by the
+    // signing `agent_id`, so one noisy producer can't starve others.
+    //
+    // A1: this is a `peek`, NOT a `check`. `req.agent_id` is attacker-supplied
+    // and UNVERIFIED at this point — verification happens later, inside the
+    // pipeline. The old `check` both tested and charged, which meant an
+    // unauthenticated caller could name another agent and spend their budget,
+    // or name a fresh id each request and grow the bucket map without bound,
+    // because the map key was attacker-controlled. `peek` answers the only
+    // question this position needs — "is this agent already over budget?" —
+    // without writing anything. The charge moved to the success path, where
+    // the `agent_id` has been verified.
+    //
+    // CONSEQUENCE, stated rather than left to be discovered: the enforced
+    // bound is now `limit + concurrent in-flight publishes for that agent`,
+    // not `limit + 1`. Peek and charge are separated by the whole
+    // verify/persist pipeline, so N concurrent publishes can all peek under
+    // budget and all go on to charge. We do NOT reserve to close this: a
+    // reservation has to live somewhere, and that somewhere is an
+    // attacker-keyed map entry — exactly the unbounded growth `peek` not
+    // inserting exists to remove. In-flight publishes are additionally bounded
+    // by server connection concurrency rather than by the attacker alone.
     if let Some(limiter) = &state.rate_limiter {
-        if let Err(retry_after_seconds) = limiter.check(req.agent_id.as_str()) {
-            crate::metrics::record_rate_limit_rejection("publish_per_agent");
+        if let Err(retry_after_seconds) = limiter.peek(req.agent_id.as_str()) {
+            crate::metrics::record_rate_limit_rejection(
+                crate::metrics::RateLimitScope::PublishPerAgent,
+            );
             return Err(RegistryError::RateLimited {
                 retry_after_seconds,
             });
@@ -521,6 +543,16 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
                 if let Some(rec) = prior {
                     if rec.expires_at > Utc::now() {
                         if rec.content_hash.0 == req.content_hash.0 {
+                            // A1: a replay is a SUCCESSFUL publish, so it is
+                            // charged here. Without this the playground replay
+                            // would be the one success path that returns `Ok`
+                            // without a charge, making replays a free channel.
+                            // The production path's replay lands on the shared
+                            // success marker below instead, so all four
+                            // branches charge replays identically.
+                            if let Some(limiter) = &state.rate_limiter {
+                                limiter.record(req.agent_id.as_str());
+                            }
                             crate::metrics::record_publish("idempotent_replay");
                             return Ok(Json(rec.response));
                         } else {
@@ -646,6 +678,27 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
     // internally and does not surface the replay flag to the handler; only the
     // playground path (above) distinguishes replays.
     crate::metrics::record_publish("inserted");
+    // A1: charge the per-agent budget HERE, adjacent to the canonical "this
+    // publish actually happened" marker, rather than anywhere earlier. Earlier
+    // sites are all reachable by a publish that later fails —
+    // `set_tenant_of_ctx` above can fail after the branch join — and a charge
+    // for work that did not happen is the mirror of the bug this fixes.
+    //
+    // KNOWN REGRESSION, disclosed rather than silently accepted: a publish that
+    // fails LATE (bad signature, hash mismatch, store error) is no longer
+    // charged, though it cost a full verify plus a store round-trip. That
+    // weakens the "one noisy producer can't starve others" rationale this
+    // limiter exists for. It is not fixed here because the available fixes are
+    // both bad: per-branch charge sites are only clean at one of four branches,
+    // and post-hoc error classification is a denylist over a `#[non_exhaustive]`
+    // error enum that fails OPEN as new variants appear. Tracked as #242;
+    // a disclosed gap beats an undischarged commitment.
+    //
+    // On the playground branches nothing is verified at all, so the bucket
+    // there is fairness accounting, not a security control.
+    if let Some(limiter) = &state.rate_limiter {
+        limiter.record(req.agent_id.as_str());
+    }
     if response.registry_receipt.is_some() {
         crate::metrics::record_receipt_minted();
     }
@@ -1255,7 +1308,9 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
     // 4. Per-agent write rate limit, keyed by the event actor.
     if let Some(limiter) = &state.rate_limiter {
         if let Err(retry_after_seconds) = limiter.check(event.actor.as_str()) {
-            crate::metrics::record_rate_limit_rejection("lifecycle_per_agent");
+            crate::metrics::record_rate_limit_rejection(
+                crate::metrics::RateLimitScope::LifecyclePerAgent,
+            );
             return Err(RegistryError::RateLimited {
                 retry_after_seconds,
             });
