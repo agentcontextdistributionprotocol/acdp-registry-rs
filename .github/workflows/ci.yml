@@ -224,7 +224,30 @@ jobs:
           cargo test --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --test pg_integration
-      - name: cargo test (memory)
+      # NAME IS DELIBERATELY NARROW. This step does NOT test the memory
+      # storage backend, and the old name ("cargo test (memory)") implied it
+      # did. Measured: under these flags all four integration files are
+      # cfg-gated away and report 0 tests each (conformance, http_integration,
+      # metrics_integration, pg_integration). What runs is 71 tests — config
+      # validation from main.rs's inline module, plus two workspace scans —
+      # none of which touch MemoryStore.
+      #
+      # This is STRUCTURAL, not an oversight anyone can close here.
+      # `acdp-registry-server` is bin-only ([[bin]], no [lib]) and
+      # `MemoryStore` lives in src/memory_ext.rs, a module of that binary.
+      # Integration tests compile as separate crates and link only against a
+      # lib target, so no tests/*.rs file can reach it — verified, not
+      # assumed: a probe importing it fails with
+      #   error[E0433]: unresolved module or unlinked crate `acdp_registry_server`
+      # Adding a tests/memory_smoke.rs therefore CANNOT work without
+      # restructuring the crate. The only route to covering MemoryStore is a
+      # #[cfg(test)] mod tests inside memory_ext.rs itself, which has none.
+      #
+      # Renamed rather than fixed, on purpose: leaving an accurate name is
+      # better than leaving an inaccurate one while the real fix is out of
+      # scope. A `MemoryStore::get` that always returned Ok(None) would still
+      # pass this step.
+      - name: cargo test (memory build; storage backend NOT covered)
         run: |
           cargo test --locked -p acdp-registry-server \
             --no-default-features --features storage-memory
@@ -317,11 +340,28 @@ jobs:
       - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
         with:
           tool: cargo-llvm-cov
+      # --fail-under-lines is the whole point: without a floor this job could
+      # only ever ratchet DOWN invisibly, since it renders a summary and
+      # uploads lcov but asserted nothing about either.
+      #
+      # 75 is deliberately conservative rather than "just under current".
+      # Measured locally at 79.91% line coverage (79.42% region, 71.67%
+      # function) — but that run had no Postgres, so the pg tests skipped and
+      # CI's number will be HIGHER than the one this floor was derived from.
+      # Setting the floor at the local figure would therefore have been
+      # tightening against the wrong baseline. Re-tighten once a real CI
+      # number has been observed on a few runs.
+      #
+      # Honest scope: this makes the coverage JOB fail below the floor. It
+      # does not block a merge, because `coverage` is not a required status
+      # check (that is a repo setting, raised separately). A floor on an
+      # advisory job is a signal, not a gate.
       - name: cargo llvm-cov
         env:
           ACDP_REGISTRY_TEST_PG_URL: postgres://acdp:acdp@localhost:5432/acdp_registry
         run: |
-          cargo llvm-cov --locked --workspace --lcov --output-path lcov.info
+          cargo llvm-cov --locked --workspace --lcov --output-path lcov.info \
+            --fail-under-lines 75
       - name: coverage summary
         run: |
           echo '## Coverage' >> "$GITHUB_STEP_SUMMARY"
