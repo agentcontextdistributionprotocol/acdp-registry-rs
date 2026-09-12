@@ -1,6 +1,10 @@
 # Rust
 /target/
 **/target/
+
+# cargo-mutants build/report output (see DECISIONS.md #17).
+/mutants.out/
+/mutants.out.old/
 **/*.rs.bk
 *.pdb
 Cargo.lock.bak
