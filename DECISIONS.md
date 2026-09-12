@@ -2079,6 +2079,48 @@ follow-up blocks the ship.** One optional upstream follow-up is recorded above a
 authorization; it blocks nothing. The unit ships **PARTIAL by design** — nothing calls
 `visible_ctx_ids` until H-I-w — which is scope, not an unresolved assumption.
 
+
+## 16. This repo may mint a §5 wire code when the canon lacks an honest one (H-A / P7, #245, acdp-rs#268)
+
+**Standing precedent, decided by the project owner. Anyone minting a second one should find this
+entry first.**
+
+**The rule.** `acdp-registry-rs` may emit an `error.code` outside the canonical RFC-ACDP-0007 §5
+registry **when, and only when:**
+
+1. the canon has no code that is *honest* for the condition — not merely none that is convenient;
+2. the new name follows the canon's own idiom (here `unsupported_*`, as in
+   `unsupported_algorithm`); and
+3. an issue is filed upstream asking the canon to adopt it, so the divergence has a closing path
+   instead of becoming permanent.
+
+**The case that set it.** Enveloping the `415` from a missing or wrong `Content-Type` requires a
+code, because `WireErrorBody::code` is a required `String` — there is no envelope-without-a-code.
+`AcdpError::from_wire_error` recognises 25 codes and none describes a media-type failure. Before
+this, every one of the 24 codes this repo emitted was inside that set; the set difference was
+empty.
+
+**Why not the nearest canonical code.** `schema_violation` is documented as "malformed body,
+missing field, schema mismatch". On a `415` the body was never parsed — the media type was
+rejected first. Using it would state something false, make `415` indistinguishable from `400` at
+the code level, and be unfixable later without a breaking change once clients had coded against
+`AcdpError::SchemaViolation`. The canon has **no code→status mapping anywhere**, so a code's name
+is its only semantic content and nothing else corrects a wrong one.
+
+**Why minting is cheap here and would not always be.** Unrecognised codes route to
+`AcdpError::Registry(wire)`, explicitly "for forward compatibility": the client keeps the status
+and the message and loses only the typed variant. That property is what makes condition (1)
+bearable — it is not a licence to mint freely, because every minted code is a divergence someone
+must later reconcile, and condition (3) exists so that someone is us.
+
+**Emitted:** `{"error":{"code":"unsupported_media_type","message":"Expected request with
+`Content-Type: application/json`"}}` at `415`. **Upstream:** acdp-rs#268.
+
+**Process note worth keeping.** The question was held open for ~8 hours awaiting this ruling, and
+cost nothing but time, because the gap was pinned by a marker test that failed the moment the
+ruling was applied and whose failure message instructed its own deletion. A gap held behind a
+failing-on-resolution marker cannot outlive the question by being forgotten; a gap held in a
+comment can.
 ## Unit H-E — the auth/webhook quartet (lane-2, 2026-09-12)
 
 Four `UNCONFIRMED` entries from `plans/h-e-auth-webhook-quartet.md`, ranked by blast radius.

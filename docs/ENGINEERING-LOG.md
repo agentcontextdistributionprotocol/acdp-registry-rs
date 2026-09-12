@@ -31,6 +31,29 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-A, phase P7 follow-up (lane-1) — the 415 ruling applied -->
+
+### Fixed
+
+- **The `415` from a missing or wrong `Content-Type` now answers an RFC-ACDP-0007 §5 envelope**,
+  closing the one case the extractor-rejection work shipped without. It carries
+  `"code": "unsupported_media_type"` at the unchanged `415` status.
+
+  **That code is not in the canonical §5 registry, and minting it was a deliberate decision by
+  the project owner rather than an oversight.** `AcdpError::from_wire_error` recognises 25 codes
+  and none describes a media-type failure, while `WireErrorBody::code` is a required field — so
+  a registry answering `415` must put *something* there. The nearest canonical option,
+  `schema_violation`, is documented as "malformed body, missing field, schema mismatch", and on
+  a `415` the body was never parsed at all; it would have stated something false, made `415`
+  indistinguishable from `400` at the code level, and become unfixable once clients coded
+  against `AcdpError::SchemaViolation`. Unrecognised codes route to `AcdpError::Registry(wire)`
+  "for forward compatibility", so existing clients keep the status and the message and lose only
+  the typed variant.
+
+  The divergence has a closing path rather than being permanent: **acdp-rs#268** asks the canon
+  to adopt the code. Decision 16 in `DECISIONS.md` records the standing precedent — this repo may
+  mint a wire code when the canon lacks an honest one, provided the name follows the canon's
+  idiom and an upstream issue is filed.
 <!-- unit H-E (lane-2) — the auth/webhook quartet. All four audit findings
      confirmed real with exact citations, which inverted the expectation the
      assign was written with. -->
