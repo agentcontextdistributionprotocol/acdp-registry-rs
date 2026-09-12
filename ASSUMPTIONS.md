@@ -1588,7 +1588,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** a future backend that records tenants but forgets to override
   would serve the default's answer. Bounded by the doc comment stating the override
   obligation, and by both SQL backends overriding it in phases 2–3. Reversible in one commit.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — reconcile reopened a 4th option (fail closed for every `Some`) and rejected it: it would make the memory backend diverge from both SQL backends on `Some(RESERVED_TENANT)`. Residual risk recorded. See DECISIONS.md H-H #1.
 
 ## The store does NOT re-enforce the reserved-tenant rejection
 
@@ -1610,7 +1610,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   `WHERE tenant_id = 'default'` — the untenanted bucket precisely, not everything — so the
   exposure is the aliasing `RESERVED_TENANT` warns about, reachable only by bypassing the
   handler. Cheap to add later if a second caller ever appears.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — the premise is now VERIFIED, not assumed: search resolves tenancy via `tenant_for_request` (`context.rs:939`), which calls `reject_reserved_tenant`. See DECISIONS.md H-H #2.
 
 ## `tokio` added as an unconditional dev-dependency of `acdp-registry-store`
 
@@ -1625,7 +1625,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   default impl's guard does not run in a normal `cargo test`, which is where it matters most.
 - **Blast radius if wrong:** none to consumers; a dev-only dependency on a crate already in
   the tree.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — dev-only, nothing reaches the shipped artifact. See DECISIONS.md H-H #3.
 
 ## No new index for the tenant-scoped search path
 
@@ -1646,7 +1646,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** a busy mixed-tenant registry could see slower tenant-scoped
   searches than necessary. Bounded: the alternative is strictly additive later, and the
   measurement above is the baseline to re-run against. Reversible.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — on the measurements, both backends and both selectivities. See DECISIONS.md H-H #4.
 
 ## The tenant parity fixture isolates by unique tenant name, not by cleanup
 
@@ -1668,7 +1668,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   oracle, which is the A2 finding this exists to pin.
 - **Blast radius if wrong:** test-only. A clock moving backwards between runs could collide,
   which needs a same-nanosecond collision to matter.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — 3 consecutive green pg runs plus a re-falsification proving the fix did not neuter the guard. See DECISIONS.md H-H #5.
 
 ## `cursor.rs`'s disclosure claim is made per-dimension rather than restored
 
@@ -1688,7 +1688,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** documentation only, but it is the doc a future filter author will
   read when deciding whether their filter can run post-query. Getting it wrong reintroduces
   the leak.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — it states the general rule and the actionable consequence, not just an enumeration. See DECISIONS.md H-H #6.
 
 ## H-A / P3 — #218 resolved: `/metrics` answers `no-store` on every arm (200, 401, 405)
 
@@ -1752,4 +1752,4 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   better failure message.
 - **Blast radius if wrong:** a guarantee could regress while the suite stays green. Bounded by
   the recorded mutation matrix, which shows all six guarantees firing on both backends.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — 6/6 guarantees fire on both backends; matrix in the plan and PROGRESS.md. See DECISIONS.md H-H #7.
