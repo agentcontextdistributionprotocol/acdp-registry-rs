@@ -6,6 +6,7 @@
 
 pub mod cursor;
 pub mod fulltext;
+pub mod lifecycle;
 pub mod log;
 
 /// Cross-backend parity assertions shared by every backend's test suite.

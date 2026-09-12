@@ -13,6 +13,7 @@ use acdp::types::lifecycle::{retraction_state, LifecycleEvent, LifecycleEventTyp
 use acdp::types::primitives::{AgentDid, ContentHash, CtxId, LineageId, Status, Visibility};
 use acdp::types::publish::PublishResponse;
 use acdp::types::search::{SearchParams, SearchResponse, SearchResult};
+use acdp_registry_store::lifecycle::reconcile_retraction;
 use acdp_registry_store::{
     decode_cursor, encode_cursor, ExtendedRegistryStore, LogEntryRecord, Page,
 };
@@ -485,6 +486,14 @@ impl RegistryStore for SqliteStore {
             // RFC-ACDP-0013 §4.1: full retrieval serves the event array
             // inside registry_state (omitted, not [], when empty).
             let events = events_for_ctx(&self.pool, ctx_id.as_str()).await?;
+            // B3: the row and the events are two separate reads with no
+            // shared snapshot, so a retraction committing between them
+            // would otherwise be served as `status: "active"` alongside a
+            // `retracted` event — contradicting the §7.2 precedence this
+            // projection is documented to guarantee. Reconciling here makes
+            // the served pair self-consistent whichever read is fresher.
+            ctx.registry_state.status =
+                reconcile_retraction(ctx.registry_state.status.clone(), &events);
             if !events.is_empty() {
                 ctx.registry_state.lifecycle_events = Some(events);
             }
@@ -511,6 +520,14 @@ impl RegistryStore for SqliteStore {
             for r in rows {
                 let mut ctx = row_to_context(&r)?;
                 if let Some(events) = events_by_ctx.remove(ctx.body.ctx_id.as_str()) {
+                    // B3: the row and the events are two separate reads with no
+                    // shared snapshot, so a retraction committing between them
+                    // would otherwise be served as `status: "active"` alongside a
+                    // `retracted` event — contradicting the §7.2 precedence this
+                    // projection is documented to guarantee. Reconciling here makes
+                    // the served pair self-consistent whichever read is fresher.
+                    ctx.registry_state.status =
+                        reconcile_retraction(ctx.registry_state.status.clone(), &events);
                     if !events.is_empty() {
                         ctx.registry_state.lifecycle_events = Some(events);
                     }

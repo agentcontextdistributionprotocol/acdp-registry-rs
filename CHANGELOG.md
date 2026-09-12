@@ -8,6 +8,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Retrieval could serve a context as `active` while also serving its `retracted` event.**
+  `get()` and `lineage()` read the context row and its lifecycle events as **two separate
+  queries with no shared snapshot**, on *both* backends. A retraction committing between the
+  two reads produced a response carrying `registry_state.status: "active"` alongside a
+  `retracted` lifecycle event — contradicting the RFC-ACDP-0013 §7.2 precedence
+  (`retracted > superseded > expired > active`) that both backends' `row_to_context` is
+  documented to guarantee. A consumer trusting `status` would act on withdrawn data.
+
+  Unlike the search bugs above, this one was present on **both** SQLite and Postgres; it is
+  not a divergence but a shared defect.
+
+  Fixed by reconciling the row-derived status against the events actually loaded, in one
+  shared helper (`acdp_registry_store::lifecycle::reconcile_retraction`) applied at all four
+  call sites. Retraction wins from either source, so the served pair is **self-consistent by
+  construction** — a future read path that forgets to take a snapshot cannot reintroduce the
+  contradiction. Failing closed is deliberate and asymmetric: being briefly stale about a
+  republish is safe, serving `active` for retracted data is not.
+
+  A transaction-per-read would also have fixed it and was the first design; reconciliation
+  was chosen because it fixes the shape rather than the one call site. Two preconditions were
+  checked against the code before relying on the cheaper fix — `lifecycle_events` has no
+  `DELETE` in either backend (append-only), and the event and the denormalized flag are
+  written in the same transaction — so the event log can never be missing a retraction the
+  flag knows about.
+
 - **Search: `q=` returned different results on SQLite and Postgres, and a code comment
   claimed it did not.** SQLite indexed with FTS5's default `unicode61` tokenizer — no
   stemmer, no stopwords — while Postgres used `plainto_tsquery('english', …)` over an

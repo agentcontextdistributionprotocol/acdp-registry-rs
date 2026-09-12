@@ -30,7 +30,8 @@ use acdp::crypto::SigningKey;
 use acdp::producer::Producer;
 use acdp::registry::store::{PublishCommit, PublishCommitOutcome};
 use acdp::types::body::DataPeriod;
-use acdp::types::primitives::{AgentDid, ContextType, Visibility};
+use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+use acdp::types::primitives::{AgentDid, ContextType, CtxId, Status, Visibility};
 use acdp::types::search::SearchParams;
 use chrono::{DateTime, TimeZone, Utc};
 
@@ -358,5 +359,98 @@ where
         "[{label}] q='running elephant' must NOT match — terms are AND-ed, so a \
          missing term excludes the document; if this passes, conjunction has \
          become disjunction"
+    );
+}
+
+/// Publish a context and retract it, returning its `ctx_id`. Both backends
+/// reach this through the same trait methods, so the setup cannot drift.
+pub async fn publish_then_retract<S>(store: &Arc<S>, seed: u8, title: &str) -> String
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let ctx_id = publish_titled(store, seed, title).await;
+    // `event_id` must be a canonical lowercase RFC 9562 UUID and must be
+    // globally unique in `lifecycle_events`. Reuse the UUID the registry
+    // already minted for this context: unique per run without pulling in a
+    // uuid dependency, and valid by construction. (A ULID-shaped id was
+    // rejected here with a SchemaViolation — the constraint is real.)
+    let event_id = ctx_id
+        .rsplit('/')
+        .next()
+        .expect("ctx_id ends in a UUID segment")
+        .to_string();
+    let event = LifecycleEvent::new(
+        event_id,
+        CtxId(ctx_id.clone()),
+        LifecycleEventType::Retracted,
+        Utc::now(),
+        AgentDid::new(agent_did(seed)),
+        Some("parity: torn-read fixture".to_string()),
+    )
+    .expect("valid lifecycle event");
+    let s = Arc::clone(store);
+    tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&event))
+        .await
+        .expect("retract task")
+        .expect("retract succeeds");
+    ctx_id
+}
+
+/// **B3 — a context and its lifecycle events must never contradict each other.**
+///
+/// `get()` and `lineage()` read the context row and its lifecycle events as two
+/// separate queries with no shared snapshot. A retraction committing between
+/// them produced `registry_state.status: "active"` served *alongside* a
+/// `retracted` event, violating the RFC-ACDP-0013 §7.2 precedence
+/// (`retracted > superseded > expired > active`) that both backends'
+/// `row_to_context` is documented to guarantee. A consumer trusting `status`
+/// would act on withdrawn data.
+///
+/// **Why this does not race.** Driving the real interleaving means landing a
+/// commit inside a window measured in microseconds; such a test is flaky, and a
+/// flaky guard gets deleted. So the *state a tear produces* is constructed
+/// directly instead — the caller desynchronizes the denormalized `retracted`
+/// column from the event log with one UPDATE, which is exactly what the read
+/// path would have observed mid-tear — and this asserts the response is still
+/// coherent. That tests the property the race threatens rather than the timing.
+///
+/// The caller supplies `ctx_id` already in that state because clearing the
+/// column takes backend-specific SQL; the assertion itself is shared so neither
+/// backend can quietly diverge on what "coherent" means.
+pub async fn assert_desynced_retraction_is_not_served_active<S>(
+    store: &Arc<S>,
+    label: &str,
+    ctx_id: &str,
+) where
+    S: ExtendedRegistryStore + 'static,
+{
+    let s = Arc::clone(store);
+    let id = CtxId(ctx_id.to_string());
+    let ctx = tokio::task::spawn_blocking(move || s.get(&id))
+        .await
+        .expect("get task")
+        .expect("get must not error")
+        .expect("the context exists");
+
+    let events = ctx
+        .registry_state
+        .lifecycle_events
+        .as_deref()
+        .unwrap_or(&[]);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.event_type, LifecycleEventType::Retracted)),
+        "[{label}] fixture is wrong: the retraction event should still be in the \
+         log — this test proves nothing if the event is absent"
+    );
+    assert_eq!(
+        ctx.registry_state.status,
+        Status::Retracted,
+        "[{label}] a context whose event log carries a retraction must NOT be \
+         served as {:?}. The row's denormalized flag said otherwise, which is \
+         exactly what a torn read between the row query and the event query \
+         produces, and the served pair must still be self-consistent.",
+        ctx.registry_state.status
     );
 }

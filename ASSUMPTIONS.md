@@ -1431,3 +1431,33 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   the constant; it is the reason the suite pins mechanisms rather than claiming exhaustive
   agreement.
 - **Status:** UNCONFIRMED
+
+## B3 fixed by reconciling status against events, not by taking a read snapshot
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 3, B3)
+- **Assumed:** making the served object self-consistent by construction is worth more than
+  making one call site take a consistent snapshot.
+- **Chose:** a shared `reconcile_retraction(status, events)` in `acdp-registry-store`, applied
+  in `get()` and `lineage()` on both backends. Retraction wins from either source. The
+  property this buys over a transaction is that a *future* read path which forgets the
+  snapshot cannot reintroduce the bug — the fix is in the shape of the data, not in the
+  discipline of the caller. It is also one shared helper rather than two hand-mirrored
+  per-backend transactions, so the backends cannot drift on what "consistent" means.
+- **Two preconditions verified against the code first**, because the cheap fix is only sound
+  if they hold, and **my own plan had rejected this approach on the second one**: (a)
+  `lifecycle_events` is append-only — no `DELETE` exists in either backend, so the event log
+  can never be missing a retraction the denormalized flag knows about; (b) the event and the
+  flag are written in one transaction, so only the reads could ever disagree. The plan's
+  objection — "deriving from events discards the column and breaks if events are pruned" —
+  described a hazard this codebase does not have.
+- **Alternatives:** (a) a read transaction per call — sqlite WAL gives a consistent snapshot
+  on `BEGIN DEFERRED`, but Postgres `READ COMMITTED` does *not* (each statement re-snapshots),
+  so it would have needed `REPEATABLE READ` set per backend: more moving parts, and it fixes
+  only the call sites that remember to do it. (b) One statement aggregating events as JSON —
+  atomic by construction and one round trip, but it encodes the event wire shape in SQL, so
+  the mapping would have to stay in sync with the Rust struct by hand.
+- **Blast radius if wrong:** a context retracted and then republished could, under a torn
+  read, be served as `retracted` slightly after becoming active again. Stale, never
+  self-contradictory, and stale-toward-retracted is the safe direction to be wrong about
+  whether data has been withdrawn. Reversal is deleting four call-site lines.
+- **Status:** UNCONFIRMED
