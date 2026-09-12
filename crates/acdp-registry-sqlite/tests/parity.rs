@@ -199,3 +199,108 @@ async fn the_search_filter_indexes_exist() {
         "both search-filter indexes must exist after migration 014"
     );
 }
+
+/// H-I-s: a batched visibility check must answer exactly what N individual
+/// retrieve checks answer — for a fixture mixing public / owned / audience /
+/// contributor-only / retracted / foreign-tenant, across six requester
+/// perspectives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batched_visibility_matches_the_cross_backend_contract() {
+    let (store, _tmp) = store().await;
+    parity::assert_batched_visibility_parity(&store, "sqlite").await;
+}
+
+/// The point of the unit, measured rather than asserted.
+///
+/// This does not assert a speedup — a timing assertion is a flake waiting to
+/// happen on a shared CI box. It measures both paths over a full 256-entry page
+/// (the handler's `LOG_ENTRIES_PAGE_CAP`) and prints the numbers, so the claim
+/// "one query instead of 256 round-trips" has an observation behind it instead
+/// of an adjective. Run with `--nocapture` to read it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_batched_path_costs_one_round_trip_for_a_full_page() {
+    use acdp::crypto::SigningKey;
+    use acdp::producer::Producer;
+    use acdp::registry::store::{PublishCommit, PublishCommitOutcome, RegistryStore};
+    use acdp::types::primitives::{AgentDid, ContextType, Visibility};
+
+    const PAGE: usize = 256; // LOG_ENTRIES_PAGE_CAP
+    let (store, _tmp) = store().await;
+    let requester = AgentDid::new("did:web:agents.test:parity-240".to_string());
+    let p = Producer::new(
+        SigningKey::from_bytes(&[240; 32]),
+        requester.clone(),
+        "did:web:agents.test:parity-240#key-1".to_string(),
+    );
+
+    let mut ids = Vec::with_capacity(PAGE);
+    for i in 0..PAGE {
+        let req = p
+            .publish_request()
+            .title(format!("page fixture {i}"))
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid request");
+        let s = Arc::clone(&store);
+        let outcome = tokio::task::spawn_blocking(move || {
+            s.commit_publish(PublishCommit {
+                req: &req,
+                authority: "reg.test",
+                idempotency: None,
+                tenant: None,
+                receipt_minter: None,
+                predecessor_admission: None,
+            })
+        })
+        .await
+        .expect("task")
+        .expect("publishes");
+        match outcome {
+            PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => {
+                ids.push(r.ctx_id.as_str().to_string())
+            }
+        }
+    }
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+
+    let t0 = std::time::Instant::now();
+    let batched = store
+        .visible_ctx_ids(&refs, Some(&requester), None, false)
+        .await
+        .expect("batched ok");
+    let batched_ms = t0.elapsed();
+
+    // The shape the handler uses today: one blocking `get` per entry.
+    let t1 = std::time::Instant::now();
+    let mut per_id = std::collections::HashSet::new();
+    for id in &refs {
+        let s = Arc::clone(&store);
+        let parsed = acdp::types::primitives::CtxId((*id).to_string());
+        if tokio::task::spawn_blocking(move || s.get(&parsed))
+            .await
+            .expect("task")
+            .expect("get ok")
+            .is_some()
+        {
+            per_id.insert((*id).to_string());
+        }
+    }
+    let per_id_ms = t1.elapsed();
+
+    // Correctness first: the measurement is worthless if the two disagree.
+    assert_eq!(
+        batched.len(),
+        PAGE,
+        "all {PAGE} public contexts are visible to their own producer"
+    );
+    assert_eq!(
+        batched, per_id,
+        "the batched path and the per-id path must agree on a full page"
+    );
+
+    println!(
+        "[sqlite] {PAGE}-entry page: batched (1 query) {batched_ms:?} vs per-id ({PAGE} queries) \
+         {per_id_ms:?}"
+    );
+}

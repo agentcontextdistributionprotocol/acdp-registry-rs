@@ -221,6 +221,71 @@ impl ExtendedRegistryStore for SqliteStore {
         Ok(rows.into_iter().collect())
     }
 
+    /// One query for a whole page's worth of retrieval-visibility checks,
+    /// replacing N blocking `retrieve` round-trips.
+    ///
+    /// Reuses `LIST_VISIBILITY_SQLITE` rather than restating it. That choice is
+    /// the correctness of this method: the LIST predicate is the
+    /// **retrieve**-shaped one, whose non-public arm covers `restricted` AND
+    /// `private` together, so an audience member may retrieve a private context
+    /// (RFC-ACDP-0008 §4.5, conformance `vis-004`). `SEARCH_VISIBILITY_SQLITE`
+    /// is deliberately stricter — it requires ownership for `private` — and
+    /// substituting it here would silently under-disclose. The two are not
+    /// interchangeable and must not be harmonized.
+    ///
+    /// No status or `retracted` clause, deliberately: a retracted context is
+    /// still retrievable, so filtering it here would hide log entries the
+    /// caller is entitled to.
+    async fn visible_ctx_ids(
+        &self,
+        ctx_ids: &[&str],
+        requester: Option<&AgentDid>,
+        tenant: Option<&str>,
+        anonymous_public_reads: bool,
+    ) -> Result<std::collections::HashSet<String>, AcdpError> {
+        let mut out = std::collections::HashSet::with_capacity(ctx_ids.len());
+        if ctx_ids.is_empty() {
+            return Ok(out);
+        }
+        let requester_s: Option<String> = requester.map(|r| r.as_str().to_string());
+        let req = requester_s.as_deref();
+        // SQLite lacks array binding, so ids become `IN (?,?,…)` — which makes
+        // the host-parameter ceiling a real constraint. The caller's page cap
+        // (256) fits in one chunk, but this method is public and takes an
+        // arbitrary slice, so it chunks rather than failing on a large input.
+        for chunk in ctx_ids.chunks(VISIBLE_CTX_IDS_CHUNK) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut sql = format!("SELECT ctx_id FROM contexts WHERE ctx_id IN ({placeholders})");
+            sql.push_str(LIST_VISIBILITY_SQLITE);
+            if tenant.is_some() {
+                sql.push_str(" AND tenant_id = ?");
+            }
+            let mut q = sqlx::query_as::<_, (String,)>(&sql);
+            // Bind order follows textual order: the id placeholders, then the
+            // five disclosure binds, then the tenant.
+            for id in chunk {
+                q = q.bind(*id);
+            }
+            q = q
+                .bind(req)
+                .bind(anonymous_public_reads)
+                .bind(req)
+                .bind(req)
+                .bind(req);
+            if let Some(t) = tenant {
+                q = q.bind(t);
+            }
+            let rows = q
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| AcdpError::RegistryInternal(format!("visible_ctx_ids: {e}")))?;
+            out.extend(rows.into_iter().map(|(id,)| id));
+        }
+        Ok(out)
+    }
+
     async fn list_contexts(
         &self,
         limit: u32,
@@ -470,6 +535,12 @@ fn log_row_to_record(r: &sqlx::sqlite::SqliteRow) -> Result<LogEntryRecord, Acdp
 /// DID or SQL NULL for an anonymous caller and `?anon` is
 /// `anonymous_public_reads`. `json_each(body_json,'$.audience')` yields zero
 /// rows when `audience` is absent, so the audience arm short-circuits.
+/// Ids per `visible_ctx_ids` query. SQLite's default host-parameter ceiling is
+/// 999; this leaves generous room for the five disclosure binds and the tenant
+/// bind alongside the ids, and still answers the caller's 256-entry page cap in
+/// a single round-trip.
+const VISIBLE_CTX_IDS_CHUNK: usize = 900;
+
 const LIST_VISIBILITY_SQLITE: &str = " AND (\
     (visibility = 'public' AND (? IS NOT NULL OR ?)) \
     OR (? IS NOT NULL AND (agent_id = ? \
