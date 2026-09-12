@@ -9,6 +9,61 @@
 //! a hard error under this workspace's `RUSTFLAGS: "-D warnings"`) in the
 //! binary that doesn't yet use it.
 #![allow(dead_code)]
+// Under a non-sqlite build this module is already a hard error (see the
+// `compile_error!` below), so the eight imports that only the gated items use
+// would add eight `unused import` errors under `-D warnings` and bury the one
+// message that tells the author what to do. Measured: without this the probe
+// reported 9 errors; with it, 1.
+#![cfg_attr(not(feature = "storage-sqlite"), allow(unused_imports))]
+
+// This module is SQLite-backed and cannot declare the feature its includers must
+// have, so the requirement used to be maintained by hand in every `tests/*.rs`
+// that says `mod common;`. Four files agreed and the fifth did not (#256), and
+// what its author saw was `E0432: unresolved import acdp_registry_sqlite`
+// pointing into THIS file, which they had never opened — a diagnostic that names
+// neither the cause nor the fix.
+//
+// This fires only when `common` is actually compiled, which happens only when
+// some test file pulls it in. A correctly gated includer compiles `mod common;`
+// out of existence and never reaches this line, so the cost to every existing
+// caller is zero.
+//
+// Measured, and the measurement changed the design. 4 of 16 top-level items
+// touch `SqliteStore` -- `build_harness_with_webhook`, `SeededHarness` (struct
+// and impl) and `wire_server` -- so item-level `#[cfg]` is cheap. I first took
+// that as the REJECTED alternative and shipped only the `compile_error!`; the
+// probe refuted it. `compile_error!` alone does NOT replace the confusing
+// diagnostic, it merely precedes it: rustc still resolves the unconditional
+// SQLite import below and still reports E0432, so the author sees BOTH
+// ("2 previous errors").
+//
+// So both halves are here and each does a different job, and the division was
+// measured on a throwaway ungated probe rather than reasoned about. The
+// `#[cfg]`s below remove E0432 by making the SQLite-dependent items not exist.
+// What the `compile_error!` adds is not "a nicer error" but coverage of a case
+// the `#[cfg]`s alone fail SILENTLY. Three shapes, all three measured:
+//
+//   * a correctly gated includer compiles `mod common;` out of existence and
+//     reaches none of this -- every CI leg unchanged;
+//   * an UNGATED includer that touches only the twelve store-agnostic helpers
+//     compiles CLEANLY without the `compile_error!` (rc=0) -- the gate is simply
+//     missing, nothing says so, and the mistake stays latent until somebody adds
+//     the first harness call;
+//   * an ungated includer that does touch the harness gets
+//     `E0425: cannot find function build_harness_with_webhook in module common`
+//     -- a second diagnostic that names neither the cause nor the fix.
+//
+// With the `compile_error!`, the second and third both become the directive
+// below. I had originally written that the `#[cfg]`s alone would produce the
+// E0425; the probe showed they can also produce nothing at all, which is the
+// stronger reason for keeping both.
+#[cfg(not(feature = "storage-sqlite"))]
+compile_error!(
+    "tests/common is SQLite-backed. Gate your test file with \
+     `#![cfg(feature = \"storage-sqlite\")]` above `mod common;` (see \
+     http_integration.rs, conformance.rs, metrics_integration.rs) or it will \
+     fail the storage-pg and storage-memory CI legs."
+);
 
 use std::sync::Arc;
 
@@ -24,6 +79,7 @@ use acdp_registry_auth::{
     AuthService, ChallengeStore, InMemoryChallengeStore, JwtSecret, JwtSigner,
 };
 use acdp_registry_core::{build_router, AppStateInner};
+#[cfg(feature = "storage-sqlite")]
 use acdp_registry_sqlite::SqliteStore;
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::auth::{AcdpClaims, BearerClaims};
@@ -86,6 +142,7 @@ impl Harness {
 /// dereferenced is only meaningful if the one subsystem that *does* make
 /// outbound HTTP calls near the publish path (webhook delivery) is
 /// actually live during the test.
+#[cfg(feature = "storage-sqlite")]
 pub async fn build_harness_with_webhook(
     cfg: RegistryConfig,
     caps: CapabilitiesDocument,
@@ -172,6 +229,7 @@ pub async fn build_harness_with_webhook(
 /// `registry_capabilities_subset`) WITHOUT losing already-seeded state --
 /// the seeded contexts live in the SQLite store, which `rebuild` clones
 /// (cheap: `SqliteStore` is pool-backed) rather than recreates.
+#[cfg(feature = "storage-sqlite")]
 pub struct SeededHarness {
     server: Arc<RegistryServer<SqliteStore>>,
     auth: Arc<AuthService>,
@@ -179,6 +237,7 @@ pub struct SeededHarness {
     pub router: axum::Router,
 }
 
+#[cfg(feature = "storage-sqlite")]
 impl SeededHarness {
     /// Build a fresh in-memory store + router (REG-10 Phase 8's isolation
     /// requirement: every Shape D fixture gets its own `SeededHarness`,
@@ -265,6 +324,7 @@ impl SeededHarness {
 /// [`SeededHarness::rebuild`] apply IDENTICAL wiring -- a rebuild that
 /// silently dropped, say, the receipt signer because it hand-rolled a
 /// shorter version of this would be its own latent bug.
+#[cfg(feature = "storage-sqlite")]
 fn wire_server(
     store: SqliteStore,
     caps: CapabilitiesDocument,
