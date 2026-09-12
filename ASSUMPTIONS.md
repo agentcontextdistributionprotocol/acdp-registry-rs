@@ -1842,7 +1842,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   say no.
 - **Blast radius if wrong:** low; the method is crate-local, unreleased, and has one prospective
   caller (H-I-w). Changing the return type is a compile error, not a silent behaviour change.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #5.
 
 ## The default impl is behaviour-preserving (N calls), not fail-closed
 
@@ -1861,7 +1861,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   500 on a read path.
 - **Blast radius if wrong:** a backend inheriting the default is slow, not wrong. The failure mode
   chosen is *cost*, which is observable, over *silence*, which is not.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #2.
 
 ## The §4.5 rule is expressed a third time, in Rust, and contained rather than eliminated
 
@@ -1883,7 +1883,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   silently. That is the highest-consequence assumption in the unit, which is why the containment
   is a test rather than a comment: mutating the default alone reddens both backends' suites
   (verified, mutations E1/E2).
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #1.
 
 ## SQLite batches 900 ids per query; Postgres does not chunk at all
 
@@ -1900,7 +1900,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   every caller.
 - **Blast radius if wrong:** a too-large chunk fails loudly as a SQL error on an input no current
   caller produces. Not silent.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #6.
 
 ## AC1 is satisfied transitively, not by a direct two-backend comparison
 
@@ -1920,7 +1920,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** none to the code; the risk is *reporting*. An AC recorded as "met"
   when the test performed is a different (equivalent) one is an unverified claim hiding in
   supporting detail, which is why this entry exists rather than a checkmark.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #4.
 
 ## Group (a)'s oracle and group (e)'s seam check share `retrieve_visible`
 
@@ -1938,4 +1938,4 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   those absolute assertions are why this suite does not.
 - **Blast radius if wrong:** a shared error in the Rust rule would be invisible to the
   differential. Bounded as above, and the absolute assertions are the load-bearing part.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #3.
