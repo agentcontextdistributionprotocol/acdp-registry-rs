@@ -2831,9 +2831,27 @@ fn read_json(path: &Path) -> Value {
 /// `fixture_families` object's keys. `None` when the file is absent (the
 /// bare-fixtures-dir layout, where `ACDP_SPEC_DIR` points straight at
 /// `schemas/conformance` with no `registries/` sibling).
+///
+/// Under require-mode that `None` is a hard failure, mirroring
+/// [`spec_fixtures`]. It did not used to be, and the consequence was
+/// measured rather than theorised: pointing `ACDP_SPEC_DIR` at a bare
+/// fixtures dir with `ACDP_REQUIRE_CONFORMANCE=1` silently disabled four
+/// ratchets — `all_conformance_fixtures_are_bucketed_into_known_families`,
+/// `known_families_are_declared_by_the_spec`,
+/// `excused_families_are_known_and_present`, and
+/// `no_excused_family_is_required_by_our_profile` — each printing a skip
+/// line and returning green while claiming to enforce the spec.
 fn spec_families(root: &Path) -> Option<Vec<String>> {
     let profiles_path = root.join("registries/profiles.json");
     if !profiles_path.exists() {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no registries/profiles.json exists under \
+             ACDP_SPEC_DIR '{}' — ACDP_SPEC_DIR must name the spec ROOT, not its fixtures \
+             directory. Every family/EXCUSED ratchet would otherwise skip silently and this \
+             required job would report success while enforcing nothing.",
+            root.display()
+        );
         return None;
     }
     let profiles = read_json(&profiles_path);
@@ -9980,6 +9998,27 @@ async fn no_excused_family_is_required_by_our_profile() {
 /// drifting. Skips when the pinned spec isn't reachable (`ACDP_SPEC_DIR`
 /// unset/nonexistent) in default mode; panics in require mode (via
 /// `spec_root()`).
+///
+/// # Do NOT gate this on `spec_families()`
+///
+/// This test deliberately guards on [`spec_root`] alone, unlike its four
+/// neighbours, which take the `spec_families()` / `bucketed_fixtures()`
+/// skip path. Making the five uniform is the obvious tidy-up and it would
+/// be a mistake.
+///
+/// Measured: with `ACDP_SPEC_DIR` pointed at a bare fixtures directory and
+/// `ACDP_REQUIRE_CONFORMANCE=1`, the other four skipped silently and this
+/// test was the ONLY thing that failed the run — it proceeds past the
+/// gate, reaches `spec_registry_profile_ids`, and dies in `read_json` on
+/// the missing `registries/profiles.json`. That made a misconfigured
+/// required job red instead of green, which is the correct outcome
+/// reached for an accidental reason.
+///
+/// `spec_families()` now asserts under require-mode, so the four skips are
+/// loud by design and this test is no longer load-bearing on its own. Both
+/// belts are deliberate: keep this one asymmetric anyway, so a future
+/// refactor of that assert cannot silently restore a fully-green
+/// misconfiguration.
 #[tokio::test(flavor = "multi_thread")]
 async fn registry_advertisable_profiles_matches_spec_derived_set() {
     let Some(root) = spec_root() else {
@@ -9989,6 +10028,33 @@ async fn registry_advertisable_profiles_matches_spec_derived_set() {
         );
         return;
     };
+
+    // Its OWN require-mode check, deliberately not routed through
+    // `spec_families()` — see the "Do NOT gate this on `spec_families()`"
+    // note above. Duplicated on purpose: two independent paths must fail a
+    // wrongdir `ACDP_SPEC_DIR`, so weakening either one alone cannot make a
+    // misconfigured required job green.
+    //
+    // Before this, the bare-fixtures layout — which `resolve_fixture_dir`
+    // explicitly supports — hard-failed here even in DEFAULT mode, via a
+    // bare `read_json` panic on the missing file. That was a real bug for
+    // anyone pointing ACDP_SPEC_DIR at the fixtures dir locally, and it is
+    // what made this test the accidental last tripwire in require-mode.
+    if !root.join("registries/profiles.json").exists() {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no registries/profiles.json exists under \
+             ACDP_SPEC_DIR '{}' — ACDP_SPEC_DIR must name the spec ROOT, not its fixtures \
+             directory, or REGISTRY_ADVERTISABLE_PROFILES is never checked against the spec.",
+            root.display()
+        );
+        eprintln!(
+            "conformance: no registries/profiles.json under {}; skipping \
+             registry_advertisable_profiles_matches_spec_derived_set",
+            root.display()
+        );
+        return;
+    }
 
     let mut spec_ids = spec_registry_profile_ids(&root);
     spec_ids.sort();
@@ -12474,16 +12540,9 @@ async fn receipt_key_harness() -> axum::Router {
     c.acdp_version = "0.2.0".into();
     c.supported_did_methods = vec!["did:web".into(), "did:key".into()];
 
-    common::build_harness_with_webhook(
-        cfg,
-        c,
-        AUTHORITY,
-        common::StoreMode::Memory,
-        None,
-        None,
-    )
-    .await
-    .router
+    common::build_harness_with_webhook(cfg, c, AUTHORITY, common::StoreMode::Memory, None, None)
+        .await
+        .router
 }
 
 /// A receipt minted by the registry MUST verify against the key a consumer

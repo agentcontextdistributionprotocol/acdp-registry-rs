@@ -232,11 +232,20 @@ jobs:
   # Runs the spec conformance suite against a SHA-pinned spec checkout.
   # ACDP_REQUIRE_CONFORMANCE turns a missing spec into a hard failure, so
   # a green run genuinely proves the fixtures executed rather than that
-  # the suite silently skipped them (REG-1). It does not, on its own,
-  # catch ACDP_SPEC_DIR pointing at the wrong subdirectory of a real
-  # checkout -- see the KNOWN_FAMILIES/EXCUSED ratchet tests in
-  # tests/conformance.rs, which is why ACDP_SPEC_DIR below is the spec
-  # *root* (where registries/profiles.json lives), not schemas/conformance.
+  # the suite silently skipped them (REG-1).
+  #
+  # A wrongdir ACDP_SPEC_DIR -- the spec's fixtures directory instead of
+  # its root -- IS caught, but this comment used to credit the wrong
+  # mechanism. It named the KNOWN_FAMILIES/EXCUSED ratchets as the
+  # mitigation; measured, four of them SKIPPED silently under full
+  # require-mode and the run was failed by an unrelated read_json panic in
+  # registry_advertisable_profiles_matches_spec_derived_set. spec_families()
+  # now asserts under require-mode, so those four fail on their own names,
+  # and that fifth test keeps an independent check of its own. Two paths,
+  # deliberately not shared.
+  #
+  # ACDP_SPEC_DIR below is therefore the spec *root* (where
+  # registries/profiles.json lives), not schemas/conformance.
   conformance:
     name: conformance (spec fixtures)
     runs-on: ubuntu-latest
