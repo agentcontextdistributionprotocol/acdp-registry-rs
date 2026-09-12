@@ -4,6 +4,7 @@
 //! `acdp-registry-core` itself has no compile-time dependency on a
 //! specific storage crate — the binary picks one via Cargo features.
 
+pub mod extract;
 pub mod handlers;
 pub mod log;
 pub mod metrics;
