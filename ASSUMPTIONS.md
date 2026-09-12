@@ -2313,6 +2313,92 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   requirement `"11"` means `cargo update` can break it without a manifest change, which is a wider
   exposure than first written, and it still fails loudly and locally.
 
+## H-H-w — wiring the tenant predicate into `/contexts/search`
+
+- **Plan:** unit H-H-w (lane-3), closing the residual E2 that H-H's `search_in_tenant` was built for.
+- **Assumed:** that `search_in_tenant` existed, worked, and was dormant — i.e. that this unit was
+  wiring rather than building.
+- **Verified before designing, per Rule 87, rather than taken from the assignment.** All three cited
+  call sites are correct by content: `sqlite/src/store.rs:164` and `pg/src/store.rs:127` both
+  delegate to `search_inner(params, requester, anon, tenant)`; the default at
+  `store/src/lib.rs:430` is **fail-closed** (a non-reserved `Some(tenant)` returns an empty response
+  rather than falling through to an unscoped `search`). Dormancy confirmed too: every reference
+  outside the definitions is a doc comment, a unit test, a parity test, or a test wrapper — no
+  production caller. **Status: CONFIRMED.**
+
+- **Assumption (the one that would have shipped a security regression):** that
+  `RegistryServer::search` is a thin wrapper over `RegistryStore::search`, so swapping in the
+  store's tenant-scoped entry preserves behaviour.
+- **FALSE, and checked rather than assumed.** `acdp-server-0.13.1`
+  (`src/registry/server.rs:937`) rejects an anonymous search with **403 `not_authorized`** when
+  `caps.anonymous_public_reads` is false, *before* delegating — normative per RFC-ACDP-0008 §6.3 and
+  fixture `vis-009`, and deliberately not an empty `200`, because an empty 200 still confirms the
+  registry exists and that the query ran. `search_in_tenant` is a store entry point with no such
+  gate, so the obvious wiring silently downgrades a normative 403 to an empty 200.
+- **Chose:** leave the untenanted path on `server.search` **untouched** (no behaviour change at all
+  for the common case) and replicate the gate on the new tenant path only, reading
+  `anonymous_public_reads` from `state.server.capabilities()` — the same field `server.search`
+  reads, so the two agree by construction. `state.config.auth.anonymous_public_reads` is the trap:
+  right in the binary, which copies cfg into caps, wrong for any other wiring. That is GAP 3, and it
+  already cost this repo one anonymous-disclosure bug on `/log/entries`.
+- **Status:** CONFIRMED.
+
+- **Assumption (checked because the default impl is fail-closed, which hides regressions as
+  emptiness):** that routing tenant-scoped search through `search_in_tenant` does not break the
+  `storage-memory` build, whose `MemoryStore` overrides none of the tenancy methods and therefore
+  inherits a default that returns **zero rows** for any real tenant.
+- **Why it holds, and it is not my doing:** #137 already refuses the combination at startup —
+  `main.rs` bails when the memory backend is configured with tenancy, precisely so a registry does
+  not boot answering every tenant-scoped read with zero rows. Independently, `MemoryStore` reports
+  `"default"` for every row, `"default"` is `RESERVED_TENANT`, and `reject_reserved_tenant` refuses
+  it from both a header and a token claim — so no caller can assert the only tenant that backend
+  reports. A tenant-scoped search is therefore unreachable on a shipped memory deployment, and the
+  fail-closed default is not reachable through the wire.
+- **Blast radius if wrong:** tenant-scoped search on a memory build would silently return nothing
+  rather than erroring — fail-closed, so no disclosure, but functionally broken and invisible.
+- **Status:** CONFIRMED.
+
+- **Assumption (recorded as an OPEN decision, deliberately not settled by this unit):** that
+  `total_estimate` should remain omitted for a tenant-scoped request.
+- **What changed under it.** It was omitted because it was **wrong** — the store counted before the
+  handler applied the tenant predicate. `search_inner` puts `AND tenant_id = ?` in the same
+  statement as `COUNT(*) OVER ()`, so once the request is served by `search_in_tenant` the count is
+  **tenant-scoped and honest**. The original justification no longer exists.
+- **Chose:** keep omitting it, and rewrite the *reason* in `docs/HTTP-API.md` to say it is now
+  withheld **conservatively rather than necessarily**. Re-enabling it is wire-visible on an endpoint
+  another lane documented this same wave, so it is a decision for the leader and not a side effect
+  of a wiring unit. Documenting (b) without implementing it would have left the docs describing code
+  that does not exist — the failure this unit's second half exists to remove.
+- **Status:** UNCONFIRMED — the behaviour is deliberate and the docs match the code as shipped, but
+  the *decision* is open and should be closed explicitly rather than by inertia.
+## H-A P10 (A10) — the route-classification guard names what it cannot parse
+
+- **Assumption:** `NON_DATA_ROUTES` reverse containment is not redundant with the equality
+  assertion that landed in PR3.
+- **Verified, not reasoned:** removing `.route("/.well-known/jwks.json", ...)` from the core
+  router while leaving its table row standing passes assertions 1, 2 and 3 and fails only the new
+  one. Equality is blind to it because removing a route decrements the scanned count and the call
+  count together; assertion 2 is blind because it runs mounted ⊆ classified, and a table row
+  matching nothing subtracts nothing from `unclassified`.
+- **Why it matters:** a row that matches no route reads as coverage. It also silently shrinks what
+  assertion 2 can catch, because a later route reusing that path would be "already classified".
+- **Status:** CONFIRMED by falsification.
+
+- **Assumption (and the correction that produced it):** a source scanner for route registrations
+  must scan the whole source, never line by line.
+- **Why:** the first draft of `non_literal_route_forms` scanned per line and reported seven false
+  positives. `crates/acdp-registry-core/src/lib.rs` registers seven routes with `.route(` at the
+  end of one line and the path on the next; a per-line scan sees an empty argument and calls it
+  non-literal. Whitespace between `(` and the path legitimately includes a newline.
+- **This is the same defect that defeated a grep earlier in this unit** — a phrase spanning a line
+  wrap, invisible to a line-oriented tool — reproduced in code written hours after that lesson was
+  recorded. Knowing the failure mode did not prevent writing it again in a different medium.
+- **Fix, and why this shape rather than a patched regex:** `non_literal_route_forms` is now the
+  exact inverse of `mounted_route_paths` — same scan, same "is the first non-whitespace token a
+  quote" test, opposite branch taken. Two functions that must agree about what a literal is now
+  cannot disagree, rather than agreeing by inspection.
+- **Status:** CONFIRMED — the seven false positives are gone and the real injection is still the
+  only form reported.
 ## The caps/config invariant is made unrepresentable for new callers, not enforced for existing ones
 
 - **Plan:** plans/h-o-caps-testability.md
@@ -2341,3 +2427,38 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   directional result is what shows the end-to-end test measures caps rather than config, and it is
   why the config half needs its own assertion to be protected at all.
 - **Status:** UNCONFIRMED
+
+## H-A2-w — `total_estimate` returns for tenant-scoped callers
+
+- **Assumption:** the store's `COUNT(*) OVER ()` is tenant-correct, so returning `total_estimate`
+  to a tenant-asserting caller discloses nothing.
+- **Verified in the code, then on the wire:** `search_in_tenant` appends `AND tenant_id = ?` to the
+  same statement that carries `COUNT(*) OVER ()` (`acdp-registry-sqlite/src/store.rs`,
+  `acdp-registry-pg/src/store.rs`), so the count rides a scan that only ever sees the caller's
+  rows. On the wire, a `tenant-a` caller against a fixture of 2 own rows and 3 foreign rows
+  receives `2`.
+- **Why the wire check is not redundant with reading the SQL:** the handler chooses between
+  `search_in_tenant` and `RegistryServer::search` at `handlers/context.rs`. Correct SQL reached by
+  the wrong branch would still report the registry-wide number, and only an end-to-end assertion
+  distinguishes those.
+- **Status:** CONFIRMED.
+
+- **Assumption:** asserting the VALUE rather than the presence of `total_estimate` is necessary.
+- **Why:** `Option<u64>` with `skip_serializing_if` makes absent and null identical on the wire, so
+  `.is_some()` cannot tell "present and null" from "present with a number". More importantly,
+  presence alone passes against two live bugs. The fixture separates all three readings — 2 is the
+  tenant's count, 5 the registry's, 1 the page size at `limit=1` — and each was produced by a real
+  mutation rather than predicted:
+  - omission restored in the handler -> `None`;
+  - tenant predicate removed from the store's WHERE clause (the pre-#259 world) -> `Some(5)`;
+  - `total_estimate = matches.len()` -> `Some(1)`.
+- **Status:** CONFIRMED by falsification, three ways.
+
+- **Assumption (NOT acted on, recorded so the next reader does not "tidy" it):** the refill loop's
+  tenant `retain` and its `tenants_of_ctxs` call are now redundant for a tenant-scoped request,
+  because the predicate is in the statement.
+- **Why it is left in place:** removing them is an optimisation with its own falsification burden,
+  not part of this change. lane-3 left them deliberately for the same reason and said so at
+  handover. Deleting them here would ship an unfalsified behaviour change inside a diff whose
+  stated purpose is a one-field wire addition.
+- **Status:** UNCONFIRMED — a separate unit if anyone wants it, with its own evidence.

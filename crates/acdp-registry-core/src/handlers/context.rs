@@ -1049,21 +1049,72 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
         iterations += 1;
         params.cursor = cursor.clone();
 
-        let server = state.server.clone();
-        let req_owned = requester.clone();
-        // `server.search` is synchronous, so it runs on the blocking pool.
-        // We move `params` in and hand it back out with the result, which
-        // lets the loop reuse it next iteration without requiring
-        // `SearchParams: Clone` — keeps this crate decoupled from an
-        // upstream derive.
-        let (result, returned_params) = tokio::task::spawn_blocking(move || {
-            let r = server.search(&params, req_owned.as_ref());
-            (r, params)
-        })
-        .await
-        .map_err(|e| RegistryError::Internal(format!("join: {e}")))?;
-        params = returned_params;
-        let resp = result?;
+        // H-H-w: when a tenant is asserted, scan INSIDE the tenant.
+        //
+        // The store's keyset `next_cursor` is anchored on the last row the scan
+        // touched, so the only way a returned cursor cannot disclose a foreign
+        // `(created_at, ctx_id)` is for the scan never to see one. No amount of
+        // post-filtering achieves that: the handler can drop a foreign ROW from
+        // the page but the anchor was already computed from it.
+        // `ExtendedRegistryStore::search_in_tenant` (H-H) puts the tenant
+        // predicate in the same statement as the keyset and the count; it shipped
+        // merged-and-dormant because nothing called it until here.
+        let resp = if let Some(tenant) = requested_tenant.as_deref() {
+            // `RegistryServer::search` is NOT a thin wrapper over the store, and
+            // this is the half that is easy to lose. Before delegating it rejects
+            // an anonymous search with **403 `not_authorized`** when the registry
+            // does not allow anonymous reads (`acdp-server`'s BUG-01,
+            // RFC-ACDP-0008 §6.3, fixture `vis-009`) — deliberately NOT an empty
+            // `200`, because an empty 200 still confirms the registry exists and
+            // that the query ran.
+            //
+            // `search_in_tenant` is a STORE entry point and carries no such gate,
+            // so routing through it means carrying the gate here or silently
+            // downgrading a normative 403 to an empty 200.
+            //
+            // Read from `capabilities()` — the same field
+            // `RegistryServer::search` reads — so the two agree BY CONSTRUCTION
+            // rather than agreeing while config and caps happen to match.
+            // `state.config.auth.anonymous_public_reads` is the trap: it is right
+            // in the binary, which copies cfg into caps, and wrong for any other
+            // wiring. That is GAP 3 in `tests/common/mod.rs`, and it already cost
+            // this repo one anonymous-disclosure bug on `/log/entries`.
+            let anonymous_public_reads = state.server.capabilities().anonymous_public_reads;
+            if requester.is_none() && !anonymous_public_reads {
+                return Err(acdp::error::AcdpError::NotAuthorized(
+                    "anonymous search requires authentication \
+                     (registry caps: anonymous_public_reads=false)"
+                        .into(),
+                )
+                .into());
+            }
+            state
+                .server
+                .store()
+                .search_in_tenant(
+                    &params,
+                    requester.as_ref(),
+                    anonymous_public_reads,
+                    Some(tenant),
+                )
+                .await?
+        } else {
+            let server = state.server.clone();
+            let req_owned = requester.clone();
+            // `server.search` is synchronous, so it runs on the blocking pool.
+            // We move `params` in and hand it back out with the result, which
+            // lets the loop reuse it next iteration without requiring
+            // `SearchParams: Clone` — keeps this crate decoupled from an
+            // upstream derive.
+            let (result, returned_params) = tokio::task::spawn_blocking(move || {
+                let r = server.search(&params, req_owned.as_ref());
+                (r, params)
+            })
+            .await
+            .map_err(|e| RegistryError::Internal(format!("join: {e}")))?;
+            params = returned_params;
+            result?
+        };
 
         // First page sets the estimate; we don't try to aggregate across
         // pages because the upstream estimate is already a hint.
@@ -1135,29 +1186,24 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
         }
     }
 
-    // A2: `total_estimate` comes from the STORE's count, which is §4.5-visible
-    // but NOT tenant-scoped -- the tenant predicate is applied post-query, in
-    // this handler, after the count has already been taken. So for a
-    // tenant-asserting caller the number describes rows across every tenant,
-    // and returning it hands that caller a population count for data they
-    // cannot see and must not know the size of.
+    // A2 is now closed at the source rather than by withholding. This block
+    // used to null `total_estimate` for any tenant-asserting caller, because the
+    // store counted §4.5-visible rows BEFORE the tenant predicate ran -- the
+    // filter lived here, post-query -- so the number described rows across every
+    // tenant and handed that caller a population count for data they cannot see.
     //
-    // Omitted rather than recomputed: an honest tenant-scoped count needs the
-    // predicate in the store's SQL, which is a different change in a different
-    // crate. `Option<u64>` with `skip_serializing_if` means `None` omits the
-    // KEY entirely rather than sending `null`, so a client cannot mistake
-    // "withheld" for "zero".
+    // `search_in_tenant` (H-H) moved the predicate into the WHERE clause, and
+    // `COUNT(*) OVER ()` rides the same scan (`acdp-registry-sqlite/src/store.rs`,
+    // `acdp-registry-pg/src/store.rs`). The count is therefore tenant-correct by
+    // construction, computed on the caller's own rows, with no extra query. There
+    // is no longer a cross-tenant number to withhold: withholding it now hides a
+    // figure the caller is entitled to and which discloses nothing.
     //
-    // Deliberately NOT unconditional: an un-scoped caller is entitled to the
-    // count, and removing it for everyone would break conformance's
-    // `want_total_estimate` while still passing a naive "tenant caller sees no
-    // count" test. `search_still_reports_total_estimate_without_tenant` pins
-    // that half.
-    let total_estimate = if requested_tenant.is_some() {
-        None
-    } else {
-        total_estimate
-    };
+    // So the omission is removed rather than narrowed, and `total_estimate`
+    // flows for every caller. `search_reports_a_tenant_scoped_total_estimate`
+    // pins that the number is the TENANT's count and not the registry's -- the
+    // distinction this whole finding was about, and the one a test asserting
+    // mere presence would miss.
 
     Ok(SearchResponse {
         matches: accumulated,

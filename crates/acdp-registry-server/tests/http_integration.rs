@@ -7520,6 +7520,51 @@ fn mounted_route_call_count(src: &str) -> usize {
         .sum()
 }
 
+/// The route-registration forms in `src` whose path argument is NOT a string
+/// literal -- the ones [`mounted_route_paths`] silently skips.
+///
+/// The equality assertion below already FAILS when one of these exists, because
+/// the scanned count drops below the call count. What it cannot do is say WHICH
+/// route, and "26 != 27" sends the reader to diff two lists by hand. This exists
+/// so the failure names the form it could not interpret.
+///
+/// Written as the exact INVERSE of [`mounted_route_paths`] -- same scan, same
+/// "is the first non-whitespace token a quote" test, opposite branch taken -- so
+/// the two cannot disagree about what counts as a literal. A first draft scanned
+/// line by line instead and reported seven false positives: `lib.rs` registers
+/// seven routes with `.route(` at the end of one line and the path on the next,
+/// and a per-line scan sees an empty argument. Whitespace here includes the
+/// newline, which is the whole reason the shared scan shape matters.
+///
+/// Comment lines are excluded on the same grounds as [`mounted_route_call_count`]:
+/// `lib.rs` describes this very test in prose, and that prose must not be
+/// reported as a defect in the code it describes.
+fn non_literal_route_forms(src: &str) -> Vec<String> {
+    let code: String = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = Vec::new();
+    let mut rest = code.as_str();
+    while let Some(i) = rest.find(".route(") {
+        let after = &rest[i + ".route(".len()..];
+        rest = after;
+        let Some(q) = after.find('"') else { break };
+        // Literal: everything between `(` and the next quote is whitespace --
+        // newlines included, so a wrapped registration is still a literal.
+        if !after[..q].chars().any(|c| !c.is_whitespace()) {
+            continue;
+        }
+        let form: String = after
+            .chars()
+            .take_while(|c| *c != ',' && *c != ')')
+            .collect();
+        out.push(format!(".route({}, ...)", form.trim()));
+    }
+    out
+}
+
 /// Routes that intentionally sit OUTSIDE the `data` group, each with the reason
 /// it is not requester-relative-cacheable. Adding a route to the core router
 /// without adding it here (or to `DATA_PLANE_ROUTES`) fails the test below --
@@ -7636,7 +7681,41 @@ fn every_route_in_the_core_router_is_classified() {
         "the source scan interpreted a different number of routes than the router \
          actually mounts. Either the parser has stopped matching the router's syntax \
          (making this whole test vacuous), or a route was mounted with a non-literal \
-         path and is silently unclassified.",
+         path and is silently unclassified. Non-literal forms found: {:?}",
+        non_literal_route_forms(CORE_ROUTER_SRC),
+    );
+
+    // 4. REVERSE containment for NON_DATA_ROUTES: every tabled route must still
+    //    be mounted.
+    //
+    //    Assertion 2 runs one way only -- mounted ⊆ classified -- so it notices a
+    //    route added without a posture and is blind to the opposite: a route
+    //    DELETED from the router while its row stays in the table. That row then
+    //    documents a posture for a URL this server does not serve, and every
+    //    assertion here keeps passing, because a table entry matching nothing
+    //    subtracts nothing from `unclassified`.
+    //
+    //    DATA_PLANE_ROUTES does not need this: assertion 1 compares it to the
+    //    `data` group with `assert_eq!` on two sets, which already fails in both
+    //    directions. NON_DATA_ROUTES has no such partner, and this is it.
+    //
+    //    Deliberately NOT a count: `NON_DATA_ROUTES.len() == mounted - tabled`
+    //    would pass if one row went stale while another was added, which is
+    //    exactly what happens when a route is renamed.
+    let mounted_anywhere: std::collections::BTreeSet<String> =
+        mounted_route_paths(CORE_ROUTER_SRC).into_iter().collect();
+    let phantom: Vec<&str> = NON_DATA_ROUTES
+        .iter()
+        .map(|(p, _)| *p)
+        .filter(|p| !mounted_anywhere.contains(*p))
+        .collect();
+    assert!(
+        phantom.is_empty(),
+        "these paths are classified in NON_DATA_ROUTES but the core router does not \
+         mount them: {phantom:?} -- either the route was removed and its row should \
+         go with it, or it was renamed and the row was left pointing at the old \
+         path. A row that matches no route is not harmless: it reads as coverage, \
+         and it silently shrinks what assertion 2 is able to catch.",
     );
 }
 
@@ -8361,23 +8440,42 @@ async fn the_acdp_media_type_is_accepted_not_rejected() {
     );
 }
 
-/// A2: a tenant-scoped search must not report a cross-tenant population count.
+/// A2, closed: a tenant-scoped search reports the TENANT's count.
 ///
-/// `total_estimate` is produced by the STORE, which counts §4.5-visible rows
-/// before the tenant predicate is applied — the tenant filter runs in the
-/// handler, post-query. So for a tenant-asserting caller the number describes
-/// rows across every tenant, i.e. a population size for data that caller cannot
-/// see and must not learn the size of.
+/// This test is the inversion of `search_omits_total_estimate_for_tenant_scoped_caller`,
+/// which asserted the opposite and was correct while it lived. The old
+/// behaviour withheld `total_estimate` from any tenant-asserting caller because
+/// the store counted §4.5-visible rows BEFORE the tenant predicate ran — the
+/// filter was applied post-query, in the handler — so the number described the
+/// whole registry and disclosed a population size the caller must not learn.
 ///
-/// The key must be **absent**, not `null` and not `0`. `Option<u64>` with
-/// `skip_serializing_if` is what guarantees that, and a client must not be able
-/// to mistake "withheld" for "none found".
+/// `search_in_tenant` moved the predicate into the WHERE clause and
+/// `COUNT(*) OVER ()` rides the same scan, so the count is now tenant-correct by
+/// construction. Withholding it would hide a figure the caller is entitled to.
+/// Per the tripwire's own instruction, it is inverted in the commit that makes
+/// it false rather than deleted or quietly relaxed.
+///
+/// **Presence is not the assertion.** A test that only checked the key exists
+/// would pass against two different bugs, so the fixture is built to separate
+/// the number from both:
+///
+/// | value | meaning | fixture |
+/// |---|---|---|
+/// | 2 | the tenant's count — correct | `tenant-a` has 2 matching rows |
+/// | 5 | the registry's count — the disclosure this finding was about | 5 rows match `q=est` across tenants |
+/// | 1 | the page size — a handler setting it from `matches.len()` | `limit=1` returns 1 row |
+///
+/// The three are deliberately distinct, so no single wrong implementation can
+/// produce the expected number by coincidence.
 #[tokio::test]
-async fn search_omits_total_estimate_for_tenant_scoped_caller() {
+async fn search_reports_a_tenant_scoped_total_estimate() {
     let h = harness(true).await;
     for (seed, tenant, title) in [
         (31u8, "tenant-a", "est-alpha"),
+        (34u8, "tenant-a", "est-delta"),
         (32u8, "tenant-b", "est-bravo"),
+        (35u8, "tenant-b", "est-echo"),
+        (36u8, "tenant-b", "est-foxtrot"),
     ] {
         let req = producer(seed)
             .publish_request()
@@ -8395,7 +8493,7 @@ async fn search_omits_total_estimate_for_tenant_scoped_caller() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/contexts/search?q=est")
+                .uri("/contexts/search?q=est&limit=1")
                 .header("X-Tenant-Id", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8405,16 +8503,23 @@ async fn search_omits_total_estimate_for_tenant_scoped_caller() {
     assert_eq!(resp.status(), StatusCode::OK);
     let v = body_to_json(resp).await;
 
-    assert!(
-        v.get("total_estimate").is_none(),
-        "the KEY must be absent for a tenant-scoped caller -- `null` or `0` would \
-         both be readable as 'none found' rather than 'withheld': {v}"
+    // `total_estimate` is `Option<u64>` with `skip_serializing_if`, so an absent
+    // key and a null are indistinguishable on the wire. Asserting the NUMBER
+    // covers both, where `.is_some()` would not distinguish present-and-null.
+    assert_eq!(
+        v.get("total_estimate").and_then(|t| t.as_u64()),
+        Some(2),
+        "a tenant-scoped caller must receive their OWN count: 2 is `tenant-a`'s \
+         matching rows. 5 would be the registry-wide count -- the cross-tenant \
+         disclosure this finding was about. 1 would be the page size, i.e. a \
+         handler reporting `matches.len()` rather than the store's total. \
+         Absent means the omission is still in place: {v}"
     );
-    // The request must still WORK, or the test would pass against a handler that
-    // simply broke tenant search.
-    assert!(
-        v["matches"].as_array().is_some_and(|m| !m.is_empty()),
-        "tenant-scoped search must still return the caller's own rows: {v}"
+    assert_eq!(
+        v["matches"].as_array().map(Vec::len),
+        Some(1),
+        "limit=1, so the count must exceed the page -- otherwise this test \
+         cannot tell a real total from `matches.len()`: {v}"
     );
 }
 
@@ -8456,140 +8561,6 @@ async fn search_still_reports_total_estimate_without_tenant() {
         v.get("total_estimate").is_some(),
         "an un-scoped caller must still receive `total_estimate`; omitting it for \
          everyone is the over-correction this test exists to catch: {v}"
-    );
-}
-
-/// A2 is PARTIAL, and this asserts the part that is still open.
-///
-/// Omitting `total_estimate` removes an O(1) population count. It does **not**
-/// close the underlying disclosure. `next_cursor` is unsigned plaintext base64
-/// of `{mint_ms}:{anchor_ms}:{ctx_id}` anchored on the last row the STORE
-/// scanned, and the store's scan is not tenant-aware — the tenant predicate is
-/// applied afterwards, in the handler.
-///
-/// # The plan's description of this attack was wrong, and the correction matters
-///
-/// It says a tenant-pinned caller can "walk cursors at `limit=1`". That is not
-/// where the leak is. Measured on this fixture, every anchor returned at
-/// `limit=1` is one of the caller's own rows.
-///
-/// **Not "every time" — an earlier version of this comment said that and it was
-/// an overclaim from a single six-row fixture.** A foreign anchor escapes
-/// whenever the refill loop STOPS on a page whose last raw row is foreign, and
-/// the loop has two exits, not one: reaching `target`, and exhausting
-/// `SEARCH_REFILL_MAX_PAGES` (6). `cursor` is assigned before that break, so at
-/// any `limit` — `1` included — enough consecutive foreign pages will hand a
-/// foreign anchor to the client. This fixture is too small to reach that exit.
-///
-/// The reason `limit=1` is clean HERE is the refill loop's target exit. A
-/// foreign anchor escapes that exit only when `accumulated` reaches `target`
-/// *on the page whose last raw row is foreign*.
-/// With `target == 1` a store page is one row, so if that row is foreign it is
-/// dropped by the retain, `accumulated` stays below `target`, and the loop
-/// refills — consuming the foreign-anchored cursor internally and returning the
-/// next one instead. The filter that hides the row also hides the anchor.
-///
-/// At `target >= 2` a page can contain an own row *and* a trailing foreign row,
-/// `accumulated` reaches `target` on it, the loop stops, and that page's
-/// foreign-anchored cursor is handed to the client. Measured at `limit=2`.
-///
-/// Anyone reproducing the finding at `limit=1` on a fixture this size would
-/// conclude it does not exist, which is why this test pins the size that
-/// exposes it directly rather than the size the plan named.
-///
-/// **Expected to FAIL when the tenant predicate moves into the store's search
-/// SQL** (E2, owned by another lane) — at which point it must be deleted in a
-/// visible change rather than quietly relaxed. Until then A2 is not closed.
-///
-/// **If you are reading this because it just failed:** that is the good
-/// outcome. Confirm the cursor now only anchors on the caller's own rows, then
-/// delete this test and say so in the changelog.
-#[tokio::test]
-async fn search_cursor_oracle_remains_open_for_tenant_scoped_caller() {
-    let h = harness(true).await;
-
-    // Alternating tenants, oldest first. The scan is `created_at DESC`, so this
-    // publishes into an order where a page of 2 can hold [own, foreign].
-    let mut own_ids = Vec::new();
-    let mut foreign_ids = Vec::new();
-    for (i, tenant) in [
-        "tenant-b", "tenant-a", "tenant-b", "tenant-a", "tenant-b", "tenant-a",
-    ]
-    .iter()
-    .enumerate()
-    {
-        let req = producer(50 + i as u8)
-            .publish_request()
-            .title("oracle-row")
-            .context_type(ContextType::DataSnapshot)
-            .visibility(Visibility::Public)
-            .build()
-            .unwrap();
-        let (st, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
-        assert_eq!(st, StatusCode::OK, "setup publish: {v}");
-        let id = v["ctx_id"].as_str().unwrap().to_string();
-        if *tenant == "tenant-b" {
-            foreign_ids.push(id);
-        } else {
-            own_ids.push(id);
-        }
-    }
-    assert_eq!(foreign_ids.len(), 3, "setup must create foreign rows");
-
-    let mut decoded_anchors = Vec::new();
-    let mut cursor: Option<String> = None;
-    for _ in 0..8 {
-        let uri = match &cursor {
-            Some(c) => format!(
-                "/contexts/search?q=oracle-row&limit=2&cursor={}",
-                pct_encode_path_segment(c)
-            ),
-            None => "/contexts/search?q=oracle-row&limit=2".to_string(),
-        };
-        let resp = h
-            .router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .header("X-Tenant-Id", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let v = body_to_json(resp).await;
-
-        // The A2 fix itself must hold on every page.
-        assert!(
-            v.get("total_estimate").is_none(),
-            "tenant-scoped caller must not receive a count: {v}"
-        );
-
-        let Some(next) = v["next_cursor"].as_str() else {
-            break;
-        };
-        decoded_anchors.push(String::from_utf8_lossy(&B64.decode(next).unwrap()).to_string());
-        cursor = Some(next.to_string());
-    }
-
-    let leaked: Vec<&String> = decoded_anchors
-        .iter()
-        .filter(|a| foreign_ids.iter().any(|f| a.contains(f)))
-        .collect();
-    assert!(
-        !leaked.is_empty(),
-        "EXPECTED the residual leak and did not observe it. Either E2 has landed — \
-         in which case this test has done its job and should be DELETED with a \
-         changelog note — or the setup stopped exercising the path. This fixture \
-         exercises the refill loop's TARGET exit, which needs limit >= 2: the \
-         anchor escapes when `accumulated` reaches `target` on a page whose last \
-         raw row is foreign. That is not the only exit — the loop also stops on \
-         exhausting SEARCH_REFILL_MAX_PAGES, which leaks at any limit — but this \
-         fixture is too small to reach it.\n\
-         foreign ids: {foreign_ids:?}\n\
-         decoded anchors: {decoded_anchors:?}"
     );
 }
 

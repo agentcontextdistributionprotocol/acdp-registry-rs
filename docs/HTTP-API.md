@@ -396,35 +396,52 @@ Query parameters (all optional):
 
 Response: a `SearchResponse` — `{ matches: [...], total_estimate, next_cursor }`.
 Visibility (RFC-ACDP-0008 §4.5) is enforced in the SQL `WHERE` clause on both
-backends. Tenant narrowing is post-filtered with a bounded refill loop (up to 6
-inner pages), so a page may return fewer than `limit` rows near the end of a
-result set even though `next_cursor` is set — keep paging until `next_cursor`
-is absent.
+backends, and **tenant narrowing is too** — a tenant-scoped request is served by
+`ExtendedRegistryStore::search_in_tenant`, which carries the tenant predicate in
+the same statement as the keyset and the count. A `?visibility=` narrow is still
+post-filtered with a bounded refill loop (up to 6 inner pages), so a page may
+return fewer than `limit` rows near the end of a result set even though
+`next_cursor` is set — keep paging until `next_cursor` is absent.
 
-**`total_estimate` is omitted entirely for a tenant-scoped request.** It is the
-count of §4.5-visible matches for the caller *across all tenants*, because the
-count is taken in the store before the tenant predicate is applied in the
-handler. Returning it to a tenant-asserting caller would report a population
-size for rows that caller cannot see, so the key is **absent** — not `null`, and
-not `0`. A request that asserts no tenant — no `X-Tenant-Id` **and** no `tenant`
-claim in a bearer token, since `tenant_for_request` resolves both — still carries it.
+**`total_estimate` is returned for every caller, including a tenant-scoped one,
+and it is the caller's own count.** For a request that asserts a tenant it is the
+number of §4.5-visible matches **within that tenant** — never the registry-wide
+figure.
 
-> **Residual, stated rather than left to be discovered.** Omitting the count
-> does not close the underlying leak. `next_cursor` is unsigned plaintext base64
-> of `{mint_ms}:{anchor_ms}:{ctx_id}` anchored on the last row the store
-> *scanned*, which may belong to another tenant.
+This paragraph previously documented the opposite, and the history is worth one
+sentence because the field's meaning changed rather than its presence. It was
+omitted from tenant-scoped responses because it was **wrong**: the count was
+taken in the store before the handler applied the tenant predicate, so it
+described rows across every tenant and handed a tenant-scoped caller a population
+size for data it could not see. `search_in_tenant` put the predicate in the same
+statement as the keyset and the count, so `COUNT(*) OVER ()` now rides a scan
+that only ever sees the caller's rows. The number is correct by construction, and
+withholding it would hide a figure the caller is entitled to and which discloses
+nothing.
+
+Two things a client should not infer. The count is **not** the page size: with
+`limit` smaller than the result set, `total_estimate` exceeds `matches.len()` and
+is the pre-page total. And it is an estimate in name only on these backends —
+`COUNT(*) OVER ()` is exact for the scan it rides — but treat it as advisory, per
+RFC-ACDP-0008, rather than as a value to paginate against.
+
+> **The cursor oracle described here previously is closed.** Recorded rather than
+> deleted, because the shape of it is worth knowing and because this paragraph
+> used to tell readers the fix had not been built.
 >
-> The anchor escapes whenever the refill loop stops on a page whose last raw row
-> is foreign. Measured, that is **not** what happens at `limit=1`: the loop keeps
-> refilling, so the filter that hides the row also consumes its anchor. It is what
-> happens at `limit≥2`, where the loop stops on reaching `target` with a foreign
-> row last scanned — and also at any `limit` once the loop exhausts its
-> `SEARCH_REFILL_MAX_PAGES` (6) budget, since the cursor is assigned before the
-> break. So a tenant-scoped caller can still recover foreign `ctx_id`s and their
-> ordering, a row or a few rows at a time rather than a population count in one
-> request. This moves the oracle from O(1) to O(n); it does not remove it.
-> Closing it requires the tenant predicate in the store's search SQL so the scan
-> never sees another tenant's rows in the first place.
+> `next_cursor` is unsigned plaintext base64 of `{mint_ms}:{anchor_ms}:{ctx_id}`,
+> anchored on the last row the store **scanned** — not the last row returned.
+> While tenant narrowing was a handler-side post-filter, the scan saw other
+> tenants' rows, so a returned cursor could carry a foreign `(created_at,
+> ctx_id)`: the filter dropped the row but the anchor had already been computed
+> from it. No post-filter can fix that, which is the whole point — dropping a row
+> after the fact does not un-scan it.
+>
+> A tenant-scoped request is now served by `search_in_tenant`, so the scan never
+> sees another tenant's rows and the anchor can only ever be one of the caller's
+> own. Cursors remain unsigned and unauthenticated, so a caller can still read
+> and forge **its own** `{mint_ms}:{anchor_ms}:{ctx_id}` — that is a separate
+> property, unchanged by this, and not a cross-tenant disclosure.
 
 ### `GET /lineages/{lineage_id}`
 

@@ -31,6 +31,123 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-A2-w (lane-1) — total_estimate returns for tenant-scoped callers -->
+
+### Changed
+
+- **`GET /contexts/search` now returns `total_estimate` to a tenant-scoped caller, and the number
+  is that tenant's count.** Additive and wire-visible: a response that previously omitted the key
+  for any request asserting a tenant now carries it. No field changed meaning for an un-scoped
+  caller, and nothing was removed.
+
+- **Why it was withheld, and why that reason expired.** The count came from the store, which
+  counted §4.5-visible rows *before* the tenant predicate ran — the filter lived in the handler,
+  post-query — so the number described rows across every tenant and handed a tenant-scoped caller
+  a population size for data it could not see. `search_in_tenant` moved the predicate into the
+  same statement as the keyset and the count, so `COUNT(*) OVER ()` rides a scan that only ever
+  sees the caller's own rows. There is no cross-tenant number left to withhold, and withholding
+  one would hide a figure the caller is entitled to.
+
+### Fixed
+
+- **`docs/HTTP-API.md` stated the opposite, and its stated REASON was false independently of its
+  claim.** It explained the omission as "the count is taken in the store before the tenant
+  predicate is applied in the handler", which stopped being true when the predicate moved. Both
+  halves are rewritten rather than just the conclusion — a correct claim resting on a false
+  mechanism is the harder defect to notice later.
+
+- **The assertion that guarded the old behaviour was inverted, not deleted.**
+  `search_omits_total_estimate_for_tenant_scoped_caller` was a tripwire naming its own removal
+  condition, and this is the commit that makes it false, so it changes here and nowhere else. It
+  is now `search_reports_a_tenant_scoped_total_estimate`, and it asserts the **value**: presence
+  alone would pass against a handler reporting the registry-wide count and against one reporting
+  `matches.len()`. The fixture makes those three numbers distinct (2, 5, 1) and each wrong value
+  was produced by a real mutation. `search_still_reports_total_estimate_without_tenant` was left
+  untouched and kept passing throughout, which is what shows the change did not go too wide.
+
+<!-- unit H-H-w (lane-3) — wiring H-H's dormant tenant predicate into /contexts/search.
+     The fix a doc sentence said still needed building. -->
+
+### Fixed
+
+- **Security (cross-tenant disclosure): a tenant-scoped `/contexts/search` could hand back a
+  `next_cursor` anchored on another tenant's row, and that is now closed.** `next_cursor` is
+  unsigned plaintext base64 of `{mint_ms}:{anchor_ms}:{ctx_id}` anchored on the last row the store
+  **scanned**, not the last row returned. While tenant narrowing was a handler-side post-filter the
+  scan saw other tenants' rows, so the retain dropped the row while the anchor had already been
+  computed from it — a tenant-scoped caller could walk cursors to recover foreign `ctx_id`s and
+  their ordering. No post-filter could have fixed it: dropping a row after the fact does not
+  un-scan it.
+
+  A tenant-scoped request is now served by `ExtendedRegistryStore::search_in_tenant`, which carries
+  the predicate in the same statement as the keyset and the count, so the scan never sees another
+  tenant's rows and the anchor can only be one of the caller's own.
+
+  **Nothing was built for this.** `search_in_tenant` shipped with H-H and sat merged-and-dormant
+  because no caller existed — the same shape as `visible_ctx_ids` before P9. The docs said *"closing
+  it requires the tenant predicate in the store's search SQL"*, which was accurate only while the
+  wiring was missing, so that sentence is corrected in the same change.
+
+- **`search_cursor_oracle_remains_open_for_tenant_scoped_caller` is deleted**, as its own comment
+  instructed: *"If you are reading this because it just failed: that is the good outcome. Confirm
+  the cursor now only anchors on the caller's own rows, then delete this test and say so in the
+  changelog."* This is that note.
+
+  **Deleted, not relaxed, and confirmed causal before removal.** A test that asserts a defect still
+  exists is the acceptance criterion for its fix, written by whoever could still reproduce it — so
+  it was worth more than a guard written afterwards, and it was checked properly rather than assumed
+  to be the reason: with the predicate in place it failed with its own designed message ("EXPECTED
+  the residual leak and did not observe it") while its setup demonstrably still ran (three foreign
+  rows created); changing **only** the tenant argument from `Some(tenant)` to `None` made it pass
+  again. That isolates the failure to the single value that closes the oracle rather than to
+  anything else that moved on `main`.
+
+### Changed
+
+- **`total_estimate` stays omitted for a tenant-scoped request, but the reason changed.** It was
+  omitted because it was *wrong* — the store counted before the handler applied the tenant
+  predicate. `search_inner` puts `AND tenant_id = ?` in the same statement as `COUNT(*) OVER ()`,
+  so the count is now tenant-scoped and honest. The key is withheld **conservatively rather than
+  necessarily**; re-enabling it is wire-visible and ships as its own reviewable unit rather than
+  buried in a wiring change.
+
+- **One gate was carried by hand, deliberately.** `RegistryServer::search` is not a thin wrapper: it
+  rejects an anonymous search with **403 `not_authorized`** when `caps.anonymous_public_reads` is
+  false *before* delegating to the store (RFC-ACDP-0008 §6.3, fixture `vis-009`) — not an empty
+  `200`, which would still confirm the registry exists and that the query ran. `search_in_tenant` is
+  a store entry point with no such gate, so routing through it means carrying the gate or silently
+  downgrading a normative 403. The untenanted path is left on `server.search` untouched, and the
+  gate is replicated on the tenant path only, reading the flag from `capabilities()` — the same
+  field `server.search` reads, so the two agree by construction rather than while config and caps
+  happen to match.
+
+<!-- unit H-A, phase P10 (lane-1) — the route-classification guard names what it cannot parse -->
+
+### Fixed
+
+- **A route deleted from the core router while its `NON_DATA_ROUTES` row remained was invisible
+  to every assertion.** The classification test ran `mounted ⊆ classified` in one direction only,
+  so it noticed a route added without a cache posture and was blind to the opposite. A row
+  matching no route is not inert: it reads as coverage, and it silently widens what a later route
+  reusing that path would inherit. `DATA_PLANE_ROUTES` never had this gap — assertion 1 compares
+  it to the `data` group with `assert_eq!` on two sets, which fails both ways — so this closes
+  the one table that had no partner. Deliberately not a count: `len() == mounted - tabled` would
+  pass if one row went stale while another was added, which is precisely what a rename does.
+
+- **The equality assertion reddened on a non-literal route path but would not say which one.**
+  It reported "26 != 27" and left the reader to diff two lists by hand. It now names the form it
+  could not interpret, e.g. `.route(DEBUG_PATH, ...)`.
+
+### Changed
+
+- **Recorded because the bug was in this phase's own new code.** The first draft of the scanner
+  that names non-literal forms worked line by line and reported seven false positives: `lib.rs`
+  registers seven routes with `.route(` at the end of one line and the path on the next, and a
+  per-line scan sees an empty argument. That is the same line-wrap failure that defeated a grep
+  earlier in this unit, written again hours later in a different medium — knowing the failure
+  mode did not prevent repeating it. The scanner is now the exact **inverse** of
+  `mounted_route_paths`: same scan, same whitespace test, opposite branch, so the two cannot
+  disagree about what a literal is instead of agreeing by inspection.
 <!-- unit H-O (lane-2) — the caps/config split, and a premise that was mostly
      already satisfied. Three of the assign's claims were refuted by measurement. -->
 
