@@ -1611,3 +1611,43 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   the *plan* asserted a falsification that could not fire, which is the same defect class this
   unit exists to remove, one level up: an unfireable probe presented as evidence.
 - **Status:** CONFIRMED
+
+
+## H-A / P4 — A9: rate-limit scope taxonomy generated from one list
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P4)
+- **Assumed:** that a `/auth/challenge` rejection from the process-global ceiling and one from
+  the per-agent budget are operationally different events that an operator needs to tell apart,
+  and that collapsing them into `challenge_per_agent` hid the `agent_id`-rotating flood the
+  global ceiling exists to catch (#24) inside the ordinary noisy-agent case.
+- **Chose:** split the collapsed `check_global().and_then(|()| check(agent_id))` into two
+  sequential early-returns, each recording its own scope. Semantics are unchanged — `and_then`
+  already skipped `check` on a global `Err`, and each branch still surfaces its own
+  `Retry-After`.
+- **DIVERGENCE FROM THE PLAN, stated deliberately.** The plan specified a hand-written enum with
+  an exhaustive no-wildcard `match` for `label()`, plus a hand-written `ALL`, and explicitly left
+  the `ALL`-omission gap **open**: "a variant missing *from* `ALL` is invisible to
+  `every_rate_limit_scope_is_documented`, which iterates `ALL` — the same omission class that
+  lost `lifecycle_per_agent`. Closing it needs enum, `ALL` and `label()` generated from one
+  `macro_rules!`. That is worth doing but is not this phase."
+
+  I closed it in this phase instead. The macro is ~15 lines, it is the mechanism the plan itself
+  named as correct, and the gap it leaves open is not hypothetical — this taxonomy has already
+  drifted in **both** directions (`lifecycle_per_agent` emitted but undocumented; a
+  `challenge_global` documented in the `metrics.rs` docstring that nothing emitted). Shipping a
+  phase whose stated purpose is omission-proofing while leaving the dominant omission path open,
+  when the fix is fifteen lines and falsifiable, was the wrong trade. The plan's reason for
+  deferring was scope, not a technical objection.
+- **Also changed:** `record_rate_limit_rejection` now takes `RateLimitScope` rather than
+  `&'static str`, so an undocumented or mistyped label cannot be constructed. This is a `pub`
+  signature change in `acdp-registry-core`, which has exactly one consumer
+  (`acdp-registry-server`, in-workspace, by path). Not a published-API break.
+- **Alternatives:** (a) hand-written enum + hand-written `ALL` — rejected, leaves the omission
+  path the phase exists to close; (b) keep `&'static str` and rely on the doc test — rejected,
+  a typo produces a new series rather than a failure, and the doc test only iterates known
+  scopes so it cannot see an unknown one.
+- **Blast radius if wrong:** an operator's `challenge_per_agent` alert loses volume to
+  `challenge_global`. Disclosed in the CHANGELOG under `### Changed` and in an operator note in
+  `docs/HTTP-API.md` next to the metric table, both stating the direction of the shift.
+- **Status:** UNCONFIRMED — the label rename is a deliberate, documented break of an existing
+  series; whether any deployment actually alerts on `challenge_per_agent` is not knowable here.

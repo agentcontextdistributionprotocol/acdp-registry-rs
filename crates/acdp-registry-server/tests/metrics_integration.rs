@@ -20,6 +20,7 @@ use acdp::types::primitives::{AgentDid, ContextType, Visibility};
 use acdp_registry_auth::{
     AuthService, ChallengeStore, InMemoryChallengeStore, JwtSecret, JwtSigner,
 };
+use acdp_registry_core::metrics::RateLimitScope;
 use acdp_registry_core::{build_router, AppStateInner};
 use acdp_registry_sqlite::SqliteStore;
 use acdp_registry_store::ExtendedRegistryStore;
@@ -266,6 +267,83 @@ async fn metrics_endpoint_exposes_request_and_domain_series() {
         StatusCode::TOO_MANY_REQUESTS
     );
 
+    // A9: the two CHALLENGE scopes must be DISTINGUISHABLE. Until H-A/P4 both
+    // arms recorded `challenge_per_agent`, so a global-ceiling breach -- the
+    // `agent_id`-rotating flood the ceiling exists to catch -- was
+    // indistinguishable from one noisy agent. Those two mean opposite things
+    // operationally, so collapsing them hid the attack inside the normal case.
+    //
+    // A SEPARATE HARNESS PER ARM, deliberately: `check_global` increments on
+    // every request it admits (`rate_limit.rs:80`), so driving the per-agent arm
+    // first would leave the global bucket partly consumed and make the global
+    // arm's threshold depend on test order.
+    let challenge_cfg = || {
+        let mut c = metrics_config();
+        // Global ceiling is 64x the per-agent budget (`state.rs:97`), so 1 here
+        // means per-agent 1 and global 64.
+        c.limits.challenge_rate_per_minute = 1;
+        // Otherwise the per-IP middleware 429s first and never reaches the
+        // per-agent limiter at all.
+        c.rate_limit.enabled = false;
+        c
+    };
+    let challenge_for = |agent: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/auth/challenge")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "agent_id": agent }).to_string()))
+            .unwrap()
+    };
+
+    // Per-agent arm: one agent, twice. The global bucket is at 2 of 64, so the
+    // ONLY bound that can reject the second request is the per-agent budget.
+    let h_agent = harness(challenge_cfg()).await;
+    let agent = "did:web:agents.test:repeat";
+    for (i, expected) in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS]
+        .into_iter()
+        .enumerate()
+    {
+        let got = h_agent
+            .router
+            .clone()
+            .oneshot(challenge_for(agent))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(got, expected, "per-agent arm, request {}", i + 1);
+    }
+
+    // Global arm: 64 DISTINCT agents fill the global bucket to exactly 64, each
+    // comfortably inside its own per-agent budget of 1. The 65th agent is also
+    // distinct and so is ALSO inside its own per-agent budget -- which is the
+    // whole point of using a fresh id rather than repeating one. It leaves the
+    // global ceiling as the only bound that can possibly reject it, so a
+    // mislabelled rejection cannot pass this test by coincidence.
+    let h_global = harness(challenge_cfg()).await;
+    for i in 0..64 {
+        let got = h_global
+            .router
+            .clone()
+            .oneshot(challenge_for(&format!("did:web:agents.test:rot-{i}")))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(got, StatusCode::OK, "global arm, filling request {i}");
+    }
+    let got = h_global
+        .router
+        .clone()
+        .oneshot(challenge_for("did:web:agents.test:rot-64"))
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(
+        got,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the 65th distinct agent must be refused by the GLOBAL ceiling",
+    );
+
     // A request against a parameterized route, so the scrape below can pin
     // the axum 0.8 MatchedPath label form. The ctx_id need not resolve to a
     // real (or even well-formed) context — MatchedPath is set from the
@@ -360,6 +438,36 @@ async fn metrics_endpoint_exposes_request_and_domain_series() {
         ),
         1.0,
         "one per-IP rejection counted"
+    );
+
+    // The two challenge arms are counted SEPARATELY and each exactly once.
+    // Asserting both, with exact values, is what catches a label swap: if the
+    // two arms were transposed each assertion would still find a 1.0 under
+    // *some* scope, so only pinning them to the right scope distinguishes a
+    // correct split from a renamed collapse.
+    assert_eq!(
+        metric_sum(
+            &text,
+            &[
+                "acdp_registry_rate_limit_rejections_total",
+                "scope=\"challenge_per_agent\""
+            ]
+        ),
+        1.0,
+        "exactly one per-agent challenge rejection\n{text}"
+    );
+    assert_eq!(
+        metric_sum(
+            &text,
+            &[
+                "acdp_registry_rate_limit_rejections_total",
+                "scope=\"challenge_global\""
+            ]
+        ),
+        1.0,
+        "exactly one GLOBAL challenge rejection -- if this is 0 and \
+         challenge_per_agent is 2, the global arm is being mislabelled, which \
+         is the exact defect A9 reported\n{text}"
     );
 }
 
@@ -724,5 +832,80 @@ async fn empty_metrics_bearer_token_leaves_the_endpoint_open() {
         status,
         StatusCode::OK,
         "an empty token must leave /metrics open"
+    );
+}
+
+/// A9: the documented `scope` set and the emitted `scope` set must be the same
+/// set -- checked in BOTH directions.
+///
+/// One direction alone is not enough, and the taxonomy has already been burned
+/// by that: `lifecycle_per_agent` was emitted by the code and missing from the
+/// documented list, while the `metrics.rs` docstring simultaneously advertised
+/// a `challenge_global` that nothing emitted. Those are opposite failures and a
+/// single-direction check catches only one of them.
+///
+/// Reads the file at RUNTIME rather than `include_str!`. `include_str!` would
+/// bake a path reaching outside the crate root into the compiled test, which
+/// breaks `cargo package`/`cargo publish` verification for this crate; reading
+/// at runtime keeps the dependency to test execution, where it belongs.
+#[test]
+fn every_rate_limit_scope_is_documented() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/HTTP-API.md");
+    let doc = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+
+    // Scope to the row that documents THIS counter. Searching the whole file
+    // would let an unrelated mention of, say, `auth_global` elsewhere satisfy
+    // the assertion while the actual table row stayed stale.
+    let row = doc
+        .lines()
+        .find(|l| l.contains("acdp_registry_rate_limit_rejections_total"))
+        .expect("docs/HTTP-API.md must document acdp_registry_rate_limit_rejections_total");
+
+    // Direction 1: every emitted scope is documented.
+    for scope in RateLimitScope::ALL {
+        assert!(
+            row.contains(&format!("`{}`", scope.label())),
+            "scope `{}` is emitted by the code but missing from the documented \
+             set in docs/HTTP-API.md.\nrow: {row}",
+            scope.label(),
+        );
+    }
+
+    // Direction 2: every documented scope is actually emitted. Catches a label
+    // left behind after a rename -- an operator would keep alerting on a series
+    // that can never fire again.
+    let known: Vec<&str> = RateLimitScope::ALL.iter().map(|s| s.label()).collect();
+    // Backticked tokens in this row are exactly: the metric name, the label key
+    // `scope`, and the scope values. Excluding the first two by name leaves the
+    // scope values -- no shape heuristic needed.
+    //
+    // An earlier version filtered on `is_ascii_lowercase() || '_'` plus
+    // `contains('_')`, which would have SILENTLY DROPPED a future scope whose
+    // label has no underscore (say `global`): it would vanish from `documented`
+    // and the count assertion below would blame the doc for a parser bug.
+    //
+    // That version also carried a `!documented.is_empty()` guard. It is gone
+    // deliberately, not overlooked: direction 1 above has already proved every
+    // known label is present in this row, so `documented` cannot be empty by
+    // the time control reaches here. No mutation can redden that assertion
+    // specifically, which by CHARTER Rule 51 makes it decoration rather than a
+    // guard.
+    let documented: Vec<&str> = row
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|t| !t.starts_with("acdp_registry_") && *t != "scope")
+        .collect();
+    for d in &documented {
+        assert!(
+            known.contains(d),
+            "docs/HTTP-API.md documents scope `{d}`, but nothing emits it. \
+             Known scopes: {known:?}",
+        );
+    }
+    assert_eq!(
+        documented.len(),
+        known.len(),
+        "documented scopes {documented:?} vs emitted {known:?}",
     );
 }

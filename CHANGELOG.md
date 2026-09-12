@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`acdp_registry_rate_limit_rejections_total` now distinguishes a global challenge-ceiling
+  rejection from a per-agent one.** **This changes the meaning of an existing label.** A
+  `/auth/challenge` rejection caused by the process-global ceiling was previously recorded as
+  `scope="challenge_per_agent"` — the same label as one noisy agent. It is now
+  `scope="challenge_global"`.
+
+  **If you alert on `challenge_per_agent`, that series will drop** by whatever share of its
+  volume was actually global-ceiling rejections; the missing volume reappears under
+  `challenge_global`. Splitting them is the point: the two mean opposite things. A per-agent
+  rejection is one caller to throttle. A global rejection is a flood rotating `agent_id` to
+  defeat the per-key limit — the precise attack the global ceiling was added for (#24), which
+  the collapsed label rendered invisible by making it look like ordinary per-agent noise.
+
+  The `scope` values are now generated from a single list rather than written out at each call
+  site, so the emitted set, the `ALL` constant and the documented set cannot drift apart. This
+  taxonomy had already drifted twice: `lifecycle_per_agent` was emitted but undocumented, while
+  the `metrics.rs` docstring advertised a `challenge_global` that nothing emitted.
+
 ### Fixed
 
 - **Cache posture: `/metrics` and the `did.json` 404 arm were uncacheable in principle and

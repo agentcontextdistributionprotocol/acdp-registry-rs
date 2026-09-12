@@ -12,6 +12,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::metrics::RateLimitScope;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -34,11 +35,24 @@ pub async fn issue_challenge<S: ExtendedRegistryStore + 'static>(
         // The per-agent key is attacker-controlled (unauthenticated endpoint),
         // so the global ceiling is what bounds a flood that rotates `agent_id`
         // to defeat the per-key limit.
-        if let Err(retry_after_seconds) = limiter
-            .check_global()
-            .and_then(|()| limiter.check(req.agent_id.as_str()))
-        {
-            crate::metrics::record_rate_limit_rejection("challenge_per_agent");
+        //
+        // Split into two sequential checks rather than
+        // `check_global().and_then(|()| check(agent_id))` so each bound reports
+        // its OWN scope. Behaviour is unchanged -- `and_then` already skipped
+        // `check` on a global `Err`, and each branch still surfaces its own
+        // `Retry-After` -- but the collapsed form attributed every global
+        // rejection to `challenge_per_agent`, which is the label an operator
+        // alerts on. A global ceiling breached by an `agent_id`-rotating flood
+        // looked identical to one noisy agent, i.e. the metric hid exactly the
+        // attack the global ceiling exists to catch.
+        if let Err(retry_after_seconds) = limiter.check_global() {
+            crate::metrics::record_rate_limit_rejection(RateLimitScope::ChallengeGlobal);
+            return Err(RegistryError::RateLimited {
+                retry_after_seconds,
+            });
+        }
+        if let Err(retry_after_seconds) = limiter.check(req.agent_id.as_str()) {
+            crate::metrics::record_rate_limit_rejection(RateLimitScope::ChallengePerAgent);
             return Err(RegistryError::RateLimited {
                 retry_after_seconds,
             });

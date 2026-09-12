@@ -390,7 +390,9 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
     // `agent_id`, so one noisy producer can't starve others.
     if let Some(limiter) = &state.rate_limiter {
         if let Err(retry_after_seconds) = limiter.check(req.agent_id.as_str()) {
-            crate::metrics::record_rate_limit_rejection("publish_per_agent");
+            crate::metrics::record_rate_limit_rejection(
+                crate::metrics::RateLimitScope::PublishPerAgent,
+            );
             return Err(RegistryError::RateLimited {
                 retry_after_seconds,
             });
@@ -1255,7 +1257,9 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
     // 4. Per-agent write rate limit, keyed by the event actor.
     if let Some(limiter) = &state.rate_limiter {
         if let Err(retry_after_seconds) = limiter.check(event.actor.as_str()) {
-            crate::metrics::record_rate_limit_rejection("lifecycle_per_agent");
+            crate::metrics::record_rate_limit_rejection(
+                crate::metrics::RateLimitScope::LifecyclePerAgent,
+            );
             return Err(RegistryError::RateLimited {
                 retry_after_seconds,
             });
