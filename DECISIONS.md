@@ -1747,3 +1747,63 @@ judgement rather than fact is escalated rather than settled.
       (`q=running` finds "run report") and stopword-only queries now match nothing. Postgres
       behaviour is unchanged. No documentation was falsified — `docs/` describes no `q=`
       behaviour and makes no backend-equivalence claim (checked).
+
+## 13. Version strings in docs: placeholder vs literal, decided per site (H-D / D3)
+
+**Context.** `docs/HTTP-API.md`'s build-identity table and prose pinned the package version at
+`0.1.0`, stale since `0.1.2`. The first fix replaced the stale literals with current ones. That
+was wrong in a way worth recording: the divergence list this unit is working through is made
+almost entirely of literals that were correct when written. Replacing a stale literal with a
+fresh one schedules the same defect for the next release.
+
+**Decision.** Prefer *shape* over *literal* for fact claims and example payloads; keep literals
+where the literal IS the content. Judge per site, never per file.
+
+Applied:
+
+| site | kind | outcome |
+|---|---|---|
+| `HTTP-API.md` build table, both rows | illustrative | `<version>` placeholder, **both cells** |
+| `HTTP-API.md` "currently a placeholder 0.1.0…" | **fact claim**, false at 0.1.2 | rewritten to name no version at all |
+| `HTTP-API.md` `/admin/status` example | illustrative | version placeholdered; **`+g83de685c2f26` and `"commit"` left byte-identical** |
+| `README.md` `/healthz` example | illustrative | `<version>` |
+| `HTTP-API.md` "absent `acdp_version` is treated as `0.1.0`" | **protocol floor** | **UNTOUCHED** |
+| `README.md` "v0.1.0 through v0.5.0" | **protocol range** | **UNTOUCHED** |
+
+**Why not literals in the table.** Its job is to show that two builds of one release share a
+version and are told apart only by `+g<shortsha>`. With `0.1.0` in both cells the reader must
+*notice* the two numbers are equal; with `<version>` in both cells they are equal by
+construction. That only holds if the doc says so, so it now asserts it in bold directly beneath
+the table.
+
+**Revert invariant.** If a future reader wants real numbers back, the property to preserve is
+that *both cells show the same value*. A partial revert — one row literal, one row placeholder —
+is worse than either consistent state, because it silently destroys the contrast the table
+exists to teach.
+
+**The decoys are the finding.** Five `0.1.0` hits in `HTTP-API.md`; only three were targets. The
+protocol-version floor at "absent `acdp_version` is treated as `0.1.0`" is a deliberate rejection
+threshold for old payloads — a mechanical sweep would have bumped it and shipped a **wire-behaviour
+change disguised as a docs cleanup**. Re-verifying each site individually is what this unit's
+method buys, and this is the case that pays for it.
+
+## 14. ARCHITECTURE's dependency diagram: replaced with a verifiable edge list (H-D / D3)
+
+**Context.** The hand-drawn box diagram asserted two dependency edges that do not exist:
+`-store → -auth` and `-sqlite → -webhook`. Both crates depend on `acdp-registry-types` alone.
+Confirmed by `cargo metadata --no-deps` and by the absence of those entries in each
+`Cargo.toml`. The prose crate-map table further down was correct throughout, so the two
+representations had been contradicting each other.
+
+**Decision.** Replace the drawing with a textual edge list, plus the one-line `cargo metadata`
+command that regenerates it — and run that command to confirm it reproduces the documented
+edges verbatim before shipping.
+
+**Reasoning.** The diagram was wrong *because* it was a drawing: nothing could check it, so it
+drifted silently while the table beside it stayed right. A representation that a single command
+can verify is the only form that does not rot, and it is the same pattern used elsewhere in this
+unit (a CI step that boots the shipped example; mutations that must redden a named test).
+Prettiness is not worth an unverifiable claim about how the workspace is wired.
+
+**Rejected:** redrawing the boxes correctly. It would have been correct on the day and
+unverifiable forever after — the exact property that produced the defect.
