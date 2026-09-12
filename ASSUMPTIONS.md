@@ -1565,7 +1565,5 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   request-id pair and lose the id on 408s with no test failing. Bounded: the 413 guard covers the
   same layer boundary, so the regression would have to be specific to the timeout layer alone.
 - **Status:** UNCONFIRMED
-||||||| 26860a5
-||||||| b57934d
 - **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
   evidence rather than actioned here.
