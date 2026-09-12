@@ -2831,9 +2831,27 @@ fn read_json(path: &Path) -> Value {
 /// `fixture_families` object's keys. `None` when the file is absent (the
 /// bare-fixtures-dir layout, where `ACDP_SPEC_DIR` points straight at
 /// `schemas/conformance` with no `registries/` sibling).
+///
+/// Under require-mode that `None` is a hard failure, mirroring
+/// [`spec_fixtures`]. It did not used to be, and the consequence was
+/// measured rather than theorised: pointing `ACDP_SPEC_DIR` at a bare
+/// fixtures dir with `ACDP_REQUIRE_CONFORMANCE=1` silently disabled four
+/// ratchets — `all_conformance_fixtures_are_bucketed_into_known_families`,
+/// `known_families_are_declared_by_the_spec`,
+/// `excused_families_are_known_and_present`, and
+/// `no_excused_family_is_required_by_our_profile` — each printing a skip
+/// line and returning green while claiming to enforce the spec.
 fn spec_families(root: &Path) -> Option<Vec<String>> {
     let profiles_path = root.join("registries/profiles.json");
     if !profiles_path.exists() {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no registries/profiles.json exists under \
+             ACDP_SPEC_DIR '{}' — ACDP_SPEC_DIR must name the spec ROOT, not its fixtures \
+             directory. Every family/EXCUSED ratchet would otherwise skip silently and this \
+             required job would report success while enforcing nothing.",
+            root.display()
+        );
         return None;
     }
     let profiles = read_json(&profiles_path);
@@ -9980,6 +9998,27 @@ async fn no_excused_family_is_required_by_our_profile() {
 /// drifting. Skips when the pinned spec isn't reachable (`ACDP_SPEC_DIR`
 /// unset/nonexistent) in default mode; panics in require mode (via
 /// `spec_root()`).
+///
+/// # Do NOT gate this on `spec_families()`
+///
+/// This test deliberately guards on [`spec_root`] alone, unlike its four
+/// neighbours, which take the `spec_families()` / `bucketed_fixtures()`
+/// skip path. Making the five uniform is the obvious tidy-up and it would
+/// be a mistake.
+///
+/// Measured: with `ACDP_SPEC_DIR` pointed at a bare fixtures directory and
+/// `ACDP_REQUIRE_CONFORMANCE=1`, the other four skipped silently and this
+/// test was the ONLY thing that failed the run — it proceeds past the
+/// gate, reaches `spec_registry_profile_ids`, and dies in `read_json` on
+/// the missing `registries/profiles.json`. That made a misconfigured
+/// required job red instead of green, which is the correct outcome
+/// reached for an accidental reason.
+///
+/// `spec_families()` now asserts under require-mode, so the four skips are
+/// loud by design and this test is no longer load-bearing on its own. Both
+/// belts are deliberate: keep this one asymmetric anyway, so a future
+/// refactor of that assert cannot silently restore a fully-green
+/// misconfiguration.
 #[tokio::test(flavor = "multi_thread")]
 async fn registry_advertisable_profiles_matches_spec_derived_set() {
     let Some(root) = spec_root() else {
@@ -9989,6 +10028,33 @@ async fn registry_advertisable_profiles_matches_spec_derived_set() {
         );
         return;
     };
+
+    // Its OWN require-mode check, deliberately not routed through
+    // `spec_families()` — see the "Do NOT gate this on `spec_families()`"
+    // note above. Duplicated on purpose: two independent paths must fail a
+    // wrongdir `ACDP_SPEC_DIR`, so weakening either one alone cannot make a
+    // misconfigured required job green.
+    //
+    // Before this, the bare-fixtures layout — which `resolve_fixture_dir`
+    // explicitly supports — hard-failed here even in DEFAULT mode, via a
+    // bare `read_json` panic on the missing file. That was a real bug for
+    // anyone pointing ACDP_SPEC_DIR at the fixtures dir locally, and it is
+    // what made this test the accidental last tripwire in require-mode.
+    if !root.join("registries/profiles.json").exists() {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no registries/profiles.json exists under \
+             ACDP_SPEC_DIR '{}' — ACDP_SPEC_DIR must name the spec ROOT, not its fixtures \
+             directory, or REGISTRY_ADVERTISABLE_PROFILES is never checked against the spec.",
+            root.display()
+        );
+        eprintln!(
+            "conformance: no registries/profiles.json under {}; skipping \
+             registry_advertisable_profiles_matches_spec_derived_set",
+            root.display()
+        );
+        return;
+    }
 
     let mut spec_ids = spec_registry_profile_ids(&root);
     spec_ids.sort();
@@ -11193,7 +11259,7 @@ async fn err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing()
 }
 
 const EXPECTED_RATE_FIXTURE_COUNT: usize = 1;
-const EXPECTED_RATE_ASSERTION_COUNT: usize = 1;
+const EXPECTED_RATE_ASSERTION_COUNT: usize = 5;
 
 fn rate_producer(seed: u8) -> Producer {
     common::producer("rate", seed)
@@ -11306,11 +11372,21 @@ async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
         .await
         .unwrap();
 
+    // Running tally of rate-001 outcome assertions. This used to be a
+    // hardcoded `let asserted = 1usize;` immediately above a
+    // `assert_eq!(asserted, EXPECTED_RATE_ASSERTION_COUNT)` where the
+    // constant was also 1 -- i.e. `assert_eq!(1, 1)`, a compile-time
+    // tautology whose failure message claimed to prevent "a
+    // silently-shrinking count". It could not: the count was a literal, not
+    // a tally, so deleting any assertion below left it reading 1 and green.
+    let mut asserted = 0usize;
+
     assert_eq!(
         resp.status().as_u16(),
         want_status,
         "rate-001: second publish over budget must hit the fixture's own http_status"
     );
+    asserted += 1;
     let content_type = resp
         .headers()
         .get("content-type")
@@ -11321,6 +11397,7 @@ async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
         content_type, want_content_type,
         "rate-001: Content-Type must match the fixture"
     );
+    asserted += 1;
     let retry_after = resp
         .headers()
         .get("retry-after")
@@ -11329,6 +11406,7 @@ async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
     let retry_after = retry_after.unwrap_or_else(|| {
         panic!("rate-001: a 429 rate_limited response MUST carry a Retry-After header")
     });
+    asserted += 1;
     // This repo's implementation always emits an integer-seconds value
     // (RegistryError::into_response, error.rs); the fixture also permits an
     // HTTP-date, which this implementation does not use -- checked here
@@ -11341,14 +11419,15 @@ async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
         retry_after_secs >= 1,
         "rate-001: Retry-After must be a positive number of seconds, got {retry_after_secs}"
     );
+    asserted += 1;
     let body = body_to_json(resp).await;
     assert_eq!(
         body["error"]["code"].as_str(),
         Some(want_code.as_str()),
         "rate-001: wire error.code must match the fixture: {body}"
     );
+    asserted += 1;
 
-    let asserted = 1usize;
     assert_eq!(
         found_ids.len(),
         EXPECTED_RATE_FIXTURE_COUNT,
@@ -12425,5 +12504,131 @@ async fn log003_consistency_proof_golden_recomputed() {
         "expected exactly {EXPECTED_LOG003_ASSERTION_COUNT} log-003 recomputed properties at \
          spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
          failure mode this ratchet exists to prevent"
+    );
+}
+
+// ── C2: the published receipt key must be the signing key ──────────────
+//
+// RFC-ACDP-0010 §8 step 1 has a consumer verify a receipt's signature
+// against the registry's receipt public key, which it obtains by
+// resolving `did:web:<authority>` — i.e. by reading
+// `GET /.well-known/did.json`. That contract holds only if the key the
+// registry PUBLISHES is the key it SIGNS with, and until this test
+// nothing anywhere asserted the two were the same.
+//
+// Measured, not argued: setting `receipt.rs:100` to `&[0u8; 32]` — so the
+// registry publishes an all-zero key while still signing with the real one
+// — left the entire workspace suite green at 524 passed / 0 failed,
+// byte-identical to baseline. The three tests that look like they cover
+// this do not:
+//
+//   * `receipt.rs:221` is the only read of `publicKeyMultibase` in the
+//     repo and asserts `starts_with('z')` + resolvability — all-zeros
+//     satisfies both;
+//   * `did_json_serves_receipt_key_and_404s_without_one` asserts fragment
+//     *ids*, never a key value;
+//   * `did_key_publish_mints_verifiable_receipt` verifies against
+//     `receipt_public_key()`, derived from the TEST'S OWN SEED rather
+//     than from the served document — so it cannot observe a divergence
+//     between what is signed and what is served.
+//
+// This test therefore takes its verification key ONLY from the served
+// bytes. Deriving it from the local seed would reproduce exactly the
+// blindness above one level up.
+
+const C2_RECEIPT_SEED: [u8; 32] = [9u8; 32];
+
+/// Receipts-enabled router: the DID document is only served when a receipt
+/// signing key is configured, and `did:key` must be accepted so a producer
+/// can publish without a network resolver.
+async fn receipt_key_harness() -> axum::Router {
+    use base64::engine::general_purpose::STANDARD as C2B64;
+    use base64::Engine as _;
+
+    let mut cfg = config();
+    cfg.receipt.signing_key_seed_b64 = C2B64.encode(C2_RECEIPT_SEED);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+
+    let mut c = caps();
+    c.acdp_version = "0.2.0".into();
+    c.supported_did_methods = vec!["did:web".into(), "did:key".into()];
+
+    common::build_harness_with_webhook(cfg, c, AUTHORITY, common::StoreMode::Memory, None, None)
+        .await
+        .router
+}
+
+/// A receipt minted by the registry MUST verify against the key a consumer
+/// resolves from the registry's own `/.well-known/did.json`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn receipt_verifies_against_the_key_served_at_did_json() {
+    use acdp::types::receipt::RegistryReceipt;
+
+    let router = receipt_key_harness().await;
+
+    // Mint a real receipt through the public publish path.
+    let p = Producer::new_did_key(SigningKey::from_bytes(&[77u8; 32]));
+    let req = p
+        .publish_request()
+        .title("c2 served-key binding")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = common::publish(&router, &req, None).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    let receipt = RegistryReceipt::from_value(&v["registry_receipt"])
+        .expect("a receipts-advertising registry returns a closed-schema receipt");
+
+    // Resolve the key the way a consumer does: from the SERVED document.
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/did.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let doc = common::body_to_json(resp).await;
+
+    // Pick the ACTIVE entry by id, never by index: indexing would assert
+    // position, and the contract is about identity.
+    let active_id = doc["assertionMethod"][0]
+        .as_str()
+        .expect("assertionMethod[0] is a string id");
+    let entry = doc["verificationMethod"]
+        .as_array()
+        .expect("verificationMethod array")
+        .iter()
+        .find(|m| m["id"] == active_id)
+        .unwrap_or_else(|| panic!("no verificationMethod entry matches {active_id}: {doc}"));
+    let mb = entry["publicKeyMultibase"]
+        .as_str()
+        .expect("publicKeyMultibase is a string");
+
+    let served_key = match acdp::did::key::resolve_did_key(&format!("did:key:{mb}"))
+        .expect("the published multibase must resolve")
+    {
+        acdp::did::DidKeyMaterial::Ed25519(k) => k,
+        other => panic!("published receipt key is not Ed25519: {other:?}"),
+    };
+
+    // The whole point: verify with the SERVED key, not a local one.
+    receipt
+        .verify_signature_with_key(Some(&served_key), None)
+        .expect(
+            "the receipt does NOT verify against the key served at \
+             /.well-known/did.json: the registry is publishing a key it does not \
+             sign with, so every receipt it mints is unverifiable for any consumer \
+             following RFC-ACDP-0010 §8",
+        );
+
+    assert_eq!(
+        receipt.signature.key_id,
+        format!("did:web:{AUTHORITY}#receipt-key-1"),
+        "the receipt must name the same key id the DID document declares active"
     );
 }

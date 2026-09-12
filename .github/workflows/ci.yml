@@ -42,20 +42,20 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: clippy (sqlite default)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: clippy (postgres)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --all-targets -- -D warnings
       - name: clippy (playground)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --features storage-sqlite,playground \
             --all-targets -- -D warnings
       - name: clippy (memory)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-memory \
             --all-targets -- -D warnings
 
@@ -86,9 +86,22 @@ jobs:
       # Scope note: this is acdp-registry-server's feature space, NOT the
       # workspace's. `acdp-registry-types` has its own `default = ["axum"]` /
       # `axum` pair whose no-default-features build is a supported consumer
-      # scenario and is still built by no job here. #200 assumed it was
-      # "covered incidentally"; it is not. Tracked as #221 rather than folded
-      # in here.
+      # scenario.
+      #
+      # This note used to end "#200 assumed it was 'covered incidentally'; it
+      # is not." That was wrong, and #200 was right. Measured:
+      # acdp-registry-pg declares the dependency `default-features = false`
+      # (crates/acdp-registry-pg/Cargo.toml:16), and `cargo tree -p
+      # acdp-registry-pg -f '{p} {f}'` shows acdp-registry-types with an EMPTY
+      # feature set, against `axum,default` when resolved for
+      # acdp-registry-server. So the `cargo test -p acdp-registry-pg` step in
+      # the test job already compiles it at feat=[] under -D warnings.
+      #
+      # It is a -p build, which matters: `cargo test --workspace` unifies
+      # features and would resolve axum,default instead. The incidental
+      # coverage therefore hangs on that one step keeping its -p form.
+      # #221 is closed by making it deliberate (see the types steps below),
+      # not by adding coverage that did not exist.
       #
       # 7 and 8 are the inert builds: with no storage backend, `run()` bails
       # naming which feature to rebuild with, so the whole serve path is
@@ -132,24 +145,43 @@ jobs:
       # exact.
       - name: clippy (postgres + playground)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-pg,playground \
             --all-targets -- -D warnings
       - name: clippy (memory + playground)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-memory,playground \
             --all-targets -- -D warnings
       - name: clippy (no storage backend)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features \
             --all-targets -- -D warnings
       - name: clippy (playground, no storage backend)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features playground \
             --all-targets -- -D warnings
+
+      # Closes #221. `acdp-registry-types` has its own default = ["axum"]
+      # feature pair, and its no-default build is a supported consumer
+      # scenario that the eight steps above do NOT cover — they enumerate
+      # acdp-registry-server's feature space, not the workspace's.
+      #
+      # CORRECTION worth stating, because #221 does not say it: that
+      # configuration is ALREADY compiled at feat=[] today, incidentally, by
+      # `cargo test -p acdp-registry-pg` (the test job) — acdp-registry-pg
+      # depends on acdp-registry-types without default features, confirmed
+      # with `cargo tree -f '{p} {f}'`. So this step does not close a hole in
+      # what is built; it makes the coverage DELIBERATE instead of a
+      # side effect that any dependency edit could silently remove. Said
+      # plainly so nobody "discovers" the incidental build mid-review and
+      # concludes the step is redundant.
+      - name: clippy (types, no default features)
+        run: |
+          cargo clippy --locked -p acdp-registry-types \
+            --no-default-features --all-targets -- -D warnings
 
   # The workspace declares rust-version = 1.88; make that claim enforceable
   # instead of aspirational. Checks both shipped storage backends.
@@ -164,10 +196,10 @@ jobs:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: cargo check (sqlite default)
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
       - name: cargo check (postgres)
         run: |
-          cargo check -p acdp-registry-server \
+          cargo check --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --all-targets
 
@@ -184,7 +216,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: cargo doc
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --locked --workspace --no-deps
 
   test:
     name: tests
@@ -211,33 +243,73 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: cargo test (sqlite)
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
       - name: cargo test (playground)
         run: |
-          cargo test -p acdp-registry-server \
+          cargo test --locked -p acdp-registry-server \
             --features storage-sqlite,playground
       - name: cargo test (postgres)
         env:
           ACDP_REGISTRY_TEST_PG_URL: postgres://acdp:acdp@localhost:5432/acdp_registry
           ACDP_REQUIRE_PG: "1"
         run: |
-          cargo test -p acdp-registry-pg
-          cargo test -p acdp-registry-server \
+          cargo test --locked -p acdp-registry-pg
+          cargo test --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --test pg_integration
-      - name: cargo test (memory)
+      # NAME IS DELIBERATELY NARROW. This step does NOT test the memory
+      # storage backend, and the old name ("cargo test (memory)") implied it
+      # did. Measured: under these flags all four integration files are
+      # cfg-gated away and report 0 tests each (conformance, http_integration,
+      # metrics_integration, pg_integration). What runs is 71 tests — config
+      # validation from main.rs's inline module, plus two workspace scans —
+      # none of which touch MemoryStore.
+      #
+      # This is STRUCTURAL, not an oversight anyone can close here.
+      # `acdp-registry-server` is bin-only ([[bin]], no [lib]) and
+      # `MemoryStore` lives in src/memory_ext.rs, a module of that binary.
+      # Integration tests compile as separate crates and link only against a
+      # lib target, so no tests/*.rs file can reach it — verified, not
+      # assumed: a probe importing it fails with
+      #   error[E0433]: unresolved module or unlinked crate `acdp_registry_server`
+      # Adding a tests/memory_smoke.rs therefore CANNOT work without
+      # restructuring the crate. The only route to covering MemoryStore is a
+      # #[cfg(test)] mod tests inside memory_ext.rs itself, which has none.
+      #
+      # Renamed rather than fixed, on purpose: leaving an accurate name is
+      # better than leaving an inaccurate one while the real fix is out of
+      # scope. A `MemoryStore::get` that always returned Ok(None) would still
+      # pass this step.
+      - name: cargo test (memory build; storage backend NOT covered)
         run: |
-          cargo test -p acdp-registry-server \
+          cargo test --locked -p acdp-registry-server \
             --no-default-features --features storage-memory
+      # #221's other half: run the types crate's own tests at feat=[], not
+      # just compile it there. Its no-default build is a supported consumer
+      # configuration (see the clippy job's note on the incidental coverage
+      # that already exists via acdp-registry-pg).
+      - name: cargo test (types, no default features)
+        run: |
+          cargo test --locked -p acdp-registry-types \
+            --no-default-features
 
   # Runs the spec conformance suite against a SHA-pinned spec checkout.
   # ACDP_REQUIRE_CONFORMANCE turns a missing spec into a hard failure, so
   # a green run genuinely proves the fixtures executed rather than that
-  # the suite silently skipped them (REG-1). It does not, on its own,
-  # catch ACDP_SPEC_DIR pointing at the wrong subdirectory of a real
-  # checkout -- see the KNOWN_FAMILIES/EXCUSED ratchet tests in
-  # tests/conformance.rs, which is why ACDP_SPEC_DIR below is the spec
-  # *root* (where registries/profiles.json lives), not schemas/conformance.
+  # the suite silently skipped them (REG-1).
+  #
+  # A wrongdir ACDP_SPEC_DIR -- the spec's fixtures directory instead of
+  # its root -- IS caught, but this comment used to credit the wrong
+  # mechanism. It named the KNOWN_FAMILIES/EXCUSED ratchets as the
+  # mitigation; measured, four of them SKIPPED silently under full
+  # require-mode and the run was failed by an unrelated read_json panic in
+  # registry_advertisable_profiles_matches_spec_derived_set. spec_families()
+  # now asserts under require-mode, so those four fail on their own names,
+  # and that fifth test keeps an independent check of its own. Two paths,
+  # deliberately not shared.
+  #
+  # ACDP_SPEC_DIR below is therefore the spec *root* (where
+  # registries/profiles.json lives), not schemas/conformance.
   conformance:
     name: conformance (spec fixtures)
     runs-on: ubuntu-latest
@@ -277,7 +349,7 @@ jobs:
           ACDP_SPEC_DIR: ${{ steps.spec.outputs.path }}
           ACDP_REQUIRE_CONFORMANCE: "1"
         run: |
-          cargo test -p acdp-registry-server \
+          cargo test --locked -p acdp-registry-server \
             --features storage-sqlite,playground \
             --test conformance --test conformance_gate -- --nocapture
 
@@ -309,12 +381,29 @@ jobs:
       - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
         with:
           tool: cargo-llvm-cov
+      # --fail-under-lines is the whole point: without a floor this job could
+      # only ever ratchet DOWN invisibly, since it renders a summary and
+      # uploads lcov but asserted nothing about either.
+      #
+      # 75 is deliberately conservative rather than "just under current".
+      # Measured locally at 79.91% line coverage (79.42% region, 71.67%
+      # function) — but that run had no Postgres, so the pg tests skipped and
+      # CI's number will be HIGHER than the one this floor was derived from.
+      # Setting the floor at the local figure would therefore have been
+      # tightening against the wrong baseline. Re-tighten once a real CI
+      # number has been observed on a few runs.
+      #
+      # Honest scope: this makes the coverage JOB fail below the floor. It
+      # does not block a merge, because `coverage` is not a required status
+      # check (that is a repo setting, raised separately). A floor on an
+      # advisory job is a signal, not a gate.
       - name: cargo llvm-cov
         env:
           ACDP_REGISTRY_TEST_PG_URL: postgres://acdp:acdp@localhost:5432/acdp_registry
           ACDP_REQUIRE_PG: "1"
         run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov --locked --workspace --lcov --output-path lcov.info \
+            --fail-under-lines 75
       - name: coverage summary
         run: |
           echo '## Coverage' >> "$GITHUB_STEP_SUMMARY"

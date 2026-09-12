@@ -106,6 +106,84 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `acdp-registry-server/tests/pg_integration.rs` hold a second copy of the helper and are
   covered by the same CI env var once that copy is updated.
 
+- **Two CI guards that were never guarding, plus three claims that were false.**
+  Unit H-C. Every finding below was reproduced by experiment before being fixed —
+  the audit that produced them could not compile or run anything, and running them
+  refuted part of what it reported.
+
+  **The receipt key the registry published was never checked against the key it
+  signs with.** RFC-ACDP-0010 §8 has a consumer verify a receipt against the key it
+  resolves from `/.well-known/did.json`. Setting `receipt.rs:100` to `&[0u8; 32]` —
+  publishing an all-zero key while still signing with the real one, so no consumer
+  could verify any receipt — left the workspace suite at 524 passed / 0 failed,
+  byte-identical to baseline. The only existing read of `publicKeyMultibase`
+  asserted `starts_with('z')`; the HTTP test asserted fragment ids; and the
+  receipt-verifying test used a key derived from its own seed rather than the served
+  document. Two guards added, each falsified against that mutation; the end-to-end
+  one takes its verification key only from the served bytes.
+
+  **A wrongdir `ACDP_SPEC_DIR` silently disabled four conformance ratchets even
+  under require-mode.** `spec_families()` returned `None` on a missing
+  `registries/profiles.json` without consulting `require_conformance()`, unlike its
+  neighbour `spec_fixtures()`. It now asserts.
+
+  Narrower claim than it first appears, and the correction matters: this does **not**
+  make CI catch a wrongdir spec directory — CI already caught it. The run was failed
+  by `registry_advertisable_profiles_matches_spec_derived_set`, which gates on
+  `spec_root()` alone, proceeds, and dies in `read_json`. **The last tripwire was one
+  test being inconsistent with its four neighbours**, so the obvious tidy-up — making
+  all five skip uniformly — would have produced exactly the fully-green failure the
+  audit imagined. That trap is now documented at the test itself, which keeps an
+  independent require-mode check rather than sharing one.
+
+  Also fixed there: a bare-fixtures `ACDP_SPEC_DIR` in default mode used to fail hard
+  via that same panic, despite being a layout `resolve_fixture_dir` explicitly
+  supports. And `replays_spec_fixtures_when_present` was not skipping but *degrading*
+  — bucketing fixtures by filename heuristic instead of spec-declared families while
+  reporting ok. The silently-affected set was six tests, not five.
+
+### Changed
+
+- **CI: supply-chain and reproducibility gates that actually assert something.**
+  `[sources] unknown-registry`/`unknown-git` flipped to `deny` (free today: zero
+  git-sourced and zero non-workspace path dependencies). `--locked` added to all 18
+  CI cargo invocations that resolve dependencies, so a build can no longer silently
+  use versions the lockfile never pinned.
+
+  Two settings were deliberately **not** flipped, each for a measured reason.
+  `yanked` stays `warn` because `deny` fails today — this workspace already depends
+  on two yanked crates (`spin`, `wnaf`) and nobody noticed, which is the finding
+  rather than a reason to shrug; clearing them needs a `Cargo.lock` update and should
+  land in the same change that flips the setting. `[bans] multiple-versions` stays
+  `warn` because duplicate versions exist today and are normal in a Rust graph.
+
+- **CI: the memory test step was renamed, not fixed, and the name now says so.**
+  `cargo test (memory)` → `cargo test (memory build; storage backend NOT covered)`.
+  Under those flags all four integration files are cfg-gated away and report 0 tests
+  each; the 71 that run are config validation and workspace scans, none touching
+  `MemoryStore`. **The fix the finding proposed cannot work**:
+  `acdp-registry-server` is bin-only, `MemoryStore` lives in a module of that binary,
+  and integration tests link only against a lib target — a probe importing it fails
+  with `error[E0433]: unresolved module or unlinked crate`. Covering `MemoryStore`
+  requires a test module inside `memory_ext.rs` or a crate restructure; neither is in
+  this change. A `MemoryStore::get` that always returned `Ok(None)` still passes this
+  step. It is now labelled accurately rather than left overclaiming.
+
+- **CI: coverage gained a floor** (`--fail-under-lines 75`), where before it rendered
+  a summary and uploaded lcov while asserting nothing and could only ratchet down
+  invisibly. 75 is deliberately conservative: the local baseline is 79.91% lines, but
+  that run had no Postgres, so CI's figure will be higher than the number the floor
+  was derived from. This fails the coverage *job*; it does not block a merge, because
+  `coverage` is not a required check.
+
+- **CI: `acdp-registry-types` is now built and tested at `feat=[]` deliberately**
+  (closes #221), with a correction #221 does not carry — that configuration was
+  *already* compiled there incidentally, by `cargo test -p acdp-registry-pg`, which
+  declares the dependency `default-features = false`. A stale comment in `ci.yml`
+  claiming otherwise has been corrected. The incidental coverage depends on that step
+  keeping its `-p` form, since `--workspace` unifies features.
+||||||| 26860a5
+
 - **Security (availability): `GET /contexts/search?limit=` could abort the registry
   process from an unauthenticated request.** The handler sized its accumulator with
   `Vec::with_capacity` directly from the caller-supplied `limit`, using `.max(1)` — a
@@ -116,8 +194,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to the same cap the stores enforce. Regression test landed deliberately red first, so
   the PR's own CI history shows it catching the live defect.
 
-
-### Changed
 
 - **Wire behaviour: the registry now emits a cache posture on requester-relative
   responses** (#205, the wire half of #190). Additive response headers — no
