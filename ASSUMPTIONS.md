@@ -2131,6 +2131,12 @@ conclude the leak does not exist. The marker test pins `limit=2`.
     error can reach the caller than before, because the batched query is
     `SELECT ctx_id FROM contexts WHERE …` and never deserializes a body or reads events. The
     "strictly more honest" framing had it backwards.
+  - **Scope, stated because the two failures above were both over-generalizations.** "Fewer" is a
+    property of the SQLite and Postgres *overrides*, not of `visible_ctx_ids` as a trait method:
+    the default impl still runs a full `get` per id. It holds for every backend that can serve
+    `/log/entries` today (`MemoryStore` does not override `log_entries`, so the route is
+    `NotImplemented` there), but not necessarily for an external implementor of this published
+    trait that overrides `log_entries` and not `visible_ctx_ids`.
   - Worth keeping for its own sake: a correction is not self-verifying. The first one was written
     to fix a false claim and was itself false, and it read as more trustworthy *because* it was a
     correction.

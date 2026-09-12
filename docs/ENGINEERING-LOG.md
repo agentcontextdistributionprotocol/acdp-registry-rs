@@ -67,7 +67,7 @@ hold entries from several releases. Use the commands.
 - **Responses are byte-identical for a given `anonymous_public_reads` — but this is not a pure
   refactor, and two things change.** First, the flag above: get it wrong and the bytes differ
   enormously, which is the whole of the security entry. Second, which store errors can reach
-  the caller — and the change runs in **both** directions, not one:
+  the caller — and the change is one-directional:
 
   **No longer able to surface: everything `RegistryStore::get` does.** The old path ran
   `server.retrieve` — and therefore a full `get`, including `events_for_ctx`,
@@ -75,6 +75,13 @@ hold entries from several releases. Use the commands.
   **was** the visibility check. The batched query is `SELECT ctx_id FROM contexts WHERE …`, so a
   decode failure or an events-table error on any row of the page used to 500 the request and now
   cannot.
+
+  **Scope of that claim.** It is a property of the two SQL overrides, which is every backend that
+  can serve this endpoint today — `MemoryStore` does not override `log_entries`, so
+  `/log/entries` is `NotImplemented` there before this code is reached. It is *not* a property of
+  `visible_ctx_ids` as a trait method: the default impl still runs a full `get` per id, so an
+  external implementor that overrides `log_entries` but not `visible_ctx_ids` would see an
+  unchanged error surface, not a smaller one.
 
   **Nothing is newly able to surface.** Two earlier drafts of this entry got this wrong in
   opposite ways, so the reasoning is spelled out rather than asserted. The first said a store
