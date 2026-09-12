@@ -7920,3 +7920,158 @@ async fn credential_endpoints_are_never_stored() {
         "the rate-limit 429 must carry no-store -- the header layer must wrap the limiter",
     );
 }
+
+/// A1: the per-agent publish budget is charged on SUCCESS, not on ATTEMPT.
+///
+/// The old code called `check`, which tested and charged in one step, at a point
+/// where `req.agent_id` is still attacker-supplied and unverified. This test
+/// pins the observable half of the fix end-to-end: a publish that fails AFTER
+/// the limiter leaves the budget untouched.
+///
+/// The failure used here is a bound producer asserting a tenant it is not bound
+/// to. That is rejected at `set_tenant_of_ctx` (`context.rs:624`), which sits
+/// between the `peek` (`:412`) and the `record` (`:700`) -- i.e. squarely inside
+/// the window this change is about. Same producer for both arms, because the
+/// budget is per-agent and two different producers would prove nothing.
+#[tokio::test]
+async fn a_publish_that_fails_late_does_not_consume_the_agents_budget() {
+    let mut cfg = config(true);
+    cfg.auth.enabled = true;
+    cfg.auth.require_tenant = true;
+    cfg.auth.tenant_agents = vec![TenantAgentBinding {
+        agent_did: "did:web:agents.test:smoke-50".into(),
+        tenant_id: "tenant-a".into(),
+    }];
+    cfg.limits.publish_rate_per_minute = 2;
+    let h = harness_from_config(cfg).await;
+
+    let make = |title: &str| {
+        producer(50)
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap()
+    };
+
+    // EXACTLY as many late failures as the budget (2), not more. This count is
+    // load-bearing in both directions:
+    //   - at most `budget` failures, so that even under the OLD charge-on-attempt
+    //     behaviour every one of them still reaches the tenant check and 403s.
+    //     Three would have the third rejected 429 by the limiter itself, which
+    //     reddens the precondition below and MASKS the real assertion further
+    //     down (CHARTER Rule 51).
+    //   - enough that failures + successes exceed the budget, so the successes
+    //     below genuinely distinguish charge-on-attempt from charge-on-success.
+    for i in 0..2 {
+        let (status, v) = publish_with_tenant(
+            &h.router,
+            &make(&format!("late-fail-{i}")),
+            Some("tenant-b"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "attempt {i} must fail at the tenant check, i.e. AFTER the limiter: {v}"
+        );
+    }
+
+    // The budget is untouched, so both permitted publishes still succeed.
+    for i in 0..2 {
+        let (status, v) = publish_with_tenant(&h.router, &make(&format!("legit-{i}")), None).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "publish {i} must succeed -- two FAILED attempts must not have spent \
+             a budget of 2. Under the old charge-on-attempt behaviour this is 429: {v}"
+        );
+    }
+
+    // ...and the budget is REAL. Without this the test would also pass against a
+    // build where the limiter was simply never consulted, which is the opposite
+    // defect and just as bad.
+    let (status, _) = publish_with_tenant(&h.router, &make("over"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the third SUCCEEDING publish must be refused -- `record` has to actually charge",
+    );
+}
+
+/// A1: `peek` and `record` are gated on `state.rate_limiter` at two sites ~290
+/// lines apart. If either gate is dropped, a deployment with the limiter
+/// disabled panics or misbehaves on the publish path -- the most common
+/// configuration breaking in the least visible way.
+#[tokio::test]
+async fn publishing_works_when_the_rate_limiter_is_disabled() {
+    let mut cfg = config(true);
+    cfg.limits.publish_rate_per_minute = 0; // limiter absent entirely
+    let h = harness_from_config(cfg).await;
+
+    // Well past any plausible budget: nothing may throttle, nothing may panic.
+    for i in 0..5 {
+        let req = producer(60)
+            .publish_request()
+            .title(format!("unlimited-{i}"))
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let (status, v) = publish_with_tenant(&h.router, &req, None).await;
+        assert_eq!(status, StatusCode::OK, "publish {i} with no limiter: {v}");
+    }
+}
+
+/// A1: an idempotent REPLAY is a successful publish and must be charged.
+///
+/// The playground replay path early-returns at `context.rs:~554`, before the
+/// shared success marker where the main charge lives. Without a second `record`
+/// there, replays would be the one `Ok` path that costs an agent nothing --
+/// a free channel, and one an attacker controls by simply resending a key.
+/// The production path's replay lands on the shared marker instead, so all
+/// branches charge replays identically.
+#[tokio::test]
+async fn an_idempotent_replay_is_charged_like_any_other_successful_publish() {
+    let mut cfg = config(true);
+    cfg.limits.publish_rate_per_minute = 2;
+    let h = harness_from_config(cfg).await;
+    let app = &h.router;
+
+    let req = producer(61)
+        .publish_request()
+        .title("replay-charge")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+
+    // 1st: a real insert. Charges 1 of 2.
+    let (s1, v1) = publish(app, &req, Some("replay-key")).await;
+    assert_eq!(s1, StatusCode::OK, "first publish: {v1}");
+
+    // 2nd: the SAME key and content -> replay. Returns Ok, so it charges 2 of 2.
+    let (s2, v2) = publish(app, &req, Some("replay-key")).await;
+    assert_eq!(s2, StatusCode::OK, "replay: {v2}");
+    assert_eq!(
+        v1["ctx_id"], v2["ctx_id"],
+        "must be the same row, i.e. a replay"
+    );
+
+    // 3rd: budget is now spent. If the replay were uncharged this is 200 and
+    // replays are free.
+    let other = producer(61)
+        .publish_request()
+        .title("after-replay")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (s3, _) = publish(app, &other, None).await;
+    assert_eq!(
+        s3,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the replay must have consumed the second unit of budget",
+    );
+}

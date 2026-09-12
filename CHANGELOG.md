@@ -28,6 +28,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Security: the per-agent publish budget was charged against an UNVERIFIED `agent_id`.** The
+  publish limiter ran `check` — which tests and charges in one step — before the verify/persist
+  pipeline, at a point where `req.agent_id` is whatever the caller wrote in the body. Two
+  consequences, both reachable without any credential: an unauthenticated caller could **spend
+  another agent's budget** by naming them, and could **grow the limiter's bucket map without
+  bound** by naming a fresh id each request, because the map key was attacker-controlled.
+
+  `check` is now split. `peek` runs in the same place, answers the only question that position
+  needs — "is this agent already over budget?" — and **never writes**: no insert, and no window
+  rollover, so a caller who never earns a charge leaves no trace. `record` charges on the success
+  path, where the `agent_id` has been verified. The 429, its `Retry-After`, and the
+  `publish_per_agent` metric are unchanged.
+
+  Two consequences are stated rather than left to be discovered. The enforced bound is now
+  `limit + concurrent in-flight publishes for that agent`, not `limit + 1`, because peek and
+  charge are separated by the whole pipeline; reserving to close that was rejected because a
+  reservation must live somewhere, and that somewhere is the attacker-keyed map entry this change
+  exists to remove. And a publish that fails *late* is no longer throttled at all — disclosed and
+  tracked as #242 rather than papered over, because both available fixes are worse than the gap
+  (see the issue).
+
 - **Cache posture: `/metrics` and the `did.json` 404 arm were uncacheable in principle and
   unlabelled in practice; `/healthz` was doing two jobs under one name.** Three fixes.
 
