@@ -1,0 +1,27 @@
+-- B7: widen `contexts.version` from INTEGER to BIGINT.
+--
+-- `PublishRequest.version` is a client-supplied `u32`. SQLite casts it `as i64`
+-- (lossless for every u32) but Postgres cast it `as i32`, which WRAPS for any
+-- value above 2^31-1 — silently, because Rust's `as` truncates rather than
+-- panicking in release. Two places were affected, and neither is the
+-- `put()` the original finding assumed:
+--
+--   * the supersession check in `commit_publish` — `req.version as i32 !=
+--     prev_version + 1` compared a wrapped negative against a real version, so
+--     the version-sequence gate could be evaluated against the wrong number;
+--   * the row INSERT — a wrapped negative would have been stored.
+--
+-- So this was reachable from a publish request AND a divergence between the
+-- backends: the same input produced a correct answer on SQLite and a wrong one
+-- on Postgres. BIGINT matches SQLite's i64 exactly, making the two agree by
+-- construction rather than by both being narrow in the same way.
+--
+-- INTEGER -> BIGINT changes the on-disk width, so Postgres rewrites the table
+-- and holds an ACCESS EXCLUSIVE lock for the duration. That is acceptable at
+-- this registry's scale and is the honest cost of the fix; on a very large
+-- `contexts` it should be scheduled rather than run blind.
+--
+-- Widening only. No value can fail to fit, so there is nothing to reject and
+-- no data to migrate.
+
+ALTER TABLE contexts ALTER COLUMN version TYPE BIGINT;
