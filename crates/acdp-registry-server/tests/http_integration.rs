@@ -8360,3 +8360,857 @@ async fn the_acdp_media_type_is_accepted_not_rejected() {
          never be the thing that gets 415'd",
     );
 }
+
+/// A2: a tenant-scoped search must not report a cross-tenant population count.
+///
+/// `total_estimate` is produced by the STORE, which counts §4.5-visible rows
+/// before the tenant predicate is applied — the tenant filter runs in the
+/// handler, post-query. So for a tenant-asserting caller the number describes
+/// rows across every tenant, i.e. a population size for data that caller cannot
+/// see and must not learn the size of.
+///
+/// The key must be **absent**, not `null` and not `0`. `Option<u64>` with
+/// `skip_serializing_if` is what guarantees that, and a client must not be able
+/// to mistake "withheld" for "none found".
+#[tokio::test]
+async fn search_omits_total_estimate_for_tenant_scoped_caller() {
+    let h = harness(true).await;
+    for (seed, tenant, title) in [
+        (31u8, "tenant-a", "est-alpha"),
+        (32u8, "tenant-b", "est-bravo"),
+    ] {
+        let req = producer(seed)
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let (st, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
+        assert_eq!(st, StatusCode::OK, "setup publish: {v}");
+    }
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/contexts/search?q=est")
+                .header("X-Tenant-Id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_to_json(resp).await;
+
+    assert!(
+        v.get("total_estimate").is_none(),
+        "the KEY must be absent for a tenant-scoped caller -- `null` or `0` would \
+         both be readable as 'none found' rather than 'withheld': {v}"
+    );
+    // The request must still WORK, or the test would pass against a handler that
+    // simply broke tenant search.
+    assert!(
+        v["matches"].as_array().is_some_and(|m| !m.is_empty()),
+        "tenant-scoped search must still return the caller's own rows: {v}"
+    );
+}
+
+/// A2, the anti-over-correction half. **Without this, "always omit" passes the
+/// test above** while silently breaking every un-scoped caller — including
+/// conformance's `want_total_estimate` and the vis-007 fixture that asserts
+/// `total_estimate == 0`.
+///
+/// An un-scoped caller is entitled to the count: with no tenant asserted there
+/// is no cross-tenant boundary to cross, and the number is exactly what the
+/// store computed for them.
+#[tokio::test]
+async fn search_still_reports_total_estimate_without_tenant() {
+    let h = harness(true).await;
+    let req = producer(33)
+        .publish_request()
+        .title("est-charlie")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (st, v) = publish_with_tenant(&h.router, &req, None).await;
+    assert_eq!(st, StatusCode::OK, "setup publish: {v}");
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/contexts/search?q=est-charlie")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_to_json(resp).await;
+    assert!(
+        v.get("total_estimate").is_some(),
+        "an un-scoped caller must still receive `total_estimate`; omitting it for \
+         everyone is the over-correction this test exists to catch: {v}"
+    );
+}
+
+/// A2 is PARTIAL, and this asserts the part that is still open.
+///
+/// Omitting `total_estimate` removes an O(1) population count. It does **not**
+/// close the underlying disclosure. `next_cursor` is unsigned plaintext base64
+/// of `{mint_ms}:{anchor_ms}:{ctx_id}` anchored on the last row the STORE
+/// scanned, and the store's scan is not tenant-aware — the tenant predicate is
+/// applied afterwards, in the handler.
+///
+/// # The plan's description of this attack was wrong, and the correction matters
+///
+/// It says a tenant-pinned caller can "walk cursors at `limit=1`". That is not
+/// where the leak is. Measured on this fixture, every anchor returned at
+/// `limit=1` is one of the caller's own rows.
+///
+/// **Not "every time" — an earlier version of this comment said that and it was
+/// an overclaim from a single six-row fixture.** A foreign anchor escapes
+/// whenever the refill loop STOPS on a page whose last raw row is foreign, and
+/// the loop has two exits, not one: reaching `target`, and exhausting
+/// `SEARCH_REFILL_MAX_PAGES` (6). `cursor` is assigned before that break, so at
+/// any `limit` — `1` included — enough consecutive foreign pages will hand a
+/// foreign anchor to the client. This fixture is too small to reach that exit.
+///
+/// The reason `limit=1` is clean HERE is the refill loop's target exit. A
+/// foreign anchor escapes that exit only when `accumulated` reaches `target`
+/// *on the page whose last raw row is foreign*.
+/// With `target == 1` a store page is one row, so if that row is foreign it is
+/// dropped by the retain, `accumulated` stays below `target`, and the loop
+/// refills — consuming the foreign-anchored cursor internally and returning the
+/// next one instead. The filter that hides the row also hides the anchor.
+///
+/// At `target >= 2` a page can contain an own row *and* a trailing foreign row,
+/// `accumulated` reaches `target` on it, the loop stops, and that page's
+/// foreign-anchored cursor is handed to the client. Measured at `limit=2`.
+///
+/// Anyone reproducing the finding at `limit=1` on a fixture this size would
+/// conclude it does not exist, which is why this test pins the size that
+/// exposes it directly rather than the size the plan named.
+///
+/// **Expected to FAIL when the tenant predicate moves into the store's search
+/// SQL** (E2, owned by another lane) — at which point it must be deleted in a
+/// visible change rather than quietly relaxed. Until then A2 is not closed.
+///
+/// **If you are reading this because it just failed:** that is the good
+/// outcome. Confirm the cursor now only anchors on the caller's own rows, then
+/// delete this test and say so in the changelog.
+#[tokio::test]
+async fn search_cursor_oracle_remains_open_for_tenant_scoped_caller() {
+    let h = harness(true).await;
+
+    // Alternating tenants, oldest first. The scan is `created_at DESC`, so this
+    // publishes into an order where a page of 2 can hold [own, foreign].
+    let mut own_ids = Vec::new();
+    let mut foreign_ids = Vec::new();
+    for (i, tenant) in [
+        "tenant-b", "tenant-a", "tenant-b", "tenant-a", "tenant-b", "tenant-a",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let req = producer(50 + i as u8)
+            .publish_request()
+            .title("oracle-row")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let (st, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
+        assert_eq!(st, StatusCode::OK, "setup publish: {v}");
+        let id = v["ctx_id"].as_str().unwrap().to_string();
+        if *tenant == "tenant-b" {
+            foreign_ids.push(id);
+        } else {
+            own_ids.push(id);
+        }
+    }
+    assert_eq!(foreign_ids.len(), 3, "setup must create foreign rows");
+
+    let mut decoded_anchors = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..8 {
+        let uri = match &cursor {
+            Some(c) => format!(
+                "/contexts/search?q=oracle-row&limit=2&cursor={}",
+                pct_encode_path_segment(c)
+            ),
+            None => "/contexts/search?q=oracle-row&limit=2".to_string(),
+        };
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("X-Tenant-Id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_to_json(resp).await;
+
+        // The A2 fix itself must hold on every page.
+        assert!(
+            v.get("total_estimate").is_none(),
+            "tenant-scoped caller must not receive a count: {v}"
+        );
+
+        let Some(next) = v["next_cursor"].as_str() else {
+            break;
+        };
+        decoded_anchors.push(String::from_utf8_lossy(&B64.decode(next).unwrap()).to_string());
+        cursor = Some(next.to_string());
+    }
+
+    let leaked: Vec<&String> = decoded_anchors
+        .iter()
+        .filter(|a| foreign_ids.iter().any(|f| a.contains(f)))
+        .collect();
+    assert!(
+        !leaked.is_empty(),
+        "EXPECTED the residual leak and did not observe it. Either E2 has landed — \
+         in which case this test has done its job and should be DELETED with a \
+         changelog note — or the setup stopped exercising the path. This fixture \
+         exercises the refill loop's TARGET exit, which needs limit >= 2: the \
+         anchor escapes when `accumulated` reaches `target` on a page whose last \
+         raw row is foreign. That is not the only exit — the loop also stops on \
+         exhausting SEARCH_REFILL_MAX_PAGES, which leaks at any limit — but this \
+         fixture is too small to reach it.\n\
+         foreign ids: {foreign_ids:?}\n\
+         decoded anchors: {decoded_anchors:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A4: a counting store wrapper, so the fan-out fix is PINNED.
+//
+// The fix is behaviourally invisible — `/log/entries` returns byte-identical
+// responses before and after. Only the cost changes: a full 256-record page
+// went from 256 blocking `retrieve` dispatches (up to 512 store round-trips) to
+// one query. Nothing else in the suite could notice a revert, which is exactly
+// the kind of improvement that silently rots back.
+//
+// So wrap the real store and count the two calls that distinguish the shapes.
+// `get` is the per-record path — `RegistryServer::retrieve` reaches the store
+// through it — and `visible_ctx_ids` is the batched one. Every other method
+// delegates untouched, including the log methods, which `SqliteStore` overrides
+// and whose trait defaults would otherwise quietly replace the real ones.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct StoreCalls {
+    get: std::sync::atomic::AtomicUsize,
+    visible_ctx_ids: std::sync::atomic::AtomicUsize,
+    tenant_of_ctx: std::sync::atomic::AtomicUsize,
+    /// Counted because P9's acceptance criterion names it, even though the
+    /// shipped handler never calls it: without this, a variant that batched
+    /// tenants in a SEPARATE query would satisfy every other assertion here
+    /// while doing two queries per page instead of one.
+    tenants_of_ctxs: std::sync::atomic::AtomicUsize,
+}
+
+impl StoreCalls {
+    fn snapshot(&self) -> (usize, usize, usize, usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.get.load(Relaxed),
+            self.visible_ctx_ids.load(Relaxed),
+            self.tenant_of_ctx.load(Relaxed),
+            self.tenants_of_ctxs.load(Relaxed),
+        )
+    }
+}
+
+struct CountingStore {
+    inner: Arc<SqliteStore>,
+    calls: Arc<StoreCalls>,
+}
+
+impl acdp::registry::RegistryStore for CountingStore {
+    fn put(&self, body: acdp::types::body::Body) -> Result<(), acdp::error::AcdpError> {
+        self.inner.put(body)
+    }
+    fn get(
+        &self,
+        ctx_id: &acdp::types::primitives::CtxId,
+    ) -> Result<Option<acdp::types::body::FullContext>, acdp::error::AcdpError> {
+        self.calls
+            .get
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.get(ctx_id)
+    }
+    fn lineage(
+        &self,
+        lineage_id: &acdp::types::primitives::LineageId,
+    ) -> Result<Vec<acdp::types::body::FullContext>, acdp::error::AcdpError> {
+        self.inner.lineage(lineage_id)
+    }
+    fn current(
+        &self,
+        lineage_id: &acdp::types::primitives::LineageId,
+    ) -> Result<Option<acdp::types::body::FullContext>, acdp::error::AcdpError> {
+        self.inner.current(lineage_id)
+    }
+    fn mark_superseded(
+        &self,
+        ctx_id: &acdp::types::primitives::CtxId,
+    ) -> Result<(), acdp::error::AcdpError> {
+        self.inner.mark_superseded(ctx_id)
+    }
+    fn first_version_ctx_id(
+        &self,
+        lineage_id: &acdp::types::primitives::LineageId,
+    ) -> Result<Option<acdp::types::primitives::CtxId>, acdp::error::AcdpError> {
+        self.inner.first_version_ctx_id(lineage_id)
+    }
+    fn search(
+        &self,
+        params: &acdp::types::search::SearchParams,
+        requester: Option<&AgentDid>,
+        anonymous_public_reads: bool,
+    ) -> Result<acdp::types::search::SearchResponse, acdp::error::AcdpError> {
+        self.inner.search(params, requester, anonymous_public_reads)
+    }
+    fn idempotency_lookup(
+        &self,
+        agent_id: &AgentDid,
+        key: &str,
+    ) -> Result<Option<acdp::registry::IdempotencyRecord>, acdp::error::AcdpError> {
+        self.inner.idempotency_lookup(agent_id, key)
+    }
+    fn idempotency_record(
+        &self,
+        agent_id: &AgentDid,
+        key: &str,
+        hash: &acdp::types::primitives::ContentHash,
+        response: &acdp::types::publish::PublishResponse,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), acdp::error::AcdpError> {
+        self.inner
+            .idempotency_record(agent_id, key, hash, response, expires_at)
+    }
+    fn idempotency_evict_expired(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), acdp::error::AcdpError> {
+        self.inner.idempotency_evict_expired(now)
+    }
+    fn commit_publish(
+        &self,
+        commit: acdp::registry::store::PublishCommit<'_>,
+    ) -> Result<acdp::registry::store::PublishCommitOutcome, acdp::error::AcdpError> {
+        self.inner.commit_publish(commit)
+    }
+    fn commit_lifecycle_event(
+        &self,
+        event: &acdp::types::lifecycle::LifecycleEvent,
+    ) -> Result<acdp::registry::LifecycleCommitOutcome, acdp::error::AcdpError> {
+        self.inner.commit_lifecycle_event(event)
+    }
+}
+
+#[async_trait::async_trait]
+impl ExtendedRegistryStore for CountingStore {
+    async fn list_contexts(
+        &self,
+        limit: u32,
+        cursor: Option<&str>,
+        requester: Option<&AgentDid>,
+        tenant: Option<&str>,
+        anonymous_public_reads: bool,
+    ) -> Result<acdp_registry_store::Page<acdp::types::body::FullContext>, acdp::error::AcdpError>
+    {
+        self.inner
+            .list_contexts(limit, cursor, requester, tenant, anonymous_public_reads)
+            .await
+    }
+    async fn health(&self) -> Result<(), acdp::error::AcdpError> {
+        self.inner.health().await
+    }
+    async fn count_idempotency_records(&self) -> Result<Option<u64>, acdp::error::AcdpError> {
+        self.inner.count_idempotency_records().await
+    }
+    async fn migrate(&self) -> Result<(), acdp::error::AcdpError> {
+        self.inner.migrate().await
+    }
+    async fn tenant_of_ctx(&self, ctx_id: &str) -> Result<Option<String>, acdp::error::AcdpError> {
+        self.calls
+            .tenant_of_ctx
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.tenant_of_ctx(ctx_id).await
+    }
+    async fn set_tenant_of_ctx(
+        &self,
+        ctx_id: &str,
+        tenant_id: &str,
+    ) -> Result<(), acdp::error::AcdpError> {
+        self.inner.set_tenant_of_ctx(ctx_id, tenant_id).await
+    }
+    async fn lifecycle_events_of_ctx(
+        &self,
+        ctx_id: &str,
+    ) -> Result<Vec<acdp::types::lifecycle::LifecycleEvent>, acdp::error::AcdpError> {
+        self.inner.lifecycle_events_of_ctx(ctx_id).await
+    }
+    async fn log_tree_size(&self) -> Result<u64, acdp::error::AcdpError> {
+        self.inner.log_tree_size().await
+    }
+    async fn log_leaf_hashes(&self, up_to: u64) -> Result<Vec<[u8; 32]>, acdp::error::AcdpError> {
+        self.inner.log_leaf_hashes(up_to).await
+    }
+    async fn log_leaf_by_ctx(
+        &self,
+        ctx_id: &str,
+    ) -> Result<Option<acdp_registry_store::LogEntryRecord>, acdp::error::AcdpError> {
+        self.inner.log_leaf_by_ctx(ctx_id).await
+    }
+    async fn log_leaf_by_index(
+        &self,
+        leaf_index: u64,
+    ) -> Result<Option<acdp_registry_store::LogEntryRecord>, acdp::error::AcdpError> {
+        self.inner.log_leaf_by_index(leaf_index).await
+    }
+    async fn log_entries(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<acdp_registry_store::LogEntryRecord>, acdp::error::AcdpError> {
+        self.inner.log_entries(start, end).await
+    }
+    async fn upsert_witness_cosignature(
+        &self,
+        log_id: &str,
+        tree_size: u64,
+        root_hash: &str,
+        witness_did: &str,
+        witnessed_at: &str,
+        cosignature_json: &str,
+    ) -> Result<(), acdp::error::AcdpError> {
+        self.inner
+            .upsert_witness_cosignature(
+                log_id,
+                tree_size,
+                root_hash,
+                witness_did,
+                witnessed_at,
+                cosignature_json,
+            )
+            .await
+    }
+    async fn witness_cosignatures_for(
+        &self,
+        log_id: &str,
+        tree_size: u64,
+        root_hash: &str,
+    ) -> Result<Vec<serde_json::Value>, acdp::error::AcdpError> {
+        self.inner
+            .witness_cosignatures_for(log_id, tree_size, root_hash)
+            .await
+    }
+    async fn tenants_of_ctxs(
+        &self,
+        ctx_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>, acdp::error::AcdpError> {
+        self.calls
+            .tenants_of_ctxs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.tenants_of_ctxs(ctx_ids).await
+    }
+    async fn visible_ctx_ids(
+        &self,
+        ctx_ids: &[&str],
+        requester: Option<&AgentDid>,
+        tenant: Option<&str>,
+        anonymous_public_reads: bool,
+    ) -> Result<std::collections::HashSet<String>, acdp::error::AcdpError> {
+        self.calls
+            .visible_ctx_ids
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .visible_ctx_ids(ctx_ids, requester, tenant, anonymous_public_reads)
+            .await
+    }
+    async fn search_in_tenant(
+        &self,
+        params: &acdp::types::search::SearchParams,
+        requester: Option<&AgentDid>,
+        anonymous_public_reads: bool,
+        tenant: Option<&str>,
+    ) -> Result<acdp::types::search::SearchResponse, acdp::error::AcdpError> {
+        self.inner
+            .search_in_tenant(params, requester, anonymous_public_reads, tenant)
+            .await
+    }
+}
+
+/// Build a log-enabled harness over a [`CountingStore`], returning the counters.
+async fn counting_log_harness() -> (Harness, Arc<StoreCalls>) {
+    let mut cfg = config(false);
+    cfg.receipt.signing_key_seed_b64 = B64.encode(RECEIPT_SEED);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.log.enabled = true;
+
+    let db = tempfile::Builder::new()
+        .prefix("acdp-counting-")
+        .suffix(".sqlite")
+        .tempfile()
+        .unwrap();
+    // Mirror `common::build_harness_with_webhook` exactly: an enabled [log]
+    // makes every commit_publish append its leaf atomically, and a configured
+    // receipt key attaches the signer. Skipping either turns /log/entries into
+    // a 400 that has nothing to do with what this test measures.
+    let inner = SqliteStore::connect(db.path(), 1)
+        .await
+        .unwrap()
+        .with_transparency_log();
+    inner.migrate().await.unwrap();
+    let calls = Arc::new(StoreCalls::default());
+    let store = CountingStore {
+        inner: Arc::new(inner),
+        calls: calls.clone(),
+    };
+
+    let server = RegistryServer::try_new(store, log_caps(), AUTHORITY).unwrap();
+    let receipt_signer =
+        acdp_registry_core::receipt::build_signer(&cfg.receipt, &cfg.registry.authority)
+            .expect("receipt signer");
+    let server = Arc::new(
+        server
+            .with_receipt_signer(receipt_signer)
+            .expect("receipt signer"),
+    );
+    let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+    let secret = JwtSecret::from_bytes(&[42u8; 32]);
+    let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
+    let resolver = Arc::new(WebResolver::new());
+    let auth = Arc::new(AuthService::new(
+        AuthConfig::default(),
+        challenges,
+        signer,
+        resolver,
+        AUTHORITY.into(),
+    ));
+    let state = AppStateInner::new(server, auth, None, cfg, None);
+    (
+        Harness {
+            router: build_router(state),
+            db: Some(db),
+        },
+        calls,
+    )
+}
+
+/// A4: `/log/entries` answers the whole page with ONE visibility query.
+///
+/// This is the phase's entire deliverable and it is invisible in the response
+/// body — the bytes are identical before and after. Without this test a revert
+/// to the per-record loop passes every other assertion in the suite.
+///
+/// The two counters distinguish the shapes unambiguously: the old code reached
+/// the store through `RegistryStore::get` once per record (via
+/// `RegistryServer::retrieve`), the new code calls `visible_ctx_ids` once for
+/// the page. Asserting only "visible_ctx_ids == 1" would not catch a version
+/// that called BOTH, so `get` is pinned at zero as well.
+#[tokio::test]
+async fn log_entries_answers_the_page_with_one_visibility_query() {
+    let (h, calls) = counting_log_harness().await;
+    for i in 0..5u8 {
+        log_publish(&h, 120 + i, &format!("fanout-{i}"), Visibility::Public).await;
+    }
+
+    let before = calls.snapshot();
+    let (status, v) = get_json(&h.router, "/log/entries?start=0&end=5").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        v["entries"].as_array().map(Vec::len),
+        Some(5),
+        "setup must produce a five-entry page: {v}"
+    );
+    let after = calls.snapshot();
+
+    let (gets, visible, tenants, tenants_batched) = (
+        after.0 - before.0,
+        after.1 - before.1,
+        after.2 - before.2,
+        after.3 - before.3,
+    );
+    assert_eq!(
+        visible, 1,
+        "exactly ONE batched visibility query per page (got {visible})"
+    );
+    assert_eq!(
+        gets, 0,
+        "zero per-record `get`s -- {gets} means the request fanned out one \
+         store read per entry, which is the defect A4 removed"
+    );
+    assert_eq!(
+        tenants, 0,
+        "no tenant header was sent, so the untenanted path must not pay for a \
+         tenant lookup at all (got {tenants})"
+    );
+    assert_eq!(
+        tenants_batched, 0,
+        "and it must not pay for a BATCHED tenant lookup either -- the tenant \
+         predicate belongs inside the one visibility query, not beside it \
+         (got {tenants_batched})"
+    );
+}
+
+/// A4: the same holds under a tenant header, which is the branch that used to
+/// cost TWO store reads per record rather than one.
+///
+/// This branch had no test coverage of any kind before this phase, and it is
+/// precisely the one being rewritten.
+#[tokio::test]
+async fn log_entries_leaf_presence_is_tenant_scoped() {
+    let (h, calls) = counting_log_harness().await;
+    for i in 0..3u8 {
+        log_publish(
+            &h,
+            130 + i,
+            &format!("tenant-fanout-{i}"),
+            Visibility::Public,
+        )
+        .await;
+    }
+
+    let before = calls.snapshot();
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/log/entries?start=0&end=3")
+                .header("X-Tenant-Id", "tenant-zzz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_to_json(resp).await;
+    let after = calls.snapshot();
+
+    // §8.3 across the tenant boundary: the rows were published into the default
+    // tenant, so a caller scoped to `tenant-zzz` must see the positions but no
+    // `leaf` — absent, never null.
+    let entries = v["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 3, "positions are still disclosed: {v}");
+    for e in entries {
+        assert!(
+            e.get("leaf").is_none(),
+            "a foreign-tenant row must expose its POSITION but not its leaf, and \
+             the key must be absent rather than null: {e}"
+        );
+        assert!(
+            e.get("leaf_hash").is_some() && e.get("leaf_index").is_some(),
+            "position fields must still be present: {e}"
+        );
+    }
+
+    assert_eq!(
+        after.1 - before.1,
+        1,
+        "still exactly one batched query under a tenant header"
+    );
+    assert_eq!(
+        after.0 - before.0,
+        0,
+        "still zero per-record store reads under a tenant header"
+    );
+    assert_eq!(
+        after.3 - before.3,
+        0,
+        "the tenant predicate rides inside the SAME query -- a separate batched \
+         tenant lookup would be two queries per page, not one"
+    );
+    assert_eq!(
+        after.2 - before.2,
+        0,
+        "and zero PER-RECORD tenant lookups. This is the branch where the old \
+         code actually made that call, so leaving it unasserted here would let a \
+         variant that batched visibility and then looked up tenants one at a \
+         time pass every other assertion in this test"
+    );
+}
+
+/// A4: the untenanted bucket is not addressable from `/log/entries`.
+///
+/// The plan for this phase asked for a test that a `ctx_id` with no stored
+/// tenant "still resolves to `default`", pinning the handler-side fallback the
+/// old code carried:
+///
+/// ```ignore
+/// state.server.store().tenant_of_ctx(ctx_id).await?.unwrap_or_else(|| "default".into())
+/// ```
+///
+/// Measured, that fallback could never change an answer, for two independent
+/// reasons -- so a test written to its premise would have asserted nothing:
+///
+/// 1. `tenant_id` is `TEXT NOT NULL DEFAULT 'default'`
+///    (`crates/acdp-registry-sqlite/migrations/007_tenant_id.sql:11`), so
+///    `tenant_of_ctx` returns `None` only for a row that does not exist -- and
+///    such a row already failed the visibility check above it.
+/// 2. `"default"` is a RESERVED sentinel: `reject_reserved_tenant`
+///    (`handlers/context.rs:190`) refuses it from the header AND from a token
+///    claim, so `requested_tenant` is never `Some("default")` and the
+///    comparison `stored != tenant` was unreachable in the affirmative.
+///
+/// (2) is the property that actually matters, and it is what this test pins
+/// instead. It is why replacing the loop with `AND tenant_id = ?` is safe: the
+/// untenanted bucket cannot be named, so no tenant-scoped caller can reach it.
+/// If `/log/entries` ever resolved its tenant without that rejection, setting
+/// one header would alias every untenanted row in the registry -- and the
+/// response would be a perfectly well-formed 200 with real leaves in it.
+///
+/// Asserting the STATUS alone would not catch that: `/log/entries` has other
+/// 400s (`start > end`, a missing bound). The code and the message are what
+/// tie this 400 to the sentinel rather than to argument validation.
+#[tokio::test]
+async fn log_entries_rejects_the_reserved_default_tenant() {
+    let (h, calls) = counting_log_harness().await;
+    for i in 0..3u8 {
+        log_publish(&h, 140 + i, &format!("untenanted-{i}"), Visibility::Public).await;
+    }
+
+    let before = calls.snapshot();
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/log/entries?start=0&end=3")
+                .header("X-Tenant-Id", "default")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "the reserved sentinel is refused before any row is read"
+    );
+    let v = body_to_json(resp).await;
+    assert_eq!(v["error"]["code"], "schema_violation", "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("reserved tenant sentinel")),
+        "must be the SENTINEL rejection, not one of this route's argument \
+         validations, which share the status and the code: {v}"
+    );
+    let after = calls.snapshot();
+
+    // The rejection happens in `tenant_for_request`, before the page is read.
+    // A version that resolved the tenant late would answer the same 400 while
+    // still having touched the store -- correct on the wire, wrong about when.
+    assert_eq!(
+        (
+            after.0 - before.0,
+            after.1 - before.1,
+            after.2 - before.2,
+            after.3 - before.3,
+        ),
+        (0, 0, 0, 0),
+        "a rejected tenant must cost ZERO store reads of any kind"
+    );
+
+    // And the bucket stays readable to an anonymous, unscoped caller -- the
+    // rejection removes a way to NAME the bucket, not the bucket itself.
+    let (status, v) = get_json(&h.router, "/log/entries?start=0&end=3").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    for e in v["entries"].as_array().expect("entries") {
+        assert!(e.get("leaf").is_some(), "public rows stay public: {e}");
+    }
+}
+
+/// A4 / SECURITY: `/log/entries` must gate `leaf` on the SAME
+/// `anonymous_public_reads` the retrieve it mirrors gates on.
+///
+/// `RegistryServer::retrieve` reads that flag off `self.caps` -- the
+/// `CapabilitiesDocument` baked in at `try_new` time -- NOT off
+/// `RegistryConfig`. That split is documented in this repo as GAP 3
+/// (search `tests/common/mod.rs` for "GAP 3"), and it is a trap: this file's
+/// own `caps()` helper hardcodes `anonymous_public_reads: true`, and `config()`
+/// separately opts the CONFIG in as well, while the SHIPPED default is `false`
+/// (`AuthConfig::default()` in `acdp-registry-types/src/config.rs`, copied into
+/// caps by `build_capabilities` in `acdp-registry-server/src/main.rs`). So a test
+/// that flips
+/// `cfg.auth.anonymous_public_reads` and observes a 200 measures the harness's
+/// caps/config split and nothing about the binary.
+///
+/// This test therefore overrides the CAPS, which is the only thing that moves
+/// the real predicate. With the flag off, `can_retrieve`'s public arm is
+/// `anonymous_public_reads || requester.is_some()` -- false for an anonymous
+/// caller -- so a public context is NOT retrievable and §8.3 requires its
+/// `leaf` to be absent while its position stays disclosed.
+///
+/// The batched rewrite must pass this flag through rather than assume a value.
+/// Hardcoding `true` makes the endpoint disclose every public leaf in the
+/// registry to an unauthenticated caller on the shipped default config -- and
+/// because `auth.enabled` also defaults to false, on that config EVERY caller
+/// is anonymous.
+#[tokio::test]
+async fn log_entries_honours_anonymous_public_reads_from_caps() {
+    let mut cfg = config(false);
+    cfg.receipt.signing_key_seed_b64 = B64.encode(RECEIPT_SEED);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.log.enabled = true;
+    cfg.auth.anonymous_public_reads = false;
+
+    let mut caps = log_caps();
+    caps.anonymous_public_reads = false;
+    let h = build_harness_with_caps(cfg, caps, None).await;
+
+    let (ctx_id, _) = log_publish(&h, 150, "anon-gated", Visibility::Public).await;
+
+    // Ground truth for the rule this endpoint mirrors, MEASURED rather than
+    // asserted in prose: the retrieve itself refuses this caller. §8.3 defines
+    // `leaf` presence in terms of retrievability, so if this ever stops being a
+    // 404 the leaf assertion below is testing something else and must be
+    // re-derived, not merely re-run.
+    //
+    // An earlier version of this test claimed this ground truth in a comment
+    // without performing it -- the same shape as the invalid probe this whole
+    // test exists to make impossible.
+    let (retrieve_status, rv) = get_json(
+        &h.router,
+        &format!("/contexts/{}", pct_encode_path_segment(&ctx_id)),
+    )
+    .await;
+    assert_eq!(
+        retrieve_status,
+        StatusCode::NOT_FOUND,
+        "premise: with caps.anonymous_public_reads false an anonymous caller \
+         cannot retrieve even a PUBLIC context: {rv}"
+    );
+
+    let (status, v) = get_json(&h.router, "/log/entries?start=0&end=1").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let entries = v["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "{v}");
+    assert!(
+        entries[0].get("leaf_hash").is_some(),
+        "the POSITION is always disclosed, §8.3: {v}"
+    );
+    assert!(
+        entries[0].get("leaf").is_none(),
+        "an anonymous caller cannot retrieve this context when \
+         caps.anonymous_public_reads is false, so §8.3 forbids echoing its \
+         leaf -- a `leaf` here is a transparency-log disclosure of every \
+         public context to the world on the SHIPPED default config: {v}"
+    );
+}

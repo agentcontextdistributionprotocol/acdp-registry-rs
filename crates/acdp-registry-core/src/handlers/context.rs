@@ -1092,9 +1092,27 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
         // `RegistryServer::search` / `RegistryStore::search` contract carries no
         // tenant. The store's `next_cursor` is therefore anchored on the last
         // RAW scanned row, which may belong to another tenant — so a returned
-        // cursor can disclose a foreign row's `(created_at, ctx_id)` (a
-        // low-grade ordering/existence oracle; the row itself is removed by the
-        // retain above, so no context DATA leaks). Closing this fully requires
+        // cursor can disclose a foreign row's `(created_at, ctx_id)`.
+        //
+        // That was previously described here as "a low-grade ordering/existence
+        // oracle ... so no context DATA leaks". Both halves overclaimed. The
+        // cursor is unsigned plaintext base64 of `{mint_ms}:{anchor_ms}:{ctx_id}`,
+        // so a `ctx_id` is not low-grade -- it is a durable identifier, and the
+        // caller can walk cursors to recover foreign `ctx_id`s AND their
+        // ordering, a few rows at a time. NOT at `limit=1`, which an earlier
+        // draft of this comment claimed: measured, the refill loop keeps going
+        // there, so the filter that hides the row also consumes its anchor. The
+        // anchor escapes when the loop stops on a page whose last RAW row is
+        // foreign -- at `limit>=2` on reaching `target`, and at any `limit` once
+        // the loop exhausts `SEARCH_REFILL_MAX_PAGES`, since `cursor` is
+        // assigned before the break. "No context DATA leaks" is true
+        // only of BODIES; identifiers and ordering are data. Omitting
+        // `total_estimate` (A2) moves the population count from O(1) to O(n)
+        // requests; it does NOT close the oracle, and
+        // `search_cursor_oracle_remains_open_for_tenant_scoped_caller` asserts
+        // the residue so that is machine-checked rather than remembered.
+        //
+        // Closing this fully requires
         // pushing the tenant predicate into the store's search SQL (a
         // tenant-aware `ExtendedRegistryStore::search`), so the scan — and thus
         // the cursor — only ever sees the caller's own rows.
@@ -1116,6 +1134,30 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
             break;
         }
     }
+
+    // A2: `total_estimate` comes from the STORE's count, which is §4.5-visible
+    // but NOT tenant-scoped -- the tenant predicate is applied post-query, in
+    // this handler, after the count has already been taken. So for a
+    // tenant-asserting caller the number describes rows across every tenant,
+    // and returning it hands that caller a population count for data they
+    // cannot see and must not know the size of.
+    //
+    // Omitted rather than recomputed: an honest tenant-scoped count needs the
+    // predicate in the store's SQL, which is a different change in a different
+    // crate. `Option<u64>` with `skip_serializing_if` means `None` omits the
+    // KEY entirely rather than sending `null`, so a client cannot mistake
+    // "withheld" for "zero".
+    //
+    // Deliberately NOT unconditional: an un-scoped caller is entitled to the
+    // count, and removing it for everyone would break conformance's
+    // `want_total_estimate` while still passing a naive "tenant caller sees no
+    // count" test. `search_still_reports_total_estimate_without_tenant` pins
+    // that half.
+    let total_estimate = if requested_tenant.is_some() {
+        None
+    } else {
+        total_estimate
+    };
 
     Ok(SearchResponse {
         matches: accumulated,

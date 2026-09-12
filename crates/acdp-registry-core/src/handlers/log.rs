@@ -468,8 +468,61 @@ pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
     let requested_tenant = tenant_for_request(&state, &headers)?;
 
     let records = state.server.store().log_entries(start, capped_end).await?;
+
+    // A4: ONE visibility query for the whole page, not one per record.
+    //
+    // This loop previously called `requester_can_retrieve` per entry, each of
+    // which did a blocking `RegistryServer::retrieve` plus, under a tenant
+    // header, a `tenant_of_ctx`. On a full 256-record page that is 256 blocking
+    // dispatches and up to 512 store round-trips to answer one request.
+    // `visible_ctx_ids` answers the same question -- §4.5 retrieve visibility
+    // plus the tenant gate -- for the whole page, and both SQL backends
+    // override it with a single query.
+    //
+    // `anonymous_public_reads` is read from the SERVER'S CAPABILITIES, not from
+    // `state.config.auth`, because that is the field the call being replaced
+    // actually consulted: `RegistryServer::retrieve` -> `can_retrieve` gates its
+    // public arm on `self.caps.anonymous_public_reads || requester.is_some()`.
+    // Reading it from the same place makes this batched call equal to the old
+    // per-record retrieve BY CONSTRUCTION, rather than equal only as long as
+    // config and caps happen to agree.
+    //
+    // Both alternatives are wrong, and the second one silently:
+    //
+    //   * a hardcoded `true` discloses every public `leaf` to an anonymous
+    //     caller on the SHIPPED default (`anonymous_public_reads: false`,
+    //     `acdp-registry-types/src/config.rs`), and since `auth.enabled` also
+    //     defaults to false, on that config every caller is anonymous;
+    //   * `state.config.auth.anonymous_public_reads` is right in the binary
+    //     (`acdp-registry-server/src/main.rs` copies cfg -> caps) but not by
+    //     construction -- any other wiring that builds a `RegistryServer` with
+    //     caps that disagree with cfg makes this endpoint diverge from the
+    //     retrieve it is defined to mirror.
+    //
+    // This is GAP 3 in `tests/common/mod.rs`: authorization-relevant decisions
+    // come off `caps`, never off `RegistryConfig`. The default test harness
+    // hardcodes `caps.anonymous_public_reads: true`, so a test that flips the
+    // CONFIG value proves nothing here -- which is exactly how an earlier draft
+    // of this change convinced itself a hardcoded `true` was behaviour-preserving.
+    // `log_entries_honours_anonymous_public_reads_from_caps` overrides the caps.
+    let ctx_ids: Vec<&str> = records.iter().map(|r| r.ctx_id.as_str()).collect();
+    // No empty-slice guard: the range check above guarantees `start < end`, so
+    // `records` is never empty here. Both SQL overrides early-return on an empty
+    // slice and the default impl simply iterates zero times, so an empty input is
+    // harmless in any case. A guard here would be a branch no test could reach.
+    let visible = state
+        .server
+        .store()
+        .visible_ctx_ids(
+            &ctx_ids,
+            requester.as_ref(),
+            requested_tenant.as_deref(),
+            state.server.capabilities().anonymous_public_reads,
+        )
+        .await?;
+
     let mut entries = Vec::with_capacity(records.len());
-    for record in records {
+    for record in &records {
         let mut entry = json!({
             "leaf_index": record.leaf_index,
             "leaf_hash": record.leaf_hash,
@@ -478,14 +531,7 @@ pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
         // the context (public: always); absent — never null — otherwise.
         // An unauthorized auditor learns that *a* publish occupies this
         // position, nothing else.
-        if requester_can_retrieve(
-            &state,
-            requester.as_ref(),
-            requested_tenant.as_deref(),
-            &record.ctx_id,
-        )
-        .await?
-        {
+        if visible.contains(record.ctx_id.as_str()) {
             entry["leaf"] = record.leaf_value().map_err(RegistryError::Acdp)?;
         }
         entries.push(entry);
