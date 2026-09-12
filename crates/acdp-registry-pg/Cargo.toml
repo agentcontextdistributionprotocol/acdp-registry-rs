@@ -23,3 +23,8 @@ thiserror   = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
 uuid        = { workspace = true }
+
+[dev-dependencies]
+# `features = ["test-support"]` pulls in the shared cross-backend parity
+# assertions that tests/parity.rs runs against this backend.
+acdp-registry-store = { path = "../acdp-registry-store", version = "0.1.2", features = ["test-support"] }

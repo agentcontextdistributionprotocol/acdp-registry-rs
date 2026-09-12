@@ -1250,12 +1250,47 @@ impl RegistryStore for SqliteStore {
                 sql.push_str(" AND expires_at IS NOT NULL AND expires_at <= ?");
                 binds.push(before.to_rfc3339());
             }
+            // BUG-B1: compare data_period bounds NUMERICALLY, never as TEXT.
+            //
+            // These two predicates read out of `body_json`, whose timestamps
+            // are chrono's serde output (`Z` suffix, 0/3/6/9 fractional
+            // digits), while the bound is bound as `to_rfc3339()` (`+00:00`
+            // suffix). Two different serializers for the same instant, so a
+            // lexicographic compare is simply wrong: `'+'`(0x2B) `<
+            // '.'`(0x2E) `<` digits `< 'Z'`(0x5A), which makes a stored
+            // whole-second value sort AFTER a bound naming that very same
+            // instant. Measured in sqlite3:
+            //
+            //     '2026-01-01T00:00:00Z' <= '2026-01-01T00:00:00+00:00'  -> 0
+            //
+            // so an inclusive bound excluded an equal instant, and the mirror
+            // case wrongly included. The `created_at`/`expires_at` filters
+            // above are NOT affected: both their stored and bound sides go
+            // through `to_rfc3339()`, so their lexical order does hold — that
+            // was measured too, rather than assumed by analogy.
+            //
+            // `unixepoch(..., 'subsec')` puts both sides through one parser
+            // and yields a real number, which fixes every combination of
+            // suffix and fractional width at once. Binding a `Z`-normalized
+            // string instead would NOT be enough: '…00Z' still sorts after
+            // '…00.500Z'. Requires SQLite >= 3.42; the bundled library is
+            // 3.46.0.
+            //
+            // Deliberately query-side only. The alternative — normalizing the
+            // stored form with a migration — would rewrite `body_json`, whose
+            // exact bytes are the `content_hash` preimage.
             if let Some(after) = dp_start_after {
-                sql.push_str(" AND json_extract(body_json, '$.data_period.start') >= ?");
+                sql.push_str(
+                    " AND unixepoch(json_extract(body_json, '$.data_period.start'), 'subsec') \
+                     >= unixepoch(?, 'subsec')",
+                );
                 binds.push(after.to_rfc3339());
             }
             if let Some(before) = dp_end_before {
-                sql.push_str(" AND json_extract(body_json, '$.data_period.end') <= ?");
+                sql.push_str(
+                    " AND unixepoch(json_extract(body_json, '$.data_period.end'), 'subsec') \
+                     <= unixepoch(?, 'subsec')",
+                );
                 binds.push(before.to_rfc3339());
             }
 
@@ -1704,9 +1739,30 @@ fn parse_opt_rfc3339(s: &Option<String>) -> Result<Option<DateTime<Utc>>, AcdpEr
 /// Tokenizes the input on Unicode whitespace, quotes each token as an
 /// FTS5 string literal, and joins with implicit AND (the default FTS5
 /// operator). That makes `q=foo bar` match documents containing BOTH
-/// `foo` and `bar` — the same semantics Postgres `plainto_tsquery`
-/// already gives us, so the two backends agree on result sets for the
-/// same query.
+/// `foo` and `bar`, which is also what Postgres `plainto_tsquery` does
+/// with its terms.
+///
+/// **The two backends do NOT agree on result sets for the same query, and
+/// this comment used to claim they did.** Term conjunction is the only part
+/// that matches. FTS5 here uses the default `unicode61` tokenizer — no
+/// stemmer, no stopword list (`migrations/002_fts5.sql`) — while Postgres
+/// runs `plainto_tsquery('english', …)` over an `english` tsvector, which
+/// applies snowball stemming and drops stopwords
+/// (`acdp-registry-pg/migrations/002_fts.sql`). Measured on both engines:
+///
+/// | query | sqlite | pg |
+/// |---|---|---|
+/// | `q=running` against "run report" | 0 rows | 1 row (stems to `run`) |
+/// | `q=the` against "the quarterly figures" | 1 row | 0 rows (stopword; the tsquery is empty) |
+///
+/// Reconciling them is a deliberate semantics choice with user-visible
+/// consequences, tracked separately rather than smuggled into this comment:
+/// matching Postgres means an approximate stemmer (FTS5 `porter` is not
+/// snowball `english`) plus a stopword list, so the resulting parity would
+/// be pinned per-word rather than structural. Until that lands, treat `q=`
+/// as backend-specific and do not assume a query returns the same rows on
+/// both. `acdp_registry_store::parity` is where any such guarantee gets
+/// enforced once it exists.
 ///
 /// Per-token quoting neutralizes FTS5 operator syntax (`NOT`, `AND`,
 /// `OR`, `NEAR`, column filters, `^`, `+`, `-`, `(`, `)`); embedded
