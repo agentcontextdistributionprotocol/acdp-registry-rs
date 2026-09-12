@@ -8360,3 +8360,222 @@ async fn the_acdp_media_type_is_accepted_not_rejected() {
          never be the thing that gets 415'd",
     );
 }
+
+/// A2: a tenant-scoped search must not report a cross-tenant population count.
+///
+/// `total_estimate` is produced by the STORE, which counts §4.5-visible rows
+/// before the tenant predicate is applied — the tenant filter runs in the
+/// handler, post-query. So for a tenant-asserting caller the number describes
+/// rows across every tenant, i.e. a population size for data that caller cannot
+/// see and must not learn the size of.
+///
+/// The key must be **absent**, not `null` and not `0`. `Option<u64>` with
+/// `skip_serializing_if` is what guarantees that, and a client must not be able
+/// to mistake "withheld" for "none found".
+#[tokio::test]
+async fn search_omits_total_estimate_for_tenant_scoped_caller() {
+    let h = harness(true).await;
+    for (seed, tenant, title) in [
+        (31u8, "tenant-a", "est-alpha"),
+        (32u8, "tenant-b", "est-bravo"),
+    ] {
+        let req = producer(seed)
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let (st, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
+        assert_eq!(st, StatusCode::OK, "setup publish: {v}");
+    }
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/contexts/search?q=est")
+                .header("X-Tenant-Id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_to_json(resp).await;
+
+    assert!(
+        v.get("total_estimate").is_none(),
+        "the KEY must be absent for a tenant-scoped caller -- `null` or `0` would \
+         both be readable as 'none found' rather than 'withheld': {v}"
+    );
+    // The request must still WORK, or the test would pass against a handler that
+    // simply broke tenant search.
+    assert!(
+        v["matches"].as_array().is_some_and(|m| !m.is_empty()),
+        "tenant-scoped search must still return the caller's own rows: {v}"
+    );
+}
+
+/// A2, the anti-over-correction half. **Without this, "always omit" passes the
+/// test above** while silently breaking every un-scoped caller — including
+/// conformance's `want_total_estimate` and the vis-007 fixture that asserts
+/// `total_estimate == 0`.
+///
+/// An un-scoped caller is entitled to the count: with no tenant asserted there
+/// is no cross-tenant boundary to cross, and the number is exactly what the
+/// store computed for them.
+#[tokio::test]
+async fn search_still_reports_total_estimate_without_tenant() {
+    let h = harness(true).await;
+    let req = producer(33)
+        .publish_request()
+        .title("est-charlie")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (st, v) = publish_with_tenant(&h.router, &req, None).await;
+    assert_eq!(st, StatusCode::OK, "setup publish: {v}");
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/contexts/search?q=est-charlie")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_to_json(resp).await;
+    assert!(
+        v.get("total_estimate").is_some(),
+        "an un-scoped caller must still receive `total_estimate`; omitting it for \
+         everyone is the over-correction this test exists to catch: {v}"
+    );
+}
+
+/// A2 is PARTIAL, and this asserts the part that is still open.
+///
+/// Omitting `total_estimate` removes an O(1) population count. It does **not**
+/// close the underlying disclosure. `next_cursor` is unsigned plaintext base64
+/// of `{mint_ms}:{anchor_ms}:{ctx_id}` anchored on the last row the STORE
+/// scanned, and the store's scan is not tenant-aware — the tenant predicate is
+/// applied afterwards, in the handler.
+///
+/// # The plan's description of this attack was wrong, and the correction matters
+///
+/// It says a tenant-pinned caller can "walk cursors at `limit=1`". **At
+/// `limit=1` nothing leaks.** Measured: anchors returned at `limit=1` are the
+/// caller's own rows, every time.
+///
+/// The reason is the refill loop. A foreign anchor only escapes when
+/// `accumulated` reaches `target` *on the page whose last raw row is foreign*.
+/// With `target == 1` a store page is one row, so if that row is foreign it is
+/// dropped by the retain, `accumulated` stays below `target`, and the loop
+/// refills — consuming the foreign-anchored cursor internally and returning the
+/// next one instead. The filter that hides the row also hides the anchor.
+///
+/// At `target >= 2` a page can contain an own row *and* a trailing foreign row,
+/// `accumulated` reaches `target` on it, the loop stops, and that page's
+/// foreign-anchored cursor is handed to the client. Measured at `limit=2`.
+///
+/// Anyone reproducing the finding at `limit=1` would conclude it does not
+/// exist, which is why this test pins the size that actually works.
+///
+/// **Expected to FAIL when the tenant predicate moves into the store's search
+/// SQL** (E2, owned by another lane) — at which point it must be deleted in a
+/// visible change rather than quietly relaxed. Until then A2 is not closed.
+///
+/// **If you are reading this because it just failed:** that is the good
+/// outcome. Confirm the cursor now only anchors on the caller's own rows, then
+/// delete this test and say so in the changelog.
+#[tokio::test]
+async fn search_cursor_oracle_remains_open_for_tenant_scoped_caller() {
+    let h = harness(true).await;
+
+    // Alternating tenants, oldest first. The scan is `created_at DESC`, so this
+    // publishes into an order where a page of 2 can hold [own, foreign].
+    let mut own_ids = Vec::new();
+    let mut foreign_ids = Vec::new();
+    for (i, tenant) in [
+        "tenant-b", "tenant-a", "tenant-b", "tenant-a", "tenant-b", "tenant-a",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let req = producer(50 + i as u8)
+            .publish_request()
+            .title("oracle-row")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let (st, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
+        assert_eq!(st, StatusCode::OK, "setup publish: {v}");
+        let id = v["ctx_id"].as_str().unwrap().to_string();
+        if *tenant == "tenant-b" {
+            foreign_ids.push(id);
+        } else {
+            own_ids.push(id);
+        }
+    }
+    assert_eq!(foreign_ids.len(), 3, "setup must create foreign rows");
+
+    let mut decoded_anchors = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..8 {
+        let uri = match &cursor {
+            Some(c) => format!(
+                "/contexts/search?q=oracle-row&limit=2&cursor={}",
+                pct_encode_path_segment(c)
+            ),
+            None => "/contexts/search?q=oracle-row&limit=2".to_string(),
+        };
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("X-Tenant-Id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_to_json(resp).await;
+
+        // The A2 fix itself must hold on every page.
+        assert!(
+            v.get("total_estimate").is_none(),
+            "tenant-scoped caller must not receive a count: {v}"
+        );
+
+        let Some(next) = v["next_cursor"].as_str() else {
+            break;
+        };
+        decoded_anchors.push(String::from_utf8_lossy(&B64.decode(next).unwrap()).to_string());
+        cursor = Some(next.to_string());
+    }
+
+    let leaked: Vec<&String> = decoded_anchors
+        .iter()
+        .filter(|a| foreign_ids.iter().any(|f| a.contains(f)))
+        .collect();
+    assert!(
+        !leaked.is_empty(),
+        "EXPECTED the residual leak and did not observe it. Either E2 has landed — \
+         in which case this test has done its job and should be DELETED with a \
+         changelog note — or the setup stopped exercising the path (the anchor only \
+         escapes when `accumulated` reaches `target` on a page whose last raw row is \
+         foreign, which needs limit >= 2).\n\
+         foreign ids: {foreign_ids:?}\n\
+         decoded anchors: {decoded_anchors:?}"
+    );
+}

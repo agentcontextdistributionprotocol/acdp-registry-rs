@@ -396,11 +396,26 @@ Query parameters (all optional):
 
 Response: a `SearchResponse` — `{ matches: [...], total_estimate, next_cursor }`.
 Visibility (RFC-ACDP-0008 §4.5) is enforced in the SQL `WHERE` clause on both
-backends, and `total_estimate` is the count of §4.5-visible matches for the
-caller. Tenant narrowing is post-filtered with a bounded refill loop (up to 6
+backends. Tenant narrowing is post-filtered with a bounded refill loop (up to 6
 inner pages), so a page may return fewer than `limit` rows near the end of a
 result set even though `next_cursor` is set — keep paging until `next_cursor`
 is absent.
+
+**`total_estimate` is omitted entirely for a tenant-scoped request.** It is the
+count of §4.5-visible matches for the caller *across all tenants*, because the
+count is taken in the store before the tenant predicate is applied in the
+handler. Returning it to a tenant-asserting caller would report a population
+size for rows that caller cannot see, so the key is **absent** — not `null`, and
+not `0`. A request with no `X-Tenant-Id` still carries it.
+
+> **Residual, stated rather than left to be discovered.** Omitting the count
+> does not close the underlying leak. `next_cursor` is unsigned plaintext base64
+> of `{mint_ms}:{anchor_ms}:{ctx_id}` anchored on the last row the store
+> *scanned*, which may belong to another tenant. A tenant-scoped caller can page
+> at `limit=1` and recover foreign `ctx_id`s and their ordering — one request per
+> row instead of one request for the total. This moves the oracle from O(1) to
+> O(n); it does not remove it. Closing it requires the tenant predicate in the
+> store's search SQL so the scan never sees another tenant's rows in the first place.
 
 ### `GET /lineages/{lineage_id}`
 

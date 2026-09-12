@@ -31,6 +31,40 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-A, phase P8 (lane-1) — tenant-scoped search stops reporting a cross-tenant count -->
+
+### Fixed
+
+- **Security (cross-tenant disclosure, partial): a tenant-scoped search reported a population
+  count for rows across every tenant.** `total_estimate` is produced by the store, which counts
+  §4.5-visible rows *before* the tenant predicate is applied — tenant narrowing happens
+  afterwards, in the handler, as a post-query filter. So a caller asserting `X-Tenant-Id`
+  received the number of matches across the whole registry while seeing only their own rows: an
+  O(1) population count for data they cannot read.
+
+  The key is now **omitted entirely** for a tenant-scoped request. Omitted rather than
+  recomputed, because an honest tenant-scoped count needs the predicate in the store's SQL, which
+  is a different change in a different crate. `Option<u64>` with `skip_serializing_if` means the
+  key is *absent* rather than `null` or `0`, so a client cannot read "withheld" as "none found".
+  An un-scoped caller still receives it — removing it for everyone would have passed a naive
+  "tenant caller sees no count" test while breaking conformance, which is why
+  `search_still_reports_total_estimate_without_tenant` exists.
+
+  **This is partial and is not described as closed.** `next_cursor` is unsigned plaintext base64
+  of `{mint_ms}:{anchor_ms}:{ctx_id}` anchored on the last row the *store scanned*, which may
+  belong to another tenant, so foreign `ctx_id`s and their ordering remain recoverable by paging.
+  The fix moves that from one request to one request per row; it does not remove it. Closing it
+  requires the tenant predicate in the store's search SQL.
+  `search_cursor_oracle_remains_open_for_tenant_scoped_caller` asserts the residue, so "partial"
+  is machine-checked rather than a sentence someone has to re-read, and it fails deliberately
+  when the underlying fix lands.
+
+  Two claims that were overstated have been corrected rather than carried forward. The code
+  comment described the cursor as "a low-grade ordering/existence oracle" where "no context DATA
+  leaks" — a `ctx_id` is a durable identifier, not low-grade, and "no data" was true only of
+  bodies. And `docs/HTTP-API.md` stated `total_estimate` was "the count of §4.5-visible matches
+  for the caller", which was exactly the falsified claim.
+
 <!-- unit H-A, phase P7 follow-up (lane-1) — the 415 ruling applied -->
 
 ### Fixed

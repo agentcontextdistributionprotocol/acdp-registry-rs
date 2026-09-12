@@ -2019,3 +2019,42 @@ bump.
   shipping rather than alongside.
 - **Status:** CONFIRMED (2026-09-12) — code minted per ruling, upstream issue filed, precedent
   recorded, marker deleted.
+
+
+## H-A / P8 — A2: tenant-scoped search omits `total_estimate`
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P8)
+- **Assumed:** that a caller asserting `X-Tenant-Id` must not learn the size of the population
+  outside their tenant, and that `total_estimate` — computed in the store, before the handler's
+  post-query tenant filter — disclosed exactly that.
+- **Chose:** omit the key when `requested_tenant.is_some()`. Not recomputed: an honest
+  tenant-scoped count needs the predicate in the store's SQL, a different change in a different
+  crate. `skip_serializing_if` makes the key ABSENT rather than `null`/`0`, so "withheld" cannot
+  be misread as "none found".
+- **Deliberately not unconditional.** An un-scoped caller is entitled to the count, and omitting
+  it for everyone passes the tenant test while breaking conformance's `want_total_estimate` and
+  the vis-007 `total_estimate == 0` fixture. Pinned by
+  `search_still_reports_total_estimate_without_tenant`.
+
+### CORRECTION to the plan's description of the residual attack
+
+The plan states a tenant-pinned caller "can walk cursors at `limit=1`" to recover foreign
+`ctx_id`s. **Measured: at `limit=1` nothing leaks.** Every anchor returned at `limit=1` is one of
+the caller's own rows.
+
+The refill loop is why. A foreign anchor only escapes when `accumulated` reaches `target` on the
+page whose last raw row is foreign. With `target == 1` a store page is one row, so a foreign row
+is dropped by the retain, `accumulated` stays below `target`, the loop refills, and the
+foreign-anchored cursor is consumed internally. **The filter that hides the row also hides the
+anchor.** At `target >= 2` a page can hold an own row followed by a foreign one, `accumulated`
+reaches `target` there, the loop stops, and that cursor is returned. Confirmed at `limit=2`;
+`limit=3` returned no cursor at all for the fixture.
+
+This matters beyond pedantry: anyone reproducing the finding at the size the plan names would
+conclude the leak does not exist. The marker test pins `limit=2`.
+
+- **Blast radius if wrong:** a client that depended on `total_estimate` under a tenant header now
+  sees the key absent. That is the intended behaviour change and it is in the engineering log.
+- **Status:** UNCONFIRMED — A2 ships PARTIAL by design. The cursor oracle remains open and is
+  asserted by `search_cursor_oracle_remains_open_for_tenant_scoped_caller`; A2 must not be
+  described as closed until the store-side predicate lands and that test is deliberately deleted.
