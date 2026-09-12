@@ -33,6 +33,15 @@ pub struct SqliteStore {
     log_enabled: bool,
 }
 
+/// How long a writer waits for SQLite's write lock before returning
+/// `SQLITE_BUSY`.
+///
+/// Chosen to comfortably exceed a `BEGIN IMMEDIATE` held across the
+/// receipt-minter callback plus an fsync on a slow disk — the window that
+/// produced spurious 500s when the timeout was left implicit. Generous on
+/// purpose: waiting is cheap and correct, failing the request is neither.
+const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl SqliteStore {
     /// Open or create a SQLite database at `path`.
     pub async fn connect(path: &Path, max_connections: u32) -> Result<Self, AcdpError> {
@@ -47,7 +56,23 @@ impl SqliteStore {
             .map_err(|e| AcdpError::RegistryInternal(format!("sqlite uri: {e}")))?
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
-            .foreign_keys(true);
+            .foreign_keys(true)
+            // B5: set the busy timeout EXPLICITLY rather than inheriting
+            // sqlx's implicit default.
+            //
+            // `commit_publish` holds `BEGIN IMMEDIATE` across the
+            // receipt-minter callback, so a writer can legitimately hold the
+            // write lock for as long as that callback plus an fsync takes. A
+            // concurrent writer that waits less than that surfaces
+            // `SQLITE_BUSY` as a 500 with no retry — a spurious failure under
+            // ordinary contention rather than a real error.
+            //
+            // The value is a named constant here rather than a config field
+            // because the storage config lives in `acdp-registry-types`, which
+            // is outside this change's scope; making it tunable is tracked
+            // separately. An explicit value that is written down beats an
+            // implicit one that has to be looked up in a dependency.
+            .busy_timeout(SQLITE_BUSY_TIMEOUT);
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections.max(1))
             .connect_with(opts)
@@ -926,11 +951,25 @@ impl RegistryStore for SqliteStore {
                 let prev_status: String = row.try_get("status").map_err(map_sqlx_err)?;
                 let prev_agent: String = row.try_get("agent_id").map_err(map_sqlx_err)?;
                 // contributors is stored as a JSON-encoded array of DIDs.
-                let prev_contributors: Vec<String> = row
-                    .try_get::<String, _>("contributors")
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
+                // B6: a corrupt `contributors` column must FAIL the publish, not
+                // silently become an empty list.
+                //
+                // This previously swallowed both errors with
+                // `.ok().and_then(...).unwrap_or_default()`. The consequence was
+                // not a cosmetic one: `contributors` feeds the RFC-ACDP-0014 §4
+                // predecessor-admission check below, so an unreadable column
+                // meant a legitimate contributor was told
+                // `SupersededTarget::NotFound` while the check itself reported
+                // success. Postgres already errored here (`TEXT[]`, decoded with
+                // `?`), so this was also a backend divergence.
+                let prev_contributors_raw: String =
+                    row.try_get("contributors").map_err(map_sqlx_err)?;
+                let prev_contributors: Vec<String> = serde_json::from_str(&prev_contributors_raw)
+                    .map_err(|e| {
+                        AcdpError::RegistryInternal(format!(
+                            "decode contributors for predecessor '{prev}': {e}"
+                        ))
+                    })?;
                 let prev_tenant: String = row.try_get("tenant_id").map_err(map_sqlx_err)?;
                 // P0 (tenant continuity): a successor must live in the same
                 // tenant as its predecessor. Even with the owner check below

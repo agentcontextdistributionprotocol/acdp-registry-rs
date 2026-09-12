@@ -8,6 +8,49 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **SQLite swallowed a corrupt `contributors` column and skipped an admission check while
+  reporting success.** The predecessor's `contributors` was decoded with
+  `.ok().and_then(...).unwrap_or_default()`, so an unreadable value became an empty list. That
+  is not cosmetic: `contributors` feeds the RFC-ACDP-0014 §4 predecessor-admission check, so a
+  legitimate contributor was refused with `SupersededTarget::NotFound` **while the check
+  itself reported success**. Postgres already errored here (`TEXT[]` decoded with `?`), so this
+  was a backend divergence as well as a silent wrong answer. SQLite now fails loudly.
+
+  The finding that surfaced this claimed it contradicted the existing test
+  `admission_is_not_skipped_when_the_predecessor_body_is_undecodable`. It does not — that test
+  corrupts `body_json`, a different field. It establishes the principle rather than covering
+  the case, which is why this ships with its own test.
+
+- **SQLite relied on sqlx's implicit busy timeout.** `commit_publish` holds `BEGIN IMMEDIATE`
+  across the receipt-minter callback, so a writer can legitimately hold the write lock for as
+  long as that callback plus an fsync takes; a concurrent writer waiting less than that
+  surfaced `SQLITE_BUSY` as a 500 with no retry — a spurious failure under ordinary
+  contention. The timeout is now set explicitly and named. Mapping busy to a retryable 503 is
+  a separate change in a different crate and is not included.
+
+- **Postgres narrowed `version` to `i32`, where SQLite used `i64`.** `PublishRequest.version`
+  is a client-supplied `u32`; Postgres bound it `as i32` (wrapping above 2^31-1, silently,
+  since Rust's `as` truncates rather than panicking) with an `INTEGER` column to match.
+  `contexts.version` is now `BIGINT` and the casts are `i64::from`, so the two backends agree
+  by construction rather than by both being narrow.
+
+  **Scope, stated precisely:** this is a parity fix and defence in depth, **not** a live
+  exploit closed. The finding called it unreachable "because `put()` has no production
+  callers", which was wrong — the casts were in `commit_publish` and the row INSERT, both on
+  the live publish path. It is nonetheless unreachable, for a different and measured reason:
+  the request builder requires `version == 1` for a first publish and `prev + 1` for a
+  supersession, so a publish carrying 3_000_000_000 is refused before the store sees it on
+  both backends. Reaching 2^31 would take ~2 billion sequential supersessions.
+
+### Added
+
+- **Indexes on `contexts(domain)` and `contexts(expires_at)` in both backends.** Both columns
+  are used by `GET /contexts/search` filters and neither was indexed, so both filters were
+  full scans. The `expires_at` index is partial (`WHERE expires_at IS NOT NULL`), matching the
+  predicate the query actually writes. The `data_period` filters remain scans deliberately —
+  they read out of `body_json` through a conversion, so indexing them needs an expression or
+  generated column, which is a schema decision with no measured volume behind it yet.
+
 - **Retrieval could serve a context as `active` while also serving its `retracted` event.**
   `get()` and `lineage()` read the context row and its lifecycle events as **two separate
   queries with no shared snapshot**, on *both* backends. A retraction committing between the

@@ -816,7 +816,10 @@ impl RegistryStore for PgStore {
                     });
                 };
                 let prev_lineage: String = row.try_get("lineage_id").map_err(map_sqlx_err)?;
-                let prev_version: i32 = row.try_get("version").map_err(map_sqlx_err)?;
+                // B7: i64, matching SQLite. `version` is BIGINT since
+                // migration 012 — see that file for why the old `i32` silently
+                // wrapped for any u32 above 2^31-1.
+                let prev_version: i64 = row.try_get("version").map_err(map_sqlx_err)?;
                 let prev_status: String = row.try_get("status").map_err(map_sqlx_err)?;
                 let prev_agent: String = row.try_get("agent_id").map_err(map_sqlx_err)?;
                 let prev_contributors: Vec<String> =
@@ -870,7 +873,7 @@ impl RegistryStore for PgStore {
                         });
                     }
                 }
-                if req.version as i32 != prev_version + 1 {
+                if i64::from(req.version) != prev_version + 1 {
                     return Err(AcdpError::SupersededTarget {
                         reason: acdp::error::SupersessionReason::VersionMismatch,
                         message: format!(
@@ -1436,7 +1439,7 @@ async fn insert_body<'c>(
     .bind(status.as_str())
     .bind(visibility)
     .bind(context_type)
-    .bind(body.version as i32)
+    .bind(i64::from(body.version))
     .bind(body.supersedes.as_ref().map(|c| c.as_str().to_string()))
     .bind(&body.title)
     .bind(body.description.clone())

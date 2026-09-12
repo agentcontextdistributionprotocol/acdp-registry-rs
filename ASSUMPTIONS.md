@@ -1461,3 +1461,63 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   self-contradictory, and stale-toward-retracted is the safe direction to be wrong about
   whether data has been withdrawn. Reversal is deleting four call-site lines.
 - **Status:** UNCONFIRMED
+
+## B5's busy timeout is an in-crate constant, not a config field — and has no behavioural test
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 4, B5)
+- **Assumed:** an explicit value that is written down beats an implicit one inherited from a
+  dependency, even if it is not yet tunable.
+- **Chose:** a named `SQLITE_BUSY_TIMEOUT` constant (30s) in the sqlite crate. The finding
+  asked for it to come "from config", but the storage config lives in `acdp-registry-types`,
+  outside this change's path scope — adding a field there is a separate change, flagged rather
+  than smuggled in.
+- **Stated limit — this one has NO falsifying test, unlike every other guard in this unit.**
+  Reddening it deterministically means holding `BEGIN IMMEDIATE` across a slow callback and
+  racing a second writer against a wall clock; such a test is timing-dependent, and a flaky
+  guard gets deleted, which is worse than an honest gap. The change is a one-line
+  configuration of an existing mechanism, and it is recorded here as untested rather than
+  described as guarded.
+- **Blast radius if wrong:** 30s is too long for a caller that would rather fail fast, or too
+  short for a pathological disk. Either way it is one constant, and the old behaviour was an
+  undocumented 5s from sqlx.
+- **Status:** UNCONFIRMED
+
+## B7 is a parity fix, not a live exploit closed — and both the finding and my own read were wrong
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 4, B7)
+- **Assumed, then measured:** the finding said the `as i32` narrowing was unreachable "because
+  `put()` has no production callers". That reason is **false** — the casts were in
+  `commit_publish` and in the row INSERT, both on the live publish path. I then concluded it
+  was therefore reachable, and **that was also false**: measured on both backends, a publish
+  carrying `version = 3_000_000_000` is refused before the store sees it, because the request
+  builder requires `version == 1` for a first publish and `prev + 1` for a supersession.
+  Reaching 2^31 needs ~2 billion sequential supersessions.
+- **Chose:** widen `contexts.version` to `BIGINT` and use `i64::from` anyway. It removes a real
+  divergence (SQLite was already lossless), it is a widening so nothing can fail to fit, and
+  the cost is one table rewrite. Keeping a narrowing cast on the publish path because today's
+  validation happens to prevent it would be relying on a constraint enforced in a different
+  crate.
+- **Alternatives:** leave it and document — rejected, the divergence is exactly what this unit
+  exists to remove; assert on `version` at the store boundary instead — duplicates validation
+  the SDK already does, in the wrong layer.
+- **Blast radius if wrong:** `INTEGER` → `BIGINT` rewrites the table under an ACCESS EXCLUSIVE
+  lock. Acceptable at this scale, worth scheduling on a very large `contexts`.
+- **Status:** UNCONFIRMED
+
+## `lineages` is write-only and was deliberately NOT dropped
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 4, B8)
+- **Assumed:** a table written on every insert and read by nothing is dead write amplification
+  worth removing.
+- **Verified exhaustively before deciding:** `lineages` has `INSERT` only
+  (`sqlite/src/store.rs`, `pg/src/store.rs`) and **zero** `SELECT`/`JOIN`/`UPDATE` anywhere in
+  the repository — src, tests, and migrations all swept, not just the two store files.
+- **Chose: do not drop it.** Two reasons, either sufficient. (a) Dropping a table is a one-way
+  door and this unit has no mandate for one. (b) `crates/acdp-registry-server/tests/pg_integration.rs`
+  TRUNCATEs it in test setup, so removing the table means editing a file outside this change's
+  path scope — the finding cannot be actioned without a cross-boundary edit even if it were
+  desirable.
+- **Blast radius if wrong:** every insert keeps paying for one extra row write. Measured cost:
+  one INSERT per publish, inside a transaction that already writes several rows.
+- **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
+  evidence rather than actioned here.

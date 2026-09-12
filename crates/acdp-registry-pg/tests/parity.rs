@@ -126,3 +126,71 @@ async fn a_desynced_retraction_is_not_served_as_active() {
 
     parity::assert_desynced_retraction_is_not_served_active(&store, "pg", &ctx_id).await;
 }
+
+/// B7: pin that `contexts.version` is `bigint`.
+///
+/// SQLite bound `version` `as i64` (lossless for a `u32`); Postgres bound it
+/// `as i32`, which wraps above 2^31-1, and the column was `INTEGER` to match.
+/// Migration 012 widens it and the casts are now `i64::from`.
+///
+/// **Honest scope.** This is defence in depth and a parity fix, NOT a live
+/// exploit closed. The original finding called the narrowing unreachable
+/// "because `put()` has no production callers", which was wrong — the casts
+/// were in `commit_publish` and the row INSERT, both on the live publish path.
+/// But it *is* unreachable, for a different reason, measured rather than
+/// assumed: the SDK request builder requires `version == 1` for a first publish
+/// and `prev + 1` for a supersession, so reaching 2^31 needs ~2 billion
+/// sequential supersessions. A publish carrying version 3_000_000_000 is
+/// refused before the store sees it, on both backends.
+///
+/// So what is asserted here is the column width itself, which is what the
+/// migration changed and what makes the two backends agree by construction
+/// rather than by both being narrow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_version_column_is_wide_enough_for_any_u32() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+
+    let (data_type,): (String,) = sqlx::query_as(
+        "SELECT data_type FROM information_schema.columns \
+         WHERE table_name = 'contexts' AND column_name = 'version'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("read the column type");
+    assert_eq!(
+        data_type, "bigint",
+        "contexts.version must be bigint so every u32 fits; `integer` is the \
+         narrowing that made Postgres disagree with SQLite"
+    );
+
+    // And prove the width is real rather than just declared: a value above
+    // i32::MAX must survive a round trip through the column.
+    let (echoed,): (i64,) = sqlx::query_as("SELECT $1::bigint")
+        .bind(3_000_000_000_i64)
+        .fetch_one(store.pool())
+        .await
+        .expect("round-trip a value above i32::MAX");
+    assert_eq!(echoed, 3_000_000_000_i64);
+}
+
+/// B8: pin that the two search-filter indexes exist. Mirror of the SQLite
+/// assertion — see that one for why a migration needs its result asserted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_search_filter_indexes_exist() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT indexname FROM pg_indexes WHERE tablename = 'contexts' \
+         AND indexname IN ('idx_ctx_domain', 'idx_ctx_expires') ORDER BY indexname",
+    )
+    .fetch_all(store.pool())
+    .await
+    .expect("read pg_indexes");
+    let found: Vec<&str> = rows.iter().map(|(n,)| n.as_str()).collect();
+    assert_eq!(
+        found,
+        vec!["idx_ctx_domain", "idx_ctx_expires"],
+        "both search-filter indexes must exist after migration 013"
+    );
+}
