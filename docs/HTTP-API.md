@@ -642,8 +642,28 @@ Operational snapshot. Always shipped.
 }
 ```
 
-`idempotency.records` and the webhook queue fields are `null` when the backend
-doesn't track them.
+`idempotency.records`, the webhook queue fields (`queue_in_flight`,
+`queue_capacity`) and `build.commit` are **omitted entirely** when unavailable
+— they are not serialised as `null`. Each carries
+`#[serde(skip_serializing_if = "Option::is_none")]`
+(`crates/acdp-registry-core/src/handlers/admin.rs`), so a client must treat
+the key as *absent*, not as present-with-null. A consumer doing
+`body["webhook"]["queue_in_flight"] === null` will not match.
+
+Measured on a local SQLite build with webhooks disabled — note `webhook`
+carries only `enabled`, and `build` carries no `commit`:
+
+```json
+{
+  "build":       { "version": "<version>",
+                   "storage_impl": "acdp_registry_sqlite::store::SqliteStore" },
+  "storage":     { "healthy": true },
+  "idempotency": { "records": 0 },
+  "webhook":     { "enabled": false },
+  "revocation":  { "configured_feeds": 0 },
+  "migrations":  { "backend": "Sqlite", "applied": true }
+}
+```
 
 #### The `build` group (#117)
 
@@ -828,16 +848,22 @@ documents only the registry's HTTP-status projection of them.
 | 400 | `data_ref_hash_mismatch` | An embedded/remote `data_ref` hash ≠ declared. |
 | 400 | `key_resolution_failed` | DID document fetched but the key isn't usable. |
 | 400 | `immutable_field` | A lifecycle request tried to supply/alter body content (RFC-ACDP-0013 §6 step 2). |
-| 400 | (signature) | Bad signature / unsupported algorithm. |
+| 400 | `invalid_signature` | The producer signature did not verify against the resolved key. |
+| 400 | `unsupported_algorithm` | Signature algorithm outside `supported_signature_algorithms`. |
+| 400 | `invalid_cursor` | A `cursor=` value that does not decode or does not match its query. |
+| 400 | `cursor_expired` | A structurally valid cursor whose window has passed. |
 | 403 | `not_authorized` | Bad/expired/revoked bearer, challenge failure, visibility denial, tenant-scope denial in strict mode. |
+| 403 | `key_not_authorized` | The key resolved fine but is not authorized to sign for that agent. |
 | 404 | `not_found` | Context/lineage absent or not visible to the caller. |
 | 409 | `duplicate_publish` / `superseded_target` | Idempotency/lineage conflict (race). |
 | 409 | `invalid_lifecycle_transition` | Double retract, or republish of a never-retracted context (RFC-ACDP-0013 §6 step 4). |
-| 413 | (payload) | Body over `max_payload_bytes`, or embedded data over `max_embedded_bytes`. |
+| 413 | `payload_too_large` | Body over `max_payload_bytes`. |
+| 413 | `embedded_too_large` | Embedded data over `max_embedded_bytes`. |
 | 429 | `rate_limited` | Publish/challenge bucket drained; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
 | 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*` and lifecycle endpoints when their profiles are not enabled). |
 | 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (also covers SSRF-policy rejection). |
+| 502 | `invalid_witness_cosignature` | A witness cosignature failed verification (RFC-ACDP-0015 §6.1). Like `invalid_log_proof`, a 502 because it is normally another party's artifact that failed. |
 | 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Normally raised when validating an *upstream's* proofs (federation), which is why it is a 502. **It is also reachable from this registry's own `/log/proof`**: for a retrieval-authorized requester the handler echoes the leaf via `record.leaf()` (`crates/acdp-registry-core/src/handlers/log.rs:359`), and a stored leaf that no longer parses under the closed schema surfaces as `invalid_log_proof` from here, not from a peer (`crates/acdp-registry-store/src/log.rs:64`, with the reject cases pinned by that module's own tests). If you see it and you are not federating, suspect your own `log_leaves` table. The other `/log/*` failures are `schema_violation`, `not_found`, or `not_implemented`; there is no `log_unavailable`. |
 
 Note: auth failures on the ACDP routes surface as `403 not_authorized`, not
