@@ -8,6 +8,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Observability: the registry minted `x-request-id` values that reached no response,
+  and middleware-generated `413`s carried no error envelope.** Two defects in the
+  middleware stack, both in `build_router`.
+
+  `SetRequestIdLayer` was applied before `PropagateRequestIdLayer`, and `Router::layer`
+  makes the *later* call the *outer* one — the inverse of `tower::ServiceBuilder`, whose
+  doc example the stack was written against. So `PropagateRequestId` ran first and read a
+  request header that `SetRequestId` had not written yet, and the generated UUID reached
+  **no response at all** — not merely the middleware-generated ones, but plain `200`s too.
+  A client-supplied `x-request-id` echoed back correctly, which is what hid this: any test
+  or manual check that sent its own id saw the header and concluded the feature worked.
+  The pair is now inverted and hoisted outside the body limit, the timeout and CORS, so a
+  `413`, a `408` and a CORS preflight all carry an id.
+
+  Separately, **both** `413` paths violated RFC-ACDP-0007 §5. With `Content-Length` set,
+  `RequestBodyLimitLayer` short-circuits before calling inner and hard-sets
+  `Content-Type: text/plain`, which the outermost `if_not_present` media-type layer cannot
+  correct. Streamed (no `Content-Length`), the response reached the per-route layer and so
+  advertised `application/acdp+json` — over a plain-text body. A response-rewriting layer
+  now gives both the `payload_too_large` envelope; it keys on whether the body actually
+  parses as an envelope rather than on the media type, because the streamed path already
+  claimed the right type while carrying the wrong payload.
+
+  The existing regression test asserted status and `Content-Type` only, and passed against
+  a non-JSON body via a code path its own comment misidentified. It is split into
+  `_with_content_length` and `_chunked`, both asserting `error.code`. The Content-Length
+  variant was run red before the fix.
+
+  **`408` is deliberately not covered.** RFC-ACDP-0007 §5 has no wire code for a timeout,
+  so the envelope would have to say `internal_error` — worse than silence, because it
+  misattributes a client-side timeout to a server fault. Minting a `request_timeout` code
+  is a change to the shared §5 registry and is tracked separately.
+
 - **Security (availability): `GET /contexts/search?limit=` could abort the registry
   process from an unauthenticated request.** The handler sized its accumulator with
   `Vec::with_capacity` directly from the caller-supplied `limit`, using `.max(1)` — a
