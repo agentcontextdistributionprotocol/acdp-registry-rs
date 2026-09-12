@@ -1561,9 +1561,83 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** a future refactor could move the timeout layer outside the
   request-id pair and lose the id on 408s with no test failing. Bounded: the 413 guard covers the
   same layer boundary, so the regression would have to be specific to the timeout layer alone.
-- **Status:** UNCONFIRMED
 - **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
   evidence rather than actioned here.
+
+
+## H-A / P4 — A9: rate-limit scope taxonomy generated from one list
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P4)
+- **Assumed:** that a `/auth/challenge` rejection from the process-global ceiling and one from
+  the per-agent budget are operationally different events that an operator needs to tell apart,
+  and that collapsing them into `challenge_per_agent` hid the `agent_id`-rotating flood the
+  global ceiling exists to catch (#24) inside the ordinary noisy-agent case.
+- **Chose:** split the collapsed `check_global().and_then(|()| check(agent_id))` into two
+  sequential early-returns, each recording its own scope. Semantics are unchanged — `and_then`
+  already skipped `check` on a global `Err`, and each branch still surfaces its own
+  `Retry-After`.
+- **DIVERGENCE FROM THE PLAN, stated deliberately.** The plan specified a hand-written enum with
+  an exhaustive no-wildcard `match` for `label()`, plus a hand-written `ALL`, and explicitly left
+  the `ALL`-omission gap **open**: "a variant missing *from* `ALL` is invisible to
+  `every_rate_limit_scope_is_documented`, which iterates `ALL` — the same omission class that
+  lost `lifecycle_per_agent`. Closing it needs enum, `ALL` and `label()` generated from one
+  `macro_rules!`. That is worth doing but is not this phase."
+
+  I closed it in this phase instead. The macro is ~15 lines, it is the mechanism the plan itself
+  named as correct, and the gap it leaves open is not hypothetical — this taxonomy has already
+  drifted in **both** directions (`lifecycle_per_agent` emitted but undocumented; a
+  `challenge_global` documented in the `metrics.rs` docstring that nothing emitted). Shipping a
+  phase whose stated purpose is omission-proofing while leaving the dominant omission path open,
+  when the fix is fifteen lines and falsifiable, was the wrong trade. The plan's reason for
+  deferring was scope, not a technical objection.
+- **Also changed:** `record_rate_limit_rejection` now takes `RateLimitScope` rather than
+  `&'static str`, so an undocumented or mistyped label cannot be constructed. This is a `pub`
+  signature change in `acdp-registry-core`, which has exactly one consumer
+  (`acdp-registry-server`, in-workspace, by path). Not a published-API break.
+- **Alternatives:** (a) hand-written enum + hand-written `ALL` — rejected, leaves the omission
+  path the phase exists to close; (b) keep `&'static str` and rely on the doc test — rejected,
+  a typo produces a new series rather than a failure, and the doc test only iterates known
+  scopes so it cannot see an unknown one.
+- **Blast radius if wrong:** an operator's `challenge_per_agent` alert loses volume to
+  `challenge_global`. Disclosed in the CHANGELOG under `### Changed` and in an operator note in
+  `docs/HTTP-API.md` next to the metric table, both stating the direction of the shift.
+- **Status:** UNCONFIRMED — the label rename is a deliberate, documented break of an existing
+  series; whether any deployment actually alerts on `challenge_per_agent` is not knowable here.
+
+
+## H-A / P5 — A1a: the publish bucket is charged on success, not on attempt
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P5)
+- **Assumed:** that `check`'s combined test-and-charge, run on an unverified `req.agent_id`, is a
+  security defect in the WRITE half only, and that the pre-pipeline rejection the comment at
+  `context.rs` defends needs only a READ.
+- **Chose:** `peek` (read-only, never inserts, never rolls the window over) at the original call
+  site; `record` (infallible charge, reproduces the rollover) adjacent to the canonical
+  `record_publish("inserted")` success marker, plus a second `record` on the playground replay
+  early-return so all four branches charge replays identically.
+- **Decision — document the concurrency bound, do NOT reserve.** The enforced bound is
+  `limit + concurrent in-flight publishes for that agent`. A reservation would need somewhere to
+  live, reintroducing exactly the attacker-keyed map growth that `peek`-not-inserting removes,
+  and would contradict the `peek_does_not_create_a_bucket` guard. In-flight publishes are
+  additionally bounded by server connection concurrency, not by the attacker alone.
+- **Decision — disclose the late-failure throttling gap, do NOT commit to a fix here.** Filed as
+  **#242**. The two available shapes are per-branch charge sites (clean at only one of four
+  branches, because verification happens inside the SDK call on the blocking pool) and post-hoc
+  error classification (a denylist over a `#[non_exhaustive]` enum that fails OPEN as variants
+  are added).
+- **CORRECTION TO THE PLAN'S OWN PREDICTION, found by falsification.** The plan stated that an
+  "increment only" `record` would accumulate across windows and "permanently trip a bucket" —
+  i.e. fail closed. Against this `peek` it does the OPPOSITE and fails **open**: `peek` reads an
+  expired window as count 0 independently, so a `record` that never advances `window_start`
+  leaves every later `peek` seeing a long-expired window and returning `Ok` forever. The limiter
+  silently stops limiting after the first window. My first guard asserted only that budget was
+  available again after the window turned, which is true under BOTH implementations, so the
+  mutation ran green; the guard was rewritten to spend the full budget inside the new window and
+  to assert `window_start` and `count` directly.
+- **Blast radius if wrong:** a publish limiter that under- or over-charges. Bounded by the guards
+  above, each falsified individually.
+- **Status:** UNCONFIRMED — the concurrency bound and the #242 gap are deliberate, documented
+  trades, not settled questions.
 
 ## `search_in_tenant`'s default treats the backend as untenanted rather than refusing
 

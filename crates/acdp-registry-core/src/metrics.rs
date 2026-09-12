@@ -192,9 +192,62 @@ pub fn record_witness_cosignature(outcome: &'static str) {
     metrics::counter!(WITNESS_COSIGNATURES_TOTAL, "outcome" => outcome).increment(1);
 }
 
-/// A request rejected with 429 by the rate limiter, labelled by scope
-/// (`auth_per_ip`, `auth_global`, `publish_per_agent`, `challenge_per_agent`,
-/// `challenge_global`).
-pub fn record_rate_limit_rejection(scope: &'static str) {
-    metrics::counter!(RATE_LIMIT_REJECTIONS_TOTAL, "scope" => scope).increment(1);
+/// The `scope` label on [`RATE_LIMIT_REJECTIONS_TOTAL`]: which bound rejected
+/// the request.
+///
+/// **Enum, `ALL` and `label()` are generated from the single list below, so
+/// adding a scope is one line and cannot desynchronise them.** That matters
+/// more than it looks: this taxonomy has already lost a label once
+/// (`lifecycle_per_agent` was emitted by the code and missing from the
+/// documented set), and the two mechanisms that *nearly* prevent it both fail
+/// in the same way.
+///
+/// - A hand-written `match` with no `_` arm makes a *missing* `label()` arm a
+///   compile error, but does nothing about a hand-written `ALL` — and the
+///   documentation test iterates `ALL`, so a variant missing from `ALL` is
+///   invisible to the very test meant to catch it.
+/// - A hand-written `ALL` checked against `label()` catches a variant in
+///   neither, but only if someone remembers to extend `ALL`.
+///
+/// Generating both from one list removes the remembering. Adding a variant to
+/// the macro invocation extends the enum, `ALL` and `label()` together or not
+/// at all.
+macro_rules! rate_limit_scopes {
+    ($($variant:ident => $label:literal),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum RateLimitScope {
+            $($variant),+
+        }
+
+        impl RateLimitScope {
+            /// Every scope this registry can emit. Generated, not maintained.
+            pub const ALL: &'static [RateLimitScope] = &[$(RateLimitScope::$variant),+];
+
+            /// The Prometheus `scope` label value.
+            pub fn label(self) -> &'static str {
+                match self {
+                    $(RateLimitScope::$variant => $label),+
+                }
+            }
+        }
+    };
+}
+
+rate_limit_scopes! {
+    AuthPerIp         => "auth_per_ip",
+    AuthGlobal        => "auth_global",
+    ChallengePerAgent => "challenge_per_agent",
+    ChallengeGlobal   => "challenge_global",
+    PublishPerAgent   => "publish_per_agent",
+    LifecyclePerAgent => "lifecycle_per_agent",
+}
+
+/// A request rejected with 429 by the rate limiter, labelled by scope.
+///
+/// Takes [`RateLimitScope`] rather than `&'static str` deliberately: a label
+/// that is not in the enum cannot be constructed, so a typo or an
+/// undocumented scope is a compile error instead of a silently-wrong series
+/// that nobody notices until an alert fails to fire.
+pub fn record_rate_limit_rejection(scope: RateLimitScope) {
+    metrics::counter!(RATE_LIMIT_REJECTIONS_TOTAL, "scope" => scope.label()).increment(1);
 }

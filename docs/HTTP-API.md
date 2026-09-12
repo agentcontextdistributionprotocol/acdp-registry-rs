@@ -281,7 +281,22 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_log_leaves_total` | counter | — | RFC-ACDP-0012 transparency-log leaves appended. |
 | `acdp_registry_lifecycle_event_total` | counter | `event`, `outcome` | Retract / republish outcomes. |
 | `acdp_registry_witness_cosignatures_total` | counter | `outcome` | Witness cosignatures `aggregated` / `rejected` / `store_error`. |
-| `acdp_registry_rate_limit_rejections_total` | counter | `scope` | 429s by scope (`auth_per_ip`, `auth_global`, `publish_per_agent`, `challenge_per_agent`, `lifecycle_per_agent`). |
+| `acdp_registry_rate_limit_rejections_total` | counter | `scope` | 429s by scope (`auth_per_ip`, `auth_global`, `challenge_per_agent`, `challenge_global`, `publish_per_agent`, `lifecycle_per_agent`). |
+
+> **`scope` changed meaning for global challenge rejections (H-A/P4).** Until
+> this change, a `/auth/challenge` rejection caused by the process-global
+> ceiling was labelled `challenge_per_agent` — the same label as a single noisy
+> agent. It is now `challenge_global`. **If you alert on
+> `challenge_per_agent`, that series will drop** by however much of its volume
+> was actually global-ceiling rejections, and the missing volume reappears
+> under the new label. The two are worth separating precisely because they mean
+> opposite things operationally: `challenge_per_agent` is one agent to throttle,
+> `challenge_global` is a flood rotating `agent_id` to defeat the per-key limit,
+> which is the case the global ceiling exists to catch and the old label hid.
+>
+> The authoritative list is `RateLimitScope::ALL` in
+> `crates/acdp-registry-core/src/metrics.rs`; the table row above is pinned
+> against it by `every_rate_limit_scope_is_documented`.
 
 Adding a handler needs no metrics-middleware change: request metrics are
 automatic (from `MatchedPath`); domain counters are explicit `metrics::counter!`

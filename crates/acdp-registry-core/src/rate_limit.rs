@@ -81,6 +81,78 @@ impl AgentRateLimiter {
         Ok(())
     }
 
+    /// Read-only budget test for `agent_id`. **Never mutates, never inserts.**
+    ///
+    /// This is the half of the old `check` that is safe to run on an
+    /// **unverified** `agent_id`. `check` combined a read and a write, so
+    /// calling it before signature verification let an unauthenticated caller
+    /// (a) spend another agent's budget by naming them, and (b) grow the bucket
+    /// map without bound by naming a fresh id each time -- the map key was
+    /// attacker-controlled. `peek` answers the question the pre-pipeline
+    /// rejection actually needs ("is this agent already over budget?") without
+    /// either effect.
+    ///
+    /// An absent bucket and an expired window both read as count 0. The expired
+    /// case deliberately does NOT roll the window over: rolling is a write, and
+    /// a caller who never earns a charge must leave no trace at all.
+    pub fn peek(&self, agent_id: &str) -> Result<(), u64> {
+        self.peek_at(agent_id, Instant::now())
+    }
+
+    fn peek_at(&self, agent_id: &str, now: Instant) -> Result<(), u64> {
+        let map = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        // No bucket => nothing spent this window.
+        let Some(bucket) = map.get(agent_id) else {
+            return Ok(());
+        };
+        // Expired window => nothing spent, and we do NOT roll it over here.
+        if now.duration_since(bucket.window_start) >= WINDOW {
+            return Ok(());
+        }
+        if bucket.count >= self.limit {
+            let elapsed = now.duration_since(bucket.window_start);
+            // Mirrors `check_at` exactly, including the 1s floor so a client
+            // never sees `Retry-After: 0`.
+            return Err(WINDOW.saturating_sub(elapsed).as_secs().max(1));
+        }
+        Ok(())
+    }
+
+    /// Charge one unit against `agent_id`'s budget. Infallible: this is the
+    /// write half, called only once a publish has actually succeeded and the
+    /// `agent_id` is therefore verified.
+    ///
+    /// **Rolls the window over exactly as `check_at` does.** A "just increment"
+    /// implementation would accumulate across windows and permanently trip the
+    /// bucket -- the count would never reset, so an agent that published
+    /// steadily would eventually be locked out forever. The rollover is not an
+    /// optimisation; it is what makes this a fixed-window limiter rather than a
+    /// lifetime quota.
+    ///
+    /// Pruning lives here rather than in `peek` because this is the only entry
+    /// point that inserts, so it is the only one that can grow the map.
+    pub fn record(&self, agent_id: &str) {
+        self.record_at(agent_id, Instant::now());
+    }
+
+    fn record_at(&self, agent_id: &str, now: Instant) {
+        let mut map = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= PRUNE_AT {
+            map.retain(|_, b| now.duration_since(b.window_start) < WINDOW);
+        }
+        let bucket = map.entry(agent_id.to_string()).or_insert(Bucket {
+            window_start: now,
+            count: 0,
+        });
+        if now.duration_since(bucket.window_start) >= WINDOW {
+            bucket.window_start = now;
+            bucket.count = 0;
+        }
+        // Saturating rather than wrapping: a wrapped count would silently reset
+        // the bucket to 0 and hand the agent a fresh budget.
+        bucket.count = bucket.count.saturating_add(1);
+    }
+
     /// Record one publish attempt by `agent_id`. Returns `Err(retry_after_secs)`
     /// when the agent is over budget for the current window, otherwise `Ok`.
     pub fn check(&self, agent_id: &str) -> Result<(), u64> {
@@ -272,6 +344,142 @@ pub fn canonical_ip(ip: IpAddr) -> IpAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- A1: peek / record ----------------------------------------------
+    //
+    // The security property is that a caller who never earns a charge leaves NO
+    // TRACE. Each test below pins one half of that, and each is falsifiable on
+    // its own -- asserting only "peek doesn't reject" would pass against an
+    // implementation that inserted a bucket, which is the actual defect.
+
+    #[test]
+    fn peek_does_not_create_a_bucket() {
+        let rl = AgentRateLimiter::new(1);
+        let t0 = Instant::now();
+        for i in 0..1000 {
+            assert!(rl.peek_at(&format!("spoofed-{i}"), t0).is_ok());
+        }
+        // THE security assertion. `check` would have left 1000 entries keyed by
+        // attacker-supplied strings; that unbounded, attacker-keyed growth is
+        // the half of A1 that a "does it reject?" test cannot see.
+        assert_eq!(
+            rl.buckets.lock().unwrap().len(),
+            0,
+            "peek must not insert: the map key is attacker-controlled",
+        );
+    }
+
+    #[test]
+    fn peek_does_not_charge() {
+        let rl = AgentRateLimiter::new(1);
+        let t0 = Instant::now();
+        // Peeking is free no matter how often; only `record` spends.
+        for _ in 0..50 {
+            assert!(rl.peek_at("agent-a", t0).is_ok());
+        }
+        // The single unit of budget is still there to be spent.
+        rl.record_at("agent-a", t0);
+        assert!(
+            rl.peek_at("agent-a", t0).is_err(),
+            "one record against a limit of 1 must exhaust the budget",
+        );
+    }
+
+    #[test]
+    fn peek_sees_another_agents_spent_budget() {
+        // Spoofing protection is about WRITES, not reads: peek must still
+        // report a genuinely exhausted budget, or the pre-pipeline rejection
+        // stops working entirely.
+        let rl = AgentRateLimiter::new(1);
+        let t0 = Instant::now();
+        rl.record_at("agent-a", t0);
+        assert!(rl.peek_at("agent-a", t0).is_err());
+        assert!(rl.peek_at("agent-b", t0).is_ok());
+    }
+
+    #[test]
+    fn record_rolls_the_window_over_rather_than_accumulating() {
+        // `record` was described in an early draft as "increment only, never
+        // rejects". That draft predicted such an implementation would
+        // accumulate and lock an agent out PERMANENTLY -- fail closed.
+        //
+        // Against this `peek` it does the opposite, and that is worse. `peek`
+        // reads an expired window as count 0 on its own, so if `record` never
+        // advances `window_start`, every later `peek` sees a window that expired
+        // long ago and returns Ok forever. The limiter silently STOPS LIMITING
+        // after the first window -- fail open.
+        //
+        // The first version of this test asserted only that budget was available
+        // again after the window turned. That is true under both the correct and
+        // the broken implementation, so it caught nothing: the mutation ran green.
+        // The assertions below are the ones that separate them.
+        let rl = AgentRateLimiter::new(2);
+        let t0 = Instant::now();
+        rl.record_at("agent-a", t0);
+        rl.record_at("agent-a", t0);
+        assert!(rl.peek_at("agent-a", t0).is_err(), "budget spent in-window");
+
+        // Spend the FULL budget again inside the NEW window.
+        let later = t0 + WINDOW + Duration::from_secs(1);
+        rl.record_at("agent-a", later);
+        rl.record_at("agent-a", later);
+        assert!(
+            rl.peek_at("agent-a", later).is_err(),
+            "the new window's budget must be enforceable. Under an increment-only \
+             `record`, window_start stays at t0, every peek reads the window as \
+             expired, and the limiter never rejects again",
+        );
+
+        // Directly, so the mechanism is pinned and not merely its symptom.
+        let map = rl.buckets.lock().unwrap();
+        let b = map.get("agent-a").expect("record created it");
+        assert_eq!(
+            b.window_start, later,
+            "record must ADVANCE window_start into the new window",
+        );
+        assert_eq!(
+            b.count, 2,
+            "count must restart from 0 in the new window; an increment-only \
+             record leaves 4 here",
+        );
+    }
+
+    #[test]
+    fn peek_does_not_roll_the_window_over() {
+        // An expired window reads as count 0, but peek must not WRITE that
+        // rollover -- otherwise an unverified caller mutates state again, just
+        // more subtly than by inserting.
+        let rl = AgentRateLimiter::new(1);
+        let t0 = Instant::now();
+        rl.record_at("agent-a", t0);
+        let later = t0 + WINDOW + Duration::from_secs(1);
+        assert!(rl.peek_at("agent-a", later).is_ok());
+        // The stored bucket must be untouched: same window_start, same count.
+        let map = rl.buckets.lock().unwrap();
+        let b = map.get("agent-a").expect("record created it");
+        assert_eq!(b.count, 1, "peek must not reset a stored count");
+        assert_eq!(
+            b.window_start, t0,
+            "peek must not advance a stored window_start",
+        );
+    }
+
+    #[test]
+    fn peek_retry_after_matches_check() {
+        // The 429's `Retry-After` is part of the wire contract and must not
+        // change just because the read moved out of `check`.
+        let a = AgentRateLimiter::new(1);
+        let b = AgentRateLimiter::new(1);
+        let t0 = Instant::now();
+        a.record_at("agent-a", t0);
+        assert!(b.check_at("agent-a", t0).is_ok());
+        let mid = t0 + Duration::from_secs(20);
+        assert_eq!(
+            a.peek_at("agent-a", mid).unwrap_err(),
+            b.check_at("agent-a", mid).unwrap_err(),
+            "peek must compute Retry-After exactly as check does",
+        );
+    }
 
     #[test]
     fn allows_up_to_limit_then_rejects() {
