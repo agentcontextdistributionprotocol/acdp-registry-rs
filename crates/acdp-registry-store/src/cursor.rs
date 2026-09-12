@@ -16,12 +16,40 @@
 //! - `ctx_id` — the tiebreaker for rows sharing an `anchor_ms`. Split with `splitn(3, ':')`
 //!   so a `ctx_id` containing `:` (every `acdp://` URI does) survives intact.
 //!
-//! Cursors are **unsigned plaintext**. They are deliberately not a confidentiality
-//! boundary: everything inside is either a timestamp or an identifier the requester was
-//! already shown. RFC-ACDP-0005 §2.5.4's requirement is that a cursor carry no
-//! *client-decodable visibility information*, which this format satisfies by carrying no
-//! visibility information at all. Visibility is recomputed per page from the current
-//! requester, never remembered in the cursor.
+//! Cursors are **unsigned plaintext**, and deliberately not a confidentiality boundary.
+//! RFC-ACDP-0005 §2.5.4's requirement is that a cursor carry no *client-decodable
+//! visibility information*, which this format satisfies by carrying no visibility
+//! information at all: visibility is recomputed per page from the current requester, never
+//! remembered in the cursor.
+//!
+//! # What the anchor can name, and what it cannot
+//!
+//! This module used to claim outright that everything inside a cursor is "either a
+//! timestamp or an identifier the requester was already shown". **That is not true in
+//! general, and the exception is the whole reason this section exists.** The anchor is the
+//! last row the SQL scan *touched*, not the last row the caller was *served* — a
+//! distinction `acdp::pagination` makes on purpose, so that a page whose rows are all
+//! removed by a post-SQL filter cannot halt pagination early. So whether the claim holds
+//! depends entirely on whether the filter that matters ran **in the scan** or **after it**:
+//!
+//! - **§4.5 disclosure (visibility): in SQL, on both backends.** The scan never touches a
+//!   restricted or private row the requester may not see, so the anchor cannot name one.
+//!   The original claim holds for this dimension.
+//! - **Tenancy: in SQL only for callers of
+//!   [`ExtendedRegistryStore::search_in_tenant`](crate::ExtendedRegistryStore::search_in_tenant).**
+//!   For those callers the anchor is necessarily one of the caller's own rows. For callers
+//!   of the protocol-level `RegistryStore::search` — which carries no tenancy, and which
+//!   the HTTP search handler still uses today — a tenant filter applied to the *result set*
+//!   leaves the anchor free to name a foreign tenant's row, disclosing its
+//!   `(created_at, ctx_id)`. That is an ordering and existence oracle, walkable one page at
+//!   a time, and it is tracked as SECURITY follow-up #14.
+//!
+//! The honest summary: a cursor discloses nothing beyond what the *scan that produced it*
+//! was allowed to see. Narrowing a result set after the scan does not narrow the cursor,
+//! so any future filter that must not leak positions belongs in the query, not in Rust.
+//!
+//! Found by lane-1 while working on a neighbouring unit, and flagged rather than quietly
+//! reworded here.
 //!
 //! # Expiry
 //!

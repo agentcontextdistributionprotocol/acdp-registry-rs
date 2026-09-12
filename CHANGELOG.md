@@ -8,6 +8,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Security (cross-tenant disclosure narrowing): a tenant-scoped search could hand back a
+  pagination cursor anchored on another tenant's row.** The store layer's `search` carried no
+  tenant predicate in either backend, so tenancy was applied in Rust to the *result set*. The
+  foreign rows were removed from the page — no context data was ever served — but
+  `acdp::pagination` anchors `next_cursor` on the last row the **scan touched**, not the last
+  row served, deliberately, so that a page emptied by post-SQL filters cannot halt pagination
+  early. The surviving cursor therefore encoded a foreign row's `(created_at, ctx_id)`: an
+  ordering and existence oracle over rows the caller must not know exist, walkable one page at
+  a time rather than a single-shot leak.
+
+  `ExtendedRegistryStore::search_in_tenant` is new and puts `tenant_id = ?` in the `WHERE`
+  clause on both SQLite and Postgres, which fixes the anchor **by construction** — every row
+  the scan touches already belongs to the caller — and makes `total_estimate` tenant-correct on
+  the same scan, with no extra query (measured: 100 of 2000 rows on SQLite, 2 of 506 on
+  Postgres). Both backends run it through a single shared query builder rather than a second
+  copy of the ~260-line filter chain, and a cross-backend assertion in
+  `acdp_registry_store::parity` decodes the returned cursor and asserts the anchored row's
+  tenant, so a future divergence fails both backends' suites.
+
+  **Scope, stated plainly: this is not yet reachable, and the underlying leak is not yet
+  closed.** No caller invokes `search_in_tenant` — the HTTP search handler still uses the
+  protocol-level `RegistryStore::search` plus a post-query filter, so the cursor oracle remains
+  live on the deployed path until the handler is wired (a separate change, in a crate this one
+  deliberately does not touch). What ships here is the storage-layer half plus the guard that
+  proves it: a **partial** fix, named as such. `cursor.rs`'s module docs previously claimed a
+  cursor holds only "an identifier the requester was already shown"; that claim was false under
+  tenant narrowing and is now replaced with a per-dimension account of what the anchor can
+  name. Thanks to lane-1 for finding that while working on a neighbouring unit and flagging it
+  rather than silently rewording it.
+
+  No migration: the tenant predicate is already index-assisted in both backends
+  (`idx_ctx_tenant` on a selective tenant; Postgres correctly prefers `idx_ctx_created` when the
+  tenant is not selective), so a new index would be write cost for no measured gain.
 - **Cache posture: `/metrics` and the `did.json` 404 arm were uncacheable in principle and
   unlabelled in practice; `/healthz` was doing two jobs under one name.** Three fixes.
 
@@ -72,7 +105,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so the envelope would have to say `internal_error` — worse than silence, because it
   misattributes a client-side timeout to a server fault. Minting a `request_timeout` code
   is a change to the shared §5 registry and is tracked separately.
-||||||| 26860a5
 
 - **SQLite swallowed a corrupt `contributors` column and skipped an admission check while
   reporting success.** The predecessor's `contributors` was decoded with
@@ -327,7 +359,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   declares the dependency `default-features = false`. A stale comment in `ci.yml`
   claiming otherwise has been corrected. The incidental coverage depends on that step
   keeping its `-p` form, since `--workspace` unifies features.
-||||||| 26860a5
 
 - **Security (availability): `GET /contexts/search?limit=` could abort the registry
   process from an unauthenticated request.** The handler sized its accumulator with

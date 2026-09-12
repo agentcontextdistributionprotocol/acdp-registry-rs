@@ -35,7 +35,7 @@ use acdp::types::primitives::{AgentDid, ContextType, CtxId, Status, Visibility};
 use acdp::types::search::SearchParams;
 use chrono::{DateTime, TimeZone, Utc};
 
-use crate::ExtendedRegistryStore;
+use crate::{decode_cursor, ExtendedRegistryStore};
 
 const AUTHORITY: &str = "reg.test";
 
@@ -452,5 +452,218 @@ pub async fn assert_desynced_retraction_is_not_served_active<S>(
          exactly what a torn read between the row query and the event query \
          produces, and the served pair must still be self-consistent.",
         ctx.registry_state.status
+    );
+}
+
+/// Publish one context into `tenant`, returning its `ctx_id`.
+///
+/// Unlike [`publish_with_period`] this carries a `tenant`, which is what makes
+/// the tenant-scoping assertion below possible at all. `created_at` is not
+/// settable through the publish builder — it is stamped from the body — so
+/// ordering between rows is publish order at millisecond resolution. The
+/// caller is responsible for any gap it needs between groups.
+async fn publish_in_tenant<S>(store: &Arc<S>, seed: u8, title: &str, tenant: &str) -> String
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let p = producer(seed);
+    let req = p
+        .publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid publish request");
+    let s = Arc::clone(store);
+    let tenant = tenant.to_string();
+    let outcome = tokio::task::spawn_blocking(move || {
+        s.commit_publish(PublishCommit {
+            req: &req,
+            authority: AUTHORITY,
+            idempotency: None,
+            tenant: Some(&tenant),
+            receipt_minter: None,
+            predecessor_admission: None,
+        })
+    })
+    .await
+    .expect("publish task")
+    .expect("publish succeeds");
+    match outcome {
+        PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => {
+            r.ctx_id.as_str().to_string()
+        }
+    }
+}
+
+/// **H-H — a tenant-scoped search must not disclose a foreign tenant's rows,
+/// including through its cursor.**
+///
+/// # What this is actually testing
+///
+/// Not "are foreign rows filtered out" — they always were, by the handler's
+/// post-query `retain`. The defect this pins is subtler and survived that
+/// filter: `acdp::pagination` anchors `next_cursor` on the **last raw scanned
+/// row**, deliberately, so that a page whose rows are all dropped by post-SQL
+/// filters does not halt pagination early. Filter by tenant *after* the scan
+/// and the anchor can name another tenant's row — handing the caller its
+/// `(created_at, ctx_id)` in a token. That is an ordering and existence oracle
+/// over rows the caller must not know exist, walkable one page at a time.
+///
+/// # Why the fixture is shaped like this
+///
+/// Both groups are published by the **same producer**, so an `agent_id` filter
+/// scopes the search to this scenario without also separating the tenants —
+/// leaving `tenant` as the only thing that can distinguish them. A different
+/// producer per tenant would have made the test pass for the wrong reason.
+///
+/// Tenant B is published **last**, so its rows carry the greater `created_at`
+/// and sort first under `ORDER BY created_at DESC`. With `limit` below the
+/// group size, a post-filtering implementation therefore scans B's rows first
+/// and anchors on one of them. That ordering is the whole reason the fixture
+/// can observe the defect, and it is verified by falsification rather than
+/// assumed: with the predicate removed, this assertion must fail naming a
+/// tenant-B `ctx_id`.
+pub async fn assert_tenant_scoped_search_parity<S>(store: &Arc<S>, backend: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    const SEED: u8 = 241;
+    const GROUP: usize = 3;
+    const LIMIT: u32 = 2;
+
+    // Tenant names are UNIQUE PER RUN, and that is load-bearing rather than
+    // tidiness. This assertion checks an exact `total_estimate`, so it is
+    // sensitive to rows left behind by earlier runs — and Postgres is a
+    // PERSISTENT fixture, unlike SQLite's fresh tempfile. With fixed names the
+    // second run against the same database saw 6 rows in `tenant-a`, the third
+    // 9, and the assertion failed for a reason that had nothing to do with the
+    // defect under test. The sibling assertions in this module dodge that by
+    // testing membership rather than counts; this one cannot, so it isolates by
+    // namespace instead.
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let tenant_a = format!("tenant-a-{run}");
+    let tenant_b = format!("tenant-b-{run}");
+    let (tenant_a, tenant_b) = (tenant_a.as_str(), tenant_b.as_str());
+
+    let mut a_ids = Vec::new();
+    for i in 0..GROUP {
+        a_ids.push(publish_in_tenant(store, SEED, &format!("tenant a row {i}"), tenant_a).await);
+    }
+    // Strictly separate the two groups in `created_at` (millisecond
+    // resolution), so tenant B reliably sorts first. See the doc above.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let mut b_ids = Vec::new();
+    for i in 0..GROUP {
+        b_ids.push(publish_in_tenant(store, SEED, &format!("tenant b row {i}"), tenant_b).await);
+    }
+
+    let params = SearchParams {
+        agent_id: Some(agent_did(SEED)),
+        limit: Some(LIMIT),
+        ..Default::default()
+    };
+    let resp = store
+        .search_in_tenant(&params, None, true, Some(tenant_a))
+        .await
+        .unwrap_or_else(|e| panic!("[{backend}] search_in_tenant must not error: {e:?}"));
+
+    // Every guarantee below is EVALUATED on every run, and violations are
+    // collected rather than asserted one at a time. `assert!` aborts the test at
+    // the first failure, so four guarantees behind four asserts means one verdict
+    // for four promises and three that may never have executed (CHARTER rule 51).
+    // Accumulating them means a single mutation reports exactly which guarantees
+    // it broke — which is both a stronger proof that each is live and a far more
+    // useful failure message.
+    let mut violations: Vec<String> = Vec::new();
+
+    // (a) No foreign row may appear in the page itself.
+    let leaked: Vec<&str> = resp
+        .matches
+        .iter()
+        .map(|m| m.ctx_id.as_str())
+        .filter(|id| b_ids.iter().any(|b| b == id))
+        .collect();
+    if !leaked.is_empty() {
+        violations.push(format!(
+            "(a) page content: a search scoped to {tenant_a} returned {tenant_b}'s rows {leaked:?}"
+        ));
+    }
+
+    // (b) The cursor anchor — the actual defect. Check the anchored row's
+    // IDENTITY, not merely that a cursor came back: a cursor anchored on a
+    // foreign row is indistinguishable from a correct one until you decode it.
+    match resp.next_cursor.as_deref() {
+        None => violations.push(format!(
+            "(b) cursor absent: {GROUP} rows exist in {tenant_a} and the limit is {LIMIT}, so the \
+             page must be resumable. With no cursor this guarantee cannot be observed at all, \
+             which is a failure of the fixture as much as of the code."
+        )),
+        Some(cursor) => match decode_cursor(cursor) {
+            Err(e) => violations.push(format!("(b) next_cursor did not decode: {e:?}")),
+            Ok(None) => violations.push("(b) next_cursor decoded to None".to_string()),
+            Ok(Some((_, anchor_id))) => {
+                if b_ids.contains(&anchor_id) {
+                    violations.push(format!(
+                        "(b) CURSOR ANCHOR: next_cursor is anchored on {tenant_b}'s row \
+                         {anchor_id} — a caller scoped to {tenant_a} must never receive a token \
+                         encoding another tenant's (created_at, ctx_id). This is SECURITY \
+                         follow-up #14: the row itself was filtered out, but its position leaked."
+                    ));
+                } else if !a_ids.contains(&anchor_id) {
+                    violations.push(format!(
+                        "(b) anchor {anchor_id} belongs to neither tenant in this fixture — it \
+                         must be one of the caller's own rows"
+                    ));
+                }
+            }
+        },
+    }
+
+    // (c) total_estimate must be the TENANT-scoped count, not the global one.
+    // `COUNT(*) OVER ()` rides the same scan, so this is the observable proof
+    // that the predicate is in the WHERE clause rather than applied afterwards.
+    if resp.total_estimate != Some(GROUP as u64) {
+        violations.push(format!(
+            "(c) total_estimate is {:?}, must be Some({GROUP}) — only {tenant_a}'s rows. Counting \
+             ANY row outside that tenant is a cross-tenant count oracle (the A2 finding), and it \
+             is exactly what a post-query filter produces, because the count was computed before \
+             the filter ran. Note the observed number can exceed this fixture's own row count: on \
+             a persistent backend the agent_id filter also matches earlier runs' rows, which is \
+             itself a demonstration that the oracle grows with the table.",
+            resp.total_estimate
+        ));
+    }
+
+    // (d) The mirror. Without it, (a)-(c) would also pass an implementation that
+    // ignored `tenant` entirely and happened to be scanning only A's rows.
+    let empty = store
+        .search_in_tenant(&params, None, true, Some("tenant-with-no-rows-at-all"))
+        .await
+        .unwrap_or_else(|e| panic!("[{backend}] search_in_tenant must not error: {e:?}"));
+    if !empty.matches.is_empty() {
+        violations.push(format!(
+            "(d) a tenant with no rows matched {} contexts",
+            empty.matches.len()
+        ));
+    }
+    if empty.total_estimate != Some(0) {
+        violations.push(format!(
+            "(d) a tenant with no rows reported total_estimate {:?}, must be Some(0)",
+            empty.total_estimate
+        ));
+    }
+    if empty.next_cursor.is_some() {
+        violations.push("(d) a tenant with no rows must not receive a cursor".to_string());
+    }
+
+    assert!(
+        violations.is_empty(),
+        "[{backend}] {} tenant-scoping guarantee(s) violated:\n  - {}",
+        violations.len(),
+        violations.join("\n  - ")
     );
 }
