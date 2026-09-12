@@ -1748,6 +1748,125 @@ judgement rather than fact is escalated rather than settled.
       behaviour is unchanged. No documentation was falsified — `docs/` describes no `q=`
       behaviour and makes no backend-equivalence claim (checked).
 
+## 13. Version strings in docs: placeholder vs literal, decided per site (H-D / D3)
+
+**Context.** `docs/HTTP-API.md`'s build-identity table and prose pinned the package version at
+`0.1.0`, stale since `0.1.2`. The first fix replaced the stale literals with current ones. That
+was wrong in a way worth recording: the divergence list this unit is working through is made
+almost entirely of literals that were correct when written. Replacing a stale literal with a
+fresh one schedules the same defect for the next release.
+
+**Decision.** Prefer *shape* over *literal* for fact claims and example payloads; keep literals
+where the literal IS the content. Judge per site, never per file.
+
+Applied:
+
+| site | kind | outcome |
+|---|---|---|
+| `HTTP-API.md` build table, both rows | illustrative | `<version>` placeholder, **both cells** |
+| `HTTP-API.md` "currently a placeholder 0.1.0…" | **fact claim**, false at 0.1.2 | rewritten to name no version at all |
+| `HTTP-API.md` `/admin/status` example | illustrative | version placeholdered; **`+g83de685c2f26` and `"commit"` left byte-identical** |
+| `README.md` `/healthz` example | illustrative | `<version>` |
+| `HTTP-API.md` "absent `acdp_version` is treated as `0.1.0`" | **protocol floor** | **UNTOUCHED** |
+| `README.md` "v0.1.0 through v0.5.0" | **protocol range** | **UNTOUCHED** |
+
+**Why not literals in the table.** Its job is to show that two builds of one release share a
+version and are told apart only by `+g<shortsha>`. With `0.1.0` in both cells the reader must
+*notice* the two numbers are equal; with `<version>` in both cells they are equal by
+construction. That only holds if the doc says so, so it now asserts it in bold directly beneath
+the table.
+
+**Revert invariant.** If a future reader wants real numbers back, the property to preserve is
+that *both cells show the same value*. A partial revert — one row literal, one row placeholder —
+is worse than either consistent state, because it silently destroys the contrast the table
+exists to teach.
+
+**The decoys are the finding.** Five `0.1.0` hits in `HTTP-API.md`; only three were targets. The
+protocol-version floor at "absent `acdp_version` is treated as `0.1.0`" is a deliberate rejection
+threshold for old payloads — a mechanical sweep would have bumped it and shipped a **wire-behaviour
+change disguised as a docs cleanup**. Re-verifying each site individually is what this unit's
+method buys, and this is the case that pays for it.
+
+## 14. ARCHITECTURE's dependency diagram: replaced with a verifiable edge list (H-D / D3)
+
+**Context.** The hand-drawn box diagram asserted two dependency edges that do not exist:
+`-store → -auth` and `-sqlite → -webhook`. Both crates depend on `acdp-registry-types` alone.
+Confirmed by `cargo metadata --no-deps` and by the absence of those entries in each
+`Cargo.toml`. The prose crate-map table further down was correct throughout, so the two
+representations had been contradicting each other.
+
+**Decision.** Replace the drawing with a textual edge list, plus the one-line `cargo metadata`
+command that regenerates it — and run that command to confirm it reproduces the documented
+edges verbatim before shipping.
+
+**Reasoning.** The diagram was wrong *because* it was a drawing: nothing could check it, so it
+drifted silently while the table beside it stayed right. A representation that a single command
+can verify is the only form that does not rot, and it is the same pattern used elsewhere in this
+unit (a CI step that boots the shipped example; mutations that must redden a named test).
+Prettiness is not worth an unverifiable claim about how the workspace is wired.
+
+**Rejected:** redrawing the boxes correctly. It would have been correct on the day and
+unverifiable forever after — the exact property that produced the defect.
+
+## 15. The root `CHANGELOG.md`: retired to a pointer, not split by version (H-D / D4, #220)
+
+**Context.** 3,596 lines, one `## ` heading — `## [Unreleased]` — while `0.1.0`, `0.1.1` and
+`0.1.2` have all shipped. The file therefore asserted that nothing in it had been released,
+which was false for roughly 90% of its content. Its own header also claims the file "follows
+Keep a Changelog"; a single perpetual Unreleased section does not.
+
+**What the evidence actually showed.** Attribution is derivable, not a matter of opinion:
+`git blame` each line, then bucket its commit by the earliest release tag containing it.
+
+```sh
+git blame --line-porcelain -- CHANGELOG.md | awk '/^[0-9a-f]{40} /{print $1}'
+# then, per commit: git merge-base --is-ancestor <commit> acdp-registry-server/v0.1.<n>
+```
+
+That yields 2,938 lines from `0.1.0`, 324 from `0.1.1`, 334 unreleased, and **zero** from
+`0.1.2` — consistent with the file being 2,939 lines at the `v0.1.0` tag and 3,264 at both the
+`v0.1.1` and `v0.1.2` tags.
+
+**Decision.** Retire the root file to a pointer at the authoritative records, and move the
+narrative to `docs/ENGINEERING-LOG.md` unchanged. Do **not** split it into version sections.
+
+**Reasoning — why splitting was rejected, and it is not the effort.** The `0.1.1` content is not
+appended, it is *interleaved*: seven separate runs inside the `0.1.0` body, because entries were
+inserted under pre-existing `### Category` headings rather than prepended wholesale. Two of those
+runs make a version split ill-defined rather than merely laborious:
+
+- Lines 2974–2979 are a `0.1.1` amendment written **inside a `0.1.0` paragraph**. There is no
+  assignment of those six lines to exactly one version section that leaves the paragraph intact.
+  The acceptance constraint for a split — every non-blank line lands in exactly one section — is
+  unsatisfiable there without rewriting prose that documents already-released behaviour, i.e.
+  editing the historical record to fit the format.
+- Line 3552 opens `<!-- W3-U5 (lane-1) — correcting the U-005 entry above -->`. The file contains
+  deliberate cross-version corrections. Splitting by version tears each correction away from what
+  it corrects, making the record *less* accurate, not more.
+
+**Reasoning — why a pointer is sufficient.** Release truth already has an authoritative home and
+it is in good order: `release-plz` owns the eight per-crate `CHANGELOG.md` files
+(`[workspace] changelog_update = true`), each of which carries correctly dated and linked
+`0.1.0`/`0.1.1`/`0.1.2` sections, and the GitHub Releases mirror them. Verified: all eight have a
+current `## [0.1.2]` section. The root file was duplicating that job badly and was the only
+artefact stating the falsehood. Removing the duplicate removes the contradiction.
+
+**Rule 48.** Neither the pointer nor the narrative restates a fact by hand. The per-release
+attribution is not written down at all — the command that derives it is, because a number written
+into prose here would be stale at the next release, which is precisely the defect being fixed.
+`root_changelog_stays_a_pointer` enforces the outcome: the root file must not reacquire a version
+heading, must keep pointing at both authoritative sources, and every crate must still carry a
+section for the current workspace version.
+
+**Convention change, and it affects other lanes.** New entries go to `docs/ENGINEERING-LOG.md`,
+not to `CHANGELOG.md`. Relayed to the leader as an `fyi` so it reaches lane-1 and lane-2 at their
+next phase boundary rather than as a merge conflict.
+
+**Rejected:** leaving the narrative in place under a disclaimer. The file would still be named
+`CHANGELOG.md`, still be read as the changelog by anyone arriving at the repo root, and still
+fail the format its own header claims. A disclaimer that contradicts the filename is the same
+class of defect as the diagram in decision 14 — correct text that the surrounding artefact
+undermines.
 ## H-H — tenant-aware search at the SQL layer (unit H-H, lane-2, reconciled 2026-09-12)
 
 Seven entries tagged `plans/h-h-tenant-aware-search.md`, reconciled **before** the PR rather

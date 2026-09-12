@@ -582,7 +582,8 @@ async fn metrics_bearer_gate_enforced() {
 /// NARROWER than the `auth.admin_tokens` guard, on the stated grounds that
 /// this path trims BOTH the configured value and the presented one, so a
 /// padded token is not protocol-dependent here. That rationale is asserted in
-/// four places (`main.rs`, `CHANGELOG.md`, `docs/CONFIGURATION.md`,
+/// four places (`main.rs`, `docs/ENGINEERING-LOG.md` — the root `CHANGELOG.md`
+/// until #220 —, `docs/CONFIGURATION.md`,
 /// `docs/AUTHENTICATION.md`). If the trim is ever dropped, this test is what
 /// fails instead of every padded-token deployment 401-ing its scrapes.
 #[tokio::test]
