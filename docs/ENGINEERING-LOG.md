@@ -31,6 +31,47 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-O (lane-2) — the caps/config split, and a premise that was mostly
+     already satisfied. Three of the assign's claims were refuted by measurement. -->
+
+### Changed
+
+- **The test harness gained one call that cannot set half of the `anonymous_public_reads`
+  invariant.** `RegistryServer` gates that flag off the `CapabilitiesDocument` baked in at
+  `try_new`, not off `RegistryConfig`, so a test that flips the config value and observes a
+  200 has measured the harness's caps/config split and nothing about the binary — the invalid
+  "wire probe" that let a shipping anonymous-disclosure bug reach review (#255). The config
+  value is not dead either: it is what the binary's `build_capabilities` derives the caps value
+  *from*, so a test that sets only caps is asserting against a state no deployment can reach.
+  `common::with_anonymous_public_reads` takes one input and returns both, so divergence is
+  unrepresentable through it.
+
+  **Three of the four premises behind this unit were refuted by measurement, and the refutation
+  is most of the result.** `tests/common/mod.rs` already parameterised caps completely — every
+  constructor takes it, and there is no `anonymous_public_reads` literal in that file's code at
+  all. `conformance.rs` already overrode caps in three independent paths, not zero: the Shape D
+  driver, `vis009_anonymous_public_reads_gates_anonymous_not_authenticated`, and
+  `seeded_harness_rebuild_changes_router_behavior_and_preserves_seeded_state`, which sets caps
+  false and asserts the same anonymous search is now refused. And a `caps=false` visibility test
+  already existed and had already been falsified, in #255. So only the fourth premise — that
+  nothing makes the two-knob divergence loud — survived, and that is all this ships.
+
+  **Enforcement was deliberately not shipped.** A `debug_assert` in the shared wiring would have
+  reddened `admin_list_returns_rows_under_the_shipped_disclosure_default` in a file another lane
+  holds, so the invariant is constructive here and the divergent site is reported instead.
+
+### Fixed
+
+- **Recorded, not fixed — a third instance of the "probe that cannot fail" class, in this same
+  area.** `admin_list_returns_rows_under_the_shipped_disclosure_default` is framed as testing
+  "the SHIPPED DEFAULT `anonymous_public_reads = false`", and `admin_list` reads that flag from
+  **neither** config nor caps: `handlers/admin.rs` hardcodes `let admin_sees_public_arm = true;`.
+  The test varies a value its code path never consults, so it cannot fail for the reason it was
+  written. Its actual assertion — an admin bearer still sees public rows — remains meaningful;
+  only the framing overstates what is exercised. Both files are outside this lane's grant, so
+  this is reported rather than edited.
+
+
 <!-- unit H-A, phase P9 (lane-1) — /log/entries answers a page with one visibility query -->
 
 ### Fixed
