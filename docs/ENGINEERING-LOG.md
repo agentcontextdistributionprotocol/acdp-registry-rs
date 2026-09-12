@@ -31,6 +31,34 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-N (lane-2) — H-G's JWT-issuer item. The claim was TRUE and true in its
+     specifics: deleting the issuer check left the whole workspace green. -->
+
+### Fixed
+
+- **The JWT issuer was validated and never asserted**, and the gap was measured rather than
+  argued: commenting out `v.set_issuer(&[&self.issuer])` in `jwt.rs::validate` left
+  **all 619 workspace tests passing**. Nothing in this repo could distinguish a working issuer
+  check from an absent one, so the guard against a federated token from a trusted-but-wrong
+  issuer rested on a line no test was watching.
+
+  `rejects_token_from_a_different_issuer` now closes that. The audience sibling
+  (`rejects_token_for_a_different_audience`) already existed; this is the missing half.
+
+  **The fixture is built so it can actually reach the issuer check** — the failure mode for a
+  JWT test is that signature, expiry or audience validation short-circuits first and the test
+  passes having proved nothing. Every other property of the token is deliberately correct:
+  signed by the same signer, unexpired, matching `aud`, matching `acdp.registry`. And the
+  assertion **names `InvalidIssuer`** rather than accepting any error, because "rejected" and
+  "rejected for the reason under test" are different claims.
+
+  Three mutations, each RED at a **different** assertion, which is what makes them three guards
+  rather than one: deleting the check and *adding the attacker's issuer to the trusted list*
+  both redden the primary assertion; setting the trusted issuer to a value nothing matches
+  reddens the **control** — proving the control is a live guard and not decoration. The widened
+  trust list is the realistic defect and it is now caught.
+
+
 <!-- unit H-A, phase P7 follow-up (lane-1) — the 415 ruling applied -->
 
 ### Fixed

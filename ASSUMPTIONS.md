@@ -2094,3 +2094,27 @@ bump.
 - **Blast radius if wrong:** additive headers are ignorable; withdrawal would only affect receivers
   that had adopted them, which is why the adoption contract is documented rather than implied.
 - **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-E #2.
+
+## The issuer guard asserts on `jsonwebtoken`'s Display string, not on an error kind
+
+- **Plan:** plans/h-n-jwt-issuer-assertion.md
+- **Assumed.** `rejects_token_from_a_different_issuer` proves WHICH guard rejected the token by
+  asserting `err.to_string().contains("InvalidIssuer")`. That string comes from
+  `jsonwebtoken::errors::ErrorKind::InvalidIssuer`'s `Display`, reached through
+  `AuthError::TokenInvalid(e.to_string())` — so the assertion depends on a dependency's error
+  *rendering*, which is not a stability contract.
+- **Chose** the string anyway, because the alternative is worse here. `validate` deliberately
+  flattens every decode failure into `AuthError::TokenInvalid(String)`, so by the time the error
+  reaches a caller the kind is already gone. Recovering it would mean widening `AuthError` to carry
+  a `jsonwebtoken` kind — leaking a dependency's type into this crate's public error enum, for the
+  benefit of one test.
+- **Alternatives rejected.** (a) Assert only `is_err()` — that is the defect this test exists to
+  avoid: it passes when an earlier guard short-circuits, and M3 below shows a signer that rejects
+  *everything* would satisfy it. (b) Add a typed `AuthError::IssuerMismatch` and check the issuer by
+  hand before `decode` — a second issuer check next to the library's, which is the duplicate-source
+  problem, and it would not even be exercised by the library's own path.
+- **Blast radius if wrong:** a `jsonwebtoken` upgrade that renames the Display text turns this test
+  RED with a message naming exactly what happened ("expected the ISSUER guard to reject this token,
+  but it was refused by something else ... Got: <new text>"). It fails loudly and locally, and the
+  fix is one string. That is the acceptable direction for this coupling to break.
+- **Status:** UNCONFIRMED

@@ -440,6 +440,56 @@ mod tests {
         assert!(s.validate(&token_ok).is_ok());
     }
 
+    /// **H-N — the issuer check was configured and never asserted.**
+    ///
+    /// `validate` sets `v.set_issuer(&[&self.issuer])`. Deleting that line left
+    /// **all 619 workspace tests green**, so nothing in this repo could tell a
+    /// working issuer check from an absent one. This is the guard that makes
+    /// that mutation visible.
+    ///
+    /// **Rule 76 — the fixture has to REACH the issuer check.** Every other
+    /// property of this token is deliberately correct: it is signed by this
+    /// signer with this algorithm, it is unexpired, its `aud` matches, and its
+    /// `acdp.registry` matches the post-decode check. So the signature,
+    /// expiry, audience and registry guards cannot reject it first, and the
+    /// only guard left that can is the issuer one. A JWT fixture is exactly the
+    /// shape where an earlier guard short-circuits and the test passes while
+    /// proving nothing — so the assertion **names `InvalidIssuer`** rather than
+    /// accepting any error, because "rejected" and "rejected for the reason
+    /// under test" are different claims.
+    #[test]
+    fn rejects_token_from_a_different_issuer() {
+        let s = JwtSigner::new(
+            JwtSecret::from_bytes(&[7u8; 32]),
+            "did:web:registry.test".into(),
+            "registry.test".into(),
+            30,
+        );
+        let mut wrong = sample_claims();
+        wrong.iss = "did:web:evil.registry".into();
+        // Signed by THIS signer, so the signature is valid and the rejection
+        // cannot come from the key.
+        let token = s.sign(&wrong).expect("sign");
+        let err = s
+            .validate(&token)
+            .expect_err("a token from a different issuer must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("InvalidIssuer"),
+            "expected the ISSUER guard to reject this token, but it was refused by \
+             something else -- a test that cannot see the issuer check is not a guard \
+             for it. Got: {msg}"
+        );
+
+        // Control: identical token, correct issuer, validates. Without this the
+        // test above would also pass against a signer that rejects everything.
+        let token_ok = s.sign(&sample_claims()).expect("sign");
+        assert!(
+            s.validate(&token_ok).is_ok(),
+            "control: the matching issuer must still validate"
+        );
+    }
+
     #[test]
     fn eddsa_sign_then_validate_roundtrip() {
         let pem = fresh_ed25519_pkcs8_pem();
