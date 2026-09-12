@@ -34,6 +34,31 @@ pub struct PgStore {
 /// without the log never take it.
 const LOG_APPEND_LOCK_KEY: i64 = 0x00AC_D900_0012;
 
+/// RFC-ACDP-0008 §4.5 **retrieval**-style disclosure, Postgres form. `$1` is the
+/// requester DID (SQL NULL when anonymous); `$2` is `anonymous_public_reads`.
+/// Postgres resolves the repeated `$1` to one bound value, so a caller binds
+/// exactly two values for this clause and may number its own parameters from
+/// `$3`.
+///
+/// The non-public arm covers `restricted` **and** `private` together, so a named
+/// audience member may retrieve a private context. That is deliberate and it is
+/// what separates this predicate from the search/discovery one, where `private`
+/// requires ownership and the audience is excluded (conformance `vis-004`, the
+/// "private/audience retrieval asymmetry"). The two are not interchangeable;
+/// substituting the search predicate here would under-disclose.
+///
+/// Carries no status or `retracted` clause, deliberately: `retrieve` returns a
+/// retracted context, so filtering on status here would hide rows the caller is
+/// entitled to.
+///
+/// Extracted from `list_contexts` so `visible_ctx_ids` can share the one
+/// expression rather than restating it — SQLite has kept its equivalent as a
+/// named constant for the same reason.
+const LIST_VISIBILITY_PG: &str =
+    " AND ((visibility = 'public' AND ($1::text IS NOT NULL OR $2::bool)) \
+     OR ($1::text IS NOT NULL AND (agent_id = $1::text \
+     OR (body_json -> 'audience') @> to_jsonb($1::text))))";
+
 impl PgStore {
     pub async fn connect(url: &str, max_connections: u32) -> Result<Self, AcdpError> {
         let pool = PgPoolOptions::new()
@@ -154,6 +179,50 @@ impl ExtendedRegistryStore for PgStore {
         Ok(rows.into_iter().collect())
     }
 
+    /// One query for a whole page's worth of retrieval-visibility checks,
+    /// replacing N blocking `retrieve` round-trips.
+    ///
+    /// Shares `LIST_VISIBILITY_PG` with `list_contexts` — the retrieve-shaped
+    /// predicate, whose non-public arm covers `restricted` AND `private`, so an
+    /// audience member may retrieve a private context (§4.5, conformance
+    /// `vis-004`). Answering this with a search predicate would under-disclose.
+    ///
+    /// Unlike SQLite this needs no chunking: `= ANY($3)` binds the whole id list
+    /// as one array parameter, so there is no host-parameter ceiling to respect.
+    /// The asymmetry is worth naming rather than hiding — the two backends are
+    /// interchangeable in behaviour, not in how they express a set membership.
+    async fn visible_ctx_ids(
+        &self,
+        ctx_ids: &[&str],
+        requester: Option<&AgentDid>,
+        tenant: Option<&str>,
+        anonymous_public_reads: bool,
+    ) -> Result<std::collections::HashSet<String>, AcdpError> {
+        if ctx_ids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let requester_s: Option<String> = requester.map(|r| r.as_str().to_string());
+        let owned: Vec<String> = ctx_ids.iter().map(|s| (*s).to_string()).collect();
+        let mut sql = String::from("SELECT ctx_id FROM contexts WHERE ctx_id = ANY($3)");
+        sql.push_str(LIST_VISIBILITY_PG);
+        if tenant.is_some() {
+            sql.push_str(" AND tenant_id = $4");
+        }
+        let mut q = sqlx::query_as::<_, (String,)>(&sql);
+        q = q
+            .bind(requester_s) // $1
+            .bind(anonymous_public_reads) // $2
+            .bind(&owned); // $3
+        if let Some(t) = tenant {
+            q = q.bind(t); // $4
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| AcdpError::RegistryInternal(format!("visible_ctx_ids: {e}")))?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
     async fn list_contexts(
         &self,
         limit: u32,
@@ -183,11 +252,7 @@ impl ExtendedRegistryStore for PgStore {
         // `Public => anonymous_public_reads || requester.is_some()` — this
         // restores a term that was dropped when this predicate was written;
         // `retrieve` and `search` both honor it already.
-        q.push_str(
-            " AND ((visibility = 'public' AND ($1::text IS NOT NULL OR $2::bool)) \
-             OR ($1::text IS NOT NULL AND (agent_id = $1::text \
-             OR (body_json -> 'audience') @> to_jsonb($1::text))))",
-        );
+        q.push_str(LIST_VISIBILITY_PG);
         let mut next_pos = 3usize;
         // Plan §7: SQL-level tenant filter — see sqlite/list_contexts
         // and store/lib.rs for rationale. The composite

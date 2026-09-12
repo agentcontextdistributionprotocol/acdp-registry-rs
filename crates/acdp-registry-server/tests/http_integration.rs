@@ -8112,3 +8112,307 @@ async fn an_idempotent_replay_is_charged_like_any_other_successful_publish() {
         "the replay must have consumed the second unit of budget",
     );
 }
+
+/// A3: an extractor rejection answers the RFC-ACDP-0007 §5 envelope **at its
+/// own status**, and stops leaking axum/serde internals.
+///
+/// Before this, all four cases answered `Content-Type: application/acdp+json`
+/// -- stamped on by the outermost media-type backstop -- over a **plain-text**
+/// body with no `error.code`, so the wire promised an ACDP error envelope and
+/// delivered parser prose:
+///
+/// ```text
+/// 400 Failed to parse the request body as JSON: key must be a string at line 1 column 3
+/// 415 Expected request with `Content-Type: application/json`
+/// 422 Failed to deserialize the JSON body into the target type: agent_id: invalid type: integer `123`
+/// 400 Failed to deserialize query string: limit: invalid digit found in string
+/// ```
+///
+/// **Statuses are asserted PER CASE, never as "not 400".** The whole point of
+/// the local rejection type is that 415 and 422 survive; an assertion that
+/// merely rejected 400 would pass against an implementation that collapsed
+/// them, which is the design this phase explicitly rejected.
+///
+/// The harness MUST enable auth: `/auth/*` is mounted only when
+/// `cfg.auth.enabled`, so without it every row below asserts against a 404 and
+/// the test is vacuous while looking thorough.
+#[tokio::test]
+async fn extractor_rejections_return_the_rfc0007_envelope() {
+    let mut cfg = config(true);
+    cfg.auth.enabled = true;
+    let h = harness_from_config(cfg).await;
+
+    /// case, method, uri, content-type, body, expected status, expected §5 code
+    type Case = (
+        &'static str,
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+        &'static str,
+        StatusCode,
+        &'static str,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "body is not JSON",
+            "POST",
+            "/auth/challenge",
+            Some("application/json"),
+            "{ not json",
+            StatusCode::BAD_REQUEST,
+            "schema_violation",
+        ),
+        (
+            "valid JSON, wrong shape",
+            "POST",
+            "/auth/challenge",
+            Some("application/json"),
+            r#"{"agent_id":123}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "schema_violation",
+        ),
+        (
+            "unparseable query value",
+            "GET",
+            "/contexts/search?limit=abc",
+            None,
+            "",
+            StatusCode::BAD_REQUEST,
+            "schema_violation",
+        ),
+    ];
+
+    for (case, method, uri, ct, body, want_status, want_code) in cases {
+        let mut b = Request::builder().method(method).uri(uri);
+        if let Some(c) = ct {
+            b = b.header("content-type", c);
+        }
+        let resp = h
+            .router
+            .clone()
+            .oneshot(b.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+
+        let got_status = resp.status();
+        let got_ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("<none>")
+            .to_string();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        // `unwrap_or(Null)` so a non-JSON body is an ASSERTION failure with the
+        // body in the message, not a panic that hides which case broke.
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+
+        assert_eq!(
+            got_status, want_status,
+            "[{case}] status must be preserved exactly, not collapsed: body = {text}"
+        );
+        assert!(
+            got_ct.starts_with("application/acdp+json"),
+            "[{case}] content-type = {got_ct}"
+        );
+        assert_eq!(
+            v.pointer("/error/code").and_then(Value::as_str),
+            Some(want_code),
+            "[{case}] missing or wrong §5 error.code: body = {text}"
+        );
+        assert!(
+            v.pointer("/error/message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| !m.is_empty()),
+            "[{case}] error.message must be present and non-empty: body = {text}"
+        );
+        // `details` must be ABSENT, not null -- the envelope is built from
+        // `WireErrorBody`, whose `skip_serializing_if` guarantees this. Pinned
+        // so a hand-rolled `json!` replacement cannot silently reintroduce it.
+        assert!(
+            v.pointer("/error/details").is_none(),
+            "[{case}] `details` must be absent, never null: body = {text}"
+        );
+        // AC2: no axum/serde internals on the wire.
+        for leak in [
+            "Failed to parse",
+            "Failed to deserialize",
+            "target type",
+            "invalid type:",
+            "line 1 column",
+        ] {
+            assert!(
+                !text.contains(leak),
+                "[{case}] response leaks parser internals ({leak:?}): {text}"
+            );
+        }
+    }
+}
+
+/// MARKER TEST — delete this deliberately when the 415 ruling lands.
+///
+/// A3 envelopes extractor rejections at their original status. The 415 from a
+/// missing or wrong `Content-Type` is the one case **not** enveloped, and this
+/// test exists so that gap is visible in the suite rather than remembered.
+///
+/// Why it is held: `WireErrorBody::code` is a required `String`, so enveloping
+/// a 415 means choosing a §5 `code`. The canonical registry
+/// (`acdp_primitives::error::AcdpError::from_wire_error`) has exactly 25 codes
+/// and none describes a media-type failure, and this repo has never emitted a
+/// code outside that set — all 24 it emits are inside it. So answering means
+/// minting a code the canon lacks, which is a policy question about this
+/// project's relationship to upstream rather than a technical one. It is with
+/// the project owner, with a recommendation (`unsupported_media_type`) recorded
+/// in `ASSUMPTIONS.md`.
+///
+/// **What this asserts, and what it does not.** It pins the parts that are true
+/// under either ruling: the status is 415 and the media type is not what gets
+/// rejected. It also pins the CURRENT un-enveloped body — that assertion is
+/// pinning a known defect on purpose, so that the moment the ruling is applied
+/// this test goes RED and forces a deliberate deletion, instead of the hold
+/// quietly outliving the question.
+///
+/// **If you are reading this because this test just failed:** the 415 envelope
+/// almost certainly landed. That is the expected outcome. Move the two 415 rows
+/// into `extractor_rejections_return_the_rfc0007_envelope` with the ruled code
+/// and delete this test.
+#[tokio::test]
+async fn marker_the_415_rejection_is_not_yet_enveloped_pending_a_ruling() {
+    let mut cfg = config(true);
+    cfg.auth.enabled = true;
+    let h = harness_from_config(cfg).await;
+
+    for (case, ct) in [
+        ("no Content-Type", None),
+        ("wrong Content-Type", Some("text/plain")),
+    ] {
+        let mut b = Request::builder().method("POST").uri("/auth/challenge");
+        if let Some(c) = ct {
+            b = b.header("content-type", c);
+        }
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                b.body(Body::from(r#"{"agent_id":"did:web:a.test:x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // True under either ruling: the STATUS is 415 and always was. A3 never
+        // proposed changing it, only the body.
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "[{case}] a wrong Content-Type must remain a 415, ruling or no ruling",
+        );
+
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        assert!(
+            v.pointer("/error/code").is_none(),
+            "[{case}] the 415 now carries a §5 error.code, so the ruling has landed. \
+             This marker has done its job: move the 415 rows into \
+             `extractor_rejections_return_the_rfc0007_envelope` and DELETE this test. \
+             body = {text}",
+        );
+    }
+
+    // And the thing that must never regress while this is held: the RFC's own
+    // media type is accepted, so it is not what 415s. Verified on the wire
+    // rather than assumed -- `application/acdp+json` matches axum's `+json`
+    // structured-suffix check.
+    let ok = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/challenge")
+                .header("content-type", "application/acdp+json")
+                .body(Body::from(r#"{"agent_id":"did:web:a.test:x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ok.status(),
+        StatusCode::OK,
+        "the RFC-mandated `application/acdp+json` must be ACCEPTED, not 415'd",
+    );
+}
+
+/// A3: the rejection's OWN status survives, including the one that is not 400.
+///
+/// `AcdpJson`'s catch-all must carry `rej.status()`, never a hard-coded 400.
+/// `JsonRejection` is `#[non_exhaustive]`, so a catch-all arm is mandatory, and
+/// `JsonRejection::BytesRejection` wraps a `LengthLimitError` whose status is
+/// **413**. A hard-coded 400 there would silently downgrade an oversized body
+/// on `/auth/*` from 413 to 400 -- an observable status change on exactly the
+/// path the 413-envelope work exists to make conformant, and one that would
+/// falsify this phase's "no status changes" claim while every other test
+/// stayed green.
+///
+/// Both framings are asserted because they take DIFFERENT paths to the same
+/// status, and only one of them goes through `AcdpJson` at all:
+/// with `Content-Length`, `RequestBodyLimitLayer` short-circuits on the header
+/// before any handler runs; without it, the limit is enforced while the body is
+/// read, which is what surfaces as `BytesRejection` inside the extractor.
+#[tokio::test]
+async fn an_oversized_auth_body_stays_413_through_the_extractor() {
+    let mut cfg = config(true);
+    cfg.auth.enabled = true;
+    let h = harness_from_config(cfg).await;
+
+    let big = "x".repeat(2 * 1024 * 1024); // > the 1 MiB default cap
+    let body = format!(r#"{{"agent_id":"{big}"}}"#);
+
+    for (case, with_len) in [
+        (
+            "streamed (no Content-Length) -- reaches AcdpJson as BytesRejection",
+            false,
+        ),
+        (
+            "declared Content-Length -- short-circuited by the limit layer",
+            true,
+        ),
+    ] {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/auth/challenge")
+            .header("content-type", "application/json");
+        if with_len {
+            b = b.header("content-length", body.len().to_string());
+        }
+        let resp = h
+            .router
+            .clone()
+            .oneshot(b.body(Body::from(body.clone())).unwrap())
+            .await
+            .unwrap();
+
+        let got = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+
+        assert_eq!(
+            got,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "[{case}] must stay 413, not be downgraded to 400: body = {text}"
+        );
+        assert_eq!(
+            v.pointer("/error/code").and_then(Value::as_str),
+            Some("payload_too_large"),
+            "[{case}] must carry the §5 payload_too_large code: body = {text}"
+        );
+    }
+}

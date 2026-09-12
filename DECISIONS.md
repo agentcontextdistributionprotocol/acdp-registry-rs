@@ -1972,3 +1972,109 @@ reddens (b), page clean and cursor leaking.
 **Summary: 7 confirmed, 0 changed, 0 deferred, 7 settled by Opus, 0 needing the human. No code
 follow-up blocks the ship.** The unit still ships PARTIAL by design — that is scope, not an
 unresolved assumption.
+
+## Unit H-I-s — batched retrieval visibility for `/log/entries` (lane-2, 2026-09-12)
+
+Six `UNCONFIRMED` entries from `plans/h-i-s-batched-visibility.md`, ranked by blast radius.
+
+**Tiering, stated up front:** none of the six is a genuine one-way door. No schema change, no
+migration, no public HTTP contract change, no auth-model change; the new method is on a
+**crate-local** trait, is defaulted, and has **no callers at all** until H-I-w wires the handler.
+Every entry is reversible in a commit, so all six are Opus-tier and **none needs the human**. Two of
+them are security-*shaped* and were given the most scrutiny anyway, because "reversible" is not
+"unimportant" — a disclosure boundary that moves silently is cheap to revert and expensive to
+notice.
+
+**Deviation from `/reconcile`'s method, declared:** it asks for a fresh subagent per entry. This
+session is instructed not to spawn agents, so the analyses ran in-context. Compensation: every
+entry below is settled against evidence produced *this run* — a `file:line`, a measurement, or a
+named mutation — rather than against recollection, and the two entries that could have been waved
+through are the two that exist specifically to stop me overstating the result.
+
+### 1. The §4.5 rule is expressed a third time, in Rust — CONFIRMED (Opus)
+
+Highest blast radius in the unit: three expressions of one disclosure rule, and a drift between them
+moves a security boundary with no error. Examined hardest, and the finding is that the duplication
+is **forced rather than chosen** — `RegistryServer::retrieve` is `store.get()` + `can_retrieve`, and
+`can_retrieve` is `pub(crate)` in `acdp-server-0.13.1` (`src/registry/server.rs:1257`), while
+`RegistryStore` — the trait this crate can actually reach — exposes only a raw `get`. There is no
+call available to make.
+
+Rejected: have the SQL backends call `retrieve_visible` per row (that is precisely the N+1 this unit
+removes); vendor or fork upstream (disproportionate, and it is an upstream change).
+
+Confirmed because the containment is a **test, not a comment**: `DefaultOnly` wraps a real backend
+and declines to override the method, so the Rust default answers for the same rows the SQL override
+just answered for, and mutating the default *alone* reddens both backends' suites (E1, E2 — verified
+`ran==1`, matched by name, on sqlite and pg).
+
+**Follow-up, recorded and deliberately NOT actioned:** the better long-term fix is for upstream to
+make `can_retrieve` `pub`, which would collapse three copies to one. Upstream is
+`github.com/agentcontextdistributionprotocol/acdp-rs`. An issue there is a tracked ask rather than a
+cross-repo write, but it is still an outward-facing artifact in another repository and this unit
+ships correctly without it, so it is flagged for a human to authorize rather than filed
+unprompted. It blocks nothing.
+
+### 2. The default impl is behaviour-preserving (N calls), not fail-closed — CONFIRMED (Opus)
+
+The method had to be defaulted — `ExtendedRegistryStore` has three implementors and one is
+`MemoryStore` in `crates/acdp-registry-server/`, outside this lane's claim, so a required method is
+a compile break in a file this unit may not edit. That makes what the default *does* a security
+decision rather than a formality.
+
+Settled in H-H and **not re-derived**: fail-closed makes an untenanted backend disagree with both
+SQL backends about rows it can see perfectly well — the H-B divergence defect reintroduced in the
+name of safety. `Err(NotImplemented)` turns a working backend into a 500 on a read path. The chosen
+failure mode is **cost**, which is observable, over **silence**, which is not; and the cost is
+measured rather than asserted (991µs batched vs 21.9ms per-id over a 256-entry page on SQLite).
+
+Specifically checked, because it is the question that matters: can a tenant-recording backend reach
+this default and silently mis-answer? No — both SQL backends override, and deleting either override
+reddens its parity suite.
+
+### 3. Groups (a) and (e) share `retrieve_visible` — CONFIRMED (Opus)
+
+A coverage *limitation*, logged so it is not mistaken for coverage. The N-call reference and the
+trait default both apply `retrieve_visible`, so a mutation of that function moves both together and
+the differential cannot detect an error in the Rust expression of the rule — only a SQL-vs-Rust
+disagreement.
+
+Confirmed because the gap is covered elsewhere and the compensations are named: the 13 unit
+mutations pin `retrieve_visible` to §4.5 absolutely, and three **absolute** assertions inside the
+parity suite (audience-sees-private, contributor-does-not, retracted-still-visible) do not route
+through the reference at all. A pure differential passes when both sides are wrong the same way;
+those three are why this suite does not.
+
+### 4. AC1 is satisfied transitively, not by direct comparison — CONFIRMED (Opus)
+
+The assign asked for a test proving both backends return identical sets for the same fixture. What
+exists is not a direct two-backend comparison and **cannot be**: `parity.rs` deliberately does not
+depend on either backend crate — they depend on it — because importing both would invert the
+dependency graph, as its own module docs state. Both backends are compared against the same third
+implementation, so `sqlite == reference` and `pg == reference` yields `sqlite == pg`.
+
+Confirmed as a *reporting* decision rather than a code one. The alternative (a new test crate
+depending on both backends) buys a literal side-by-side comparison and nothing else. The risk this
+entry exists to kill is an AC recorded as "met" when the test performed was a different, equivalent
+one — an unverified claim hiding in supporting detail.
+
+### 5. `visible_ctx_ids` returns a set, not a mask — CONFIRMED (Opus)
+
+`HashSet<String>`: order-free, duplicate-safe, reads correctly at the call site. A `Vec<bool>`
+parallel to the input silently mis-associates if any caller reorders, filters or de-duplicates
+between building the slice and reading the mask, and no type would catch it. Reversible as a compile
+error, not a silent behaviour change; crate-local and unreleased.
+
+### 6. SQLite chunks at 900 ids; Postgres does not chunk — CONFIRMED (Opus)
+
+SQLite's `IN (?,?,…)` meets a default 999-parameter ceiling, leaving headroom for five disclosure
+binds plus the tenant bind; Postgres binds the list as one array and has no ceiling. Chunking is
+kept even though the caller's page cap is 256, because `LOG_ENTRIES_PAGE_CAP` bounds the *handler*,
+not this public method — relying on it would be a correctness bug waiting for a second caller. An
+oversized chunk would fail loudly as a SQL error, not silently. The asymmetry between backends is
+documented rather than smoothed over.
+
+**Summary: 6 confirmed, 0 changed, 0 deferred, 6 settled by Opus, 0 needing the human. No code
+follow-up blocks the ship.** One optional upstream follow-up is recorded above and flagged for human
+authorization; it blocks nothing. The unit ships **PARTIAL by design** — nothing calls
+`visible_ctx_ids` until H-I-w — which is scope, not an unresolved assumption.

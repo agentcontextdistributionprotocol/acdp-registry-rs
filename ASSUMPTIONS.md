@@ -1827,3 +1827,167 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** a guarantee could regress while the suite stays green. Bounded by
   the recorded mutation matrix, which shows all six guarantees firing on both backends.
 - **Status:** CONFIRMED (2026-09-12) — 6/6 guarantees fire on both backends; matrix in the plan and PROGRESS.md. See DECISIONS.md H-H #7.
+
+## `visible_ctx_ids` returns a set rather than a mask aligned to the input
+
+- **Plan:** `plans/h-i-s-batched-visibility.md` (H-I-s Phase 1)
+- **Assumed:** that callers want "which of these may I disclose?" rather than "answer per input
+  position".
+- **Chose:** `HashSet<String>`. Order-free, duplicate-safe, and it reads correctly at the call
+  site (`if visible.contains(id)`).
+- **Alternatives:** a `Vec<bool>` parallel to the input — rejected because it silently
+  mis-associates if any caller ever reorders, filters or de-duplicates its input between building
+  the slice and reading the mask, and nothing in the type system would catch that. A
+  `HashMap<String, bool>` — same information as the set, with absent-vs-false as a second way to
+  say no.
+- **Blast radius if wrong:** low; the method is crate-local, unreleased, and has one prospective
+  caller (H-I-w). Changing the return type is a compile error, not a silent behaviour change.
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #5.
+
+## The default impl is behaviour-preserving (N calls), not fail-closed
+
+- **Plan:** `plans/h-i-s-batched-visibility.md` (H-I-s Phase 1)
+- **Assumed:** that a defaulted method on this trait must be *correct* for an untenanted backend,
+  not merely compilable.
+- **Chose:** the default does exactly what the caller did before — one `RegistryStore::get` per
+  id, then the §4.5 rule, then the tenant gate. Same answers, N round-trips.
+- **Why defaulted at all (a boundary condition, not a preference):** `ExtendedRegistryStore` has
+  three implementors and one is `MemoryStore` in `crates/acdp-registry-server/`, outside this
+  lane's claim. A required method would be a compile break in a file this unit may not edit.
+- **Alternatives:** fail closed (return an empty set) for every call — rejected, and this was
+  settled in H-H rather than re-derived: it makes the memory backend disagree with both SQL
+  backends about rows it can see perfectly well, which is the H-B divergence defect reintroduced
+  in the name of safety. Return `Err(NotImplemented)` — rejected: turns a working backend into a
+  500 on a read path.
+- **Blast radius if wrong:** a backend inheriting the default is slow, not wrong. The failure mode
+  chosen is *cost*, which is observable, over *silence*, which is not.
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #2.
+
+## The §4.5 rule is expressed a third time, in Rust, and contained rather than eliminated
+
+- **Plan:** `plans/h-i-s-batched-visibility.md` (H-I-s Phases 1 and 4)
+- **Assumed initially (WRONG):** that the authoritative rule could be called rather than restated.
+- **What checking found:** `RegistryServer::retrieve` is `store.get()` + `can_retrieve(...)`, and
+  `can_retrieve` is **`pub(crate)`** in `acdp-server-0.13.1` (`src/registry/server.rs:1257`).
+  `RegistryStore` — the trait this crate can reach — offers only a raw `get`. So the duplication
+  is **forced**, not chosen.
+- **Chose:** name it (`retrieve_visible`), document the duplication where it lives, and contain it
+  with a three-way differential test in which the Rust default and both SQL overrides answer for
+  the same rows.
+- **Alternatives:** have the SQL backends call `retrieve_visible` per row — rejected: that is the
+  N+1 this unit exists to remove. Vendor or fork upstream to widen `can_retrieve`'s visibility —
+  rejected as disproportionate, and it is an upstream change, so it becomes an issue rather than a
+  local edit. Ask upstream to make it `pub` — worth doing, and the better long-term fix; noted for
+  a follow-up rather than blocking here.
+- **Blast radius if wrong:** the rule drifts in one of three places and a disclosure boundary moves
+  silently. That is the highest-consequence assumption in the unit, which is why the containment
+  is a test rather than a comment: mutating the default alone reddens both backends' suites
+  (verified, mutations E1/E2).
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #1.
+
+## SQLite batches 900 ids per query; Postgres does not chunk at all
+
+- **Plan:** `plans/h-i-s-batched-visibility.md` (H-I-s Phases 2 and 3)
+- **Assumed:** that SQLite's default host-parameter ceiling (999) is the binding constraint, and
+  that the five disclosure binds plus the tenant bind need headroom beside the ids.
+- **Chose:** 900 for SQLite. Postgres binds the whole list as one array (`= ANY($3)`) so it has no
+  ceiling to respect and does not chunk.
+- **Why chunk at all when the caller's page cap is 256:** the method is public and takes an
+  arbitrary slice. `LOG_ENTRIES_PAGE_CAP` bounds the *handler*, not this method, so relying on it
+  would be a correctness bug waiting for a second caller.
+- **Alternatives:** a temp table or JSON-array parameter on SQLite — more machinery than a
+  bounded `IN` list needs at this size. Refuse an oversized slice — pushes a backend detail onto
+  every caller.
+- **Blast radius if wrong:** a too-large chunk fails loudly as a SQL error on an input no current
+  caller produces. Not silent.
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #6.
+
+## AC1 is satisfied transitively, not by a direct two-backend comparison
+
+- **Plan:** `plans/h-i-s-batched-visibility.md` (H-I-s Phase 3)
+- **Assign asked for:** a parity test proving SQLite and Postgres return **identical** visibility
+  sets for the same fixture.
+- **What is delivered, precisely:** not a direct comparison, and it cannot be — `parity.rs`
+  deliberately does not depend on either backend crate (they depend on it), because importing both
+  to build a "both backends" test would invert the dependency graph; its module docs say so. Both
+  backends are instead compared against the **same third implementation**
+  (`visible_by_n_calls`, one function shared by both suites), so `sqlite == reference` and
+  `pg == reference` yields `sqlite == pg`.
+- **Alternatives:** a new test crate depending on both backends — possible, and the only way to
+  get a literal side-by-side comparison; rejected as disproportionate when transitivity gives the
+  same guarantee. Duplicate the expectations per backend — exactly what this module exists to
+  prevent.
+- **Blast radius if wrong:** none to the code; the risk is *reporting*. An AC recorded as "met"
+  when the test performed is a different (equivalent) one is an unverified claim hiding in
+  supporting detail, which is why this entry exists rather than a checkmark.
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #4.
+
+## Group (a)'s oracle and group (e)'s seam check share `retrieve_visible`
+
+- **Plan:** `plans/h-i-s-batched-visibility.md` (H-I-s Phases 2 and 4)
+- **Assumed:** that a differential oracle plus a three-way seam check are independent guards.
+- **They are not fully independent, and this states it rather than implying otherwise:** the
+  N-call reference (`visible_by_n_calls`) and the trait default both apply `retrieve_visible`. A
+  mutation of *that function* therefore moves the reference and the default together, so group (a)
+  cannot detect an error in the Rust expression of the rule — only a disagreement between SQL and
+  Rust.
+- **What actually covers that gap:** the 13 unit mutations against `retrieve_visible` itself
+  (phase 1), which pin it to §4.5 absolutely, plus the three absolute assertions inside the parity
+  suite (audience-sees-private, contributor-does-not, retracted-still-visible) which do not go
+  through the reference at all. A pure differential passes when both sides are wrong the same way;
+  those absolute assertions are why this suite does not.
+- **Blast radius if wrong:** a shared error in the Rust rule would be invisible to the
+  differential. Bounded as above, and the absolute assertions are the load-bearing part.
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-I-s #3.
+
+## H-A / P7 — A3: extractor rejections get the §5 envelope at their original status
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P7)
+- **Measured before changing anything** (real router, auth enabled): malformed body -> 400;
+  missing/wrong `Content-Type` -> 415; schema mismatch -> 422; `?limit=abc` -> 400. All four
+  already carried `application/acdp+json` over PLAIN TEXT with no `error.code`. Also confirmed
+  `application/acdp+json` is ACCEPTED (200), so the RFC-mandated media type is not what 415s.
+- **Chose:** a local `AcdpRejection` implementing `IntoResponse` directly, with `AcdpJson<T>` /
+  `AcdpQuery<T>` newtypes using it as their `Rejection`. Envelope built from the public
+  `WireError`/`WireErrorBody` so the shape -- including `details` ABSENT rather than `null` --
+  cannot drift from `RegistryError::into_response`.
+- **Alternatives:** (a) map onto `RegistryError` -- rejected, it has no 415-bearing variant so
+  415 and 422 would both collapse to 400, which would be an artifact of the mechanism rather
+  than a decision; (b) `impl From<JsonRejection> for RegistryError` -- the orphan rule forces it
+  into `acdp-registry-types`, a different crate than the problem; (c) `axum-extra`'s
+  `WithRejection` -- not a dependency, and adding one enters the `deny.toml` gate for something
+  solvable in forty lines locally.
+
+### DIVERGENCE: the plan's prescribed shape contradicts the plan's own acceptance criterion
+
+The plan specifies `AcdpRejection(rej.status(), code_for(&rej), rej.body_text())`. Its
+acceptance criterion 2 says **no response body may contain "Failed to parse", "Failed to
+deserialize", or a serde type path**. `rej.body_text()` returns exactly those strings -- so the
+prescribed shape guarantees the criterion fails. Implemented AC2; messages are this registry's
+own and stable. Beyond AC2 there is an independent reason: axum's and serde's wording is theirs
+to change, so echoing it onto the wire grows an accidental contract that breaks on a dependency
+bump.
+
+### OPEN — escalated, NOT decided here: the §5 `code` for a 415
+
+- **The question:** enveloping a 415 requires a `code`, because `WireErrorBody::code` is a
+  required `String` -- there is no "envelope without a code".
+- **Why it is not mine to settle:** the canonical registry
+  (`acdp_primitives::error::AcdpError::from_wire_error`) is 25 closed codes and none describes a
+  media-type failure. This repo emits 24 codes and **every one is inside that set** -- verified
+  by set difference, which is empty. So answering means minting a code the canon lacks: a policy
+  question about this project's relationship to upstream, not a technical one.
+- **Recommendation on record:** `unsupported_media_type`. An unrecognised code routes to
+  `AcdpError::Registry(wire)`, documented as "for forward compatibility", preserving status and
+  message and losing only the typed variant. The canonical alternative, `schema_violation`, is
+  documented as "malformed body, missing field, schema mismatch" -- and on a 415 the body was
+  never parsed, so it would state something false, make 415 indistinguishable from 400 at the
+  code level, and be unfixable later without a breaking change once clients code against
+  `AcdpError::SchemaViolation`. The canon also already has an `unsupported_*` family
+  (`unsupported_algorithm`), so the name is in its own idiom.
+- **Held, visibly.** The 415 keeps its existing un-enveloped body until the ruling.
+  `marker_the_415_rejection_is_not_yet_enveloped_pending_a_ruling` pins the current behaviour and
+  fails the moment the ruling is applied, with a failure message instructing its own deletion --
+  so the hold cannot outlive the question by being forgotten.
+- **Status:** UNCONFIRMED — the 415 code is with the project owner. Everything else in this
+  phase is settled and shipped.

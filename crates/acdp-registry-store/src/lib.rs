@@ -17,9 +17,9 @@ pub mod parity;
 
 use acdp::error::AcdpError;
 use acdp::registry::RegistryStore;
-use acdp::types::body::FullContext;
+use acdp::types::body::{Body, FullContext};
 use acdp::types::lifecycle::LifecycleEvent;
-use acdp::types::primitives::AgentDid;
+use acdp::types::primitives::{AgentDid, CtxId, Visibility};
 use acdp::types::search::{SearchParams, SearchResponse};
 use acdp_registry_types::config::RESERVED_TENANT;
 use async_trait::async_trait;
@@ -279,6 +279,80 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
         Ok(out)
     }
 
+    /// Batched retrieval-visibility check. Returns the subset of `ctx_ids`
+    /// the `requester` is allowed to **retrieve**, under the same rule
+    /// `GET /contexts/{ctx_id}` applies: RFC-ACDP-0008 §4.5 visibility plus
+    /// this registry's tenant gate.
+    ///
+    /// # Why this exists
+    ///
+    /// `GET /log/entries` gates every `ctx_id` it echoes on that rule, and it
+    /// did so **one context at a time** — a blocking `RegistryServer::retrieve`
+    /// per entry, up to a 256-entry page. One query answers the whole page.
+    ///
+    /// # It is `retrieve` semantics, NOT `search` semantics
+    ///
+    /// These genuinely differ, and the difference is a disclosure boundary in
+    /// both directions. Under §4.5 an audience member **may** retrieve a
+    /// `private` context; `search` deliberately requires *ownership* for
+    /// `private` and excludes the audience. That asymmetry is specified, not
+    /// accidental — conformance fixture `vis-004` pins it, including that a
+    /// listed *contributor* who is not in the audience is refused, because
+    /// contributors are not authorization. So this method must mirror the
+    /// **list/retrieve**-shaped predicate, and an implementation that reuses a
+    /// search predicate will under-disclose.
+    ///
+    /// Note also what is **absent** from the rule: status. A `retracted`
+    /// context is still retrievable (its status is projected, not hidden), so
+    /// implementations MUST NOT filter on status here.
+    ///
+    /// # The default implementation
+    ///
+    /// Behaviour-preserving, not fail-closed: it does exactly what the caller
+    /// did before — one `RegistryStore::get` per id, then [`retrieve_visible`],
+    /// then the tenant gate via [`Self::tenant_of_ctx`]. N round-trips, same
+    /// answers. A fail-closed default was considered and rejected: it would
+    /// make an untenanted backend disagree with both SQL backends about ids it
+    /// can see perfectly well, which is a correctness defect wearing safety's
+    /// clothing. SQL backends override with a single query.
+    ///
+    /// Because `RegistryStore::get` is synchronous, the default blocks; callers
+    /// on an async runtime should treat it the way they already treat
+    /// `retrieve` and hand it to `spawn_blocking`.
+    async fn visible_ctx_ids(
+        &self,
+        ctx_ids: &[&str],
+        requester: Option<&AgentDid>,
+        tenant: Option<&str>,
+        anonymous_public_reads: bool,
+    ) -> Result<std::collections::HashSet<String>, AcdpError> {
+        let mut out = std::collections::HashSet::with_capacity(ctx_ids.len());
+        for id in ctx_ids {
+            // An unparseable ctx_id is not visible, matching the caller's own
+            // `CtxId::parse` failure path rather than raising.
+            let Ok(parsed) = CtxId::parse((*id).to_string()) else {
+                continue;
+            };
+            let Some(ctx) = self.get(&parsed)? else {
+                continue;
+            };
+            if !retrieve_visible(&ctx.body, requester, anonymous_public_reads) {
+                continue;
+            }
+            if let Some(want) = tenant {
+                let stored = self
+                    .tenant_of_ctx(id)
+                    .await?
+                    .unwrap_or_else(|| RESERVED_TENANT.to_string());
+                if stored != want {
+                    continue;
+                }
+            }
+            out.insert((*id).to_string());
+        }
+        Ok(out)
+    }
+
     /// Tenant-scoped search: like [`RegistryStore::search`], but the backend
     /// MUST apply the tenant predicate **in storage**, not to the result set.
     ///
@@ -368,6 +442,47 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
                 next_cursor: None,
             }),
         }
+    }
+}
+
+/// RFC-ACDP-0008 §4.5 retrieval disclosure rule, in Rust.
+///
+/// | visibility   | may retrieve                                        |
+/// |--------------|-----------------------------------------------------|
+/// | `public`     | anyone, when `anonymous_public_reads`; else any DID  |
+/// | `restricted` | the producer (`agent_id`) **or** a DID in `audience` |
+/// | `private`    | the producer (`agent_id`) **or** a DID in `audience` |
+///
+/// `private` and `restricted` are deliberately the same row: the audience is
+/// authorization for both. `contributors` appears nowhere — it is provenance,
+/// not access.
+///
+/// # Why this is written out here
+///
+/// The authoritative copy is `can_retrieve` in the upstream `acdp` crate, which
+/// is `pub(crate)` there and so cannot be called from this one. This is
+/// therefore a deliberate re-expression of someone else's rule, which is exactly
+/// the kind of duplication that drifts silently. Two things guard it: the SQL
+/// backends express the same rule as a predicate rather than calling this, and
+/// the parity suite asserts all three agree on one fixture. If this function
+/// and upstream `can_retrieve` ever disagree, that suite is what says so.
+pub fn retrieve_visible(
+    body: &Body,
+    requester: Option<&AgentDid>,
+    anonymous_public_reads: bool,
+) -> bool {
+    match body.visibility {
+        Visibility::Public => anonymous_public_reads || requester.is_some(),
+        Visibility::Restricted | Visibility::Private => match requester {
+            None => false,
+            Some(r) => {
+                r == &body.agent_id
+                    || body
+                        .audience
+                        .as_deref()
+                        .is_some_and(|a| a.iter().any(|d| d == r))
+            }
+        },
     }
 }
 
@@ -628,6 +743,516 @@ mod default_search_in_tenant_tests {
             None,
             "next_cursor must be absent; the sentinel cursor leaking here is exactly the \
              cross-tenant anchor disclosure this method exists to prevent"
+        );
+    }
+}
+
+#[cfg(test)]
+mod default_visible_ctx_ids_tests {
+    use super::*;
+    use acdp::crypto::SigningKey;
+    use acdp::producer::Producer;
+    use acdp::registry::store::{PublishCommit, PublishCommitOutcome};
+    use acdp::registry::{IdempotencyRecord, LifecycleCommitOutcome};
+    use acdp::types::body::RegistryState;
+    use acdp::types::primitives::{ContentHash, ContextType, LineageId, Status};
+    use acdp::types::publish::PublishResponse;
+    use chrono::{DateTime, Utc};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const PRODUCER: &str = "did:web:reg.test:producer";
+    const AUDIENCE: &str = "did:web:reg.test:audience-member";
+    const CONTRIB: &str = "did:web:reg.test:contributor";
+    const OUTSIDER: &str = "did:web:reg.test:outsider";
+
+    // Fixture ids. Named for what each one is *for*, so a failure message
+    // points at the guarantee rather than at a UUID.
+    const PUBLIC: &str = "acdp://reg.test/00000000-0000-4000-8000-00000000a001";
+    const PRIVATE_WITH_AUDIENCE: &str = "acdp://reg.test/00000000-0000-4000-8000-00000000a002";
+    const PRIVATE_OWNER_ONLY: &str = "acdp://reg.test/00000000-0000-4000-8000-00000000a003";
+    const RESTRICTED_WITH_AUDIENCE: &str = "acdp://reg.test/00000000-0000-4000-8000-00000000a004";
+    const PRIVATE_WITH_CONTRIBUTOR: &str = "acdp://reg.test/00000000-0000-4000-8000-00000000a005";
+    const PUBLIC_RETRACTED: &str = "acdp://reg.test/00000000-0000-4000-8000-00000000a006";
+    const NEVER_STORED: &str = "acdp://reg.test/00000000-0000-4000-8000-0000000000ff";
+    const NOT_A_CTX_ID: &str = "this is not a ctx_id at all";
+
+    fn did(s: &str) -> AgentDid {
+        AgentDid::new(s.to_string())
+    }
+
+    /// `RegistryState::is_retracted()` is derived from `lifecycle_events`, NOT
+    /// from `status`. A fixture that sets only `status` is therefore not
+    /// retracted by the definition half the codebase uses — so the retracted
+    /// fixture below carries both, and a status filter written either way is
+    /// caught.
+    fn retracted_event(ctx_id: &str) -> LifecycleEvent {
+        serde_json::from_value(serde_json::json!({
+            "event_id": "01J0000000000000000000000A",
+            "ctx_id": ctx_id,
+            "event_type": "retracted",
+            "occurred_at": "2026-01-01T00:00:00.000Z",
+            "actor": "did:web:agents.test:actor",
+        }))
+        .expect("valid lifecycle event")
+    }
+
+    /// One stored context. `audience` / `contributors` are passed separately
+    /// because the whole point of the contributor fixture is that the two
+    /// fields are NOT interchangeable.
+    fn ctx(
+        ctx_id: &str,
+        visibility: Visibility,
+        audience: Vec<AgentDid>,
+        contributors: Vec<AgentDid>,
+        status: Status,
+    ) -> FullContext {
+        let p = Producer::new(
+            SigningKey::from_bytes(&[11u8; 32]),
+            did(PRODUCER),
+            format!("{PRODUCER}#key-1"),
+        );
+        let mut b = p
+            .publish_request()
+            .title("visibility-fixture")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(visibility);
+        if !audience.is_empty() {
+            b = b.audience(audience);
+        }
+        if !contributors.is_empty() {
+            b = b.contributors(contributors);
+        }
+        let req = b.build().expect("valid publish request");
+        let id = CtxId(ctx_id.to_string());
+        let lineage_id = acdp::crypto::derive_lineage_id(&id);
+        let body = Body::from_publish_request(
+            &req,
+            id,
+            lineage_id,
+            "reg.test".to_string(),
+            acdp::time::trunc_ms(Utc::now()),
+        );
+        let lifecycle_events = if status == Status::Retracted {
+            Some(vec![retracted_event(ctx_id)])
+        } else {
+            None
+        };
+        FullContext {
+            body,
+            registry_state: RegistryState {
+                status,
+                lifecycle_events,
+                extensions: serde_json::Map::new(),
+            },
+            registry_receipt: None,
+            lineage_head_receipt: None,
+            log_inclusion: None,
+            extensions: serde_json::Map::new(),
+        }
+    }
+
+    /// A backend that stores contexts and overrides **no**
+    /// `ExtendedRegistryStore` method — so `visible_ctx_ids`' default body is
+    /// what every test below executes (CHARTER rule 52). It also counts `get`
+    /// calls, which is how the N-round-trip shape of the default is asserted
+    /// rather than assumed.
+    struct FixtureBackend {
+        by_id: HashMap<String, FullContext>,
+        get_calls: AtomicUsize,
+    }
+
+    impl FixtureBackend {
+        fn new() -> Self {
+            let mut by_id = HashMap::new();
+            for c in [
+                ctx(PUBLIC, Visibility::Public, vec![], vec![], Status::Active),
+                ctx(
+                    PRIVATE_WITH_AUDIENCE,
+                    Visibility::Private,
+                    vec![did(AUDIENCE)],
+                    vec![],
+                    Status::Active,
+                ),
+                ctx(
+                    PRIVATE_OWNER_ONLY,
+                    Visibility::Private,
+                    vec![],
+                    vec![],
+                    Status::Active,
+                ),
+                ctx(
+                    RESTRICTED_WITH_AUDIENCE,
+                    Visibility::Restricted,
+                    vec![did(AUDIENCE)],
+                    vec![],
+                    Status::Active,
+                ),
+                // A contributor and NO audience: the fixture that proves
+                // contributors are provenance, not authorization.
+                ctx(
+                    PRIVATE_WITH_CONTRIBUTOR,
+                    Visibility::Private,
+                    vec![],
+                    vec![did(CONTRIB)],
+                    Status::Active,
+                ),
+                ctx(
+                    PUBLIC_RETRACTED,
+                    Visibility::Public,
+                    vec![],
+                    vec![],
+                    Status::Retracted,
+                ),
+            ] {
+                by_id.insert(c.body.ctx_id.as_str().to_string(), c);
+            }
+            Self {
+                by_id,
+                get_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn gets(&self) -> usize {
+            self.get_calls.load(Ordering::SeqCst)
+        }
+
+        /// Every id this fixture knows about, plus the two it deliberately
+        /// does not. Passing the unknown ids on every call means "absent ids
+        /// are skipped" is exercised by every test, not just its own.
+        fn all_ids() -> Vec<&'static str> {
+            vec![
+                PUBLIC,
+                PRIVATE_WITH_AUDIENCE,
+                PRIVATE_OWNER_ONLY,
+                RESTRICTED_WITH_AUDIENCE,
+                PRIVATE_WITH_CONTRIBUTOR,
+                PUBLIC_RETRACTED,
+                NEVER_STORED,
+                NOT_A_CTX_ID,
+            ]
+        }
+
+        async fn visible_to(&self, requester: Option<&str>, anon: bool) -> HashSet<String> {
+            let r = requester.map(did);
+            self.visible_ctx_ids(&Self::all_ids(), r.as_ref(), None, anon)
+                .await
+                .expect("visible_ctx_ids ok")
+        }
+    }
+
+    impl RegistryStore for FixtureBackend {
+        fn get(&self, ctx_id: &CtxId) -> Result<Option<FullContext>, AcdpError> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.by_id.get(ctx_id.as_str()).cloned())
+        }
+
+        // `unimplemented!` rather than a plausible stub: if the default ever
+        // reaches one of these, the test must fail loudly rather than quietly
+        // pass against a fake.
+        fn search(
+            &self,
+            _params: &SearchParams,
+            _requester: Option<&AgentDid>,
+            _anonymous_public_reads: bool,
+        ) -> Result<SearchResponse, AcdpError> {
+            unimplemented!("visible_ctx_ids must not reach search — that is the other predicate")
+        }
+        fn put(&self, _body: Body) -> Result<(), AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+        fn lineage(&self, _lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+        fn current(&self, _lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+        fn mark_superseded(&self, _ctx_id: &CtxId) -> Result<(), AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+        fn first_version_ctx_id(
+            &self,
+            _lineage_id: &LineageId,
+        ) -> Result<Option<CtxId>, AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+        fn idempotency_lookup(
+            &self,
+            _agent_id: &AgentDid,
+            _key: &str,
+        ) -> Result<Option<IdempotencyRecord>, AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+        fn idempotency_record(
+            &self,
+            _agent_id: &AgentDid,
+            _key: &str,
+            _hash: &ContentHash,
+            _response: &PublishResponse,
+            _expires_at: DateTime<Utc>,
+        ) -> Result<(), AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+        fn idempotency_evict_expired(&self, _now: DateTime<Utc>) -> Result<(), AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+        fn commit_publish(
+            &self,
+            _commit: PublishCommit<'_>,
+        ) -> Result<PublishCommitOutcome, AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+        fn commit_lifecycle_event(
+            &self,
+            _event: &LifecycleEvent,
+        ) -> Result<LifecycleCommitOutcome, AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+    }
+
+    #[async_trait]
+    impl ExtendedRegistryStore for FixtureBackend {
+        async fn health(&self) -> Result<(), AcdpError> {
+            Ok(())
+        }
+        async fn migrate(&self) -> Result<(), AcdpError> {
+            Ok(())
+        }
+        async fn list_contexts(
+            &self,
+            _limit: u32,
+            _cursor: Option<&str>,
+            _requester: Option<&AgentDid>,
+            _tenant: Option<&str>,
+            _anonymous_public_reads: bool,
+        ) -> Result<Page<FullContext>, AcdpError> {
+            unimplemented!("not reached by visible_ctx_ids' default")
+        }
+        // `visible_ctx_ids` and `tenant_of_ctx` deliberately NOT overridden —
+        // the defaults are the subject under test.
+    }
+
+    // ---- one guarantee per test (CHARTER rule 51) ----------------------------
+    //
+    // These are deliberately not four asserts in one test: `assert!` aborts at
+    // the first failure, so N guarantees behind N asserts yields one verdict for
+    // N promises and never evaluates the rest.
+
+    /// THE load-bearing guarantee of the whole unit. Under §4.5 an audience
+    /// member MAY retrieve a `private` context — `search` refuses this exact
+    /// case, so an implementation built on a search predicate fails here and
+    /// silently under-discloses. Conformance fixture `vis-004` pins it.
+    #[tokio::test]
+    async fn an_audience_member_may_retrieve_a_private_context() {
+        let s = FixtureBackend::new();
+        let v = s.visible_to(Some(AUDIENCE), false).await;
+        assert!(
+            v.contains(PRIVATE_WITH_AUDIENCE),
+            "an audience member MUST be able to retrieve a private context (RFC-ACDP-0008 §4.5, \
+             conformance vis-004). This is precisely where `search` semantics differ: search \
+             requires ownership for `private`. Missing it means the batch was built on the wrong \
+             predicate and under-discloses. Visible set was {v:?}"
+        );
+    }
+
+    /// The other half of vis-004: `contributors` is provenance, never
+    /// authorization. A listed contributor who is not in the audience is
+    /// refused.
+    #[tokio::test]
+    async fn a_listed_contributor_is_not_authorization() {
+        let s = FixtureBackend::new();
+        let v = s.visible_to(Some(CONTRIB), false).await;
+        assert!(
+            !v.contains(PRIVATE_WITH_CONTRIBUTOR),
+            "being listed in `contributors` MUST NOT grant retrieval of a private context — \
+             contributors is provenance, not authorization (conformance vis-004). Visible set \
+             was {v:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_outsider_may_not_retrieve_a_private_context() {
+        let s = FixtureBackend::new();
+        let v = s.visible_to(Some(OUTSIDER), false).await;
+        assert!(
+            !v.contains(PRIVATE_WITH_AUDIENCE) && !v.contains(PRIVATE_OWNER_ONLY),
+            "a requester who is neither producer nor audience MUST see no private context; \
+             visible set was {v:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_producer_may_retrieve_their_own_private_context() {
+        let s = FixtureBackend::new();
+        let v = s.visible_to(Some(PRODUCER), false).await;
+        assert!(
+            v.contains(PRIVATE_OWNER_ONLY),
+            "the producer MUST be able to retrieve their own private context; visible set was {v:?}"
+        );
+    }
+
+    /// §4.5 says nothing about status, and `retrieve` returns a retracted
+    /// context (its status is projected, not hidden). A status filter added
+    /// here would look like hardening and would actually be a correctness bug,
+    /// hiding audit entries the caller is entitled to.
+    #[tokio::test]
+    async fn a_retracted_context_is_still_retrievable() {
+        let s = FixtureBackend::new();
+        // Precondition, asserted rather than assumed: the fixture must actually
+        // be retracted by BOTH definitions in play — the `status` column and
+        // the lifecycle-event derivation. Set only one and this test quietly
+        // stops being about retraction, which is how it first passed against a
+        // mutation that should have broken it.
+        let c = s
+            .by_id
+            .get(PUBLIC_RETRACTED)
+            .expect("retracted fixture present");
+        assert_eq!(
+            c.registry_state.status,
+            Status::Retracted,
+            "fixture precondition: the `status` column must say retracted"
+        );
+        assert!(
+            c.registry_state.is_retracted(),
+            "fixture precondition: `is_retracted()` derives from lifecycle_events, so the fixture              must carry a retracted event too"
+        );
+        let v = s.visible_to(Some(OUTSIDER), false).await;
+        assert!(
+            v.contains(PUBLIC_RETRACTED),
+            "a retracted context is still RETRIEVABLE — status is projected, not hidden, and §4.5 \
+             has no status clause. Filtering on status here would hide entries the caller is \
+             entitled to. Visible set was {v:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_anonymous_requester_is_refused_public_when_the_flag_is_off() {
+        let s = FixtureBackend::new();
+        let v = s.visible_to(None, false).await;
+        assert!(
+            v.is_empty(),
+            "with no requester and `anonymous_public_reads` off, NOTHING is retrievable — not even \
+             public. Visible set was {v:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_anonymous_requester_is_allowed_public_when_the_flag_is_on() {
+        let s = FixtureBackend::new();
+        let v = s.visible_to(None, true).await;
+        let expected: HashSet<String> = [PUBLIC, PUBLIC_RETRACTED]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            v, expected,
+            "with `anonymous_public_reads` on, an anonymous requester sees exactly the public \
+             contexts and nothing else"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_ctx_id_is_absent_rather_than_an_error() {
+        let s = FixtureBackend::new();
+        let v = s.visible_to(Some(PRODUCER), true).await;
+        assert!(
+            !v.contains(NEVER_STORED),
+            "an id the backend never stored must simply be absent, not an error and not present"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_ctx_id_is_absent_rather_than_an_error() {
+        let s = FixtureBackend::new();
+        let v = s.visible_to(Some(PRODUCER), true).await;
+        assert!(
+            !v.contains(NOT_A_CTX_ID),
+            "an unparseable ctx_id must be treated as not-visible, mirroring the caller's own \
+             CtxId::parse failure path rather than raising"
+        );
+    }
+
+    /// The tenant gate is half the contract. `tenant_of_ctx`'s default reports
+    /// every row as the reserved tenant, so a request for any other tenant must
+    /// come back empty — the same "satisfy the trait without claiming a wrong
+    /// answer" posture `search_in_tenant`'s default takes.
+    #[tokio::test]
+    async fn a_foreign_tenant_yields_nothing_on_an_untenanted_backend() {
+        let s = FixtureBackend::new();
+        let v = s
+            .visible_ctx_ids(
+                &FixtureBackend::all_ids(),
+                Some(&did(PRODUCER)),
+                Some("tenant-that-this-backend-never-assigns"),
+                true,
+            )
+            .await
+            .expect("visible_ctx_ids ok");
+        assert!(
+            v.is_empty(),
+            "this backend records no tenants, so every row is the reserved tenant and a request \
+             scoped to any other tenant must return NOTHING. Returning rows here would be the \
+             tenant half of the contract silently dropped. Visible set was {v:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reserved_tenant_passes_the_gate() {
+        let s = FixtureBackend::new();
+        let v = s
+            .visible_ctx_ids(
+                &FixtureBackend::all_ids(),
+                Some(&did(PRODUCER)),
+                Some(RESERVED_TENANT),
+                true,
+            )
+            .await
+            .expect("visible_ctx_ids ok");
+        assert!(
+            v.contains(PUBLIC),
+            "on an untenanted backend every row IS `{RESERVED_TENANT}`, so scoping to it must not \
+             filter anything out; visible set was {v:?}"
+        );
+    }
+
+    /// Equality against the full expected subset, not a `contains` and not a
+    /// floor (CHARTER rule 55): under-disclosure and over-disclosure are both
+    /// silent failures here, and only an equality assertion catches both.
+    #[tokio::test]
+    async fn the_result_is_exactly_the_visible_subset() {
+        let s = FixtureBackend::new();
+        let v = s.visible_to(Some(AUDIENCE), false).await;
+        let expected: HashSet<String> = [
+            PUBLIC,
+            PUBLIC_RETRACTED,
+            PRIVATE_WITH_AUDIENCE,
+            RESTRICTED_WITH_AUDIENCE,
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        assert_eq!(
+            v, expected,
+            "the audience member sees exactly: both public contexts (retracted included), the \
+             private one naming them, and the restricted one naming them — and NOT the \
+             owner-only private one nor the contributor-only one"
+        );
+    }
+
+    /// The default is the N-round-trip shape on purpose (behaviour-preserving,
+    /// not fail-closed). Asserting the count by equality documents the cost the
+    /// SQL overrides exist to remove, and would catch a "clever" default that
+    /// silently stopped consulting the store.
+    #[tokio::test]
+    async fn the_default_costs_one_get_per_parseable_id() {
+        let s = FixtureBackend::new();
+        let _ = s.visible_to(Some(PRODUCER), true).await;
+        let parseable = FixtureBackend::all_ids().len() - 1; // NOT_A_CTX_ID never reaches `get`
+        assert_eq!(
+            s.gets(),
+            parseable,
+            "the default impl must do exactly one `get` per parseable id — that N-round-trip cost \
+             is the whole reason the SQL backends override this method"
         );
     }
 }
