@@ -1308,3 +1308,39 @@ bin target's 7. And the consequence runs backwards — because both are also bin
 `--bins`-only mutation would still redden. The outcome claim (all four steps minus
 `--all-targets` pass) is true and measured; only the reason given for it was invented. That is
 the identical defect this block was rewritten to fix, recurring inside the rewrite.
+
+## `ACDP_REQUIRE_PG` inherits `is_ok()` semantics, so `ACDP_REQUIRE_PG=0` enables require-mode
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 1, B4)
+- **Assumed:** matching the established `ACDP_REQUIRE_CONFORMANCE` contract matters more
+  than the surface surprise of `=0` meaning "on".
+- **Chose:** `std::env::var("ACDP_REQUIRE_PG").is_ok()` — any value, including the empty
+  string, enables require-mode. Identical to `conformance.rs:2704-2708`, which carries an
+  explicit "Do not 'improve' this to a truthiness check" comment. I carried that comment
+  across and named the reason: two require-flags in one repo disagreeing about what `=0`
+  means is a worse trap than either one being individually surprising, because the person
+  who hits it will have read the other one first.
+- **Alternatives:** a truthiness check (`== "1" || == "true"`). Rejected: it diverges from
+  the sibling for no gain, and CI sets `"1"` either way so the distinction is invisible in
+  the only place it currently runs.
+- **Blast radius if wrong:** someone sets `ACDP_REQUIRE_PG=0` expecting to disable the gate
+  and gets a red run. Cost to reverse: one line. Visible immediately, not silently.
+- **Status:** UNCONFIRMED
+
+## Phase 1 gates 23 of 34 pg tests; the other 11 belong to lane-3
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 1, B4)
+- **Assumed:** landing the gate for the 23 tests I own is better than waiting for lane-3 to
+  apply the same helper to `crates/acdp-registry-server/tests/pg_integration.rs:51-54`.
+- **Chose:** ship my half now; send lane-3 the exact helper shape through the leader
+  (`outbox/lane-2/20260912T011543Z-fyi.md`) rather than editing their file. My
+  `ci.yml:221` line sets the env var for the whole step, which covers *both* suites, so
+  lane-3's 11 tests become gated the moment they apply the helper — no second CI change.
+- **Alternatives:** (a) edit their file — forbidden by the lane claim, and it is exactly the
+  cross-lane write the claim exists to prevent; (b) block Phase 1 on lane-3 — serializes
+  two independent lanes for a one-line change.
+- **Blast radius if wrong:** until lane-3 lands their half, an absent Postgres reddens on 23
+  tests instead of 34. The gate is strictly better than the status quo either way; the risk
+  is only that someone reads "pg is gated" as covering all 34. Mitigated by saying 23-of-34
+  explicitly in the PR body rather than implying completeness.
+- **Status:** UNCONFIRMED

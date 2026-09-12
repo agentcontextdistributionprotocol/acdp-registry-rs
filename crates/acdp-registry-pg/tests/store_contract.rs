@@ -19,6 +19,10 @@
 //! Gated the same way as `acdp-registry-server/tests/pg_integration.rs`:
 //! when `ACDP_REGISTRY_TEST_PG_URL` is unset every test prints a skip
 //! line and returns success, so the suite is a no-op without a database.
+//! **`ACDP_REQUIRE_PG` turns that no-op into a hard failure** (see
+//! `pg_url_or_skip` below) — CI sets it on the steps that provide a
+//! Postgres service, so a green run there proves the assertions actually
+//! ran rather than proving only that they were skipped.
 //! Tests only touch rows they create (fresh producers/lineages and a
 //! UUID idempotency key per run), so no truncation or `serial` gating is
 //! needed.
@@ -39,10 +43,38 @@ use acdp_registry_store::ExtendedRegistryStore;
 const THREADS: usize = 16;
 const AUTHORITY: &str = "reg.test";
 
+/// True when `ACDP_REQUIRE_PG` is set to any value, including the empty
+/// string — matches the `ACDP_REQUIRE_CONFORMANCE` contract in
+/// `acdp-registry-server/tests/conformance.rs` byte-for-byte. Do not
+/// "improve" this to a truthiness check: `ACDP_REQUIRE_PG=0` enabling
+/// require-mode is the established behaviour of its sibling, and having the
+/// two disagree is worse than having either one be surprising.
+fn require_pg() -> bool {
+    std::env::var("ACDP_REQUIRE_PG").is_ok()
+}
+
+/// Postgres URL from `ACDP_REGISTRY_TEST_PG_URL`, or `None` (skip) when unset.
+///
+/// Under `ACDP_REQUIRE_PG` the `None` path panics instead. This matters
+/// because an early `return` from a `#[tokio::test]` is a **pass**: with the
+/// variable unset all 23 tests below report `ok` having asserted nothing and
+/// having never opened a connection, which is indistinguishable in CI output
+/// from 23 tests that genuinely exercised a database. Measured on this suite:
+/// 23 passed in 0.01s with the URL unset vs 23 passed in 0.62s with it set.
+///
+/// Require-mode is deliberately **opt-in** rather than an unconditional
+/// panic, because `.github/workflows/ci.yml`'s `cargo test --workspace` step
+/// runs this suite with no `ACDP_REGISTRY_TEST_PG_URL` on purpose; panicking
+/// there would break a step that is correct as written. The env var is set
+/// only on the steps that provide a Postgres service.
 fn pg_url_or_skip() -> Option<String> {
     match std::env::var("ACDP_REGISTRY_TEST_PG_URL") {
         Ok(u) => Some(u),
         Err(_) => {
+            assert!(
+                !require_pg(),
+                "ACDP_REQUIRE_PG is set but ACDP_REGISTRY_TEST_PG_URL is not"
+            );
             eprintln!("ACDP_REGISTRY_TEST_PG_URL unset; skipping pg store contract test");
             None
         }
