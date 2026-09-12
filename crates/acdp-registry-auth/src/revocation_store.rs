@@ -14,6 +14,25 @@ use chrono::{DateTime, Utc};
 
 use crate::AuthError;
 
+/// The instant at which a revocation tombstone stops being needed.
+///
+/// **A tombstone must outlive the validator's acceptance window, not merely the
+/// token's `exp`.** [`crate::JwtSigner::validate`] applies `leeway_seconds` of
+/// clock-skew tolerance, so a token is still decoded and accepted until
+/// `exp + leeway`. Comparing a tombstone against a bare `now` therefore retires
+/// it `leeway` seconds too early, and in the window `(exp, exp + leeway]` a
+/// **revoked token is accepted again after its own expiry** — revocation
+/// un-revokes.
+///
+/// Both halves of the lifecycle must use this: the check
+/// ([`RevocationStore::is_revoked`]) and the eviction
+/// ([`RevocationStore::evict_expired`]). Widening only the check leaves eviction
+/// deleting the row at `expires_at`, which defeats the fix through the other
+/// door while a check-only test still passes.
+pub fn tombstone_cutoff(now: DateTime<Utc>, leeway_seconds: u64) -> DateTime<Utc> {
+    now - chrono::Duration::seconds(leeway_seconds as i64)
+}
+
 /// Tombstone record. The signer rejects any presented token whose `jti`
 /// has a row here (revoked = true) and whose `expires_at` has not yet
 /// elapsed (expired tokens are harmless and don't need to live forever).
@@ -50,15 +69,27 @@ pub trait RevocationStore: Send + Sync {
     /// (which itself is sync). DB-backed implementations bridge via
     /// `block_in_place + Handle::block_on(...)`, matching the storage
     /// layer pattern elsewhere in this workspace.
-    fn is_revoked(&self, jti: &str) -> Result<bool, AuthError>;
+    ///
+    /// `cutoff` is the instant returned by [`tombstone_cutoff`] — `now` less the
+    /// validator's leeway, NOT a bare `now`. A tombstone counts as live while
+    /// `expires_at > cutoff`, so it outlives every token the validator would
+    /// still accept. Passing a bare `now` here reopens the window this parameter
+    /// exists to close.
+    fn is_revoked(&self, jti: &str, cutoff: DateTime<Utc>) -> Result<bool, AuthError>;
 
     /// Whether a stored revocation belongs to `agent_did`. Used by the
     /// revocation endpoint to forbid cross-agent revocations.
     async fn owner_of(&self, jti: &str) -> Result<Option<String>, AuthError>;
 
-    /// Drop tombstones whose `expires_at` has elapsed. Bounded background
-    /// task — keeps the table from growing forever.
-    async fn evict_expired(&self, now: DateTime<Utc>) -> Result<(), AuthError>;
+    /// Drop tombstones that are no longer needed. Bounded background task —
+    /// keeps the table from growing forever.
+    ///
+    /// `cutoff` MUST be [`tombstone_cutoff`]'s value, not a bare `now`: a row is
+    /// still needed while the validator would still accept a token bearing that
+    /// `jti`, which is `leeway` seconds past `expires_at`. This is the eviction
+    /// half of the pair described on [`tombstone_cutoff`]; getting it wrong
+    /// deletes the evidence that [`Self::is_revoked`] is about to look for.
+    async fn evict_expired(&self, cutoff: DateTime<Utc>) -> Result<(), AuthError>;
 
     /// Read the persisted poll cursor for a federated `issuer`.
     ///
@@ -139,13 +170,13 @@ impl RevocationStore for InMemoryRevocationStore {
         Ok(())
     }
 
-    fn is_revoked(&self, jti: &str) -> Result<bool, AuthError> {
+    fn is_revoked(&self, jti: &str, cutoff: DateTime<Utc>) -> Result<bool, AuthError> {
         let g = self
             .inner
             .lock()
             .map_err(|_| AuthError::Internal("lock poisoned".into()))?;
         Ok(g.get(jti)
-            .is_some_and(|e| e.revoked && e.record.expires_at > Utc::now()))
+            .is_some_and(|e| e.revoked && e.record.expires_at > cutoff))
     }
 
     async fn owner_of(&self, jti: &str) -> Result<Option<String>, AuthError> {
@@ -156,12 +187,12 @@ impl RevocationStore for InMemoryRevocationStore {
         Ok(g.get(jti).map(|e| e.record.agent_did.clone()))
     }
 
-    async fn evict_expired(&self, now: DateTime<Utc>) -> Result<(), AuthError> {
+    async fn evict_expired(&self, cutoff: DateTime<Utc>) -> Result<(), AuthError> {
         let mut g = self
             .inner
             .lock()
             .map_err(|_| AuthError::Internal("lock poisoned".into()))?;
-        g.retain(|_, e| e.record.expires_at > now);
+        g.retain(|_, e| e.record.expires_at > cutoff);
         Ok(())
     }
 
@@ -236,7 +267,7 @@ impl RevocationStore for SqliteRevocationStore {
         .map_err(|e| AuthError::Storage(e.to_string()))
     }
 
-    fn is_revoked(&self, jti: &str) -> Result<bool, AuthError> {
+    fn is_revoked(&self, jti: &str, cutoff: DateTime<Utc>) -> Result<bool, AuthError> {
         let jti = jti.to_string();
         self.block_on(async move {
             use sqlx::Row;
@@ -256,7 +287,7 @@ impl RevocationStore for SqliteRevocationStore {
             let exp = chrono::DateTime::parse_from_rfc3339(&exp)
                 .map_err(|e| AuthError::Storage(e.to_string()))?
                 .with_timezone(&Utc);
-            Ok(exp > Utc::now())
+            Ok(exp > cutoff)
         })
     }
 
@@ -270,9 +301,9 @@ impl RevocationStore for SqliteRevocationStore {
         Ok(row.and_then(|r| r.try_get::<String, _>("agent_did").ok()))
     }
 
-    async fn evict_expired(&self, now: DateTime<Utc>) -> Result<(), AuthError> {
+    async fn evict_expired(&self, cutoff: DateTime<Utc>) -> Result<(), AuthError> {
         sqlx::query("DELETE FROM issued_tokens WHERE expires_at <= ?")
-            .bind(now.to_rfc3339())
+            .bind(cutoff.to_rfc3339())
             .execute(&self.pool)
             .await
             .map(|_| ())
@@ -356,7 +387,7 @@ impl RevocationStore for PgRevocationStore {
         .map_err(|e| AuthError::Storage(e.to_string()))
     }
 
-    fn is_revoked(&self, jti: &str) -> Result<bool, AuthError> {
+    fn is_revoked(&self, jti: &str, cutoff: DateTime<Utc>) -> Result<bool, AuthError> {
         let jti = jti.to_string();
         self.block_on(async move {
             use sqlx::Row;
@@ -373,7 +404,7 @@ impl RevocationStore for PgRevocationStore {
             let exp: DateTime<Utc> = row
                 .try_get("expires_at")
                 .map_err(|e| AuthError::Storage(e.to_string()))?;
-            Ok(exp > Utc::now())
+            Ok(exp > cutoff)
         })
     }
 
@@ -387,9 +418,9 @@ impl RevocationStore for PgRevocationStore {
         Ok(row.and_then(|r| r.try_get::<String, _>("agent_did").ok()))
     }
 
-    async fn evict_expired(&self, now: DateTime<Utc>) -> Result<(), AuthError> {
+    async fn evict_expired(&self, cutoff: DateTime<Utc>) -> Result<(), AuthError> {
         sqlx::query("DELETE FROM issued_tokens WHERE expires_at <= $1")
-            .bind(now)
+            .bind(cutoff)
             .execute(&self.pool)
             .await
             .map(|_| ())
@@ -446,12 +477,18 @@ mod tests {
             Some("did:web:agent.example"),
             "the issuance must be observable by the revocation endpoint"
         );
-        assert!(!s.is_revoked("t1").unwrap(), "fresh token is not revoked");
+        assert!(
+            !s.is_revoked("t1", crate::tombstone_cutoff(Utc::now(), 0))
+                .unwrap(),
+            "fresh token is not revoked"
+        );
 
         // 2. revoke — is_revoked flips to true. owner_of still works
         //    so a subsequent attempt to re-revoke is allowed.
         s.revoke(rec("t1")).await.unwrap();
-        assert!(s.is_revoked("t1").unwrap());
+        assert!(s
+            .is_revoked("t1", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
         assert_eq!(
             s.owner_of("t1").await.unwrap().as_deref(),
             Some("did:web:agent.example")
@@ -462,7 +499,8 @@ mod tests {
         //    not make a tombstoned token usable again.
         s.record_issued(rec("t1")).await.unwrap();
         assert!(
-            s.is_revoked("t1").unwrap(),
+            s.is_revoked("t1", crate::tombstone_cutoff(Utc::now(), 0))
+                .unwrap(),
             "re-recording an issued jti must not clear the tombstone"
         );
     }
@@ -477,9 +515,13 @@ mod tests {
 
     #[tokio::test]
     async fn in_memory_is_revoked_false_for_expired_tombstone() {
-        // An expired token is harmless: even with a tombstone present,
-        // is_revoked is false (validate already rejects it on exp), so the
-        // store doesn't have to keep dead rows alive to stay correct.
+        // Past the CUTOFF a tombstone is genuinely spent and may go cold.
+        // NOTE the justification, which used to read "validate already rejects
+        // it on exp" and was false: with leeway, validate does NOT reject at
+        // `exp` — it accepts until `exp + leeway`, which is the whole reason
+        // `is_revoked` takes a cutoff instead of comparing against `now`. This
+        // test passes a ZERO-leeway cutoff, so `cutoff == now` and the old
+        // boundary is what is being asserted here.
         let s = InMemoryRevocationStore::new();
         s.revoke(RevocationRecord {
             jti: "expired".into(),
@@ -489,7 +531,8 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            !s.is_revoked("expired").unwrap(),
+            !s.is_revoked("expired", crate::tombstone_cutoff(Utc::now(), 0))
+                .unwrap(),
             "expired tombstone must not count as an active revocation"
         );
     }
@@ -512,9 +555,15 @@ mod tests {
         .await
         .unwrap();
         let s = SqliteRevocationStore::new(pool);
-        assert!(!s.is_revoked("t9").unwrap(), "unknown jti is not revoked");
+        assert!(
+            !s.is_revoked("t9", crate::tombstone_cutoff(Utc::now(), 0))
+                .unwrap(),
+            "unknown jti is not revoked"
+        );
         s.revoke(rec("t9")).await.unwrap();
-        assert!(s.is_revoked("t9").unwrap());
+        assert!(s
+            .is_revoked("t9", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
         assert_eq!(
             s.owner_of("t9").await.unwrap().as_deref(),
             Some("did:web:agent.example")
@@ -527,7 +576,9 @@ mod tests {
         // The AuthService policy enforces caller==owner before calling this.
         let s = InMemoryRevocationStore::new();
         s.revoke(rec("t2")).await.unwrap();
-        assert!(s.is_revoked("t2").unwrap());
+        assert!(s
+            .is_revoked("t2", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
     }
 
     #[tokio::test]
@@ -620,15 +671,192 @@ mod tests {
         .unwrap();
         let s = SqliteRevocationStore::new(pool);
         s.record_issued(rec("t1")).await.unwrap();
-        assert!(!s.is_revoked("t1").unwrap());
+        assert!(!s
+            .is_revoked("t1", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
         assert_eq!(
             s.owner_of("t1").await.unwrap().as_deref(),
             Some("did:web:agent.example")
         );
         s.revoke(rec("t1")).await.unwrap();
-        assert!(s.is_revoked("t1").unwrap());
+        assert!(s
+            .is_revoked("t1", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
         // Tombstone-preservation: re-recording must not clear `revoked`.
         s.record_issued(rec("t1")).await.unwrap();
-        assert!(s.is_revoked("t1").unwrap());
+        assert!(s
+            .is_revoked("t1", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
+    }
+
+    // ── E1: the tombstone must outlive the validator's acceptance window ──
+    //
+    // Enumerated per backend rather than totalled (Rule 55/64): memory, sqlite
+    // and postgres each get their own guard, because "the fix works" is a claim
+    // about three separate comparisons in three separate impls.
+
+    /// A tombstone whose token has expired within the leeway is STILL live.
+    /// Before the fix this returned false and a revoked token sailed through.
+    #[tokio::test]
+    async fn in_memory_tombstone_outlives_expiry_by_the_leeway() {
+        let s = InMemoryRevocationStore::new();
+        let expired_5s_ago = Utc::now() - chrono::Duration::seconds(5);
+        s.revoke(RevocationRecord {
+            jti: "inside-window".into(),
+            agent_did: "did:web:agent.example".into(),
+            expires_at: expired_5s_ago,
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            s.is_revoked("inside-window", crate::tombstone_cutoff(Utc::now(), 30))
+                .unwrap(),
+            "a token 5s past exp is still accepted under 30s leeway, so its tombstone must \
+             still count as an active revocation"
+        );
+        // And the boundary still exists — this is not "tombstones live forever".
+        assert!(
+            !s.is_revoked("inside-window", crate::tombstone_cutoff(Utc::now(), 0))
+                .unwrap(),
+            "with no leeway the same tombstone is spent; the window is bounded by leeway, \
+             not removed"
+        );
+    }
+
+    /// THE PAIRED HALF. Widening the check alone is not a fix: eviction would
+    /// delete the row at `expires_at` and the revoked token would be accepted
+    /// again — through the other door, with the check-side test still green.
+    #[tokio::test]
+    async fn in_memory_eviction_spares_a_tombstone_inside_the_window() {
+        let s = InMemoryRevocationStore::new();
+        let expired_5s_ago = Utc::now() - chrono::Duration::seconds(5);
+        s.revoke(RevocationRecord {
+            jti: "spare-me".into(),
+            agent_did: "did:web:agent.example".into(),
+            expires_at: expired_5s_ago,
+        })
+        .await
+        .unwrap();
+
+        s.evict_expired(crate::tombstone_cutoff(Utc::now(), 30))
+            .await
+            .unwrap();
+        assert!(
+            s.is_revoked("spare-me", crate::tombstone_cutoff(Utc::now(), 30))
+                .unwrap(),
+            "eviction must not delete a tombstone the validator would still consult; \
+             evicting at `expires_at` defeats revocation through the eviction door"
+        );
+
+        // Past the window it is still collected — the table stays bounded.
+        s.evict_expired(crate::tombstone_cutoff(Utc::now(), 0))
+            .await
+            .unwrap();
+        assert!(
+            s.owner_of("spare-me").await.unwrap().is_none(),
+            "once outside the acceptance window the row must still be reclaimed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_tombstone_outlives_expiry_and_survives_eviction() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE issued_tokens (\
+                jti TEXT PRIMARY KEY, \
+                agent_did TEXT NOT NULL, \
+                expires_at TEXT NOT NULL, \
+                revoked INTEGER NOT NULL DEFAULT 0\
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let s = SqliteRevocationStore::new(pool);
+        s.revoke(RevocationRecord {
+            jti: "sq-window".into(),
+            agent_did: "did:web:agent.example".into(),
+            expires_at: Utc::now() - chrono::Duration::seconds(5),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            s.is_revoked("sq-window", crate::tombstone_cutoff(Utc::now(), 30))
+                .unwrap(),
+            "sqlite: tombstone must stay live for the leeway past exp"
+        );
+        s.evict_expired(crate::tombstone_cutoff(Utc::now(), 30))
+            .await
+            .unwrap();
+        assert!(
+            s.is_revoked("sq-window", crate::tombstone_cutoff(Utc::now(), 30))
+                .unwrap(),
+            "sqlite: eviction must spare a tombstone still inside the window"
+        );
+    }
+
+    /// Postgres half. Gated the same way the rest of this workspace gates pg:
+    /// an absent URL skips, but `ACDP_REQUIRE_PG=1` turns a missing URL into a
+    /// FAILURE rather than a silent pass — otherwise "no pg" and "pg passed"
+    /// are indistinguishable, which is the defect my own B4 removed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_tombstone_outlives_expiry_and_survives_eviction() {
+        let url = match std::env::var("ACDP_REGISTRY_TEST_PG_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                assert!(
+                    std::env::var("ACDP_REQUIRE_PG").unwrap_or_default() != "1",
+                    "ACDP_REQUIRE_PG=1 but ACDP_REGISTRY_TEST_PG_URL is unset"
+                );
+                return;
+            }
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("pg connect");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS issued_tokens (\
+                jti TEXT PRIMARY KEY, \
+                agent_did TEXT NOT NULL, \
+                expires_at TIMESTAMPTZ NOT NULL, \
+                revoked BOOLEAN NOT NULL DEFAULT false\
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create table");
+
+        // Unique per run: this database is persistent across runs, and an
+        // exact-state assertion against accumulated rows is exactly how I
+        // shipped a flake in H-H.
+        let jti = format!(
+            "pg-window-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let s = PgRevocationStore::new(pool);
+        s.revoke(RevocationRecord {
+            jti: jti.clone(),
+            agent_did: "did:web:agent.example".into(),
+            expires_at: Utc::now() - chrono::Duration::seconds(5),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            s.is_revoked(&jti, crate::tombstone_cutoff(Utc::now(), 30))
+                .unwrap(),
+            "pg: tombstone must stay live for the leeway past exp"
+        );
+        s.evict_expired(crate::tombstone_cutoff(Utc::now(), 30))
+            .await
+            .unwrap();
+        assert!(
+            s.is_revoked(&jti, crate::tombstone_cutoff(Utc::now(), 30))
+                .unwrap(),
+            "pg: eviction must spare a tombstone still inside the window"
+        );
     }
 }

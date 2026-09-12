@@ -383,11 +383,19 @@ impl AuthService {
             }
         });
         if let Some(rev) = self.revocations.clone() {
+            // Retire tombstones against the validator's acceptance window, not
+            // bare `now`. Evicting at `expires_at` would delete the row while
+            // `JwtSigner::validate` is still willing to accept a token bearing
+            // that `jti` — defeating revocation through the eviction door even
+            // though the check itself is correct. The leeway comes from the
+            // signer so the two cannot disagree.
+            let leeway = self.signer.leeway_seconds();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
                 loop {
                     interval.tick().await;
-                    if let Err(e) = rev.evict_expired(Utc::now()).await {
+                    let cutoff = crate::tombstone_cutoff(Utc::now(), leeway);
+                    if let Err(e) = rev.evict_expired(cutoff).await {
                         tracing::warn!(error = %e, "revocation eviction failed");
                     }
                 }
@@ -770,7 +778,9 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AuthError::TokenInvalid(_)));
         // The token stays live since the revoke was refused.
-        assert!(!store.is_revoked("jti-owned").unwrap());
+        assert!(!store
+            .is_revoked("jti-owned", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
     }
 
     #[tokio::test]
@@ -788,7 +798,9 @@ mod tests {
         svc.revoke_token("jti-owned", "did:web:agents.test:alice")
             .await
             .expect("owner may revoke");
-        assert!(store.is_revoked("jti-owned").unwrap());
+        assert!(store
+            .is_revoked("jti-owned", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

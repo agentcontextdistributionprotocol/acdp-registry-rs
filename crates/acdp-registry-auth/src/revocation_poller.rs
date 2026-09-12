@@ -309,8 +309,12 @@ mod tests {
             entry("empty-iss", "", 9_999_999_999),
         ];
         assert!(apply_entries(&entries, &store, &cfg).await);
-        assert!(store.is_revoked("matches").unwrap());
-        assert!(store.is_revoked("empty-iss").unwrap());
+        assert!(store
+            .is_revoked("matches", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
+        assert!(store
+            .is_revoked("empty-iss", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
     }
 
     #[tokio::test]
@@ -323,7 +327,9 @@ mod tests {
         let entries = vec![entry("foreign", "evil.issuer", 9_999_999_999)];
         assert!(apply_entries(&entries, &store, &cfg).await);
         assert!(
-            !store.is_revoked("foreign").unwrap(),
+            !store
+                .is_revoked("foreign", crate::tombstone_cutoff(Utc::now(), 0))
+                .unwrap(),
             "a foreign-issuer entry must not revoke a local token"
         );
     }
@@ -341,10 +347,14 @@ mod tests {
         ];
         assert!(apply_entries(&entries, &store, &cfg).await);
         assert!(
-            !store.is_revoked("bad-exp").unwrap(),
+            !store
+                .is_revoked("bad-exp", crate::tombstone_cutoff(Utc::now(), 0))
+                .unwrap(),
             "an entry with a malformed exp must be skipped"
         );
         // The well-formed sibling in the same batch is still applied.
-        assert!(store.is_revoked("good").unwrap());
+        assert!(store
+            .is_revoked("good", crate::tombstone_cutoff(Utc::now(), 0))
+            .unwrap());
     }
 }
