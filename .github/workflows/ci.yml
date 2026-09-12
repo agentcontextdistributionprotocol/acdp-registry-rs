@@ -86,9 +86,22 @@ jobs:
       # Scope note: this is acdp-registry-server's feature space, NOT the
       # workspace's. `acdp-registry-types` has its own `default = ["axum"]` /
       # `axum` pair whose no-default-features build is a supported consumer
-      # scenario and is still built by no job here. #200 assumed it was
-      # "covered incidentally"; it is not. Tracked as #221 rather than folded
-      # in here.
+      # scenario.
+      #
+      # This note used to end "#200 assumed it was 'covered incidentally'; it
+      # is not." That was wrong, and #200 was right. Measured:
+      # acdp-registry-pg declares the dependency `default-features = false`
+      # (crates/acdp-registry-pg/Cargo.toml:16), and `cargo tree -p
+      # acdp-registry-pg -f '{p} {f}'` shows acdp-registry-types with an EMPTY
+      # feature set, against `axum,default` when resolved for
+      # acdp-registry-server. So the `cargo test -p acdp-registry-pg` step in
+      # the test job already compiles it at feat=[] under -D warnings.
+      #
+      # It is a -p build, which matters: `cargo test --workspace` unifies
+      # features and would resolve axum,default instead. The incidental
+      # coverage therefore hangs on that one step keeping its -p form.
+      # #221 is closed by making it deliberate (see the types steps below),
+      # not by adding coverage that did not exist.
       #
       # 7 and 8 are the inert builds: with no storage backend, `run()` bails
       # naming which feature to rebuild with, so the whole serve path is
@@ -150,6 +163,25 @@ jobs:
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features playground \
             --all-targets -- -D warnings
+
+      # Closes #221. `acdp-registry-types` has its own default = ["axum"]
+      # feature pair, and its no-default build is a supported consumer
+      # scenario that the eight steps above do NOT cover — they enumerate
+      # acdp-registry-server's feature space, not the workspace's.
+      #
+      # CORRECTION worth stating, because #221 does not say it: that
+      # configuration is ALREADY compiled at feat=[] today, incidentally, by
+      # `cargo test -p acdp-registry-pg` (the test job) — acdp-registry-pg
+      # depends on acdp-registry-types without default features, confirmed
+      # with `cargo tree -f '{p} {f}'`. So this step does not close a hole in
+      # what is built; it makes the coverage DELIBERATE instead of a
+      # side effect that any dependency edit could silently remove. Said
+      # plainly so nobody "discovers" the incidental build mid-review and
+      # concludes the step is redundant.
+      - name: clippy (types, no default features)
+        run: |
+          cargo clippy --locked -p acdp-registry-types \
+            --no-default-features --all-targets -- -D warnings
 
   # The workspace declares rust-version = 1.88; make that claim enforceable
   # instead of aspirational. Checks both shipped storage backends.
@@ -251,6 +283,14 @@ jobs:
         run: |
           cargo test --locked -p acdp-registry-server \
             --no-default-features --features storage-memory
+      # #221's other half: run the types crate's own tests at feat=[], not
+      # just compile it there. Its no-default build is a supported consumer
+      # configuration (see the clippy job's note on the incidental coverage
+      # that already exists via acdp-registry-pg).
+      - name: cargo test (types, no default features)
+        run: |
+          cargo test --locked -p acdp-registry-types \
+            --no-default-features
 
   # Runs the spec conformance suite against a SHA-pinned spec checkout.
   # ACDP_REQUIRE_CONFORMANCE turns a missing spec into a hard failure, so
