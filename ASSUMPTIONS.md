@@ -1386,3 +1386,48 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   by the corrected comment, which now states the divergence with measured numbers instead of
   denying it, so nobody builds on a false guarantee in the meantime.
 - **Status:** UNCONFIRMED — the (a)-vs-plan choice is the decision B2 must settle.
+
+## `q=` semantics: Postgres wins, SQLite raised to it via porter + a verified stopword list
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 2b, B2)
+- **Assumed:** of the two ways to make `q=` agree, keeping Postgres's behaviour and changing
+  SQLite is the right trade.
+- **Chose:** SQLite adopts Postgres. `tokenize = 'porter unicode61'` (migration 013) for
+  stemming, plus query-side stopword removal in `fts5_escape` using PostgreSQL 16's own
+  `english.stop`. Postgres is the production backend, stemming is better search behaviour,
+  and the cost falls on SQLite's FTS index — derived data, rebuilt from `contexts`, so the
+  change is reversible and no context data is rewritten. Measured before committing to it:
+  porter stems *through* FTS5 phrase quoting, so `fts5_escape` keeps quoting every token and
+  loses none of its operator-neutralizing property.
+- **Alternatives:** (a) **pg adopts SQLite** (`simple` instead of `english`) — would give
+  *exact structural* parity with no word list and no stemmer mismatch possible, and was
+  genuinely tempting for that reason; rejected because it removes stemming from the
+  production backend, a real search-quality regression, to buy a testing property. (b) Ship
+  approximate parity without saying so — rejected; that is the same overclaim as the comment
+  this phase deleted.
+- **Blast radius if wrong:** SQLite search results change — inflected queries start matching,
+  stopword-only queries stop matching. Reversible by restoring the previous tokenizer and
+  rebuilding the derived index; no data migration either way. The residual correctness gap is
+  that porter and snowball disagree on some words, so parity is pinned per-mechanism rather
+  than proven across the language — stated on `fulltext::PG_ENGLISH_STOPWORDS` and in the
+  parity suite's docs rather than left implicit.
+- **Status:** UNCONFIRMED
+
+## The stopword table is verified against Postgres rather than trusted
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 2b, B2)
+- **Assumed:** a hand-copied 127-entry table will go stale and nobody will notice, which is
+  the characteristic failure of hand-maintained tables.
+- **Chose:** keep the table (it must be available to SQLite at runtime, with no database in
+  reach) but *check* it: the pg parity suite asserts, for every entry, that
+  `to_tsvector('english', w)` is empty according to the live server, plus a negative control
+  so the check cannot pass vacuously. Drift reddens a test instead of quietly skewing search.
+- **Alternatives:** query Postgres at runtime (impossible for the SQLite backend, which may
+  run with no Postgres anywhere); trust the copy (the failure mode above); derive it from a
+  crate (adds a dependency for 127 strings).
+- **Blast radius if wrong:** the one direction the check cannot cover is Postgres *gaining* a
+  stopword this list lacks — their list is a file not enumerable from SQL. Then SQLite would
+  keep a term Postgres drops, and that specific divergence would go unnoticed. Documented on
+  the constant; it is the reason the suite pins mechanisms rather than claiming exhaustive
+  agreement.
+- **Status:** UNCONFIRMED

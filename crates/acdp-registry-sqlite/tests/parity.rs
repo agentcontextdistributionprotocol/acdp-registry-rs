@@ -23,3 +23,9 @@ async fn data_period_filters_match_the_cross_backend_contract() {
     let (store, _tmp) = store().await;
     parity::assert_data_period_filter_parity(&store, "sqlite").await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fulltext_matches_the_cross_backend_contract() {
+    let (store, _tmp) = store().await;
+    parity::assert_fulltext_parity(&store, "sqlite").await;
+}

@@ -43,9 +43,16 @@ const AUTHORITY: &str = "reg.test";
 fn producer(seed: u8) -> Producer {
     Producer::new(
         SigningKey::from_bytes(&[seed; 32]),
-        AgentDid::new(format!("did:web:agents.test:parity-{seed}")),
-        format!("did:web:agents.test:parity-{seed}#key-1"),
+        AgentDid::new(agent_did(seed)),
+        format!("{}#key-1", agent_did(seed)),
     )
+}
+
+/// The DID `producer(seed)` publishes under. Derived from the seed rather than
+/// read back off `Producer` (whose `agent_id` is private), and used to scope
+/// every search below to one producer so unrelated rows cannot decide a result.
+fn agent_did(seed: u8) -> String {
+    format!("did:web:agents.test:parity-{seed}")
 }
 
 /// `2026-01-01T00:00:00Z` plus `ms` milliseconds.
@@ -214,4 +221,142 @@ where
 /// a real client sends rather than a convenient one.
 fn fmt(dt: DateTime<Utc>) -> String {
     dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+/// Publish one context with a searchable title, returning its `ctx_id`.
+async fn publish_titled<S>(store: &Arc<S>, seed: u8, title: &str) -> String
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let p = producer(seed);
+    let req = p
+        .publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid publish request");
+    let s = Arc::clone(store);
+    let outcome = tokio::task::spawn_blocking(move || {
+        s.commit_publish(PublishCommit {
+            req: &req,
+            authority: AUTHORITY,
+            idempotency: None,
+            tenant: None,
+            receipt_minter: None,
+            predecessor_admission: None,
+        })
+    })
+    .await
+    .expect("publish task")
+    .expect("publish succeeds");
+    match outcome {
+        PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => {
+            r.ctx_id.as_str().to_string()
+        }
+    }
+}
+
+/// **B2 — `q=` must mean the same thing on every backend.**
+///
+/// SQLite used FTS5's default `unicode61` tokenizer (no stemmer, no stopwords)
+/// while Postgres used `plainto_tsquery('english', …)` over an `english`
+/// tsvector (snowball stemming, stopwords removed). Measured before the fix:
+/// `q=running` matched "run report" on pg and nothing on sqlite; `q=the`
+/// matched on sqlite and nothing on pg.
+///
+/// Postgres's semantics won; SQLite was raised to them via the `porter`
+/// tokenizer plus query-side stopword removal. See
+/// [`crate::fulltext`] for the decision and its cost.
+///
+/// **What this pins, and what it deliberately does not.** FTS5 `porter` and
+/// snowball `english` are different implementations and will not agree on
+/// every word in the language, so asserting stemmer identity would be an
+/// overclaim. These cases pin the *mechanisms* instead — that a stemmed match
+/// happens at all, that stopwords are dropped, that dropping them does not
+/// destroy the rest of the query, that term conjunction holds, and that case
+/// folding applies. A backend losing any of those fails here.
+pub async fn assert_fulltext_parity<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    // Scope every query to one producer so unrelated rows — including rows
+    // left by earlier runs against a persistent database — cannot decide the
+    // outcome either way.
+    let run = publish_titled(store, 210, "run report").await;
+    let agent_run = agent_did(210);
+    let q = |query: &str| SearchParams {
+        q: Some(query.to_string()),
+        agent_id: Some(agent_run.clone()),
+        ..Default::default()
+    };
+
+    // 1. Stemming, the case that was broken on sqlite: an inflected query term
+    //    must reach an uninflected document.
+    assert!(
+        search_contains(store, &q("running"), &run),
+        "[{label}] q=running must match the document titled \"run report\" — \
+         this is the stemming case that diverged (pg matched, sqlite did not)"
+    );
+
+    // 2. Stemming the other way: an uninflected query must reach an inflected
+    //    document. Asserting only direction 1 would pass on a backend that
+    //    stems the query but not the index.
+    let running = publish_titled(store, 211, "running reports").await;
+    let agent_running = agent_did(211);
+    let q2 = |query: &str| SearchParams {
+        q: Some(query.to_string()),
+        agent_id: Some(agent_running.clone()),
+        ..Default::default()
+    };
+    assert!(
+        search_contains(store, &q2("report"), &running),
+        "[{label}] q=report must match \"running reports\" — the index side \
+         must stem too, not just the query side"
+    );
+
+    // 3. Stopwords: a stopword-only query matches nothing, because Postgres
+    //    produces an empty tsquery for it.
+    let the = publish_titled(store, 212, "the quarterly figures").await;
+    let agent_the = agent_did(212);
+    let q3 = |query: &str| SearchParams {
+        q: Some(query.to_string()),
+        agent_id: Some(agent_the.clone()),
+        ..Default::default()
+    };
+    assert!(
+        !search_contains(store, &q3("the"), &the),
+        "[{label}] q=the must match NOTHING even though the document contains \
+         the word — pg drops stopwords and yields an empty tsquery, so sqlite \
+         must drop them too"
+    );
+
+    // 4. A stopword must not poison the rest of the query. Dropping "the"
+    //    has to leave "figures" doing its job; a naive implementation that
+    //    bails out on any stopword would fail here while passing case 3.
+    assert!(
+        search_contains(store, &q3("the figures"), &the),
+        "[{label}] q='the figures' must still match — removing the stopword \
+         must leave the remaining term active, not empty the whole query"
+    );
+
+    // 5. Case folding.
+    assert!(
+        search_contains(store, &q("RUNNING"), &run),
+        "[{label}] q=RUNNING must match \"run report\" — matching is case-insensitive"
+    );
+
+    // 6. Term conjunction: all terms must be present (AND), which is the one
+    //    thing the backends always agreed on. Pinned so a tokenizer change
+    //    cannot silently turn it into OR.
+    assert!(
+        search_contains(store, &q("running report"), &run),
+        "[{label}] q='running report' must match a document containing both terms"
+    );
+    assert!(
+        !search_contains(store, &q("running elephant"), &run),
+        "[{label}] q='running elephant' must NOT match — terms are AND-ed, so a \
+         missing term excludes the document; if this passes, conjunction has \
+         become disjunction"
+    );
 }
