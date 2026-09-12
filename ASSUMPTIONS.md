@@ -1325,7 +1325,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   the only place it currently runs.
 - **Blast radius if wrong:** someone sets `ACDP_REQUIRE_PG=0` expecting to disable the gate
   and gets a red run. Cost to reverse: one line. Visible immediately, not silently.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — matches the sibling gate byte-for-byte; see DECISIONS.md H-B #1.
 
 ## Phase 1 gates 23 of 34 pg tests; the other 11 belong to lane-3
 
@@ -1343,7 +1343,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   tests instead of 34. The gate is strictly better than the status quo either way; the risk
   is only that someone reads "pg is gated" as covering all 34. Mitigated by saying 23-of-34
   explicitly in the PR body rather than implying completeness.
-- **Status:** UNCONFIRMED
+- **Status:** RESOLVED (2026-09-12) — lane-3's #227 landed the same helper; gating is now **34 of 34**, verified in the tree. See DECISIONS.md H-B #2.
 
 ## `unixepoch(…, 'subsec')` over a canonical stored timestamp column for `data_period`
 
@@ -1364,7 +1364,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   with very many contexts pays for it in search latency. Nothing is stored differently, so
   reversal is a one-line revert with no data migration. If latency is ever observed, (c) is
   the upgrade path and this entry is the record of why it was deferred.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — query-side only; the canonical-column upgrade stays deferred until latency is measured. See DECISIONS.md H-B #3.
 
 ## B2 split out of Phase 2 rather than shipped alongside B1
 
@@ -1385,7 +1385,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** `q=` keeps diverging between backends until B2 lands. Mitigated
   by the corrected comment, which now states the divergence with measured numbers instead of
   denying it, so nobody builds on a false guarantee in the meantime.
-- **Status:** UNCONFIRMED — the (a)-vs-plan choice is the decision B2 must settle.
+- **Status:** RESOLVED (2026-09-12) — the split is complete; B2 shipped in #231. See DECISIONS.md H-B #4.
 
 ## `q=` semantics: Postgres wins, SQLite raised to it via porter + a verified stopword list
 
@@ -1411,7 +1411,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   that porter and snowball disagree on some words, so parity is pinned per-mechanism rather
   than proven across the language — stated on `fulltext::PG_ENGLISH_STOPWORDS` and in the
   parity suite's docs rather than left implicit.
-- **Status:** UNCONFIRMED
+- **Status:** UNCONFIRMED — **escalated to the human**. Reversible, but a product judgement on a public API taken against a defensible alternative. Recommendation: confirm as taken. See DECISIONS.md H-B #10.
 
 ## The stopword table is verified against Postgres rather than trusted
 
@@ -1430,7 +1430,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   keep a term Postgres drops, and that specific divergence would go unnoticed. Documented on
   the constant; it is the reason the suite pins mechanisms rather than claiming exhaustive
   agreement.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — the pg suite checks all 127 entries against the live server. See DECISIONS.md H-B #5.
 
 ## B3 fixed by reconciling status against events, not by taking a read snapshot
 
@@ -1460,7 +1460,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   read, be served as `retracted` slightly after becoming active again. Stale, never
   self-contradictory, and stale-toward-retracted is the safe direction to be wrong about
   whether data has been withdrawn. Reversal is deleting four call-site lines.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — both preconditions verified in code; reconciliation beats a snapshot on shape. See DECISIONS.md H-B #6.
 
 ## B5's busy timeout is an in-crate constant, not a config field — and has no behavioural test
 
@@ -1480,7 +1480,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** 30s is too long for a caller that would rather fail fast, or too
   short for a pathological disk. Either way it is one constant, and the old behaviour was an
   undocumented 5s from sqlx.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) as an accepted, documented gap — recommendation is NOT to add a flaky timing test. See DECISIONS.md H-B #7.
 
 ## B7 is a parity fix, not a live exploit closed — and both the finding and my own read were wrong
 
@@ -1502,7 +1502,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   the SDK already does, in the wrong layer.
 - **Blast radius if wrong:** `INTEGER` → `BIGINT` rewrites the table under an ACCESS EXCLUSIVE
   lock. Acceptable at this scale, worth scheduling on a very large `contexts`.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — measured reversible (MAX(version)=2, zero rows over i32::MAX), so it drops out of the critical tier. See DECISIONS.md H-B #8.
 
 ## `lineages` is write-only and was deliberately NOT dropped
 
@@ -1519,6 +1519,8 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   desirable.
 - **Blast radius if wrong:** every insert keeps paying for one extra row write. Measured cost:
   one INSERT per publish, inside a transaction that already writes several rows.
+- **Status:** CLOSED (2026-09-12) — finding handed to the coordinator with its evidence; no action taken here. See DECISIONS.md H-B #9.
+
 - **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
   evidence rather than actioned here.
 
@@ -1564,3 +1566,6 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   same layer boundary, so the regression would have to be specific to the timeout layer alone.
 - **Status:** UNCONFIRMED
 ||||||| 26860a5
+||||||| b57934d
+- **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
+  evidence rather than actioned here.
