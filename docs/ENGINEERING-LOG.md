@@ -31,6 +31,59 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-I-s (lane-2) — batched retrieval-visibility for the audit log,
+     storage half. PARTIAL BY DESIGN: nothing calls it until H-I-w wires the
+     handler. -->
+
+### Added
+
+- **A batched retrieval-visibility check, `ExtendedRegistryStore::visible_ctx_ids`.**
+  `GET /log/entries` gates every `ctx_id` it echoes on the full
+  `GET /contexts/{ctx_id}` rule, and it did so **one context at a time** — a blocking
+  `RegistryServer::retrieve` per entry, up to the 256-entry page cap. One query now answers a
+  whole page. Measured on SQLite over a full 256-entry page: **991µs batched against 21.9ms for
+  the per-id path**, ≈22×. The test asserts only that the two paths *agree*; the timing is
+  printed rather than asserted, because a timing assertion on shared CI is a flake waiting to
+  happen.
+
+  **This ships dormant. The fan-out is still live on the deployed path.** Nothing calls
+  `visible_ctx_ids` until unit H-I-w wires `handlers/log.rs`, which is in a crate this change
+  must not touch. Partial by design, not an oversight.
+
+  **It reproduces `retrieve` semantics, NOT `search` semantics** — and that distinction is the
+  whole unit rather than a detail. Under RFC-ACDP-0008 §4.5 a named audience member **may**
+  retrieve a `private` context, while search deliberately requires *ownership* for `private` and
+  excludes the audience (conformance `vis-004`, the "private/audience retrieval asymmetry"; a
+  listed **contributor** who is not in the audience is refused, because contributors are
+  provenance, not authorization). Reusing a search predicate here would therefore silently
+  **under**-disclose — hiding audit entries a caller is entitled to, with no error. The two
+  predicates are correct for their own surfaces and must not be harmonized. Confirmed three
+  independent ways before a line was written: the conformance fixture, the shape of the existing
+  LIST predicate, and the upstream `can_retrieve` rule itself.
+
+  Two further consequences that read as hardening and are actually defects, both guarded by
+  tests that fail if someone "fixes" them: **status is absent from §4.5**, so a retracted context
+  remains retrievable and must not be filtered; and **the tenant gate is half the contract**, so
+  batching only the visibility half is a cross-tenant disclosure.
+
+  The §4.5 rule is now expressed **three times** in this workspace — SQLite's predicate,
+  Postgres's, and `retrieve_visible` in Rust. That is forced rather than chosen: the
+  authoritative `can_retrieve` is `pub(crate)` in the upstream `acdp` crate and
+  `RegistryStore` exposes only a raw `get`. The duplication is named where it lives and
+  contained by a three-way differential test that makes all three answer for the same rows.
+
+  No new index and no migration, measured rather than assumed: `ctx_id` is the primary key in
+  both backends, so the id lookup is a PK index scan (`contexts_pkey`, bitmap index scan on
+  Postgres) with visibility and tenant applied as a filter over at most N rows. Adding an index
+  here would be redundant.
+
+### Changed
+
+- **Postgres's retrieval-visibility predicate is now the named constant `LIST_VISIBILITY_PG`.**
+  It had been written inline inside `list_contexts`, so the batched method above would have made
+  a *fourth* copy of the §4.5 rule. Extracting it and pointing both methods at the one
+  expression keeps the count at three, and matches the structure SQLite already had.
+
 <!-- unit H-A, phases P4 + P5 (lane-1) — rate-limit scope taxonomy, and the
      publish bucket charged on success rather than on an unverified attempt -->
 

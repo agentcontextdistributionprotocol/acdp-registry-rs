@@ -722,6 +722,137 @@ where
     }
 }
 
+/// A store that delegates everything **except** [`ExtendedRegistryStore::visible_ctx_ids`],
+/// which it leaves to the trait default.
+///
+/// # Why this exists
+///
+/// `visible_ctx_ids` has three implementations in this workspace — the Rust
+/// default here, SQLite's SQL predicate, and Postgres's — because the
+/// authoritative rule (`can_retrieve`) is `pub(crate)` in the upstream crate and
+/// cannot be called. Three expressions of one security rule is real drift risk,
+/// and no other phase's tests compare them: the backends' own suites exercise
+/// only their overrides, and the unit tests exercise the default against a
+/// hand-built in-memory fixture.
+///
+/// Wrapping a *real* backend and declining to override the one method makes the
+/// default body run against the same rows the override just answered for, so the
+/// two can be diffed directly.
+///
+/// `tenant_of_ctx` is delegated deliberately. Left to its own default it reports
+/// every row as the reserved tenant, and the comparison would then fail on the
+/// tenant gate for a reason that has nothing to do with visibility — a test
+/// failing for the wrong reason is worse than no test.
+struct DefaultOnly<S>(Arc<S>);
+
+impl<S> acdp::registry::RegistryStore for DefaultOnly<S>
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    fn put(&self, body: acdp::types::body::Body) -> Result<(), acdp::error::AcdpError> {
+        self.0.put(body)
+    }
+    fn get(
+        &self,
+        ctx_id: &CtxId,
+    ) -> Result<Option<acdp::types::body::FullContext>, acdp::error::AcdpError> {
+        self.0.get(ctx_id)
+    }
+    fn lineage(
+        &self,
+        lineage_id: &acdp::types::primitives::LineageId,
+    ) -> Result<Vec<acdp::types::body::FullContext>, acdp::error::AcdpError> {
+        self.0.lineage(lineage_id)
+    }
+    fn current(
+        &self,
+        lineage_id: &acdp::types::primitives::LineageId,
+    ) -> Result<Option<acdp::types::body::FullContext>, acdp::error::AcdpError> {
+        self.0.current(lineage_id)
+    }
+    fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), acdp::error::AcdpError> {
+        self.0.mark_superseded(ctx_id)
+    }
+    fn first_version_ctx_id(
+        &self,
+        lineage_id: &acdp::types::primitives::LineageId,
+    ) -> Result<Option<CtxId>, acdp::error::AcdpError> {
+        self.0.first_version_ctx_id(lineage_id)
+    }
+    fn search(
+        &self,
+        params: &SearchParams,
+        requester: Option<&AgentDid>,
+        anonymous_public_reads: bool,
+    ) -> Result<acdp::types::search::SearchResponse, acdp::error::AcdpError> {
+        self.0.search(params, requester, anonymous_public_reads)
+    }
+    fn idempotency_lookup(
+        &self,
+        agent_id: &AgentDid,
+        key: &str,
+    ) -> Result<Option<acdp::registry::IdempotencyRecord>, acdp::error::AcdpError> {
+        self.0.idempotency_lookup(agent_id, key)
+    }
+    fn idempotency_record(
+        &self,
+        agent_id: &AgentDid,
+        key: &str,
+        hash: &acdp::types::primitives::ContentHash,
+        response: &acdp::types::publish::PublishResponse,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), acdp::error::AcdpError> {
+        self.0
+            .idempotency_record(agent_id, key, hash, response, expires_at)
+    }
+    fn idempotency_evict_expired(&self, now: DateTime<Utc>) -> Result<(), acdp::error::AcdpError> {
+        self.0.idempotency_evict_expired(now)
+    }
+    fn commit_publish(
+        &self,
+        commit: PublishCommit<'_>,
+    ) -> Result<PublishCommitOutcome, acdp::error::AcdpError> {
+        self.0.commit_publish(commit)
+    }
+    fn commit_lifecycle_event(
+        &self,
+        event: &LifecycleEvent,
+    ) -> Result<acdp::registry::LifecycleCommitOutcome, acdp::error::AcdpError> {
+        self.0.commit_lifecycle_event(event)
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> ExtendedRegistryStore for DefaultOnly<S>
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    async fn health(&self) -> Result<(), acdp::error::AcdpError> {
+        self.0.health().await
+    }
+    async fn migrate(&self) -> Result<(), acdp::error::AcdpError> {
+        self.0.migrate().await
+    }
+    async fn list_contexts(
+        &self,
+        limit: u32,
+        cursor: Option<&str>,
+        requester: Option<&AgentDid>,
+        tenant: Option<&str>,
+        anonymous_public_reads: bool,
+    ) -> Result<crate::Page<acdp::types::body::FullContext>, acdp::error::AcdpError> {
+        self.0
+            .list_contexts(limit, cursor, requester, tenant, anonymous_public_reads)
+            .await
+    }
+    /// Delegated on purpose — see the type's docs.
+    async fn tenant_of_ctx(&self, ctx_id: &str) -> Result<Option<String>, acdp::error::AcdpError> {
+        self.0.tenant_of_ctx(ctx_id).await
+    }
+    // `visible_ctx_ids` deliberately NOT overridden: the default body is the
+    // subject of the three-way comparison.
+}
+
 /// Retract an already-published context in place. `publish_then_retract` exists
 /// but publishes into the default tenant, and this fixture needs the retracted
 /// row inside the scoped tenant.
@@ -1024,6 +1155,43 @@ where
         violations.push(format!(
             "[{backend}] an unparseable ctx_id was reported visible"
         ));
+    }
+
+    // (e) THE THREE-WAY SEAM. The §4.5 rule is expressed three times in this
+    // workspace — this backend's SQL predicate, the other backend's, and the Rust
+    // default — because the authoritative `can_retrieve` is `pub(crate)` upstream
+    // and cannot be called. Nothing else compares them: each backend's suite
+    // exercises only its own override, and the unit tests exercise the default
+    // against a hand-built in-memory fixture. `DefaultOnly` wraps THIS store and
+    // declines to override the method, so the default body answers for the very
+    // rows the override just answered for.
+    let default_only = DefaultOnly(Arc::clone(store));
+    for (who, requester, anon) in [
+        ("the producer", Some(&owner), false),
+        ("an audience member", Some(&aud), false),
+        ("an outsider", Some(&outsider), false),
+        ("an anonymous caller, anon reads ON", None, true),
+    ] {
+        for scope in [None, Some(tenant.as_str())] {
+            let via_override = store
+                .visible_ctx_ids(&ids, requester, scope, anon)
+                .await
+                .expect("override ok");
+            let via_default = default_only
+                .visible_ctx_ids(&ids, requester, scope, anon)
+                .await
+                .expect("default ok");
+            if via_override != via_default {
+                let only_override: Vec<_> = via_override.difference(&via_default).collect();
+                let only_default: Vec<_> = via_default.difference(&via_override).collect();
+                violations.push(format!(
+                    "[{backend}] the SQL override and the Rust DEFAULT disagree for {who} \
+                     (tenant scope {scope:?}). The §4.5 rule is written in both places and they \
+                     have drifted. Only the override disclosed: {only_override:?}. Only the \
+                     default disclosed: {only_default:?}"
+                ));
+            }
+        }
     }
 
     assert!(

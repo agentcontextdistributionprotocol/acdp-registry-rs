@@ -54,7 +54,8 @@ const LOG_APPEND_LOCK_KEY: i64 = 0x00AC_D900_0012;
 /// Extracted from `list_contexts` so `visible_ctx_ids` can share the one
 /// expression rather than restating it — SQLite has kept its equivalent as a
 /// named constant for the same reason.
-const LIST_VISIBILITY_PG: &str = " AND ((visibility = 'public' AND ($1::text IS NOT NULL OR $2::bool)) \
+const LIST_VISIBILITY_PG: &str =
+    " AND ((visibility = 'public' AND ($1::text IS NOT NULL OR $2::bool)) \
      OR ($1::text IS NOT NULL AND (agent_id = $1::text \
      OR (body_json -> 'audience') @> to_jsonb($1::text))))";
 
