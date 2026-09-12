@@ -2121,3 +2121,172 @@ cost nothing but time, because the gap was pinned by a marker test that failed t
 ruling was applied and whose failure message instructed its own deletion. A gap held behind a
 failing-on-resolution marker cannot outlive the question by being forgotten; a gap held in a
 comment can.
+
+## 17. `cargo-mutants` is viable here, but only with `--test-workspace=true` (H-M, #216)
+
+**Status: measured, not adopted.** This entry records numbers so the next lane inherits a
+measurement instead of a guess. No CI job was added — see "Why no workflow" below.
+
+**The finding that matters is not the timing.** `cargo-mutants` defaults to testing each mutant
+with a **package-scoped** command. Mutating `acdp-registry-core` produces:
+
+```
+cargo test --verbose --package=acdp-registry-core@0.1.2
+```
+
+That runs core's own 80 unit tests and nothing else. This repo's coverage does not live there: it
+lives in `acdp-registry-server`'s integration suites. So the default configuration reports
+survivors for code that **is** covered, by tests it never ran.
+
+Demonstrated on one mutant, both ways:
+
+| scope | command | `receipt.rs:58:21` `replace \|\| with && in validated_fragment` |
+|---|---|---|
+| default (package) | `cargo test --package=acdp-registry-core@0.1.2` | **MISSED** |
+| `--test-workspace=true` | `cargo test --verbose --workspace` | **CAUGHT** |
+
+The killing test is `malformed_retired_receipt_key_fails_startup` in
+`crates/acdp-registry-server/src/main.rs`, which asserts a `'#'` in a retired key fragment fails
+startup. It is in a different package from the mutant, so package scoping cannot see it. Under
+`--test-workspace=true` the whole of `receipt.rs` comes back **7 caught, 2 unviable, 0 missed** —
+the file has no coverage gap, and the lone survivor was an artifact of scope.
+
+**A naive baseline would therefore have been worse than no baseline**, because a survivor list
+full of false positives is indistinguishable from a real one without re-deriving each entry.
+
+**Measurements** (this machine, 2026-09-12, `cargo-mutants 27.1.0`, warm `target/`):
+
+| quantity | value | how obtained |
+|---|---|---|
+| install cost | 23s, +7.8 MiB in `~/.cargo/bin` | `cargo install cargo-mutants` |
+| mutants, whole workspace | 1383 | `cargo mutants --list --workspace` |
+| mutants, `acdp-registry-core` | 472 | `--list -p acdp-registry-core` |
+| mutants, `handlers/log.rs` | 65 — note three different `log.rs` files exist (8 / 15 / 65) | `--list --file …` |
+| mutants, the bounded scope below | 206 (`receipt.rs` 9, `handlers/log.rs` 65, `handlers/context.rs` 132) | `--list --file …` |
+| `receipt.rs`, workspace-scoped | 9 mutants in 82s, baseline build 26s | run below |
+| build directory on disk | **2.3 GiB, per `-j` job** | `du -sh $TMPDIR/cargo-mutants-*.tmp` mid-run |
+| free disk during runs | never below 30 GiB (from 32 GiB) | `df -g /` before/after each run |
+| CI's playground suite alone | 16s warm, 305 tests | `cargo test --locked -p acdp-registry-server --features storage-sqlite,playground` |
+
+Reproduce the run the per-mutant cost comes from:
+
+```
+cargo mutants --file 'crates/acdp-registry-core/src/receipt.rs' --test-workspace=true --timeout 900
+```
+
+**Extrapolation — an estimate, and labelled as one.** Basis: **9 mutants from one 273-line leaf
+module**, n=7 viable. Subtracting the 26s baseline build leaves 56s for 9 mutants, so **~6.2s per
+mutant** marginal under `--test-workspace=true` (9.2s if the one-off baseline build is amortised
+over this small a run; it vanishes over a large one). Applied to 1383 workspace mutants that is
+**~2.4 hours**, and applied to the 206-mutant bounded scope below **~21 minutes**. Treat both as
+**lower bounds**, for three reasons: `receipt.rs` is a leaf module whose mutants trigger the cheapest possible rebuild, where
+`handlers/context.rs` (132 mutants, the largest single file in scope) forces its dependents to
+rebuild; mutants that induce a hang cost the full `--timeout` each and their number here is
+unmeasured; and a faithful test command is more expensive than the one measured — see next.
+
+**No single `cargo test` reproduces CI, and `cargo-mutants` runs exactly one command per mutant.**
+CI's `test` job runs three, with different package scopes and feature sets:
+
+```
+cargo test --locked --workspace                                             # default features
+cargo test --locked -p acdp-registry-server --features storage-sqlite,playground
+cargo test --locked -p acdp-registry-pg  (+ a --features storage-pg server run)
+```
+
+`--test-workspace=true` covers only the first. `--features storage-sqlite,playground` cannot be
+added while mutating core — `cargo-mutants` applies `--features` to the *mutated* package's
+baseline build, which fails outright (`the package 'acdp-registry-core' does not contain this
+feature: storage-sqlite`). So reaching CI-equivalent coverage requires a custom `--test-tool` or a
+wrapper script running all three. Adding the playground suite's measured 16s to each mutant puts
+the estimate nearer **~22s/mutant**, i.e. **~8.5 hours** for the workspace and **~76 minutes** for
+the bounded scope. Until that wrapper exists, **survivors in code reachable only under the
+`playground`, `storage-sqlite` or `storage-pg` features are expected false positives.**
+
+**Verdict: viable now, as a scheduled job over a bounded file set — not per-PR, and not
+workspace-wide.** Disk is not the constraint (2.3 GiB per job against 30+ GiB free); wall-clock is.
+Concretely, for whoever picks up #216 steps 1–3:
+
+1. `--test-workspace=true` is **mandatory**, not an optimisation. Without it the baseline is noise.
+2. Scope the first baseline to a bounded set rather than the workspace. `receipt.rs` +
+   `handlers/log.rs` + `handlers/context.rs` is 206 mutants, ~21 min estimated (~76 min with the
+   wrapper in point 3). That set is a choice made here for being the densest core logic, **not**
+   a scope #216 names — #216 names only `conformance.rs`, and its step 1 is fault injection over
+   `src/` generally, which is the full 1383.
+3. Build the three-command wrapper before trusting any survivor in feature-gated code, or restrict
+   the scope to code the default-feature workspace suite actually reaches.
+
+**Why no workflow file.** The unit deliberately excluded one. A scheduled `cargo-mutants` job whose
+survivor baseline had never been produced is the same mistake #249 avoided: an issue closed by an
+unverified artifact is worse than an open issue. The measurement above is the prerequisite that was
+missing, and #216 stays open with it recorded.
+
+## Unit H-E — the auth/webhook quartet (lane-2, 2026-09-12)
+
+Four `UNCONFIRMED` entries from `plans/h-e-auth-webhook-quartet.md`, ranked by blast radius.
+
+**Tiering.** No genuine one-way door: no schema change, no migration, and the one public-surface
+change is **additive and withdrawable**. The leader settled E3's tier explicitly on a fact rather
+than a judgement — the canon has no webhook concept (`grep -ril webhook` over `acdp-primitives`
+returns nothing) and the scheme "matches GitHub's exactly" by this repo's own choice, so the registry
+owns the surface outright; the inverse of the 415 case, which needed the human precisely because that
+code sat in a canonical registry the repo does not own. So all four are Opus-tier and **none needs
+the human**. One carries real operator impact and got the most scrutiny anyway.
+
+**Method deviation, declared:** `/reconcile` asks for a fresh subagent per entry; this session does
+not spawn agents, so the analyses ran in-context. Every entry below is settled against evidence
+produced this run — a `file:line`, a measurement, or a named mutation.
+
+### 1. `safe_client` refuses private-range feed hosts — CONFIRMED (Opus), with the cost named
+
+Highest blast radius because it can break a **working** deployment, not just a wrong one. Examined
+hardest for that reason.
+
+The finding is about **redirects**: the feed URL is operator-configured, so the SSRF risk is a
+hostile *redirect target*, not an attacker-chosen URL. `redirect(Policy::none())` alone closes it.
+`safe_client` does more — it installs a DNS resolver that refuses private/loopback/link-local hosts —
+so a peer registry reachable only on an internal hostname is now refused rather than polled.
+
+Confirmed for consistency, not for strength: webhook delivery already accepts exactly this posture
+for operator-configured URLs, and two different HTTP-client postures in adjacent crates is the drift
+this repo keeps paying for. The rejected alternative (a hand-built client with redirects off and no
+resolver) would have fixed the finding with zero collateral change and is the right fallback if an
+operator hits this; a config knob to allow private ranges is a legitimate follow-up, not this unit.
+
+Also recorded, because "safe_client" reads stronger than it is: it consults its policy **only** for
+DNS. `allow_http` and `reject_ip_literals` are unenforced, so an `http://` feed still works and an
+IP-literal URL bypasses the resolver check entirely. That is true of the webhook crate too.
+
+### 2. E3 is additive and does not claim to deliver protection — CONFIRMED (Opus)
+
+`X-ACDP-Signature` stays byte-identical and is now **pinned by a test**, so the additive property is
+enforced rather than promised. Rejected: widening that header (breaks every deployed receiver); an
+unsigned timestamp alone (rewritable, therefore worthless); a config-gated scheme under one header
+name (two dialects, one name).
+
+Confirmed specifically including what is *not* claimed: the docs say the registry **offers** bound
+freshness and does not enforce it. A receiver that ignores the headers is as exposed as before.
+"The registry now has replay protection" would have been false on the day it shipped — and writing it
+would have manufactured a tenth false doc claim in the same wave that removed nine.
+
+### 3. E1's cutoff threads through the trait, not the store constructors — CONFIRMED (Opus)
+
+Settled by a claim boundary discovered **before** the code was written: the store constructors are
+called from `server/src/main.rs:699,743,760`, outside this lane and inside lane-1's in-flight PRs, so
+a constructor parameter was both a claim violation and a collision. `is_revoked` and `evict_expired`
+each have exactly one production caller, both in this crate, so the trait signatures changed instead
+and `server/` is untouched — verified by the workspace still building.
+
+Rejected: a defaulted method reading config itself, which re-derives the window independently of the
+validator and so re-creates the defect one layer down.
+
+### 4. The evictor reads leeway from the signer, not config — CONFIRMED (Opus)
+
+The two values are equal in every current wiring, so this is invisible today — which is exactly why
+it is written down. The bug being fixed *is* a validator and a revocation layer disagreeing about the
+acceptance window; deriving the value twice re-opens that class the moment wiring changes which value
+reaches the signer. A `leeway_seconds()` accessor is the cheaper guarantee.
+
+**Summary: 4 confirmed, 0 changed, 0 deferred, 4 settled by Opus, 0 needing the human.** No code
+follow-up blocks the ship. Two items are recorded as follow-ups that block nothing: a config knob if
+an operator needs private-range revocation feeds, and the `conformance_gate` false positive that
+flags `#[cfg(test)]` env reads inside `src/` as operator configuration.

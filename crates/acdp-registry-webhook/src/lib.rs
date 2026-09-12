@@ -220,6 +220,12 @@ async fn deliver(
     };
     let body = serde_json::to_vec(&envelope).map_err(|e| WebhookError::Encode(e.to_string()))?;
     let sig = sign(&config.secret, &body);
+    // Stamped once per delivery, deliberately: a retry is not a new signing
+    // event. `X-ACDP-Event-Id` is already documented as stable across retries,
+    // and a per-attempt timestamp would make each retry look like a fresh
+    // delivery to exactly the freshness check this exists to enable.
+    let sent_at = chrono::Utc::now().timestamp();
+    let sig_ts = sign_with_timestamp(&config.secret, sent_at, &body);
 
     let mut backoff = Duration::from_millis(250);
     let mut attempt = 0u32;
@@ -230,7 +236,9 @@ async fn deliver(
             .header("Content-Type", "application/json")
             .header("X-ACDP-Signature", &sig)
             .header("X-ACDP-Event", event.name())
-            .header("X-ACDP-Event-Id", &delivery.event_id);
+            .header("X-ACDP-Event-Id", &delivery.event_id)
+            .header(TIMESTAMP_HEADER, sent_at.to_string())
+            .header(TIMESTAMPED_SIGNATURE_HEADER, &sig_ts);
         if let Some(tenant) = &delivery.tenant_id {
             builder = builder.header("X-Tenant-Id", tenant);
         }
@@ -267,6 +275,46 @@ async fn deliver(
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(15));
     }
+}
+
+/// Header carrying the unix-seconds send time. Signed by
+/// [`sign_with_timestamp`] — never trust it on its own.
+pub const TIMESTAMP_HEADER: &str = "X-ACDP-Timestamp";
+
+/// Header carrying the signature that covers `timestamp || "." || body`.
+pub const TIMESTAMPED_SIGNATURE_HEADER: &str = "X-ACDP-Signature-Timestamped";
+
+/// `"sha256=" + hex(HMAC-SHA256(secret, "<timestamp>.<body>"))`.
+///
+/// # Why a second signature rather than just a timestamp header
+///
+/// `X-ACDP-Signature` covers the body alone, so a captured delivery can be
+/// replayed forever and — because retries reuse the same `event_id` — a replay
+/// is indistinguishable from a legitimate retry. Binding time fixes that, but
+/// **an unsigned timestamp is rewritable and therefore worthless**: an attacker
+/// replaying a capture would simply set the header to now. The freshness signal
+/// only means anything if it is inside the MAC, which is what this covers.
+///
+/// # Why not change `sign`
+///
+/// `X-ACDP-Signature` is a documented public contract (`docs/WEBHOOKS.md`) that
+/// existing receivers verify byte-for-byte, and `sign` itself is `pub`. Widening
+/// either would break every deployed receiver. This is additive: unknown headers
+/// are ignored by receivers that do not know them.
+///
+/// # What this does NOT deliver
+///
+/// Replay protection is **offered, not enforced**. A receiver that ignores these
+/// headers is exactly as exposed as before; the registry cannot make a receiver
+/// check freshness. Adopting it means verifying this signature and rejecting a
+/// timestamp outside an acceptable skew.
+pub fn sign_with_timestamp(secret: &str, timestamp: i64, body: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac accepts any key len");
+    mac.update(timestamp.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let digest = mac.finalize().into_bytes();
+    format!("sha256={}", hex::encode(digest))
 }
 
 /// `"sha256=" + hex(HMAC-SHA256(secret, body))` — same shape as GitHub.
@@ -524,6 +572,105 @@ mod tests {
         );
     }
 
+    // ── E3: bound freshness, added without touching the legacy signature ──
+
+    /// Helper: one delivery captured off the wire, split into (head, body).
+    async fn capture_delivery(secret: &str) -> (String, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let capture = tokio::spawn(capture_one_request(listener));
+        let config = WebhookConfig {
+            enabled: true,
+            url: format!("http://{addr}/hook"),
+            secret: secret.into(),
+            timeout_seconds: 5,
+            max_retries: 1,
+            queue_capacity: 8,
+        };
+        let emitter = WebhookEmitter::spawn_with_policy(config, SsrfPolicy::allow_test_loopback());
+        emitter.emit(published_event());
+        let raw = capture.await.expect("join");
+        let (head, body) = raw.split_once("\r\n\r\n").expect("header/body split");
+        (head.to_string(), body.to_string())
+    }
+
+    fn header_of(head: &str, name: &str) -> Option<String> {
+        let want = format!("{}:", name.to_ascii_lowercase());
+        head.lines()
+            .find(|l| l.to_ascii_lowercase().starts_with(&want))
+            .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+    }
+
+    /// **`X-ACDP-Signature` must remain byte-identical.** This is the condition
+    /// that keeps the change additive: every deployed receiver verifies this
+    /// header, and `sign` is `pub`. Pinned against a literal so a later refactor
+    /// cannot quietly widen what it covers — recomputing it with `sign` here
+    /// would pass even if BOTH the header and `sign` changed together.
+    #[test]
+    fn legacy_signature_input_is_pinned_to_the_body_alone() {
+        let sig = sign("shhh", b"{\"a\":1}");
+        // Cross-checked against an INDEPENDENT implementation rather than copied
+        // from this code's own output:
+        //   printf '{"a":1}' | openssl dgst -sha256 -hmac "shhh" -r
+        // Copying our own output would enshrine a bug in `sign` as the contract;
+        // openssl agreeing proves the value really is the GitHub-compatible HMAC
+        // that receivers reimplement.
+        assert_eq!(
+            sig, "sha256=82a2822723ef5d74e78b2082b74ec3369cc9cf94e58ed4dc61f5c1e2887fd7c7",
+            "X-ACDP-Signature is a documented public contract: HMAC-SHA256 over the raw body \
+             alone. If this value changed, every existing receiver just broke."
+        );
+    }
+
+    /// The timestamped signature must cover `timestamp.body` — and a receiver
+    /// recomputing it over a TAMPERED timestamp must get a mismatch. That is the
+    /// whole point: an unsigned timestamp would be rewritable and worthless.
+    #[tokio::test]
+    async fn timestamped_signature_binds_the_timestamp() {
+        let (head, body) = capture_delivery("shhh").await;
+        let ts = header_of(&head, TIMESTAMP_HEADER).expect("X-ACDP-Timestamp present");
+        let sig_ts =
+            header_of(&head, TIMESTAMPED_SIGNATURE_HEADER).expect("timestamped signature present");
+        let parsed: i64 = ts.parse().expect("timestamp is unix seconds");
+
+        assert_eq!(
+            sig_ts,
+            sign_with_timestamp("shhh", parsed, body.as_bytes()),
+            "a receiver recomputing HMAC over `timestamp.body` must match the transmitted value"
+        );
+        assert_ne!(
+            sig_ts,
+            sign_with_timestamp("shhh", parsed + 1, body.as_bytes()),
+            "a tampered timestamp MUST NOT verify — otherwise the freshness signal is \
+             rewritable and buys nothing"
+        );
+        assert_ne!(
+            sig_ts,
+            sign("shhh", body.as_bytes()),
+            "the timestamped signature must differ from the body-only one, or it is not \
+             actually binding the timestamp"
+        );
+    }
+
+    /// The legacy header must still be exactly `sign(secret, body)` on the wire,
+    /// alongside the new ones. Guards the additive property end to end rather
+    /// than only at the function level.
+    #[tokio::test]
+    async fn adding_freshness_headers_leaves_the_legacy_signature_untouched() {
+        let (head, body) = capture_delivery("shhh").await;
+        let legacy = header_of(&head, "X-ACDP-Signature").expect("X-ACDP-Signature present");
+        assert_eq!(
+            legacy,
+            sign("shhh", body.as_bytes()),
+            "X-ACDP-Signature must still be HMAC over the raw body alone"
+        );
+        assert!(
+            header_of(&head, TIMESTAMP_HEADER).is_some()
+                && header_of(&head, TIMESTAMPED_SIGNATURE_HEADER).is_some(),
+            "both freshness headers must be present on every delivery"
+        );
+    }
+
     #[tokio::test]
     async fn delivered_signature_authenticates_the_raw_body() {
         // The whole point of X-ACDP-Signature: a receiver recomputing
@@ -694,6 +841,83 @@ mod tests {
             hits.load(Ordering::SeqCst),
             3,
             "expected exactly 429, 500, then a delivered 200"
+        );
+    }
+
+    /// **A retry must reuse the delivery's timestamp and signature.**
+    ///
+    /// `X-ACDP-Event-Id` is already documented as stable across retries. If the
+    /// timestamp were re-stamped per attempt, every retry would look like a fresh
+    /// delivery to the very freshness check these headers exist to enable — and a
+    /// receiver could not distinguish a legitimate retry from a replay, which is
+    /// the defect E3 addresses in the first place. Stamped once per delivery,
+    /// outside the retry loop; this asserts that rather than trusting it.
+    #[tokio::test]
+    async fn a_retry_reuses_the_delivery_timestamp_and_signature() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_srv = Arc::clone(&seen);
+        tokio::spawn(async move {
+            let mut n = 0usize;
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let raw = read_one_request(&mut socket).await;
+                seen_srv
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&raw).to_string());
+                n += 1;
+                // Fail the first attempt so the worker retries the SAME delivery.
+                let status = if n == 1 {
+                    "500 Internal Server Error"
+                } else {
+                    "200 OK"
+                };
+                let _ = socket
+                    .write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n").as_bytes())
+                    .await;
+                let _ = socket.flush().await;
+            }
+        });
+
+        let config = WebhookConfig {
+            enabled: true,
+            url: format!("http://{addr}/hook"),
+            secret: "shhh".into(),
+            timeout_seconds: 5,
+            max_retries: 5,
+            queue_capacity: 8,
+        };
+        let emitter = WebhookEmitter::spawn_with_policy(config, SsrfPolicy::allow_test_loopback());
+        emitter.emit(published_event());
+
+        wait_until(Duration::from_secs(10), || seen.lock().unwrap().len() >= 2).await;
+        let attempts = seen.lock().unwrap().clone();
+        // PRECONDITION: there must actually have been a retry, or "the two
+        // timestamps match" is vacuously true over a single attempt.
+        assert!(
+            attempts.len() >= 2,
+            "precondition: the 500 must have produced a second attempt; saw {} request(s)",
+            attempts.len()
+        );
+
+        let ts_of = |raw: &str| header_of(raw, TIMESTAMP_HEADER).expect("timestamp header");
+        let sig_of =
+            |raw: &str| header_of(raw, TIMESTAMPED_SIGNATURE_HEADER).expect("timestamped sig");
+        assert_eq!(
+            ts_of(&attempts[0]),
+            ts_of(&attempts[1]),
+            "a retry must carry the delivery's original timestamp, not a fresh one"
+        );
+        assert_eq!(
+            sig_of(&attempts[0]),
+            sig_of(&attempts[1]),
+            "and therefore the same timestamped signature"
         );
     }
 

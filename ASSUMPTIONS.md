@@ -2188,3 +2188,102 @@ conclude the leak does not exist. The marker test pins `limit=2`.
     and no test was written**, because its premise is unreachable (see the two reasons in the
     tenant entry above). `log_entries_rejects_the_reserved_default_tenant` ships instead.
 - **Status:** CONFIRMED.
+## E1's cutoff is threaded through the trait, not the store constructors
+
+- **Plan:** `plans/h-e-auth-webhook-quartet.md` (H-E Phase 1)
+- **Assumed initially (WRONG):** that each `RevocationStore` implementation could take the leeway as
+  a constructor parameter.
+- **What checking found:** `SqliteRevocationStore::new` / `PgRevocationStore::new` /
+  `InMemoryRevocationStore::new` are called from `crates/acdp-registry-server/src/main.rs:699,743,760`
+  and `server/tests/http_integration.rs:4204` — **outside this lane's claim**, and inside lane-1's
+  in-flight PR5/PR6. That design was a claim violation and a collision, discovered before writing it.
+- **Chose:** change the **trait method signatures** instead — `is_revoked(jti, cutoff)` and
+  `evict_expired(cutoff)`. `is_revoked` has exactly one production caller and `evict_expired` one,
+  both in this crate; `server/` only constructs the stores and passes `Arc<dyn RevocationStore>`, so
+  it is untouched and the workspace still builds.
+- **Alternatives:** a defaulted trait method reading config itself — rejected, it re-derives the
+  leeway independently of the validator, which is the exact defect being fixed one layer down.
+  A claim-request for `server/src/main.rs` — disproportionate when an in-claim design exists.
+- **Blast radius if wrong:** the trait is crate-local with three implementors, all in one file.
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-E #3.
+
+## The evictor takes its leeway from the signer, not from config
+
+- **Plan:** `plans/h-e-auth-webhook-quartet.md` (H-E Phase 1)
+- **Assumed:** that "the acceptance window" must have exactly one owner.
+- **Chose:** `AuthService::spawn_evictor` reads `signer.leeway_seconds()`. `AuthConfig` also carries
+  `token_leeway_seconds` and reading it there would look equivalent.
+- **Why not config:** the bug being fixed IS a validator and a revocation layer disagreeing about the
+  window. Deriving the value twice from a common source re-creates that class the moment any wiring
+  changes which value reaches the signer. A new `leeway_seconds()` accessor is a smaller price.
+- **Blast radius if wrong:** the two values are equal in every current wiring, so a mistake here is
+  invisible today and would surface only after a config change — which is exactly why it is written
+  down rather than left to inference.
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-E #4.
+
+## `safe_client` for the poller refuses private-range feed hosts, and that is accepted
+
+- **Plan:** `plans/h-e-auth-webhook-quartet.md` (H-E Phase 2)
+- **Assumed:** that matching webhook delivery's posture is right for the poller too.
+- **Chose:** `safe_client(&SsrfPolicy::default(), 15s)`, the remedy the finding itself names.
+- **The trade-off, stated because it can break a working deployment:** the finding is about
+  *redirects* — the feed URL is operator-configured, so the SSRF risk is a hostile **redirect
+  target**, not an attacker-chosen URL. `redirect(Policy::none())` alone would fix that. `safe_client`
+  additionally installs a DNS resolver that refuses private/loopback/link-local hosts, so a peer
+  registry on an internal hostname is now refused rather than polled. Adopted anyway, for consistency
+  with webhook delivery, which already accepts that posture for operator-configured URLs.
+- **Alternatives:** a hand-built client with `redirect(Policy::none())` and no SafeDnsResolver —
+  fixes the finding with no collateral behaviour change, rejected because two different HTTP-client
+  postures in adjacent crates is the drift this repo keeps paying for. A config knob to allow private
+  ranges — scope creep for this unit; a legitimate follow-up if an operator hits it.
+- **Also recorded:** `safe_client` consults the policy **only** for DNS. `allow_http` and
+  `reject_ip_literals` are NOT enforced by it, so an `http://` feed still works and an IP-literal URL
+  bypasses the resolver check. Anyone reading "safe_client" as "all policy fields enforced" would be
+  wrong, here and in the webhook crate.
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-E #1.
+
+## E3 extends a surface this repo owns, additively, and does not claim to deliver protection
+
+- **Plan:** `plans/h-e-auth-webhook-quartet.md` (H-E Phase 4)
+- **Question raised to the leader:** whether "the registry now offers replay protection" is a product
+  statement needing the human rather than a lane decision.
+- **Settled by a fact, not a judgement:** the canon has no webhook concept at all (`grep -ril webhook`
+  over `acdp-primitives` returns nothing) and `docs/WEBHOOKS.md` says the scheme "matches GitHub's
+  exactly" — a choice this repo made. So the registry owns this surface outright; there is no
+  external contract to diverge from. The inverse of the 415 case, which went to the human precisely
+  because that code sat in a canonical closed registry the repo does not own.
+- **Chose:** additive headers. `X-ACDP-Signature` stays byte-identical and is now pinned; a second
+  header carries HMAC over `"<timestamp>." + body`.
+- **Alternatives:** widen `X-ACDP-Signature` to cover the timestamp — breaks every deployed receiver.
+  Send an unsigned `X-ACDP-Timestamp` only — worthless, since a replayer rewrites it.
+  Make it config-gated — rejected: two schemes under one header name is worse than one additive pair.
+- **What is deliberately NOT claimed:** the docs say the registry *offers* bound freshness and does
+  not enforce it. A receiver ignoring the headers is as exposed as before. Writing "the registry now
+  has replay protection" would have been false on the day it shipped.
+- **Blast radius if wrong:** additive headers are ignorable; withdrawal would only affect receivers
+  that had adopted them, which is why the adoption contract is documented rather than implied.
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md H-E #2.
+
+## The issuer guard asserts on `jsonwebtoken`'s Display string, not on an error kind
+
+- **Plan:** plans/h-n-jwt-issuer-assertion.md
+- **Assumed.** `rejects_token_from_a_different_issuer` proves WHICH guard rejected the token by
+  asserting `err.to_string().contains("InvalidIssuer")`. That string comes from
+  `jsonwebtoken::errors::ErrorKind::InvalidIssuer`'s `Display`, reached through
+  `AuthError::TokenInvalid(e.to_string())` — so the assertion depends on a dependency's error
+  *rendering*, which is not a stability contract.
+- **Chose** the string anyway, because the alternative is worse here. `validate` deliberately
+  flattens every decode failure into `AuthError::TokenInvalid(String)`, so by the time the error
+  reaches a caller the kind is already gone. Recovering it would mean widening `AuthError` to carry
+  a `jsonwebtoken` kind — leaking a dependency's type into this crate's public error enum, for the
+  benefit of one test.
+- **Alternatives rejected.** (a) Assert only `is_err()` — that is the defect this test exists to
+  avoid: it passes when an earlier guard short-circuits, and M3 below shows a signer that rejects
+  *everything* would satisfy it. (b) Add a typed `AuthError::IssuerMismatch` and check the issuer by
+  hand before `decode` — a second issuer check next to the library's, which is the duplicate-source
+  problem, and it would not even be exercised by the library's own path.
+- **Blast radius if wrong:** a `jsonwebtoken` upgrade that renames the Display text turns this test
+  RED with a message naming exactly what happened ("expected the ISSUER guard to reject this token,
+  but it was refused by something else ... Got: <new text>"). It fails loudly and locally, and the
+  fix is one string. That is the acceptable direction for this coupling to break.
+- **Status:** UNCONFIRMED

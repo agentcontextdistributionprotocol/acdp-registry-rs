@@ -188,20 +188,52 @@ what did not change. Those changes are recorded here instead. Newest first.
 
 ## Signature scheme
 
-Matches GitHub's exactly — receivers that already verify GitHub webhooks reuse
-the same code. Headers on every delivery:
+`X-ACDP-Signature` matches GitHub's exactly — receivers that already verify
+GitHub webhooks reuse the same code. Headers on every delivery:
 
 ```
-Content-Type:      application/json
-X-ACDP-Signature:  sha256=<hex of HMAC-SHA256(webhook.secret, raw_json_body)>
-X-ACDP-Event:      context.published | context.retrieved | context.retracted
-                   | context.republished | search.executed
-X-ACDP-Event-Id:   <uuid, stable across retries>
-X-Tenant-Id:       <tenant, when the event is tenant-scoped>
+Content-Type:                  application/json
+X-ACDP-Signature:              sha256=<hex of HMAC-SHA256(webhook.secret, raw_json_body)>
+X-ACDP-Event:                  context.published | context.retrieved | context.retracted
+                               | context.republished | search.executed
+X-ACDP-Event-Id:               <uuid, stable across retries>
+X-ACDP-Timestamp:              <unix seconds, stable across retries>
+X-ACDP-Signature-Timestamped:  sha256=<hex of HMAC-SHA256(webhook.secret,
+                               "<X-ACDP-Timestamp>." + raw_json_body)>
+X-Tenant-Id:                   <tenant, when the event is tenant-scoped>
 ```
 
 Verify by recomputing the HMAC over the **raw** request body bytes (not a
 re-serialization) and comparing in constant time. Reject on mismatch.
+
+### Freshness: `X-ACDP-Timestamp` — an opt-in capability, not protection you already have
+
+`X-ACDP-Signature` covers the body and nothing else, so a captured delivery can
+be replayed indefinitely — and because `X-ACDP-Event-Id` is deliberately stable
+across retries, **a replay is indistinguishable from a legitimate retry.**
+
+`X-ACDP-Signature-Timestamped` exists so a receiver *can* bound that window. Read
+this plainly: **the registry offers bound freshness; it does not enforce it.** A
+receiver that ignores these two headers is exactly as exposed to replay as it was
+before they existed. Nothing changes for you until you verify them.
+
+To adopt it:
+
+1. Recompute `HMAC-SHA256(secret, "<X-ACDP-Timestamp>." + raw_body)` and compare
+   with `X-ACDP-Signature-Timestamped` in constant time.
+2. Reject deliveries whose `X-ACDP-Timestamp` is outside a skew you choose.
+   Allow for retry backoff — the timestamp is stamped once per **delivery**, not
+   per attempt, so the last retry of a long-running delivery legitimately carries
+   an older timestamp than its arrival time.
+
+> **Why there is a second signature rather than just a timestamp header.** An
+> unsigned timestamp is rewritable and therefore worthless: anyone replaying a
+> capture would simply set it to now. A freshness signal only means something
+> when it is inside the MAC.
+
+`X-ACDP-Signature` is unchanged and will stay unchanged — widening what it covers
+would break every deployed receiver, so freshness is additive by construction.
+Both signatures are keyed by the same `webhook.secret`.
 
 > The signing input is the exact bytes posted. Don't parse-and-reserialize
 > before verifying — key ordering or whitespace differences will break the MAC.
