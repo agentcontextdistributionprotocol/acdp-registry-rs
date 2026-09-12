@@ -506,9 +506,10 @@ pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
     // of this change convinced itself a hardcoded `true` was behaviour-preserving.
     // `log_entries_honours_anonymous_public_reads_from_caps` overrides the caps.
     let ctx_ids: Vec<&str> = records.iter().map(|r| r.ctx_id.as_str()).collect();
-    // No empty-slice guard: the range check above guarantees `start < end`, and
-    // all three `visible_ctx_ids` implementations early-return on an empty slice
-    // anyway. A guard here would be a branch no test could ever reach.
+    // No empty-slice guard: the range check above guarantees `start < end`, so
+    // `records` is never empty here. Both SQL overrides early-return on an empty
+    // slice and the default impl simply iterates zero times, so an empty input is
+    // harmless in any case. A guard here would be a branch no test could reach.
     let visible = state
         .server
         .store()

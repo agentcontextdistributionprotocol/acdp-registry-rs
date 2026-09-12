@@ -2038,6 +2038,11 @@ bump.
 
 ### CORRECTION to the plan's description of the residual attack
 
+> **This section is ITSELF corrected — see "CORRECTED — an earlier version of this entry
+> overstated it" further down, under the P9 heading.** The measurement below is right about the
+> fixture and wrong about the generalization: the refill loop has TWO exits, and this section
+> only accounts for one. Kept unedited because the reasoning is the record.
+
 The plan states a tenant-pinned caller "can walk cursors at `limit=1`" to recover foreign
 `ctx_id`s. **Measured: at `limit=1` nothing leaks.** Every anchor returned at `limit=1` is one of
 the caller's own rows.
@@ -2058,6 +2063,9 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 - **Status:** UNCONFIRMED — A2 ships PARTIAL by design. The cursor oracle remains open and is
   asserted by `search_cursor_oracle_remains_open_for_tenant_scoped_caller`; A2 must not be
   described as closed until the store-side predicate lands and that test is deliberately deleted.
+  **The `limit=1` claim in this section is superseded** by the correction under P9: a foreign
+  anchor also escapes at ANY limit once the refill loop exhausts `SEARCH_REFILL_MAX_PAGES`,
+  because `cursor` is assigned before that break. This fixture is too small to reach that exit.
 
 ## H-A P9 (A4) — `/log/entries` answers a page with one visibility query
 
@@ -2076,8 +2084,9 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 - **Blast radius if wrong:** public leaves would disappear from the log for anonymous
   auditors on a deployment that sets the flag — a silent transparency regression, not an error.
 - **Status:** **RETRACTED — the claim above is FALSE and the probe that "confirmed" it was
-  invalid.** Kept in full, unedited, because the reasoning is the record. See the retraction
-  immediately below.
+  invalid.** Kept in full, unedited, because the reasoning is the record. The retraction is the
+  section headed "RETRACTION of the `anonymous_public_reads: true` assumption above", two
+  entries further down in this same P9 block.
 
 - **Assumption:** the old handler-side tenant fallback
   (`tenant_of_ctx(...).unwrap_or_else(|| "default")`) had no behaviour to preserve.
@@ -2103,7 +2112,13 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   on a page where it previously could not.
 - **Blast radius:** a page that used to return 200 with some leaves omitted can now return 500.
   Strictly more honest, but it is a change, and calling this a pure refactor would be wrong.
-- **Status:** CONFIRMED as intended. Stated in the PR body, not just here.
+- **Status:** **CORRECTED — the "Why" and "Blast radius" above are true of `tenant_of_ctx` and
+  FALSE as a generalization.** Kept unedited; see the correction appended at the end of this
+  section. The error-surfacing change runs in both directions: the old path ran a full
+  `RegistryStore::get` (events + `body_json` decode) on EVERY record, because `server.retrieve`
+  *was* the visibility check, whereas the batched query selects `ctx_id` only — so a class of
+  errors that used to 500 a page now cannot. "Strictly more honest" was unsupported in that
+  direction.
 
 ### RETRACTION of the `anonymous_public_reads: true` assumption above
 
@@ -2159,3 +2174,17 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 - **What would make it reachable:** a migration or import path that writes `contexts` rows
   without minting through `CtxId`. Anything of that kind must revisit this.
 - **Status:** UNCONFIRMED — recorded so it is a known latent rather than a rediscovery.
+
+- **Record that would otherwise not ship: how P9's planned acceptance criteria were actually
+  met.** `plans/` is gitignored (`.gitignore:42`), so the plan's own status block is
+  worktree-local and no reviewer sees it. The load-bearing part, in a tracked file:
+  - *Criterion (2) as written* asked for `tenants_of_ctxs` "exactly once per tenant-scoped page".
+    It is called **zero** times: the tenant predicate rides inside the single `visible_ctx_ids`
+    query rather than beside it. That is better than the criterion asked for, so the criterion is
+    superseded, not missed. The `CountingStore` counts `tenants_of_ctxs` anyway and pins it at
+    zero — meaning a future variant that satisfies the criterion *as written*, with two queries
+    per page, now fails. Falsified against a mutation that adds exactly that second query.
+  - *Criterion (3)* — "a ctx_id absent from the map still resolves to `default`" — was **not met
+    and no test was written**, because its premise is unreachable (see the two reasons in the
+    tenant entry above). `log_entries_rejects_the_reserved_default_tenant` ships instead.
+- **Status:** CONFIRMED.

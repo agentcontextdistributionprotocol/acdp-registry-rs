@@ -66,11 +66,21 @@ hold entries from several releases. Use the commands.
 
 - **Responses are byte-identical for a given `anonymous_public_reads` — but this is not a pure
   refactor, and two things change.** First, the flag above: get it wrong and the bytes differ
-  enormously, which is the whole of the security entry. Second, error surfacing: the old loop
-  never asked about a row it was about to hide, so a store error could reach the caller only
-  for rows that were *already visible*. The batched call covers the whole page including
-  invisible rows, so a page that used to return 200 with some leaves omitted can now return
-  500. Strictly more honest, still a behaviour change.
+  enormously, which is the whole of the security entry. Second, which store errors can reach
+  the caller — and the change runs in **both** directions, not one:
+
+  - **Newly able to surface:** `tenant_of_ctx`. The old code called it only *after* a row was
+    known visible, so an error on a hidden row could not reach the caller. The batched query
+    applies the tenant predicate to every row on the page, so now it can.
+  - **No longer able to surface:** everything `RegistryStore::get` does. The old path ran
+    `server.retrieve` — and therefore a full `get`, including `events_for_ctx` and
+    `body_json` deserialization — on *every* record, because that call **was** the visibility
+    check. The batched query selects `ctx_id` only, so a decode failure or an events-table
+    error on any row of the page used to 500 the request and now cannot.
+
+  An earlier draft of this entry said "a store error could reach the caller only for rows that
+  were already visible". That is true of `tenant_of_ctx` and false of everything else, and
+  claiming the fix is "strictly more honest" was unsupported in the second direction.
 
 - **The guard is the deliverable.** The improvement is invisible in the response, so nothing in
   the suite could have noticed a revert. A `CountingStore` test wrapper counts `get`,

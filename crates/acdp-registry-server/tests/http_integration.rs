@@ -8469,12 +8469,21 @@ async fn search_still_reports_total_estimate_without_tenant() {
 ///
 /// # The plan's description of this attack was wrong, and the correction matters
 ///
-/// It says a tenant-pinned caller can "walk cursors at `limit=1`". **At
-/// `limit=1` nothing leaks.** Measured: anchors returned at `limit=1` are the
-/// caller's own rows, every time.
+/// It says a tenant-pinned caller can "walk cursors at `limit=1`". That is not
+/// where the leak is. Measured on this fixture, every anchor returned at
+/// `limit=1` is one of the caller's own rows.
 ///
-/// The reason is the refill loop. A foreign anchor only escapes when
-/// `accumulated` reaches `target` *on the page whose last raw row is foreign*.
+/// **Not "every time" — an earlier version of this comment said that and it was
+/// an overclaim from a single six-row fixture.** A foreign anchor escapes
+/// whenever the refill loop STOPS on a page whose last raw row is foreign, and
+/// the loop has two exits, not one: reaching `target`, and exhausting
+/// `SEARCH_REFILL_MAX_PAGES` (6). `cursor` is assigned before that break, so at
+/// any `limit` — `1` included — enough consecutive foreign pages will hand a
+/// foreign anchor to the client. This fixture is too small to reach that exit.
+///
+/// The reason `limit=1` is clean HERE is the refill loop's target exit. A
+/// foreign anchor escapes that exit only when `accumulated` reaches `target`
+/// *on the page whose last raw row is foreign*.
 /// With `target == 1` a store page is one row, so if that row is foreign it is
 /// dropped by the retain, `accumulated` stays below `target`, and the loop
 /// refills — consuming the foreign-anchored cursor internally and returning the
@@ -8484,8 +8493,9 @@ async fn search_still_reports_total_estimate_without_tenant() {
 /// `accumulated` reaches `target` on it, the loop stops, and that page's
 /// foreign-anchored cursor is handed to the client. Measured at `limit=2`.
 ///
-/// Anyone reproducing the finding at `limit=1` would conclude it does not
-/// exist, which is why this test pins the size that actually works.
+/// Anyone reproducing the finding at `limit=1` on a fixture this size would
+/// conclude it does not exist, which is why this test pins the size that
+/// exposes it directly rather than the size the plan named.
 ///
 /// **Expected to FAIL when the tenant predicate moves into the store's search
 /// SQL** (E2, owned by another lane) — at which point it must be deleted in a
@@ -9122,10 +9132,12 @@ async fn log_entries_rejects_the_reserved_default_tenant() {
 /// `RegistryServer::retrieve` reads that flag off `self.caps` -- the
 /// `CapabilitiesDocument` baked in at `try_new` time -- NOT off
 /// `RegistryConfig`. That split is documented in this repo as GAP 3
-/// (`tests/common/mod.rs:227`), and it is a trap: the default harness
-/// hardcodes `caps.anonymous_public_reads: true` (`:104`) while the SHIPPED
-/// default is `false` (`acdp-registry-types/src/config.rs:488`, wired to caps
-/// at `acdp-registry-server/src/main.rs:1228`). So a test that flips
+/// (search `tests/common/mod.rs` for "GAP 3"), and it is a trap: this file's
+/// own `caps()` helper hardcodes `anonymous_public_reads: true`, and `config()`
+/// separately opts the CONFIG in as well, while the SHIPPED default is `false`
+/// (`AuthConfig::default()` in `acdp-registry-types/src/config.rs`, copied into
+/// caps by `capabilities_for` in `acdp-registry-server/src/main.rs`). So a test
+/// that flips
 /// `cfg.auth.anonymous_public_reads` and observes a 200 measures the harness's
 /// caps/config split and nothing about the binary.
 ///
@@ -9152,11 +9164,29 @@ async fn log_entries_honours_anonymous_public_reads_from_caps() {
     caps.anonymous_public_reads = false;
     let h = build_harness_with_caps(cfg, caps, None).await;
 
-    log_publish(&h, 150, "anon-gated", Visibility::Public).await;
+    let (ctx_id, _) = log_publish(&h, 150, "anon-gated", Visibility::Public).await;
 
-    // Ground truth for the rule this endpoint mirrors: the retrieve itself
-    // refuses. If this ever stops being a 404, the premise below is void and
-    // the leaf assertion must be re-derived, not merely re-run.
+    // Ground truth for the rule this endpoint mirrors, MEASURED rather than
+    // asserted in prose: the retrieve itself refuses this caller. §8.3 defines
+    // `leaf` presence in terms of retrievability, so if this ever stops being a
+    // 404 the leaf assertion below is testing something else and must be
+    // re-derived, not merely re-run.
+    //
+    // An earlier version of this test claimed this ground truth in a comment
+    // without performing it -- the same shape as the invalid probe this whole
+    // test exists to make impossible.
+    let (retrieve_status, rv) = get_json(
+        &h.router,
+        &format!("/contexts/{}", pct_encode_path_segment(&ctx_id)),
+    )
+    .await;
+    assert_eq!(
+        retrieve_status,
+        StatusCode::NOT_FOUND,
+        "premise: with caps.anonymous_public_reads false an anonymous caller \
+         cannot retrieve even a PUBLIC context: {rv}"
+    );
+
     let (status, v) = get_json(&h.router, "/log/entries?start=0&end=1").await;
     assert_eq!(status, StatusCode::OK, "{v}");
     let entries = v["entries"].as_array().expect("entries");
