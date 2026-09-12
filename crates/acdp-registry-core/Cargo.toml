@@ -35,6 +35,13 @@ metrics-exporter-prometheus = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 acdp-registry-sqlite = { path = "../acdp-registry-sqlite", version = "0.1.2" }
+# Test-only: needed to prove `make_request_span` actually RECORDS the request id.
+# A `Span`'s Debug impl emits metadata only -- no field names, no values -- so a
+# Debug-string assertion cannot distinguish a recorded id from a missing one. It
+# takes a real subscriber to observe the field, and without one the span is
+# `disabled` and records nothing at all. Already a workspace dependency (the
+# server binary uses it), so this adds no new external crate.
+tracing-subscriber = { workspace = true }
 
 [features]
 default    = []
