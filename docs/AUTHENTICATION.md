@@ -18,7 +18,7 @@ anonymous (so the visibility gate runs against `None`).
 ```
 client                                         registry
   │  POST /auth/challenge { agent_id }            │
-  │ ────────────────────────────────────────────►│  validate did:web, mint nonce,
+  │ ────────────────────────────────────────────►│  prefix+length check, mint nonce,
   │                                               │  persist ChallengeRecord(nonce, agent_id, expires_at)
   │  AuthChallenge { nonce, signing_input, ... }  │
   │ ◄──────────────────────────────────────────── │
@@ -58,13 +58,27 @@ In order (`service.rs`):
    record (defeats nonce theft and tampering).
 3. The challenge must not have expired.
 4. `algorithm` must be supported (`ed25519` or `ecdsa-p256`).
-5. `key_id` is split into a `did:web:` DID + fragment; the fragment is required.
-6. The DID document is resolved via the shared `WebResolver` — HTTPS-only,
-   SSRF-policy-gated, LRU-cached, the *same* resolver used for publish. Its
-   defenses (IP-literal rejection, DNS-time SSRF filtering, size/redirect caps)
-   are documented in [acdp-rs · Security Model][acdp-security].
-7. The verification method named by the fragment must appear in the document's
-   `assertionMethod` set.
+5. `key_id` is split into a DID + fragment; the fragment is required. The
+   signing key is then resolved by DID method, and the two methods take
+   **different paths** (`service.rs`, `issue_token` step 5):
+
+   **`did:web`** — steps 6 and 7 below (a live document fetch).
+
+   **`did:key`** — no document to fetch and no `assertionMethod` relationship
+   to check: the DID *is* the key, decoded offline. Gated on `did:key`
+   appearing in `auth.did_methods`, mirroring the publish path's capability
+   gate — an operator who has not opted in to `did:key` does not get it
+   silently accepted for auth either; rejection is `unsupported DID method`.
+   The fragment must equal the DID's own method-specific id
+   (`did:key:z<mb>#z<mb>`), so a mismatched fragment is refused rather than
+   silently ignored. Steps 6 and 7 do not apply.
+6. (`did:web` only) The DID document is resolved via the shared `WebResolver` —
+   HTTPS-only, SSRF-policy-gated, LRU-cached, the *same* resolver used for
+   publish. Its defenses (IP-literal rejection, DNS-time SSRF filtering,
+   size/redirect caps) are documented in
+   [acdp-rs · Security Model][acdp-security].
+7. (`did:web` only) The verification method named by the fragment must appear
+   in the document's `assertionMethod` set.
 8. If the verification method declares an algorithm, it must match the request's
    `algorithm` (algorithm-downgrade defense, RFC-ACDP-0001 §5.10 — enforced by
    `acdp`; see [acdp-rs · Security Model][acdp-security]).

@@ -548,7 +548,31 @@ Mounted only when `auth.enabled = true`. Full flow and JWT details in
 
 ### `POST /auth/challenge`
 
-Body `{ "agent_id": "did:web:..." }`. Returns an `AuthChallenge`:
+Body `{ "agent_id": "did:web:..." }` — `did:key:` is accepted here too.
+
+The `agent_id` is checked cheaply **before** any storage work: it must start
+with `did:web:` or `did:key:` and be 9–2048 characters. Anything else is
+rejected **403 `not_authorized`** (`auth challenge: unsupported DID method:
+…`) without a challenge record being written, so a client mistyping the
+method cannot fill the challenge table.
+
+Measured against a running registry:
+
+| `agent_id` | length | result |
+|---|---|---|
+| `did:web:a` | 9 | 200 — a challenge is minted |
+| `did:web:` | 8 | 403 `not_authorized` |
+| `did:key:z6MkExample` | 19 | 200 — **even with `auth.did_methods = ["did:web"]`** |
+| `did:foo:bar` | 11 | 403 `not_authorized` |
+| `""` | 0 | 403 `not_authorized` |
+
+This is a *prefix and length* check only. Full DID parsing, and the
+`auth.did_methods` capability gate, run later at `POST /auth/token` — so a
+registry that does not list `did:key` in `auth.did_methods` will still issue a
+challenge for a `did:key:` agent and reject it at token time. See
+[AUTHENTICATION.md](AUTHENTICATION.md) step 5.
+
+Returns an `AuthChallenge`:
 
 ```json
 {
