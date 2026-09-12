@@ -126,14 +126,17 @@ no-store`: `/auth/*`, the `/admin/*` routes, and `/healthz` (on the degraded
 arm as well as the healthy one — a cached "ok" masks an outage).
 
 The three `/.well-known/*` documents keep `public, max-age=300`
-(`crates/acdp-registry-core/src/handlers/meta.rs:74`, `:95`, `:126`). None of
+(`crates/acdp-registry-core/src/handlers/meta.rs:74`, `:95`, `:143`). None of
 them is requester-relative, and `every_well_known_document_keeps_public_caching`
 pins all three against a downgrade. (`/.well-known/did.json` exists only when a
-receipt key is configured; its 404 arm carries no directive at all.)
+receipt key is configured; its **404 arm answers `no-store`** — a cached 404
+would mask the document from every resolver that saw the miss once an operator
+adds a key.)
 
-`GET /metrics` is the one requester-relative response outside this posture: it
-gates on `metrics.bearer_token` and emits no cache directive. Tracked as #218
-rather than folded in here.
+`GET /metrics` is requester-relative — it gates on `metrics.bearer_token`, so
+its 200-vs-401 depends on the caller — and now answers `no-store` on both arms
+(#218). The directive is attached to that route alone, not to the group it
+shares with the `/.well-known/*` documents, which keep `public, max-age=300`.
 
 ### What this does not buy you
 

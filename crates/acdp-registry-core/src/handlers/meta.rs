@@ -98,6 +98,23 @@ pub async fn registry_did_document<S: ExtendedRegistryStore + 'static>(
             .into_response(),
         None => (
             StatusCode::NOT_FOUND,
+            // The 404 means "no receipt signing key is configured" -- it flips
+            // to 200 on an operator action (add a key, restart). A shared cache
+            // heuristically caching a directive-less 404 would mask the newly
+            // available document from every resolver that saw the miss, and the
+            // operator has no way to observe or flush it.
+            //
+            // `no-store` rather than a short `max-age`: the 404 carries no ETag
+            // to revalidate against, so `max-age=0, must-revalidate` would be
+            // `no-store` with extra ceremony plus a shared-cache-storable copy;
+            // and nothing polls a missing DID document at a volume a TTL would
+            // relieve. Same reasoning `/healthz` already applies below --
+            // staleness here is the failure this endpoint exists to rule out.
+            //
+            // Set in the handler, not by a layer: the `aux` group also carries
+            // the two well-known documents that set their own
+            // `public, max-age=300`.
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
             Json(json!({
                 "error": "not_found",
                 "message":
@@ -127,6 +144,33 @@ pub async fn jwks<S: ExtendedRegistryStore + 'static>(
             (axum::http::header::CONTENT_TYPE, "application/jwk-set+json"),
         ],
         body,
+    )
+}
+
+/// `GET /livez` — process liveness. Always 200, never touches storage.
+///
+/// The split from `/healthz` is the entire point. `/healthz` reports storage
+/// READINESS and returns 503 during a DB outage (below), which is correct for a
+/// load balancer and catastrophic for a Kubernetes `livenessProbe`: the kubelet
+/// restarts a process that is perfectly alive and cannot fix the database by
+/// restarting, and each restart discards the in-memory webhook queue (bounded at
+/// `webhook.queue_capacity`, no outbox, no replay).
+///
+/// Nothing in this repo wires `/healthz` as a liveness probe today — there is no
+/// `HEALTHCHECK` in the Dockerfile and no k8s manifests — so this is a latent
+/// trap rather than a live bug. The push toward it is prose: `docker/RAILWAY.md`
+/// tells operators to point Railway's healthcheck at `/healthz` and says nothing
+/// about the 503 arm.
+///
+/// `no-store` from the handler, for the same reason `/healthz` is: a cached 200
+/// from a dead process is precisely the failure a liveness probe exists to rule
+/// out. Set here rather than by a layer because `aux` also carries the two
+/// well-known documents that set their own `public, max-age=300`.
+pub async fn livez() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(json!({ "status": "ok", "version": build_version() })),
     )
 }
 
