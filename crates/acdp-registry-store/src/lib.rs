@@ -20,6 +20,8 @@ use acdp::registry::RegistryStore;
 use acdp::types::body::FullContext;
 use acdp::types::lifecycle::LifecycleEvent;
 use acdp::types::primitives::AgentDid;
+use acdp::types::search::{SearchParams, SearchResponse};
+use acdp_registry_types::config::RESERVED_TENANT;
 use async_trait::async_trait;
 
 pub use cursor::{decode_cursor, encode_cursor};
@@ -275,5 +277,357 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
             }
         }
         Ok(out)
+    }
+
+    /// Tenant-scoped search: like [`RegistryStore::search`], but the backend
+    /// MUST apply the tenant predicate **in storage**, not to the result set.
+    ///
+    /// # Why this exists as a separate method
+    ///
+    /// [`RegistryStore::search`] is declared by the upstream `acdp` crate, so
+    /// its signature cannot grow a `tenant` parameter here. This is the
+    /// additive sibling, shaped after [`Self::list_contexts`]'s `tenant`
+    /// parameter so the trait has one tenancy idiom rather than two.
+    ///
+    /// # What the storage-layer requirement buys
+    ///
+    /// Filtering after the query is not merely slower — it is **disclosing**.
+    /// `acdp::pagination` anchors `next_cursor` on the last *raw scanned row*,
+    /// deliberately, so that a page whose rows are all dropped by post-SQL
+    /// filters does not halt pagination early. A tenant filter applied after
+    /// the scan therefore leaves the cursor anchored on whatever row the scan
+    /// last touched — possibly another tenant's — encoding its `created_at`
+    /// and `ctx_id` into a token handed to the caller. That is an ordering and
+    /// existence oracle over foreign rows, walkable one page at a time.
+    ///
+    /// Putting `tenant_id = ?` in the `WHERE` clause fixes that **by
+    /// construction** rather than by adding a second check: every raw row the
+    /// scan sees already belongs to the caller, so the anchor cannot be
+    /// foreign, and `COUNT(*) OVER ()` on the same scan yields a
+    /// tenant-correct `total_estimate` without a second query.
+    ///
+    /// Implementations SHOULD rely on the composite `(tenant_id, created_at)`
+    /// index — `idx_ctx_tenant_created`, migration 006 (PG) / 007 (SQLite) —
+    /// which already covers the `created_at DESC, ctx_id ASC` order this query
+    /// uses.
+    ///
+    /// # The contract, stated once
+    ///
+    /// `Some(t)` means **exactly** "the rows whose tenant is `t`" — never more.
+    /// `None` means no narrowing, spanning tenants, matching
+    /// [`Self::list_contexts`].
+    ///
+    /// # The default implementation
+    ///
+    /// The default treats the backend as **untenanted**, consistent with
+    /// [`Self::tenant_of_ctx`]'s default reporting every row as
+    /// [`RESERVED_TENANT`]. Under that model these are the correct answers, not
+    /// degraded ones:
+    ///
+    /// - `None` — no narrowing requested.
+    /// - `Some(RESERVED_TENANT)` — every row on such a backend *is* in that
+    ///   tenant, so "the rows whose tenant is `default`" is the whole table.
+    ///   Delegating satisfies the contract above rather than sidestepping it;
+    ///   the SQL backends reach the same answer the other way, via
+    ///   `WHERE tenant_id = 'default'`, which on a tenanted backend selects
+    ///   only the untenanted bucket.
+    /// - `Some(other)` — no row can belong to a tenant this backend never
+    ///   assigns, so the answer is the empty page: `total_estimate` of `0`, no
+    ///   cursor.
+    ///
+    /// A backend that DOES record tenants MUST override this. Handing back
+    /// unfiltered rows for a foreign tenant would be a silent cross-tenant
+    /// disclosure, which is exactly why the default does not delegate
+    /// unconditionally: the one shape that must never be reachable by accident
+    /// is a caller asking for tenant B and receiving tenant A's rows.
+    ///
+    /// # What this deliberately does NOT do
+    ///
+    /// It does not reject `Some(RESERVED_TENANT)` as an illegitimate assertion.
+    /// That rule is real — `RESERVED_TENANT`'s own docs call it MUST NOT — but
+    /// it is an **authorization** decision and it already has exactly one
+    /// enforcement point: `reject_reserved_tenant`
+    /// (`crates/acdp-registry-core/src/handlers/context.rs:189`), which refuses
+    /// it from header or token so untenanted rows stay reachable only through
+    /// the *absence* of an assertion. Re-deciding it here would put an auth
+    /// judgement in the storage layer and would make `search_in_tenant`
+    /// inconsistent with `list_contexts`, which applies the predicate for any
+    /// `Some`. One rule, one place.
+    async fn search_in_tenant(
+        &self,
+        params: &SearchParams,
+        requester: Option<&AgentDid>,
+        anonymous_public_reads: bool,
+        tenant: Option<&str>,
+    ) -> Result<SearchResponse, AcdpError> {
+        match tenant {
+            None | Some(RESERVED_TENANT) => self.search(params, requester, anonymous_public_reads),
+            Some(_) => Ok(SearchResponse {
+                matches: Vec::new(),
+                total_estimate: Some(0),
+                next_cursor: None,
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod default_search_in_tenant_tests {
+    use super::*;
+    use acdp::registry::store::{PublishCommit, PublishCommitOutcome};
+    use acdp::registry::{IdempotencyRecord, LifecycleCommitOutcome};
+    use acdp::types::body::Body;
+    use acdp::types::primitives::{ContentHash, ContextType, CtxId, LineageId, Status, Visibility};
+    use acdp::types::publish::PublishResponse;
+    use acdp::types::search::SearchResult;
+    use chrono::{DateTime, Utc};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Values chosen to be impossible to produce by accident, so a passing
+    /// assertion can only mean "the delegate branch ran".
+    const SENTINEL_TOTAL: u64 = 4242;
+    const SENTINEL_CURSOR: &str = "SENTINEL-DELEGATED-TO-SEARCH";
+    const SENTINEL_CTX: &str = "acdp://sentinel.invalid/00000000-0000-0000-0000-00000000beef";
+
+    /// One recognizable row, so that "did a foreign-tenant request return rows?"
+    /// is a question the sentinel can actually answer. With an empty `matches`
+    /// the emptiness assertion was structurally unfalsifiable — no mutation of
+    /// the default could ever make it fail — which is an assertion masquerading
+    /// as a guard (CHARTER rule 51).
+    fn sentinel_row() -> SearchResult {
+        SearchResult {
+            ctx_id: CtxId(SENTINEL_CTX.to_string()),
+            lineage_id: LineageId("sentinel-lineage".to_string()),
+            agent_id: AgentDid::new("did:web:sentinel.invalid".to_string()),
+            title: "sentinel".to_string(),
+            summary: None,
+            context_type: ContextType::DataSnapshot,
+            domain: None,
+            created_at: DateTime::<Utc>::from_timestamp(0, 0).expect("epoch"),
+            status: Status::Active,
+            visibility: Some(Visibility::Public),
+        }
+    }
+
+    /// A backend that records tenants for nothing and overrides no
+    /// `ExtendedRegistryStore` method — the shape `search_in_tenant`'s default
+    /// exists to serve. `search` returns a sentinel and counts its own calls,
+    /// so each branch is identified by *which response came back* and *whether
+    /// the underlying store was touched at all* — not by a row count, which a
+    /// wrong-but-empty implementation would also satisfy.
+    struct UntenantedBackend {
+        search_calls: AtomicUsize,
+    }
+
+    impl UntenantedBackend {
+        fn new() -> Self {
+            Self {
+                search_calls: AtomicUsize::new(0),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.search_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl RegistryStore for UntenantedBackend {
+        fn search(
+            &self,
+            _params: &SearchParams,
+            _requester: Option<&AgentDid>,
+            _anonymous_public_reads: bool,
+        ) -> Result<SearchResponse, AcdpError> {
+            self.search_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(SearchResponse {
+                matches: vec![sentinel_row()],
+                total_estimate: Some(SENTINEL_TOTAL),
+                next_cursor: Some(SENTINEL_CURSOR.to_string()),
+            })
+        }
+
+        // Everything below is outside what this test exercises. `unimplemented!`
+        // rather than a plausible stub on purpose: if the default impl ever
+        // reaches one of these, the test must fail loudly rather than quietly
+        // succeed against a fake.
+        fn put(&self, _body: Body) -> Result<(), AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        fn get(&self, _ctx_id: &CtxId) -> Result<Option<FullContext>, AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        fn lineage(&self, _lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        fn current(&self, _lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        fn mark_superseded(&self, _ctx_id: &CtxId) -> Result<(), AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        fn first_version_ctx_id(
+            &self,
+            _lineage_id: &LineageId,
+        ) -> Result<Option<CtxId>, AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        fn idempotency_lookup(
+            &self,
+            _agent_id: &AgentDid,
+            _key: &str,
+        ) -> Result<Option<IdempotencyRecord>, AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        fn idempotency_record(
+            &self,
+            _agent_id: &AgentDid,
+            _key: &str,
+            _hash: &ContentHash,
+            _response: &PublishResponse,
+            _expires_at: DateTime<Utc>,
+        ) -> Result<(), AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        fn idempotency_evict_expired(&self, _now: DateTime<Utc>) -> Result<(), AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        fn commit_publish(
+            &self,
+            _commit: PublishCommit<'_>,
+        ) -> Result<PublishCommitOutcome, AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        fn commit_lifecycle_event(
+            &self,
+            _event: &LifecycleEvent,
+        ) -> Result<LifecycleCommitOutcome, AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+    }
+
+    #[async_trait]
+    impl ExtendedRegistryStore for UntenantedBackend {
+        async fn health(&self) -> Result<(), AcdpError> {
+            Ok(())
+        }
+        async fn migrate(&self) -> Result<(), AcdpError> {
+            Ok(())
+        }
+        async fn list_contexts(
+            &self,
+            _limit: u32,
+            _cursor: Option<&str>,
+            _requester: Option<&AgentDid>,
+            _tenant: Option<&str>,
+            _anonymous_public_reads: bool,
+        ) -> Result<Page<FullContext>, AcdpError> {
+            unimplemented!("not reached by search_in_tenant's default")
+        }
+        // `search_in_tenant` deliberately NOT overridden — the default is the
+        // subject under test.
+    }
+
+    #[tokio::test]
+    async fn no_tenant_asserted_delegates_to_search() {
+        let s = UntenantedBackend::new();
+        let r = s
+            .search_in_tenant(&SearchParams::default(), None, true, None)
+            .await
+            .expect("search_in_tenant ok");
+        assert_eq!(
+            r.total_estimate,
+            Some(SENTINEL_TOTAL),
+            "`None` must delegate to RegistryStore::search — the sentinel total is how we know \
+             the delegate branch ran rather than a fabricated empty page"
+        );
+        assert_eq!(r.next_cursor.as_deref(), Some(SENTINEL_CURSOR));
+        assert_eq!(s.calls(), 1, "search must have been called exactly once");
+    }
+
+    #[tokio::test]
+    async fn the_reserved_tenant_delegates_because_every_row_is_in_it() {
+        let s = UntenantedBackend::new();
+        let r = s
+            .search_in_tenant(&SearchParams::default(), None, true, Some(RESERVED_TENANT))
+            .await
+            .expect("search_in_tenant ok");
+        assert_eq!(
+            r.total_estimate,
+            Some(SENTINEL_TOTAL),
+            "on an untenanted backend every row IS `{RESERVED_TENANT}`, so \"the rows whose \
+             tenant is default\" is the whole table"
+        );
+        assert_eq!(s.calls(), 1);
+    }
+
+    /// Helper: the default's answer for a tenant this backend cannot hold.
+    async fn foreign_tenant_response() -> (UntenantedBackend, SearchResponse) {
+        let s = UntenantedBackend::new();
+        let r = s
+            .search_in_tenant(
+                &SearchParams::default(),
+                None,
+                true,
+                Some("tenant-that-this-backend-never-assigns"),
+            )
+            .await
+            .expect("search_in_tenant ok");
+        (s, r)
+    }
+
+    // One guarantee per test, deliberately. These four were originally four
+    // asserts in ONE test, which meant a single mutation reported one verdict for
+    // four promises and the three after the first were never evaluated (CHARTER
+    // rule 51). Split, a single mutation reddens all four independently, so each
+    // is demonstrably a guard rather than decoration.
+    //
+    // Rule 52: the line under test is `search_in_tenant`'s DEFAULT body, and it
+    // demonstrably executes here — `UntenantedBackend` overrides the method
+    // nowhere, and mutating that default reddens every test below. The overriding
+    // path is covered separately, by the SQL backends' parity suite.
+
+    /// The strongest claim: a tenant the backend cannot hold must not even reach
+    /// the store. A query whose rows are discarded afterwards still leaks a cursor.
+    #[tokio::test]
+    async fn a_foreign_tenant_never_consults_the_store() {
+        let (s, _r) = foreign_tenant_response().await;
+        assert_eq!(
+            s.calls(),
+            0,
+            "the store must never be consulted for a tenant it cannot hold — a call here means \
+             the implementation is post-filtering, which is the defect, not the fix"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_tenant_returns_no_rows() {
+        let (_s, r) = foreign_tenant_response().await;
+        let ids: Vec<&str> = r.matches.iter().map(|m| m.ctx_id.as_str()).collect();
+        assert!(
+            r.matches.is_empty(),
+            "a foreign tenant must match no rows, got {ids:?} — the sentinel ctx_id appearing \
+             here is the page-level leak"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_tenant_reports_a_zero_total() {
+        let (_s, r) = foreign_tenant_response().await;
+        assert_eq!(
+            r.total_estimate,
+            Some(0),
+            "total_estimate must be 0, not the sentinel {SENTINEL_TOTAL} — a non-zero total is \
+             itself a count oracle over another tenant's rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_tenant_receives_no_cursor() {
+        let (_s, r) = foreign_tenant_response().await;
+        assert_eq!(
+            r.next_cursor.as_deref(),
+            None,
+            "next_cursor must be absent; the sentinel cursor leaking here is exactly the \
+             cross-tenant anchor disclosure this method exists to prevent"
+        );
     }
 }

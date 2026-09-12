@@ -30,6 +30,14 @@ async fn fulltext_matches_the_cross_backend_contract() {
     parity::assert_fulltext_parity(&store, "sqlite").await;
 }
 
+/// H-H: a tenant-scoped search must not leak a foreign tenant's rows — not in
+/// the page, not in `total_estimate`, and not through the cursor anchor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tenant_scoped_search_matches_the_cross_backend_contract() {
+    let (store, _tmp) = store().await;
+    parity::assert_tenant_scoped_search_parity(&store, "sqlite").await;
+}
+
 /// B3: desynchronize the denormalized `retracted` column from the event log —
 /// the exact state a torn read between the row query and the event query would
 /// observe — and assert `get()` still serves a coherent pair.

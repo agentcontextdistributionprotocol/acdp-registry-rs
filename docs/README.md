@@ -32,6 +32,7 @@ go deeper.
 | [WEBHOOKS.md](WEBHOOKS.md) | Event payloads, the GitHub-compatible signature scheme, delivery and retry semantics. |
 | [RECEIPTS.md](RECEIPTS.md) | ACDP 0.2.0 registry receipts: enabling, serving `/.well-known/did.json`, the key-retention rule, rotation, did:key, the lineage audit. |
 | [OPERATIONS.md](OPERATIONS.md) | Deploying, observability, backup/restore, key rotation, federation ops. |
+| [ENGINEERING-LOG.md](ENGINEERING-LOG.md) | The narrative record of what changed and why — reasoning, rejected alternatives, evidence. Was the root `CHANGELOG.md` until #220; per-release notes live in `crates/*/CHANGELOG.md`. |
 
 ## Where the protocol ends and this registry begins
 
