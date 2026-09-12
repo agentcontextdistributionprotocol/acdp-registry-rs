@@ -158,6 +158,20 @@ impl ExtendedRegistryStore for SqliteStore {
         Ok(Some(n.max(0) as u64))
     }
 
+    /// H-H: the tenant predicate rides the same query builder as
+    /// `RegistryStore::search`, so the scan -- and therefore the keyset cursor
+    /// anchored on its last raw row -- only ever sees `tenant`'s contexts.
+    async fn search_in_tenant(
+        &self,
+        params: &SearchParams,
+        requester: Option<&AgentDid>,
+        anonymous_public_reads: bool,
+        tenant: Option<&str>,
+    ) -> Result<SearchResponse, AcdpError> {
+        self.search_inner(params, requester, anonymous_public_reads, tenant)
+            .await
+    }
+
     async fn tenant_of_ctx(&self, ctx_id: &str) -> Result<Option<String>, AcdpError> {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT tenant_id FROM contexts WHERE ctx_id = ?1")
@@ -1246,262 +1260,303 @@ impl RegistryStore for SqliteStore {
         requester: Option<&AgentDid>,
         anonymous_public_reads: bool,
     ) -> Result<SearchResponse, AcdpError> {
-        self.block_on(async {
-            // Boundary parse of all RFC 3339 filters.
-            let created_after = parse_opt_rfc3339(&params.created_after)?;
-            let created_before = parse_opt_rfc3339(&params.created_before)?;
-            let expires_after = parse_opt_rfc3339(&params.expires_after)?;
-            let expires_before = parse_opt_rfc3339(&params.expires_before)?;
-            let dp_start_after = parse_opt_rfc3339(&params.data_period_start_after)?;
-            let dp_end_before = parse_opt_rfc3339(&params.data_period_end_before)?;
-
-            // DESIGN-01: the §4.5 search disclosure predicate is pushed into
-            // SQL (below) so restricted/private bodies the requester may not
-            // see are never read or decoded, pages fill to `limit`, and
-            // `COUNT(*) OVER ()` yields an honest, §4.5-correct pre-page total
-            // that excludes contexts the requester is not entitled to count.
-            let requester_s: Option<String> = requester.map(|r| r.as_str().to_string());
-            let mut sql = String::from(
-                "SELECT body_json, status, retracted, COUNT(*) OVER () AS total_rows \
-                 FROM contexts WHERE 1=1",
-            );
-            sql.push_str(SEARCH_VISIBILITY_SQLITE);
-            let mut binds: Vec<String> = Vec::new();
-
-            if let Some(q) = &params.q {
-                sql.push_str(
-                    " AND ctx_id IN (SELECT ctx_id FROM contexts_fts WHERE contexts_fts MATCH ?)",
-                );
-                binds.push(fts5_escape(q));
-            }
-            if let Some(d) = &params.domain {
-                sql.push_str(" AND domain = ?");
-                binds.push(d.clone());
-            }
-            if let Some(a) = &params.agent_id {
-                sql.push_str(" AND agent_id = ?");
-                binds.push(a.clone());
-            }
-            if let Some(t) = &params.context_type {
-                sql.push_str(" AND context_type = ?");
-                binds.push(t.clone());
-            }
-            if let Some(s) = &params.schema_uri {
-                sql.push_str(" AND json_extract(body_json, '$.schema_uri') = ?");
-                binds.push(s.clone());
-            }
-            if let Some(after) = created_after {
-                sql.push_str(" AND created_at >= ?");
-                binds.push(after.to_rfc3339());
-            }
-            if let Some(before) = created_before {
-                sql.push_str(" AND created_at <= ?");
-                binds.push(before.to_rfc3339());
-            }
-            if let Some(after) = expires_after {
-                sql.push_str(" AND expires_at IS NOT NULL AND expires_at >= ?");
-                binds.push(after.to_rfc3339());
-            }
-            if let Some(before) = expires_before {
-                sql.push_str(" AND expires_at IS NOT NULL AND expires_at <= ?");
-                binds.push(before.to_rfc3339());
-            }
-            // BUG-B1: compare data_period bounds NUMERICALLY, never as TEXT.
-            //
-            // These two predicates read out of `body_json`, whose timestamps
-            // are chrono's serde output (`Z` suffix, 0/3/6/9 fractional
-            // digits), while the bound is bound as `to_rfc3339()` (`+00:00`
-            // suffix). Two different serializers for the same instant, so a
-            // lexicographic compare is simply wrong: `'+'`(0x2B) `<
-            // '.'`(0x2E) `<` digits `< 'Z'`(0x5A), which makes a stored
-            // whole-second value sort AFTER a bound naming that very same
-            // instant. Measured in sqlite3:
-            //
-            //     '2026-01-01T00:00:00Z' <= '2026-01-01T00:00:00+00:00'  -> 0
-            //
-            // so an inclusive bound excluded an equal instant, and the mirror
-            // case wrongly included. The `created_at`/`expires_at` filters
-            // above are NOT affected: both their stored and bound sides go
-            // through `to_rfc3339()`, so their lexical order does hold — that
-            // was measured too, rather than assumed by analogy.
-            //
-            // `unixepoch(..., 'subsec')` puts both sides through one parser
-            // and yields a real number, which fixes every combination of
-            // suffix and fractional width at once. Binding a `Z`-normalized
-            // string instead would NOT be enough: '…00Z' still sorts after
-            // '…00.500Z'. Requires SQLite >= 3.42; the bundled library is
-            // 3.46.0.
-            //
-            // Deliberately query-side only. The alternative — normalizing the
-            // stored form with a migration — would rewrite `body_json`, whose
-            // exact bytes are the `content_hash` preimage.
-            if let Some(after) = dp_start_after {
-                sql.push_str(
-                    " AND unixepoch(json_extract(body_json, '$.data_period.start'), 'subsec') \
-                     >= unixepoch(?, 'subsec')",
-                );
-                binds.push(after.to_rfc3339());
-            }
-            if let Some(before) = dp_end_before {
-                sql.push_str(
-                    " AND unixepoch(json_extract(body_json, '$.data_period.end'), 'subsec') \
-                     <= unixepoch(?, 'subsec')",
-                );
-                binds.push(before.to_rfc3339());
-            }
-
-            // BUG-02: bind the cursor and LIMIT as part of the SQL query so
-            // pagination doesn't fetch the entire matching set into Rust
-            // and discard it. The +1 sentinel lets us tell whether another
-            // page exists. The visibility filter that runs in Rust below
-            // can still drop a few rows, so the returned page size may be
-            // slightly under `limit`; this is the same trade-off
-            // `list_contexts` accepts.
-            let cursor_anchor = params
-                .cursor
-                .as_deref()
-                .map(decode_cursor)
-                .transpose()?
-                .flatten();
-            if let Some((anchor_ts, anchor_id)) = cursor_anchor.as_ref() {
-                sql.push_str(" AND (created_at < ? OR (created_at = ? AND ctx_id > ?))");
-                let anchor_rfc = anchor_ts.to_rfc3339();
-                binds.push(anchor_rfc.clone());
-                binds.push(anchor_rfc);
-                binds.push(anchor_id.clone());
-            }
-            let limit = params.limit.unwrap_or(50).min(100) as usize;
-            sql.push_str(" ORDER BY created_at DESC, ctx_id ASC LIMIT ?");
-
-            let mut q = sqlx::query(&sql);
-            // Disclosure binds first — same textual order as SEARCH_VISIBILITY_SQLITE.
-            let req = requester_s.as_deref();
-            q = q
-                .bind(req) // public:     ? IS NOT NULL
-                .bind(anonymous_public_reads) // public:     OR ?
-                .bind(req) // restricted: ? IS NOT NULL
-                .bind(req) // restricted: agent_id = ?
-                .bind(req) // restricted: audience value = ?
-                .bind(req) // private:    ? IS NOT NULL
-                .bind(req); // private:    agent_id = ?
-            for b in &binds {
-                q = q.bind(b);
-            }
-            q = q.bind((limit as i64) + 1);
-            let rows = q.fetch_all(&self.pool).await.map_err(map_sqlx_err)?;
-
-            // DESIGN-01: `COUNT(*) OVER ()` rides the same scan, so the total
-            // is the count of §4.5-visible rows matching the SQL filters
-            // (before the LIMIT). It is an ESTIMATE: the post-SQL status /
-            // tags / derived_from refinements below are not reflected, so it
-            // is an upper bound on the returned matches. Crucially, the §4.5
-            // visibility dimension IS in SQL, so the total never counts a
-            // restricted/private context the requester may not see.
-            let total_estimate = match rows.first() {
-                Some(r) => Some(
-                    r.try_get::<i64, _>("total_rows")
-                        .map_err(map_sqlx_err)?
-                        .max(0) as u64,
-                ),
-                None => Some(0),
-            };
-
-            let now = Utc::now();
-            let want_status = params.status.as_deref().unwrap_or("active");
-
-            // REG-P2-8: the `limit + 1` sentinel and the "anchor the next
-            // cursor on the last RAW scanned row, not the last visible
-            // match" rule (a page whose rows are all dropped by the
-            // disclosure / status / tag / derived_from filters must not
-            // stop pagination early) are owned by `acdp::pagination`.
-            let page = try_paginate_rows(
-                rows,
-                limit,
-                |row| -> Result<FullContext, AcdpError> {
-                    let body_json: String = row.try_get("body_json").map_err(map_sqlx_err)?;
-                    let status: String = row.try_get("status").map_err(map_sqlx_err)?;
-                    // RFC-ACDP-0013 §8.2: project the retraction flag so a
-                    // retracted context falls out of the default (active)
-                    // filter — and out of status=superseded / status=expired
-                    // even where those facts also hold (§7.2 precedence).
-                    let retracted: i64 = row.try_get("retracted").map_err(map_sqlx_err)?;
-                    let body: Body = serde_json::from_str(&body_json)
-                        .map_err(|e| AcdpError::RegistryInternal(format!("decode body: {e}")))?;
-                    // Receipts aren't projected into SearchResult rows, so the
-                    // search SELECT deliberately skips the column.
-                    let stored = if retracted != 0 {
-                        Status::Retracted
-                    } else {
-                        parse_status(&status)
-                    };
-                    let mut ctx = full_context(body, stored, None);
-                    ctx.registry_state.status =
-                        project_status_inline(&ctx.registry_state.status, ctx.body.expires_at, now);
-                    Ok(ctx)
-                },
-                |ctx| {
-                    // DESIGN-01: §4.5 search disclosure is enforced in SQL
-                    // above; the raw scanned rows are already disclosure-
-                    // scoped. Remaining post-SQL refinements: status
-                    // projection, tags (stored as JSON), and derived_from.
-                    if ctx.registry_state.status.as_str() != want_status {
-                        return false;
-                    }
-                    // tag filter — kept post-SQL because we store as JSON.
-                    if let Some(t) = &params.tags {
-                        let want: Vec<&str> = t
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        let body_tags = ctx.body.tags.as_deref().unwrap_or(&[]);
-                        if !want.iter().all(|w| body_tags.iter().any(|bt| bt == w)) {
-                            return false;
-                        }
-                    }
-                    // derived_from filter — also post-SQL.
-                    params
-                        .derived_from
-                        .as_ref()
-                        .is_none_or(|df| ctx.body.derived_from.iter().any(|c| c.as_str() == df))
-                },
-                |ctx| {
-                    encode_cursor(
-                        ctx.body.created_at.timestamp_millis(),
-                        ctx.body.ctx_id.as_str(),
-                    )
-                },
-            )?;
-            let (matches, next_cursor) = (page.items, page.next_cursor);
-
-            let projected: Vec<SearchResult> = matches
-                .iter()
-                .map(|ctx| SearchResult {
-                    ctx_id: ctx.body.ctx_id.clone(),
-                    lineage_id: ctx.body.lineage_id.clone(),
-                    agent_id: ctx.body.agent_id.clone(),
-                    title: ctx.body.title.clone(),
-                    summary: ctx.body.summary.clone(),
-                    context_type: ctx.body.context_type.clone(),
-                    domain: ctx.body.domain.clone(),
-                    created_at: ctx.body.created_at,
-                    status: ctx.registry_state.status.clone(),
-                    visibility: Some(ctx.body.visibility.clone()),
-                })
-                .collect();
-
-            // DESIGN-01: total_estimate is now the pre-page count of
-            // §4.5-visible rows (from `COUNT(*) OVER ()`), not the page size.
-            Ok(SearchResponse {
-                matches: projected,
-                total_estimate,
-                next_cursor,
-            })
-        })
+        // Tenant-spanning: the protocol-level contract carries no tenancy.
+        // `ExtendedRegistryStore::search_in_tenant` is the narrowed entry
+        // point, and both run THIS body -- one query builder, so the
+        // tenant and non-tenant paths cannot drift apart.
+        self.block_on(self.search_inner(params, requester, anonymous_public_reads, None))
     }
 }
 
 impl SqliteStore {
+    /// The one search implementation. `tenant == None` spans tenants
+    /// (`RegistryStore::search`); `Some(t)` restricts the scan to `t`
+    /// (`ExtendedRegistryStore::search_in_tenant`).
+    ///
+    /// Duplicating this builder for the tenant case was rejected outright:
+    /// two copies of a ~260-line filter chain drift, and the drift is
+    /// invisible precisely when it matters -- which is the lesson
+    /// `acdp_registry_store::parity`'s module docs were written to record.
+    async fn search_inner(
+        &self,
+        params: &SearchParams,
+        requester: Option<&AgentDid>,
+        anonymous_public_reads: bool,
+        tenant: Option<&str>,
+    ) -> Result<SearchResponse, AcdpError> {
+        // Boundary parse of all RFC 3339 filters.
+        let created_after = parse_opt_rfc3339(&params.created_after)?;
+        let created_before = parse_opt_rfc3339(&params.created_before)?;
+        let expires_after = parse_opt_rfc3339(&params.expires_after)?;
+        let expires_before = parse_opt_rfc3339(&params.expires_before)?;
+        let dp_start_after = parse_opt_rfc3339(&params.data_period_start_after)?;
+        let dp_end_before = parse_opt_rfc3339(&params.data_period_end_before)?;
+
+        // DESIGN-01: the §4.5 search disclosure predicate is pushed into
+        // SQL (below) so restricted/private bodies the requester may not
+        // see are never read or decoded, pages fill to `limit`, and
+        // `COUNT(*) OVER ()` yields an honest, §4.5-correct pre-page total
+        // that excludes contexts the requester is not entitled to count.
+        let requester_s: Option<String> = requester.map(|r| r.as_str().to_string());
+        let mut sql = String::from(
+            "SELECT body_json, status, retracted, COUNT(*) OVER () AS total_rows \
+             FROM contexts WHERE 1=1",
+        );
+        sql.push_str(SEARCH_VISIBILITY_SQLITE);
+        let mut binds: Vec<String> = Vec::new();
+
+        // H-H: push the tenant predicate into SQL, exactly as
+        // `list_contexts` does (see its comment for the index rationale).
+        // This is the whole point of the unit, so it is worth saying why it
+        // has to be HERE and not after the query: `acdp::pagination` anchors
+        // `next_cursor` on the last RAW scanned row (see the REG-P2-8 note
+        // further down), deliberately, so that a page whose rows are all
+        // dropped by post-SQL filters cannot halt pagination early. Filter
+        // by tenant after the scan and that anchor can name another tenant's
+        // row, which leaks its `(created_at, ctx_id)` to the caller. With the
+        // predicate in the WHERE clause every raw row is already the
+        // caller's, so the anchor is tenant-safe BY CONSTRUCTION rather than
+        // by a second check -- and `COUNT(*) OVER ()` below becomes
+        // tenant-correct on the same scan, with no extra query.
+        //
+        // Bound first in `binds`, matching this textual position. `None`
+        // spans tenants, preserving `RegistryStore::search`'s behaviour
+        // exactly.
+        if let Some(t) = tenant {
+            sql.push_str(" AND tenant_id = ?");
+            binds.push(t.to_string());
+        }
+
+        if let Some(q) = &params.q {
+            sql.push_str(
+                " AND ctx_id IN (SELECT ctx_id FROM contexts_fts WHERE contexts_fts MATCH ?)",
+            );
+            binds.push(fts5_escape(q));
+        }
+        if let Some(d) = &params.domain {
+            sql.push_str(" AND domain = ?");
+            binds.push(d.clone());
+        }
+        if let Some(a) = &params.agent_id {
+            sql.push_str(" AND agent_id = ?");
+            binds.push(a.clone());
+        }
+        if let Some(t) = &params.context_type {
+            sql.push_str(" AND context_type = ?");
+            binds.push(t.clone());
+        }
+        if let Some(s) = &params.schema_uri {
+            sql.push_str(" AND json_extract(body_json, '$.schema_uri') = ?");
+            binds.push(s.clone());
+        }
+        if let Some(after) = created_after {
+            sql.push_str(" AND created_at >= ?");
+            binds.push(after.to_rfc3339());
+        }
+        if let Some(before) = created_before {
+            sql.push_str(" AND created_at <= ?");
+            binds.push(before.to_rfc3339());
+        }
+        if let Some(after) = expires_after {
+            sql.push_str(" AND expires_at IS NOT NULL AND expires_at >= ?");
+            binds.push(after.to_rfc3339());
+        }
+        if let Some(before) = expires_before {
+            sql.push_str(" AND expires_at IS NOT NULL AND expires_at <= ?");
+            binds.push(before.to_rfc3339());
+        }
+        // BUG-B1: compare data_period bounds NUMERICALLY, never as TEXT.
+        //
+        // These two predicates read out of `body_json`, whose timestamps
+        // are chrono's serde output (`Z` suffix, 0/3/6/9 fractional
+        // digits), while the bound is bound as `to_rfc3339()` (`+00:00`
+        // suffix). Two different serializers for the same instant, so a
+        // lexicographic compare is simply wrong: `'+'`(0x2B) `<
+        // '.'`(0x2E) `<` digits `< 'Z'`(0x5A), which makes a stored
+        // whole-second value sort AFTER a bound naming that very same
+        // instant. Measured in sqlite3:
+        //
+        //     '2026-01-01T00:00:00Z' <= '2026-01-01T00:00:00+00:00'  -> 0
+        //
+        // so an inclusive bound excluded an equal instant, and the mirror
+        // case wrongly included. The `created_at`/`expires_at` filters
+        // above are NOT affected: both their stored and bound sides go
+        // through `to_rfc3339()`, so their lexical order does hold — that
+        // was measured too, rather than assumed by analogy.
+        //
+        // `unixepoch(..., 'subsec')` puts both sides through one parser
+        // and yields a real number, which fixes every combination of
+        // suffix and fractional width at once. Binding a `Z`-normalized
+        // string instead would NOT be enough: '…00Z' still sorts after
+        // '…00.500Z'. Requires SQLite >= 3.42; the bundled library is
+        // 3.46.0.
+        //
+        // Deliberately query-side only. The alternative — normalizing the
+        // stored form with a migration — would rewrite `body_json`, whose
+        // exact bytes are the `content_hash` preimage.
+        if let Some(after) = dp_start_after {
+            sql.push_str(
+                " AND unixepoch(json_extract(body_json, '$.data_period.start'), 'subsec') \
+                 >= unixepoch(?, 'subsec')",
+            );
+            binds.push(after.to_rfc3339());
+        }
+        if let Some(before) = dp_end_before {
+            sql.push_str(
+                " AND unixepoch(json_extract(body_json, '$.data_period.end'), 'subsec') \
+                 <= unixepoch(?, 'subsec')",
+            );
+            binds.push(before.to_rfc3339());
+        }
+
+        // BUG-02: bind the cursor and LIMIT as part of the SQL query so
+        // pagination doesn't fetch the entire matching set into Rust
+        // and discard it. The +1 sentinel lets us tell whether another
+        // page exists. The visibility filter that runs in Rust below
+        // can still drop a few rows, so the returned page size may be
+        // slightly under `limit`; this is the same trade-off
+        // `list_contexts` accepts.
+        let cursor_anchor = params
+            .cursor
+            .as_deref()
+            .map(decode_cursor)
+            .transpose()?
+            .flatten();
+        if let Some((anchor_ts, anchor_id)) = cursor_anchor.as_ref() {
+            sql.push_str(" AND (created_at < ? OR (created_at = ? AND ctx_id > ?))");
+            let anchor_rfc = anchor_ts.to_rfc3339();
+            binds.push(anchor_rfc.clone());
+            binds.push(anchor_rfc);
+            binds.push(anchor_id.clone());
+        }
+        let limit = params.limit.unwrap_or(50).min(100) as usize;
+        sql.push_str(" ORDER BY created_at DESC, ctx_id ASC LIMIT ?");
+
+        let mut q = sqlx::query(&sql);
+        // Disclosure binds first — same textual order as SEARCH_VISIBILITY_SQLITE.
+        let req = requester_s.as_deref();
+        q = q
+            .bind(req) // public:     ? IS NOT NULL
+            .bind(anonymous_public_reads) // public:     OR ?
+            .bind(req) // restricted: ? IS NOT NULL
+            .bind(req) // restricted: agent_id = ?
+            .bind(req) // restricted: audience value = ?
+            .bind(req) // private:    ? IS NOT NULL
+            .bind(req); // private:    agent_id = ?
+        for b in &binds {
+            q = q.bind(b);
+        }
+        q = q.bind((limit as i64) + 1);
+        let rows = q.fetch_all(&self.pool).await.map_err(map_sqlx_err)?;
+
+        // DESIGN-01: `COUNT(*) OVER ()` rides the same scan, so the total
+        // is the count of §4.5-visible rows matching the SQL filters
+        // (before the LIMIT). It is an ESTIMATE: the post-SQL status /
+        // tags / derived_from refinements below are not reflected, so it
+        // is an upper bound on the returned matches. Crucially, the §4.5
+        // visibility dimension IS in SQL, so the total never counts a
+        // restricted/private context the requester may not see.
+        let total_estimate = match rows.first() {
+            Some(r) => Some(
+                r.try_get::<i64, _>("total_rows")
+                    .map_err(map_sqlx_err)?
+                    .max(0) as u64,
+            ),
+            None => Some(0),
+        };
+
+        let now = Utc::now();
+        let want_status = params.status.as_deref().unwrap_or("active");
+
+        // REG-P2-8: the `limit + 1` sentinel and the "anchor the next
+        // cursor on the last RAW scanned row, not the last visible
+        // match" rule (a page whose rows are all dropped by the
+        // disclosure / status / tag / derived_from filters must not
+        // stop pagination early) are owned by `acdp::pagination`.
+        let page = try_paginate_rows(
+            rows,
+            limit,
+            |row| -> Result<FullContext, AcdpError> {
+                let body_json: String = row.try_get("body_json").map_err(map_sqlx_err)?;
+                let status: String = row.try_get("status").map_err(map_sqlx_err)?;
+                // RFC-ACDP-0013 §8.2: project the retraction flag so a
+                // retracted context falls out of the default (active)
+                // filter — and out of status=superseded / status=expired
+                // even where those facts also hold (§7.2 precedence).
+                let retracted: i64 = row.try_get("retracted").map_err(map_sqlx_err)?;
+                let body: Body = serde_json::from_str(&body_json)
+                    .map_err(|e| AcdpError::RegistryInternal(format!("decode body: {e}")))?;
+                // Receipts aren't projected into SearchResult rows, so the
+                // search SELECT deliberately skips the column.
+                let stored = if retracted != 0 {
+                    Status::Retracted
+                } else {
+                    parse_status(&status)
+                };
+                let mut ctx = full_context(body, stored, None);
+                ctx.registry_state.status =
+                    project_status_inline(&ctx.registry_state.status, ctx.body.expires_at, now);
+                Ok(ctx)
+            },
+            |ctx| {
+                // DESIGN-01: §4.5 search disclosure is enforced in SQL
+                // above; the raw scanned rows are already disclosure-
+                // scoped. Remaining post-SQL refinements: status
+                // projection, tags (stored as JSON), and derived_from.
+                if ctx.registry_state.status.as_str() != want_status {
+                    return false;
+                }
+                // tag filter — kept post-SQL because we store as JSON.
+                if let Some(t) = &params.tags {
+                    let want: Vec<&str> = t
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let body_tags = ctx.body.tags.as_deref().unwrap_or(&[]);
+                    if !want.iter().all(|w| body_tags.iter().any(|bt| bt == w)) {
+                        return false;
+                    }
+                }
+                // derived_from filter — also post-SQL.
+                params
+                    .derived_from
+                    .as_ref()
+                    .is_none_or(|df| ctx.body.derived_from.iter().any(|c| c.as_str() == df))
+            },
+            |ctx| {
+                encode_cursor(
+                    ctx.body.created_at.timestamp_millis(),
+                    ctx.body.ctx_id.as_str(),
+                )
+            },
+        )?;
+        let (matches, next_cursor) = (page.items, page.next_cursor);
+
+        let projected: Vec<SearchResult> = matches
+            .iter()
+            .map(|ctx| SearchResult {
+                ctx_id: ctx.body.ctx_id.clone(),
+                lineage_id: ctx.body.lineage_id.clone(),
+                agent_id: ctx.body.agent_id.clone(),
+                title: ctx.body.title.clone(),
+                summary: ctx.body.summary.clone(),
+                context_type: ctx.body.context_type.clone(),
+                domain: ctx.body.domain.clone(),
+                created_at: ctx.body.created_at,
+                status: ctx.registry_state.status.clone(),
+                visibility: Some(ctx.body.visibility.clone()),
+            })
+            .collect();
+
+        // DESIGN-01: total_estimate is now the pre-page count of
+        // §4.5-visible rows (from `COUNT(*) OVER ()`), not the page size.
+        Ok(SearchResponse {
+            matches: projected,
+            total_estimate,
+            next_cursor,
+        })
+    }
     async fn idempotency_evict_inner(&self, now: DateTime<Utc>) -> Result<(), AcdpError> {
         sqlx::query("DELETE FROM idempotency_records WHERE expires_at_ms <= ?")
             .bind(now.timestamp_millis())

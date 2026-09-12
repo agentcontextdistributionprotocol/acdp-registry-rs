@@ -1521,9 +1521,6 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   one INSERT per publish, inside a transaction that already writes several rows.
 - **Status:** CLOSED (2026-09-12) — finding handed to the coordinator with its evidence; no action taken here. See DECISIONS.md H-B #9.
 
-- **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
-  evidence rather than actioned here.
-
 ## H-A / P2 — 408 is not given an RFC-ACDP-0007 §5 envelope
 
 - **Plan:** plans/h-a-wire-surface-observability.md (phase P2)
@@ -1568,6 +1565,130 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
   evidence rather than actioned here.
 
+## `search_in_tenant`'s default treats the backend as untenanted rather than refusing
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 1)
+- **Assumed:** the new trait method must be *defaulted*, not required — and what the default
+  does is a security decision rather than a compatibility formality.
+- **Measured first:** `ExtendedRegistryStore` has exactly three implementors, and one of them
+  is `MemoryStore` at `crates/acdp-registry-server/src/memory_ext.rs:99`, in a crate outside
+  this lane's claim. A required method would not compile and could not be fixed from here.
+  `MemoryStore` overrides **no** tenant method, so it inherits `tenant_of_ctx`'s default of
+  `Some("default")`.
+- **Chose:** follow the precedent `tenant_of_ctx` set in its own doc — satisfy the trait
+  "without claiming a wrong answer". `None` and `Some(RESERVED_TENANT)` delegate to
+  `RegistryStore::search`; any other tenant returns the empty page with `total_estimate: 0`
+  and no cursor. On a backend where every row is `default`, both answers are *correct* under
+  the one contract the method states: `Some(t)` means exactly the rows whose tenant is `t`.
+- **Alternatives:** (a) delegate unconditionally — rejected outright; it hands tenant A's rows
+  to a caller asking for tenant B, which is a silent cross-tenant disclosure in the default
+  path, the worst possible place for one. (b) `Err(NotImplemented)`, which has real precedent
+  in `MemoryStore::list_contexts` — rejected because a correct answer genuinely exists here,
+  so refusing would break the memory backend the moment H-H-w wires the handler.
+- **Blast radius if wrong:** a future backend that records tenants but forgets to override
+  would serve the default's answer. Bounded by the doc comment stating the override
+  obligation, and by both SQL backends overriding it in phases 2–3. Reversible in one commit.
+- **Status:** CONFIRMED (2026-09-12) — reconcile reopened a 4th option (fail closed for every `Some`) and rejected it: it would make the memory backend diverge from both SQL backends on `Some(RESERVED_TENANT)`. Residual risk recorded. See DECISIONS.md H-H #1.
+
+## The store does NOT re-enforce the reserved-tenant rejection
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 1)
+- **Assumed:** `RESERVED_TENANT`'s doc says `"default"` MUST NOT be assertable as a real
+  tenant, so `search_in_tenant` might owe a second check.
+- **Verified, not assumed:** it already has exactly one enforcement point —
+  `reject_reserved_tenant` at `crates/acdp-registry-core/src/handlers/context.rs:189`, which
+  refuses it from header or token, so untenanted rows stay reachable only through the
+  *absence* of an assertion. So `Some(RESERVED_TENANT)` cannot arrive from the HTTP path.
+- **Chose:** do not duplicate the check in the storage layer. It is an authorization
+  judgement, and `list_contexts` applies its predicate for any `Some` — adding a rejection to
+  `search_in_tenant` alone would manufacture exactly the kind of path divergence unit H-B
+  existed to remove.
+- **Alternatives:** reject it in the store as defence in depth — rejected as an auth decision
+  in the wrong layer, and inconsistent with the sibling method.
+- **Blast radius if wrong:** a non-HTTP caller (a background job, a future transport) passing
+  `Some("default")` would receive the untenanted bucket. On the SQL backends that is
+  `WHERE tenant_id = 'default'` — the untenanted bucket precisely, not everything — so the
+  exposure is the aliasing `RESERVED_TENANT` warns about, reachable only by bypassing the
+  handler. Cheap to add later if a second caller ever appears.
+- **Status:** CONFIRMED (2026-09-12) — the premise is now VERIFIED, not assumed: search resolves tenancy via `tenant_for_request` (`context.rs:939`), which calls `reject_reserved_tenant`. See DECISIONS.md H-H #2.
+
+## `tokio` added as an unconditional dev-dependency of `acdp-registry-store`
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 1)
+- **Assumed:** testing an `async` default impl needs a runtime, and the existing `tokio` dep
+  is optional behind `test-support` so it is not available to a plain `cargo test`.
+- **Chose:** add `[dev-dependencies] tokio = { workspace = true }`. Dev-dependencies never
+  reach a downstream build, and the workspace already pins `features = ["full"]`, so this adds
+  no new feature surface and nothing to the shipped artifact.
+- **Alternatives:** (a) hand-poll the future with a no-op waker to avoid the dep — rejected as
+  obscure for no gain; (b) put the tests behind `test-support` — rejected, it would mean the
+  default impl's guard does not run in a normal `cargo test`, which is where it matters most.
+- **Blast radius if wrong:** none to consumers; a dev-only dependency on a crate already in
+  the tree.
+- **Status:** CONFIRMED (2026-09-12) — dev-only, nothing reaches the shipped artifact. See DECISIONS.md H-H #3.
+
+## No new index for the tenant-scoped search path
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 2, assign item 5)
+- **Assumed (by the assign):** the search path needs a composite index the way
+  `list_contexts` did.
+- **Measured instead:** `EXPLAIN QUERY PLAN` over 2000 rows across 20 tenants, after
+  `ANALYZE`. Tenant-scoped: `SEARCH contexts USING INDEX idx_ctx_tenant (tenant_id=?)`.
+  Tenant-spanning: `SCAN contexts`. Both then `USE TEMP B-TREE FOR ORDER BY`.
+- **Chose:** add no migration. The predicate is already index-assisted, and the `ORDER BY`
+  cannot be index-satisfied on this query in either case because `COUNT(*) OVER ()` must
+  materialize the full matching set first — so the temp B-tree is pre-existing rather than
+  introduced here, and a new index would not remove it.
+- **Alternatives:** add a composite `(tenant_id, created_at DESC)` index — rejected: one
+  already exists (`idx_ctx_tenant_created`, migration 006/007) and the planner does not
+  choose it, so a *third* index would be redundant storage and write cost for no measured
+  gain. Notably the plan predicted that index would be the one used; it is not.
+- **Blast radius if wrong:** a busy mixed-tenant registry could see slower tenant-scoped
+  searches than necessary. Bounded: the alternative is strictly additive later, and the
+  measurement above is the baseline to re-run against. Reversible.
+- **Status:** CONFIRMED (2026-09-12) — on the measurements, both backends and both selectivities. See DECISIONS.md H-H #4.
+
+## The tenant parity fixture isolates by unique tenant name, not by cleanup
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 3)
+- **Assumed initially (WRONG):** that a fixed pair of tenant names was fine, because every
+  other assertion in `parity.rs` uses fixed seeds.
+- **What actually happened:** the pg suite went red on the second and third runs —
+  `total_estimate` `Some(9)` where `Some(3)` was expected. Postgres is a **persistent**
+  fixture, so rows accumulate; SQLite hid it behind a fresh tempfile per run. The sibling
+  assertions survive this only because they test *membership* (`search_contains`) rather than
+  an exact count, which this one cannot do — the tenant-scoped count IS the property under
+  test.
+- **Chose:** derive both tenant names from a nanosecond timestamp so each run occupies its own
+  namespace. Verified by three consecutive pg runs, then re-falsified to confirm the isolation
+  did not weaken the guard.
+- **Alternatives:** (a) delete the fixture's rows afterwards — rejected: a failing assertion
+  would skip the cleanup and poison the next run, which is how a flake becomes permanent;
+  (b) assert `>=` instead of `==` — rejected, it would no longer detect a cross-tenant count
+  oracle, which is the A2 finding this exists to pin.
+- **Blast radius if wrong:** test-only. A clock moving backwards between runs could collide,
+  which needs a same-nanosecond collision to matter.
+- **Status:** CONFIRMED (2026-09-12) — 3 consecutive green pg runs plus a re-falsification proving the fix did not neuter the guard. See DECISIONS.md H-H #5.
+
+## `cursor.rs`'s disclosure claim is made per-dimension rather than restored
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 4)
+- **Assumed:** that once the predicate moved into SQL, the original claim — a cursor holds
+  only "an identifier the requester was already shown" — could simply be restored.
+- **Chose:** not to restore it. It is true for §4.5 visibility (in SQL on both backends, so
+  the scan never touches a row the requester may not see) and true for tenancy **only for
+  callers of `search_in_tenant`**. The HTTP handler still calls the protocol-level
+  `RegistryStore::search` and filters afterwards, so on the live path the claim remains false.
+  The docs now state the guarantee per dimension and name the mechanism: a cursor discloses
+  nothing beyond what the *scan that produced it* was allowed to see.
+- **Alternatives:** (a) restore the original sentence — rejected: it would be false for the
+  deployed path, and a subtly-false comment is worse than a known-false one because it reads
+  as verified; (b) delete the paragraph — rejected: the anchor-vs-served distinction is
+  exactly what a future reader needs in order not to reintroduce this.
+- **Blast radius if wrong:** documentation only, but it is the doc a future filter author will
+  read when deciding whether their filter can run post-query. Getting it wrong reintroduces
+  the leak.
+- **Status:** CONFIRMED (2026-09-12) — it states the general rule and the actionable consequence, not just an enumeration. See DECISIONS.md H-H #6.
 
 ## H-A / P3 — #218 resolved: `/metrics` answers `no-store` on every arm (200, 401, 405)
 
@@ -1611,3 +1732,24 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   the *plan* asserted a falsification that could not fire, which is the same defect class this
   unit exists to remove, one level up: an unfireable probe presented as evidence.
 - **Status:** CONFIRMED
+
+## Guarantees are falsified per assertion, via accumulation rather than separate tests
+
+- **Plan:** `plans/h-h-tenant-aware-search.md` (H-H Phase 5, CHARTER rules 51–52)
+- **Assumed initially (WRONG):** that one test asserting four related properties was adequate
+  coverage of those four properties.
+- **What the audit found:** `assert!` aborts at the first failure, so only 2 of phase 1's 4
+  assertions had ever been shown to fail, and `matches.is_empty()` was **structurally
+  unfalsifiable** — the sentinel returned no rows, so no mutation could make it fail.
+- **Chose:** two different remedies for two different shapes. For the unit tests, **one test per
+  guarantee** — cheap, and a single mutation then produces four independent verdicts. For the
+  shared cross-backend assertion, **accumulate violations and report them all at once**, because
+  splitting it would have meant 4 public functions × 2 backends and a thin-caller file that is
+  supposed to stay thin.
+- **Alternatives:** split the parity assertion into one function per guarantee — rejected: it
+  multiplies the per-backend caller boilerplate the module's own docs warn against, and
+  accumulation achieves the same property (every guarantee evaluated every run) with a strictly
+  better failure message.
+- **Blast radius if wrong:** a guarantee could regress while the suite stays green. Bounded by
+  the recorded mutation matrix, which shows all six guarantees firing on both backends.
+- **Status:** CONFIRMED (2026-09-12) — 6/6 guarantees fire on both backends; matrix in the plan and PROGRESS.md. See DECISIONS.md H-H #7.

@@ -1867,3 +1867,108 @@ next phase boundary rather than as a merge conflict.
 fail the format its own header claims. A disclaimer that contradicts the filename is the same
 class of defect as the diagram in decision 14 — correct text that the surrounding artefact
 undermines.
+## H-H — tenant-aware search at the SQL layer (unit H-H, lane-2, reconciled 2026-09-12)
+
+Seven entries tagged `plans/h-h-tenant-aware-search.md`, reconciled **before** the PR rather
+than after it — `/drive`'s ordering for a one-PR feature, so code cannot ship carrying an
+unresolved one-way-door assumption.
+
+**Tier: the critical tier is empty, and that is a finding rather than a convenience.** No entry
+changes a schema, runs a migration, alters a public HTTP contract, or adds a dependency to the
+shipped artifact (`tokio` is dev-only). Every one is reversible in a commit. So none went to
+Fable and none needs the human — but the three security-shaped entries (1, 2, 6) were analyzed
+on evidence rather than confirmed by re-reading, and one of them made me reopen a design
+alternative I had not logged.
+
+**Method deviation, same as unit H-B:** `/reconcile` asks for a fresh subagent per entry and
+this session is instructed not to spawn agents, so the analyses ran in-context. What that costs
+is analyst independence, which is why each entry below rests on a code fact or a banked
+measurement, and why entry 1 records a residual risk instead of claiming none.
+
+### 1. `search_in_tenant`'s default treats the backend as untenanted — CONFIRMED (Opus)
+
+The question worth asking was not "does it work" but "can a tenant-recording backend reach this
+default and silently disclose?" Reconciling it surfaced a **fourth option I had not logged**:
+fail closed for *every* `Some`, including `RESERVED_TENANT`. That is strictly safer for an
+unknown future backend — it can never over-return — and `reject_reserved_tenant` means the
+`Some("default")` case is unreachable from HTTP anyway, so the "wrongness" would never be
+observed in production.
+
+**Rejected, on the ground that decided the original design too:** it would make the memory
+backend answer `Some(RESERVED_TENANT)` with an empty page while both SQL backends answer it with
+the untenanted bucket (`WHERE tenant_id = 'default'`). That is a cross-backend divergence in the
+trait's own contract — precisely the defect class unit H-B existed to remove, reintroduced in the
+name of safety. One contract, one answer: `Some(t)` means the rows whose tenant is `t`, on every
+backend.
+
+**Residual risk, recorded rather than argued away:** a *future* tenant-recording backend that
+neither overrides the method nor runs the parity suite would inherit the default and
+over-return. That risk is inherent to any defaulted trait method and cannot be closed by the
+type system. It is mitigated twice: the doc comment states the override obligation in the same
+words `tenant_of_ctx` uses, and the parity suite **catches a missing override** — verified in
+finalization by deleting SQLite's override, which reddened 2 guarantees rather than passing.
+
+### 2. The store does not re-enforce the reserved-tenant rejection — CONFIRMED (Opus)
+
+Logged with the premise "cannot arrive from the HTTP path". That premise is now **verified
+rather than assumed**: the search handler resolves tenancy through `tenant_for_request`
+(`crates/acdp-registry-core/src/handlers/context.rs:939`), which calls
+`reject_reserved_tenant` (`:123` and `:180`); `tenant_for_publish` does the same at `:220`/`:264`.
+
+Defence in depth was weighed and rejected for a reason stronger than layering purity:
+`list_contexts` already applies its predicate for **any** `Some`, including `RESERVED_TENANT`.
+Adding a rejection to `search_in_tenant` alone would make the two sibling methods disagree about
+the same input — a divergence inside one trait. Adding it to both would change the behaviour of
+a shipped method, and arguably wrongly, since an admin listing may legitimately want the
+untenanted bucket. The rule keeps one enforcement point.
+
+### 3. `tokio` as an unconditional dev-dependency — CONFIRMED (Opus)
+
+Dev-dependencies never reach a downstream build, the workspace already pins
+`features = ["full"]`, and the alternative (gating the tests behind `test-support`) would have
+meant the default impl's guards do **not** run in a plain `cargo test` — the one place they
+matter most.
+
+### 4. No new index for the tenant-scoped search path — CONFIRMED (Opus)
+
+On the banked measurements, not on argument. SQLite over 2000 rows / 20 tenants after `ANALYZE`:
+`SEARCH ... USING INDEX idx_ctx_tenant` against `SCAN contexts` on the tenant-spanning path.
+Postgres chooses **per selectivity** — `idx_ctx_tenant` for a selective tenant (2 of 506 rows, 4
+buffers), `idx_ctx_created` plus a filter for `default` (367 of 506) — which is the planner being
+right, not a gap. The `ORDER BY` temp sort is pre-existing on both paths because
+`COUNT(*) OVER ()` must materialize the matching set, so no index can remove it. The assign
+predicted `idx_ctx_tenant_created` would be the index used; it is not, and a third index would
+be write cost for no measured gain.
+
+### 5. Fixture isolates by unique tenant name, not cleanup — CONFIRMED (Opus)
+
+This one earned its entry by being a bug I shipped into phase 2 and caught in phase 3: an exact
+count assertion against a **persistent** Postgres accumulated 3+3+3 rows across runs. Cleanup
+was rejected because a failing assertion skips it and poisons the next run — how a flake becomes
+permanent. Asserting `>=` was rejected because it would stop detecting the count oracle, which
+is the A2 finding. Verified by three consecutive green pg runs **and** a re-falsification
+confirming the isolation had not neutered the guard.
+
+### 6. `cursor.rs`'s claim is per-dimension, not restored — CONFIRMED (Opus)
+
+The risk to weigh was whether per-dimension wording could mislead the very reader it targets — a
+future author deciding where to put a filter. It does not, because it does not stop at
+enumerating dimensions: it states the general rule (*a cursor discloses nothing beyond what the
+scan that produced it was allowed to see*) and the consequence (*any future filter that must not
+leak positions belongs in the query, not in Rust*). Restoring the original sentence was rejected
+as the worse outcome — it would be false for the deployed path, and a subtly-false comment reads
+as verified where a known-false one is at least discoverable.
+
+### 7. Per-assertion falsification via accumulation — CONFIRMED (Opus)
+
+CHARTER rules 51/52, applied to this unit's own guards and finding real gaps: only 2 of phase
+1's 4 assertions had ever failed, and `matches.is_empty()` was **structurally unfalsifiable**
+against an empty sentinel. Unit tests were split one-per-guarantee; the shared parity assertion
+accumulates instead, because splitting it would multiply the per-backend caller boilerplate its
+own module docs warn against. Result: 6/6 guarantees fire on both backends, and the two-mutation
+contrast is now the unit's clearest evidence — the deployed shape leaves guarantee (a) green and
+reddens (b), page clean and cursor leaking.
+
+**Summary: 7 confirmed, 0 changed, 0 deferred, 7 settled by Opus, 0 needing the human. No code
+follow-up blocks the ship.** The unit still ships PARTIAL by design — that is scope, not an
+unresolved assumption.
