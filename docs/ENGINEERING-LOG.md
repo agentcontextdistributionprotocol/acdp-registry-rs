@@ -31,6 +31,68 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- H-D (lane-3) — docs & release truth -->
+
+### Documentation
+
+- **Nine documentation claims that the code contradicted, and seven guards so the
+  next nine cannot hide** (unit H-D). The unit's method was that a corrected
+  sentence is worth less than a checkable one: every fix here ships with a command
+  that fails when the claim goes stale, and every guard was falsified — the defect
+  reintroduced, the named test confirmed RED with its expected message, reverted,
+  confirmed GREEN — per assertion rather than per test.
+
+  **`/livez` was undocumented and `/healthz` was described as "Storage liveness".**
+  That wording is the push toward wiring a storage-gated probe to a Kubernetes
+  `livenessProbe`, which restart-loops healthy pods through a database outage and
+  discards the in-memory webhook queue on each cycle. Corrected to
+  readiness-vs-liveness, with the missing row and a quick-start `curl` whose body
+  shape was read off the handler rather than assumed.
+
+  **`docs/AUTHENTICATION.md` anchored thirteen claims to line numbers, and two had
+  already slipped.** `context.rs:1350-1367` for `caller_from_headers` (really 1362;
+  1350 is the tail of an unrelated handler) and `lib.rs:154-156` for the `/metrics`
+  mount (really ~110 lines away — that range is the `auth` subrouter). The prose
+  around both was correct. A pin that reads as precise and points at the wrong code
+  is worse than no pin, so all thirteen became symbol citations, and a guard now
+  rejects any `.rs:<digits>` pin reappearing in that file.
+
+  **`docs/MULTI-TENANCY.md` attached a paging hazard to an endpoint that cannot
+  page.** It said search *and lineage* post-filter the tenant binding "with a
+  bounded refill loop … so a page may come back shorter than `limit`".
+  `run_search_with_refill` has exactly one caller. `lineage` does post-filter in the
+  handler, but returns the whole lineage in one unpaginated array — no loop, no
+  cursor, no short page to misread — and `/lineages/{id}/current` 404s
+  `no current version` on a foreign tenant, deliberately indistinguishable from "no
+  such lineage". All three are now documented separately with the consequence
+  attached only where it applies, and the refill cap is pinned to the constant.
+
+  **The root `CHANGELOG.md` claimed nothing in it had shipped.** 3,596 lines under a
+  single `## [Unreleased]` heading across three released versions. Retired to a
+  pointer; this file is where it went. Reasoning, and why splitting by version was
+  rejected as ill-defined rather than merely expensive, in `DECISIONS.md` decision 15.
+
+  **Operator gaps.** The section titled "Backup and restore" documented backup only.
+  It now carries a restore procedure (restore before first boot, since migrations run
+  before the listener binds; verify with `/healthz`, not `/livez`, which answers 200
+  against a dead database), a capacity section, a transparency-log-inconsistency
+  runbook, and rotation for the two credentials that had none — admin tokens, which
+  rotate through the list without a refusal window, and the webhook secret, which has
+  no overlap window at all and must therefore be rotated from the receiving side
+  first. Two `ACDP_REGISTRY_*__*_JSON` escape hatches were documented nowhere despite
+  being the only way to configure `auth.tenant_agents` and `playground.pinned_keys` on
+  a deployment without a config file.
+
+  **The finding that outlived the unit.** The first route scanner keyed on the literal
+  `.route("` and so missed every rustfmt-wrapped mount: it found **19 of 27** routes,
+  and a `>= 15` count floor passed it, reporting six never-checked routes as covered.
+  A floor cannot detect under-counting, which is precisely what a broken scanner
+  produces. It was replaced with an equality against the number of `.route(` calls —
+  which then immediately caught a second miss, this file's own prose being counted as
+  a mount. Two of the audit's own claims also failed verification, both flattering the
+  audit: receipt-key rotation was already documented, and the "four undocumented
+  features" were all documented as TOML keys.
+
 ### Fixed
 
 - **Cache posture: `/metrics` and the `did.json` 404 arm were uncacheable in principle and
