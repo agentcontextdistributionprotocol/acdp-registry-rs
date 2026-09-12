@@ -294,6 +294,49 @@ fn wire_server(
     }
 }
 
+/// Set `anonymous_public_reads` on **both** the config and the capabilities
+/// document from one input, returning them for a harness constructor.
+///
+/// # Why this exists — the two knobs look redundant and are not
+///
+/// `RegistryServer::retrieve` / `::search` gate `anonymous_public_reads` off the
+/// `CapabilitiesDocument` baked in at `RegistryServer::try_new`, **not** off
+/// `RegistryConfig` (documented as GAP 3 on [`SeededHarness::rebuild`]). So a
+/// test that flips `cfg.auth.anonymous_public_reads` and observes a 200 has
+/// measured the harness's caps/config split and **nothing about the binary** —
+/// which is exactly the invalid "wire probe" that let a shipping
+/// anonymous-disclosure bug through review (#255). Meanwhile the config value is
+/// not dead either: it is what the real binary's `build_capabilities` derives the
+/// caps value *from*, so a test that sets only caps is testing a state the
+/// deployed system cannot reach.
+///
+/// Both therefore have to move together, and across this crate's test files that
+/// agreement is maintained by hand at every construction site. This is the one
+/// call that cannot get it wrong: **there is a single input, so divergence is
+/// unrepresentable through this path.**
+///
+/// # What this deliberately does NOT do
+///
+/// It does not *enforce* the invariant on callers that set the fields directly.
+/// A `debug_assert` in the shared wiring would have, but it would also have
+/// reddened `admin_list_returns_rows_under_the_shipped_disclosure_default` in
+/// `http_integration.rs` — a file this lane does not own — where
+/// `config_shipped_disclosure_default` sets the config flag and leaves caps at
+/// `true`. That divergence is currently harmless because `admin_list` reads the
+/// flag from *neither* source (`handlers/admin.rs` hardcodes
+/// `admin_sees_public_arm = true`), but breaking another lane's test to enforce
+/// an invariant constructively available to every new caller is not a trade this
+/// unit gets to make. Reported instead.
+pub fn with_anonymous_public_reads(
+    mut cfg: RegistryConfig,
+    mut caps: CapabilitiesDocument,
+    allow: bool,
+) -> (RegistryConfig, CapabilitiesDocument) {
+    cfg.auth.anonymous_public_reads = allow;
+    caps.anonymous_public_reads = allow;
+    (cfg, caps)
+}
+
 /// A signing producer identity, namespaced by `prefix` so different test
 /// files (or different fixture families within one file) don't collide on
 /// DID/seed space — e.g. `http_integration.rs` uses `"smoke"`,
