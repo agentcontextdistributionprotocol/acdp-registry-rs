@@ -8,6 +8,19 @@ no-default-features = false
 
 [advisories]
 version = 2
+# Still "warn", and NOT because the stricter setting was untried. Flipping
+# this to "deny" was measured and it fails TODAY:
+#
+#   error[yanked]: detected yanked crate (try `cargo update -p spin`)
+#   error[yanked]: detected yanked crate (try `cargo update -p wnaf`)
+#
+# That is the finding, not a reason to shrug: this workspace already
+# depends on two yanked crates and nobody noticed, precisely because a
+# "warn" on a job that is not a required check is invisible twice over.
+# Resolving it means updating Cargo.lock, which is outside this change's
+# scope, so it is reported rather than silently bundled here. Flip this to
+# "deny" in the same change that clears `spin` and `wnaf`, not before —
+# flipping first would just redden the build for everyone.
 yanked = "warn"
 ignore = [
     # RUSTSEC-2023-0071 "Marvin" — RSA private-key timing side channel; no
@@ -63,11 +76,22 @@ allow = [
 confidence-threshold = 0.9
 
 [bans]
+# Deliberately still "warn". Unlike [sources] below, this one is NOT free:
+# the graph carries duplicate versions today (base16ct, elliptic-curve and
+# friends, largely via jsonwebtoken's p256/p384), so flipping it to "deny"
+# would redden the build immediately for a condition that is normal in a
+# Rust dependency graph and not itself a security property. Left as a
+# signal rather than a gate, on purpose.
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+# "deny" on both, and this costs nothing today: `cargo metadata` reports
+# 0 git-sourced dependencies and 0 non-workspace path dependencies, so the
+# workspace already satisfies the strict setting. It is a ratchet against a
+# future git= or path= dependency slipping in unreviewed, which is exactly
+# the case a "warn" on an advisory job would never stop.
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
