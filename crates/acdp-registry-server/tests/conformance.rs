@@ -11259,7 +11259,7 @@ async fn err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing()
 }
 
 const EXPECTED_RATE_FIXTURE_COUNT: usize = 1;
-const EXPECTED_RATE_ASSERTION_COUNT: usize = 1;
+const EXPECTED_RATE_ASSERTION_COUNT: usize = 5;
 
 fn rate_producer(seed: u8) -> Producer {
     common::producer("rate", seed)
@@ -11372,11 +11372,21 @@ async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
         .await
         .unwrap();
 
+    // Running tally of rate-001 outcome assertions. This used to be a
+    // hardcoded `let asserted = 1usize;` immediately above a
+    // `assert_eq!(asserted, EXPECTED_RATE_ASSERTION_COUNT)` where the
+    // constant was also 1 -- i.e. `assert_eq!(1, 1)`, a compile-time
+    // tautology whose failure message claimed to prevent "a
+    // silently-shrinking count". It could not: the count was a literal, not
+    // a tally, so deleting any assertion below left it reading 1 and green.
+    let mut asserted = 0usize;
+
     assert_eq!(
         resp.status().as_u16(),
         want_status,
         "rate-001: second publish over budget must hit the fixture's own http_status"
     );
+    asserted += 1;
     let content_type = resp
         .headers()
         .get("content-type")
@@ -11387,6 +11397,7 @@ async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
         content_type, want_content_type,
         "rate-001: Content-Type must match the fixture"
     );
+    asserted += 1;
     let retry_after = resp
         .headers()
         .get("retry-after")
@@ -11395,6 +11406,7 @@ async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
     let retry_after = retry_after.unwrap_or_else(|| {
         panic!("rate-001: a 429 rate_limited response MUST carry a Retry-After header")
     });
+    asserted += 1;
     // This repo's implementation always emits an integer-seconds value
     // (RegistryError::into_response, error.rs); the fixture also permits an
     // HTTP-date, which this implementation does not use -- checked here
@@ -11407,14 +11419,15 @@ async fn rate001_publish_rate_limit_trips_429_with_retry_after() {
         retry_after_secs >= 1,
         "rate-001: Retry-After must be a positive number of seconds, got {retry_after_secs}"
     );
+    asserted += 1;
     let body = body_to_json(resp).await;
     assert_eq!(
         body["error"]["code"].as_str(),
         Some(want_code.as_str()),
         "rate-001: wire error.code must match the fixture: {body}"
     );
+    asserted += 1;
 
-    let asserted = 1usize;
     assert_eq!(
         found_ids.len(),
         EXPECTED_RATE_FIXTURE_COUNT,
