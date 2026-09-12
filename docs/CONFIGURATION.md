@@ -24,6 +24,57 @@ built-in defaults  <  TOML file  <  ACDP_REGISTRY_* env vars
   export ACDP_REGISTRY_AUTH__JWT_SIGNING_ALG="EdDSA"
   ```
 
+### List-valued fields from the environment
+
+Exactly **two** fields accept a comma-separated env value, and they are named
+explicitly in the loader (`with_list_parse_key`, `config.rs`):
+
+```bash
+export ACDP_REGISTRY_AUTH__DID_METHODS="did:web,did:key"
+export ACDP_REGISTRY_REGISTRY__PROFILES="acdp-registry-core,acdp-registry-discovery"
+```
+
+Every other field — including base64 secrets, which is the reason the rule is a
+whitelist rather than "split anything containing a comma" — deserializes from the
+environment as a plain scalar. A comma in one of those values is part of the
+value.
+
+### Two settings that cannot be expressed as env vars at all — and their escape hatches
+
+`auth.tenant_agents` and `playground.pinned_keys` are lists **of structs**.
+Comma-splitting can only ever produce a `Vec<String>`, so the ordinary
+`ACDP_REGISTRY_<SECTION>__<FIELD>` mechanism cannot represent them. On a platform
+with no config-file mechanism — Railway "deploy from image" services are the
+motivating case — they would otherwise be unreachable.
+
+Two JSON escape hatches exist for exactly this. They are read directly rather
+than through the env layer, and are applied **after** every other source, so they
+win if both a TOML file and the variable are present:
+
+| Variable | Sets | Value |
+|----------|------|-------|
+| `ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON` | `auth.tenant_agents` | JSON array of `{agent_did, tenant_id}` |
+| `ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON` | `playground.pinned_keys` | JSON array of `{agent_did, public_key_b64, algorithm?, valid_from?, valid_until?}` |
+
+```bash
+export ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON='[{"agent_did":"did:web:agent.example.com","tenant_id":"acme"}]'
+```
+
+Invalid JSON fails startup with the variable's name in the message; it is never
+silently ignored. Note that these replace the whole list rather than merging
+into a TOML-configured one.
+
+### Environment variables outside the config tree
+
+These are read directly by the binary and have no TOML equivalent, so they do
+not appear in the Reference below:
+
+| Variable | Effect | Default |
+|----------|--------|---------|
+| `ACDP_REGISTRY_CONFIG` | Path to the TOML file. Unset means built-in defaults only. | unset |
+| `ACDP_LOG_FORMAT` | `json` or `pretty`. `pretty` is for interactive runs; `json` is what you want behind a log collector. | `json` |
+| `RUST_LOG` | Standard `tracing` filter. When unset the binary uses `info,acdp=info,acdp_registry=info`. | unset |
+
 ## Startup validation
 
 The binary validates config before serving and refuses to boot on a misconfig

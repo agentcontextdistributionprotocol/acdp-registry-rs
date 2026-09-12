@@ -216,12 +216,110 @@ queue/idempotency/migration state.
 
 ## Backup and restore
 
+### Backup
+
 Postgres: logical (`pg_dump`) or physical (`pg_basebackup`) backups as usual.
 The `contexts.body_json` column is the canonical projection — `body_json` plus
 `status` is enough to reconstruct every other index.
 
 SQLite: stop the writer and copy the `.db`, `.db-wal`, and `.db-shm` files
-atomically (or use the `.backup` command).
+atomically (or use the `.backup` command). Copying the `.db` alone while the
+writer is running yields a torn database: recent commits live in the `-wal`.
+
+### Restore
+
+The registry runs `store.migrate()` at startup, so a restored database is
+brought to the current schema automatically. Restore the data **before** the
+first boot against it; there is no online restore path.
+
+1. **Stop the registry.** Restoring under a live writer is what corrupts a
+   SQLite `-wal` set and what makes a Postgres restore race the migration.
+2. **Restore the data.** Postgres: `pg_restore` into an empty database (not a
+   partially-populated one — the migrations are not written to merge two
+   datasets). SQLite: put the `.db`, `.db-wal` and `.db-shm` files back
+   together, as a set.
+3. **Start the registry and watch the first boot.** Migrations run before the
+   listener binds, so a schema failure is a startup failure, not a 500 later.
+4. **Verify readiness, not liveness.** `GET /healthz` reports storage
+   readiness and answers `503` if the backend is not usable; `GET /livez` says
+   only that the process is up and will answer `200` against a broken database.
+   Check `/healthz`.
+5. **Re-check the transparency log if it is enabled** — see the runbook below.
+   A restore that rolls the log back to an earlier state is exactly the
+   condition a consistency proof is designed to expose.
+
+**What a restore does not bring back.** The webhook delivery queue is in-memory
+and bounded, with no outbox and no replay. Every event queued and not yet
+delivered at the moment of the crash or shutdown is gone, and a restore cannot
+reconstruct it — the events were never persisted. Consumers that missed a
+`context.published` must re-derive state from the API rather than wait for a
+redelivery that will never come.
+
+Nonces (`/auth/challenge`) and issued-token revocation state live in their own
+stores; restoring an older snapshot restores an older revocation list with it,
+which can un-revoke a token that has not yet expired. Prefer rotating the
+signing key over relying on a restored revocation list.
+
+## Capacity
+
+There is no autoscaling story here and no built-in load shedding beyond the
+rate limiter. Four bounds are worth knowing before they find you:
+
+| Bound | Where | What happens at the limit |
+|-------|-------|---------------------------|
+| Webhook queue | `webhook.queue_capacity` | The queue is bounded and delivery is fire-and-forget. When it is full the event is **dropped** with a `warn` log (`webhook queue full; event dropped`) — the publish itself still succeeds. There is no Prometheus gauge for depth; `GET /admin/status` reports `queue_in_flight` and `queue_capacity`, and that plus the warn log is the whole signal. |
+| Transparency log proofs | `[log]` | Tree computation is **O(n) per request** over the stored leaf hashes (only the current head root is cached). `/log/proof` and `/log/checkpoint` therefore get steadily more expensive as the log grows, and they are unauthenticated for hash-only queries. Rate-limit them deliberately rather than discovering the cost. |
+| Search page size | clamped in both stores | A caller-supplied `limit` is clamped to 100. A page can also come back **shorter** than requested — see [MULTI-TENANCY.md](MULTI-TENANCY.md) on the refill cap. Short is not "end of results"; page until `next_cursor` is absent. |
+| Storage pool | `storage.max_connections` (default 20) | Requests queue on the sqlx pool. `/healthz` issues a storage health query of its own, so it reports `degraded` + `503` once the pool can no longer serve one — which is the intended behaviour for a load balancer, and the reason `/livez` exists separately and never touches storage. |
+
+Sizing the webhook queue is a trade between memory and loss: it holds whole
+deliveries in memory, and raising it raises the amount of work a crash discards
+(none of which is replayable). If deliveries are load-bearing, the honest answer
+is a consumer that reconciles against the API, not a larger queue.
+
+## Runbook: transparency-log inconsistency
+
+Applies when `[log]` is enabled. A **consistency proof** (`GET /log/proof?first=<a>&second=<b>`)
+is the mechanism that detects a log whose history changed underneath its
+published checkpoints; RFC-ACDP-0012 §8.2 makes it REQUIRED for exactly that
+reason. A monitor that has retained an earlier checkpoint and cannot verify it
+against the current one has found a root rewrite.
+
+**What it means.** The Merkle root is not stored independently — it is computed
+from the stored leaf hashes on every request. So a failed consistency proof does
+not indicate a corrupted root value. It indicates that the **leaves themselves
+changed**: rows removed, reordered, or rewritten. The realistic causes are a
+database restore that rolled the log back, a partial restore that mixed two
+datasets, or direct writes to the log table.
+
+**Do, in order:**
+
+1. **Preserve the evidence before touching anything.** Snapshot the database and
+   keep the failing checkpoint pair (`first`, `second`) and both responses. A
+   second restore attempt destroys the only record of what the log claimed.
+2. **Establish which direction it moved.** Fetch `GET /log/checkpoint` and
+   compare `tree_size` against the retained checkpoint. A *smaller* current
+   `tree_size` is a rollback — almost always a restore from an older backup. An
+   equal-or-larger size with a non-verifying proof is a rewrite, which is more
+   serious.
+3. **Stop publishing.** Every new entry appended on top of a rewritten log
+   extends the divergence and enlarges the set of checkpoints that can never be
+   reconciled. The registry has no mechanism to repair a log in place, and none
+   to reconcile two histories.
+4. **If it was a rollback from a restore:** restore forward to the most recent
+   good backup instead. Entries published between the two backups are not
+   recoverable from the registry — they have to be re-published by their
+   producers, which mints new entries at new positions. Say so explicitly to
+   consumers; their retained inclusion proofs for the lost entries will not
+   verify against the new log.
+5. **If it was not a restore:** treat it as a possible compromise of whatever
+   has write access to the log table, and follow the rotation steps below. A
+   rewrite that nobody performed deliberately means something else can write
+   there.
+6. **Tell the monitors.** A consistency failure is the signal the transparency
+   log exists to produce; a registry that resolves one silently has removed the
+   only reason a consumer would trust it. Publish what happened, the affected
+   `tree_size` range, and whether entries were lost.
 
 ## Key rotation
 
@@ -234,3 +332,50 @@ atomically (or use the `.backup` command).
 
 For targeted revocation without rotating the signing key, use
 `POST /auth/token/revoke` (see [AUTHENTICATION.md](AUTHENTICATION.md#token-revocation)).
+
+### Admin tokens
+
+`auth.admin_tokens` is a **list**, which is what makes rotation possible without
+a window of refused admin requests:
+
+1. Append the new token to `auth.admin_tokens` and restart. Both old and new are
+   now accepted.
+2. Move every caller — deploy scripts, dashboards, whatever calls `/admin/*` —
+   to the new token.
+3. Remove the old entry and restart.
+
+Two things to know before you start. Emptying the list does **not** leave
+`/admin/*` open: an empty list disables every admin-bearer-gated route outright
+(`/admin/status`, `/admin/contexts`, the audit, retract and republish routes,
+and `/admin/pinned-keys/reload`). And entries are compared with no trimming on
+`/admin/*` — a token with stray leading or trailing whitespace is rejected there
+while being accepted on other routes over HTTP/1.1, which is why startup
+validation refuses such entries outright. See
+[AUTHENTICATION.md](AUTHENTICATION.md) for the full parser comparison.
+
+### Webhook signing secret
+
+`webhook.secret` keys the HMAC-SHA256 in `X-ACDP-Signature`. There is no
+multi-secret list and no overlap window: the registry signs with exactly one
+secret, so the moment you rotate, deliveries signed with the old secret stop
+verifying at the receiver.
+
+Rotate from the **receiving** side, not the sending side:
+
+1. Teach the receiver to accept either secret — verify against the new one, and
+   fall back to the old on mismatch.
+2. Change `webhook.secret` and restart the registry.
+3. Once no delivery has verified against the old secret for longer than your
+   retry window, drop the fallback.
+
+Rotating the registry first inverts this into an outage: every event in flight
+during the change is signed with a secret the receiver rejects, and because the
+delivery queue is in-memory with no outbox, a delivery that exhausts its retries
+is gone rather than deferred.
+
+### Receipt signing key
+
+Receipt-key rotation has its own procedure and a retention rule that must not be
+violated — a removed key invalidates every receipt it ever signed. It is
+documented in [RECEIPTS.md](RECEIPTS.md#the-key-retention-rule-read-before-rotating),
+not here.

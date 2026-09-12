@@ -645,3 +645,85 @@ fn every_docs_page_is_listed_in_the_docs_index() {
          docs/README.md, so nothing links to them: {unlisted:?}"
     );
 }
+
+/// Environment variables the binary reads **directly** — `std::env::var("…")`
+/// rather than through the `ACDP_REGISTRY_<SECTION>__<FIELD>` layer — are
+/// invisible to anyone reading the config reference, because they correspond to
+/// no TOML key that the reference documents.
+///
+/// Two of them were the only way to configure `auth.tenant_agents` and
+/// `playground.pinned_keys` on a deployment with no config file (Railway
+/// "deploy from image"), and they appeared in no document at all. A third,
+/// `ACDP_LOG_FORMAT`, was mentioned only in the narrative engineering log.
+///
+/// Rule 48: derive the set from the source instead of maintaining it by hand,
+/// because a hand-maintained list cannot catch the variable nobody added to it.
+#[test]
+fn every_directly_read_env_var_is_documented() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+
+    // Only shipped `src/` trees. Test files carry their own env knobs
+    // (`ACDP_REQUIRE_PG`, `ACDP_SPEC_DIR`, …) which are CI controls, not
+    // operator configuration, and have no place in the config reference —
+    // and this file's own doc comment would otherwise match the scan below.
+    let mut sources = String::new();
+    for crate_dir in std::fs::read_dir(root.join("crates"))
+        .expect("read crates/")
+        .flatten()
+    {
+        let src = crate_dir.path().join("src");
+        if src.is_dir() {
+            rust_source_corpus(&src, &mut sources);
+        }
+    }
+    assert!(
+        sources.len() > 100_000,
+        "src corpus is only {} bytes — the walk is broken",
+        sources.len()
+    );
+
+    // `env::var("ACDP…")` / `env::var_os("ACDP…")`, however the path is spelled.
+    let mut vars: Vec<String> = Vec::new();
+    for pat in ["env::var(\"ACDP", "env::var_os(\"ACDP"] {
+        let open = pat.rfind('"').expect("pattern contains the opening quote");
+        for (i, _) in sources.match_indices(pat) {
+            let after = &sources[i + open + 1..];
+            if let Some(end) = after.find('"') {
+                let name = after[..end].to_string();
+                if !vars.contains(&name) {
+                    vars.push(name);
+                }
+            }
+        }
+    }
+    vars.sort();
+
+    assert!(
+        vars.len() >= 4,
+        "found only {} directly-read ACDP env vars — the scan is broken and the \
+         check below would pass vacuously: {vars:?}",
+        vars.len()
+    );
+    for required in ["ACDP_REGISTRY_CONFIG", "ACDP_LOG_FORMAT"] {
+        assert!(
+            vars.iter().any(|v| v == required),
+            "the scan did not find `{required}`, which is certainly read \
+             directly: {vars:?}"
+        );
+    }
+
+    let doc = std::fs::read_to_string(root.join("docs/CONFIGURATION.md"))
+        .expect("read docs/CONFIGURATION.md");
+    let undocumented: Vec<&String> = vars.iter().filter(|v| !doc.contains(v.as_str())).collect();
+    assert!(
+        undocumented.is_empty(),
+        "these environment variables are read directly by the binary but appear \
+         nowhere in docs/CONFIGURATION.md: {undocumented:?}. They have no TOML \
+         key, so the Reference section does not cover them and an operator has \
+         no way to discover them short of reading the source."
+    );
+}
