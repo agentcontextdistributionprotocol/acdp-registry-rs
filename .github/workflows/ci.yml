@@ -293,6 +293,43 @@ jobs:
           cargo test --locked -p acdp-registry-types \
             --no-default-features
 
+      # The README's quick-start points a new user at
+      # config/registry.example.toml. That file REFUSED TO BOOT: it sets
+      # auth.enabled = true with an empty jwt_secret and
+      # allow_ephemeral_secret = false, which is exactly what
+      # crates/acdp-registry-server/src/main.rs bails on. Nothing caught it,
+      # because nothing ever booted the shipped example.
+      #
+      # This step boots it the way the README now documents and asserts the
+      # server actually answers. It is the durable half of that fix: without
+      # it, the example regresses the next time someone edits it and the
+      # quick-start silently stops working again.
+      #
+      # Deliberately uses the SHIPPED file rather than a fixture — a smoke
+      # test against a copy would prove nothing about what users are handed.
+      - name: smoke (the README quick-start actually boots)
+        run: |
+          set -euo pipefail
+          cargo build --locked -p acdp-registry-server
+          ACDP_REGISTRY_CONFIG=config/registry.example.toml \
+          ACDP_REGISTRY_AUTH__JWT_SECRET="$(openssl rand -base64 32)" \
+          ACDP_REGISTRY_REGISTRY__PORT=8899 \
+            ./target/debug/acdp-registry & SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:8899/healthz" >/dev/null 2>&1; then break; fi
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "::error::the shipped config/registry.example.toml did not boot -- the README quick-start is broken"
+              wait "$SERVER_PID" || true
+              exit 1
+            fi
+            sleep 1
+          done
+          BODY="$(curl -fsS "http://127.0.0.1:8899/healthz")"
+          echo "healthz: $BODY"
+          echo "$BODY" | grep -q '"status":"ok"' \
+            || { echo "::error::/healthz did not report ok: $BODY"; exit 1; }
+
   # Runs the spec conformance suite against a SHA-pinned spec checkout.
   # ACDP_REQUIRE_CONFORMANCE turns a missing spec into a hard failure, so
   # a green run genuinely proves the fixtures executed rather than that

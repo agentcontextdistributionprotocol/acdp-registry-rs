@@ -78,9 +78,18 @@ configuration, multi-tenancy, webhooks, and operations.
 # Run with default config (SQLite under ./data/registry.db).
 cargo run -p acdp-registry-server
 
-# Or with a config file
+# Or with a config file. NOTE: the example is a production-shaped template —
+# it sets auth.enabled = true with an empty jwt_secret and
+# allow_ephemeral_secret = false, so it will REFUSE to boot without a secret.
+# Supply one (the config's own guidance, registry.example.toml:49-51):
 ACDP_REGISTRY_CONFIG=config/registry.example.toml \
+ACDP_REGISTRY_AUTH__JWT_SECRET="$(openssl rand -base64 32)" \
     cargo run -p acdp-registry-server
+
+# For a throwaway local run you may instead set
+# ACDP_REGISTRY_AUTH__ALLOW_EPHEMERAL_SECRET=true, which mints a random
+# process-lifetime key. Tokens do not survive a restart; never use it in
+# production.
 ```
 
 Then:
@@ -88,11 +97,11 @@ Then:
 ```bash
 curl http://localhost:8443/.well-known/acdp.json
 curl http://localhost:8443/healthz
-# {"status":"ok","storage":true,"version":"0.1.0"}
+# {"status":"ok","storage":true,"version":"0.1.2"}
 ```
 
 `version` identifies the running build. A locally built binary reports the bare
-package version (`0.1.0`); an image built by CI reports `0.1.0+g<shortsha>`,
+package version (`0.1.2`); an image built by CI reports `0.1.2+g<shortsha>`,
 which is what actually pins it to a commit. Treat the string as opaque — see
 [HTTP-API.md](docs/HTTP-API.md#the-version-field-117).
 
