@@ -8,6 +8,147 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Observability: the registry minted `x-request-id` values that reached no response,
+  and middleware-generated `413`s carried no error envelope.** Two defects in the
+  middleware stack, both in `build_router`.
+
+  `SetRequestIdLayer` was applied before `PropagateRequestIdLayer`, and `Router::layer`
+  makes the *later* call the *outer* one — the inverse of `tower::ServiceBuilder`, whose
+  doc example the stack was written against. So `PropagateRequestId` ran first and read a
+  request header that `SetRequestId` had not written yet, and the generated UUID reached
+  **no response at all** — not merely the middleware-generated ones, but plain `200`s too.
+  A client-supplied `x-request-id` echoed back correctly, which is what hid this: any test
+  or manual check that sent its own id saw the header and concluded the feature worked.
+  The pair is now inverted and hoisted outside the body limit, the timeout and CORS, so a
+  `413`, a `408` and a CORS preflight all carry an id.
+
+  Separately, **both** `413` paths violated RFC-ACDP-0007 §5. With `Content-Length` set,
+  `RequestBodyLimitLayer` short-circuits before calling inner and hard-sets
+  `Content-Type: text/plain`, which the outermost `if_not_present` media-type layer cannot
+  correct. Streamed (no `Content-Length`), the response reached the per-route layer and so
+  advertised `application/acdp+json` — over a plain-text body. A response-rewriting layer
+  now gives both the `payload_too_large` envelope; it keys on whether the body actually
+  parses as an envelope rather than on the media type, because the streamed path already
+  claimed the right type while carrying the wrong payload.
+
+  The existing regression test asserted status and `Content-Type` only, and passed against
+  a non-JSON body via a code path its own comment misidentified. It is split into
+  `_with_content_length` and `_chunked`, both asserting `error.code`. The Content-Length
+  variant was run red before the fix.
+
+  **`408` is deliberately not covered.** RFC-ACDP-0007 §5 has no wire code for a timeout,
+  so the envelope would have to say `internal_error` — worse than silence, because it
+  misattributes a client-side timeout to a server fault. Minting a `request_timeout` code
+  is a change to the shared §5 registry and is tracked separately.
+||||||| 26860a5
+
+- **SQLite swallowed a corrupt `contributors` column and skipped an admission check while
+  reporting success.** The predecessor's `contributors` was decoded with
+  `.ok().and_then(...).unwrap_or_default()`, so an unreadable value became an empty list. That
+  is not cosmetic: `contributors` feeds the RFC-ACDP-0014 §4 predecessor-admission check, so a
+  legitimate contributor was refused with `SupersededTarget::NotFound` **while the check
+  itself reported success**. Postgres already errored here (`TEXT[]` decoded with `?`), so this
+  was a backend divergence as well as a silent wrong answer. SQLite now fails loudly.
+
+  The finding that surfaced this claimed it contradicted the existing test
+  `admission_is_not_skipped_when_the_predecessor_body_is_undecodable`. It does not — that test
+  corrupts `body_json`, a different field. It establishes the principle rather than covering
+  the case, which is why this ships with its own test.
+
+- **SQLite relied on sqlx's implicit busy timeout.** `commit_publish` holds `BEGIN IMMEDIATE`
+  across the receipt-minter callback, so a writer can legitimately hold the write lock for as
+  long as that callback plus an fsync takes; a concurrent writer waiting less than that
+  surfaced `SQLITE_BUSY` as a 500 with no retry — a spurious failure under ordinary
+  contention. The timeout is now set explicitly and named. Mapping busy to a retryable 503 is
+  a separate change in a different crate and is not included.
+
+- **Postgres narrowed `version` to `i32`, where SQLite used `i64`.** `PublishRequest.version`
+  is a client-supplied `u32`; Postgres bound it `as i32` (wrapping above 2^31-1, silently,
+  since Rust's `as` truncates rather than panicking) with an `INTEGER` column to match.
+  `contexts.version` is now `BIGINT` and the casts are `i64::from`, so the two backends agree
+  by construction rather than by both being narrow.
+
+  **Scope, stated precisely:** this is a parity fix and defence in depth, **not** a live
+  exploit closed. The finding called it unreachable "because `put()` has no production
+  callers", which was wrong — the casts were in `commit_publish` and the row INSERT, both on
+  the live publish path. It is nonetheless unreachable, for a different and measured reason:
+  the request builder requires `version == 1` for a first publish and `prev + 1` for a
+  supersession, so a publish carrying 3_000_000_000 is refused before the store sees it on
+  both backends. Reaching 2^31 would take ~2 billion sequential supersessions.
+
+### Added
+
+- **Indexes on `contexts(domain)` and `contexts(expires_at)` in both backends.** Both columns
+  are used by `GET /contexts/search` filters and neither was indexed, so both filters were
+  full scans. The `expires_at` index is partial (`WHERE expires_at IS NOT NULL`), matching the
+  predicate the query actually writes. The `data_period` filters remain scans deliberately —
+  they read out of `body_json` through a conversion, so indexing them needs an expression or
+  generated column, which is a schema decision with no measured volume behind it yet.
+
+- **Retrieval could serve a context as `active` while also serving its `retracted` event.**
+  `get()` and `lineage()` read the context row and its lifecycle events as **two separate
+  queries with no shared snapshot**, on *both* backends. A retraction committing between the
+  two reads produced a response carrying `registry_state.status: "active"` alongside a
+  `retracted` lifecycle event — contradicting the RFC-ACDP-0013 §7.2 precedence
+  (`retracted > superseded > expired > active`) that both backends' `row_to_context` is
+  documented to guarantee. A consumer trusting `status` would act on withdrawn data.
+
+  Unlike the search bugs above, this one was present on **both** SQLite and Postgres; it is
+  not a divergence but a shared defect.
+
+  Fixed by reconciling the row-derived status against the events actually loaded, in one
+  shared helper (`acdp_registry_store::lifecycle::reconcile_retraction`) applied at all four
+  call sites. Retraction wins from either source, so the served pair is **self-consistent by
+  construction** — a future read path that forgets to take a snapshot cannot reintroduce the
+  contradiction. Failing closed is deliberate and asymmetric: being briefly stale about a
+  republish is safe, serving `active` for retracted data is not.
+
+  A transaction-per-read would also have fixed it and was the first design; reconciliation
+  was chosen because it fixes the shape rather than the one call site. Two preconditions were
+  checked against the code before relying on the cheaper fix — `lifecycle_events` has no
+  `DELETE` in either backend (append-only), and the event and the denormalized flag are
+  written in the same transaction — so the event log can never be missing a retraction the
+  flag knows about.
+
+- **Search: `q=` returned different results on SQLite and Postgres, and a code comment
+  claimed it did not.** SQLite indexed with FTS5's default `unicode61` tokenizer — no
+  stemmer, no stopwords — while Postgres used `plainto_tsquery('english', …)` over an
+  `english` tsvector, which stems and drops stopwords. Measured on both engines:
+
+  | query | sqlite (before) | pg |
+  |---|---|---|
+  | `q=running` against "run report" | 0 rows | 1 row |
+  | `q=the` against "the quarterly figures" | 1 row | 0 rows |
+
+  **Postgres's semantics win, and SQLite was raised to them.** Postgres is the production
+  backend and stemming is better search behaviour, so degrading it to reach agreement would
+  have been a product regression rather than a fix. The cost lands on SQLite's FTS index,
+  which is derived data rebuilt from `contexts` — reversible, and no context data is touched.
+
+  Two mechanisms, matched in two places: migration `013_fts5_porter.sql` switches
+  `contexts_fts` to `tokenize = 'porter unicode61'` (stemming), and `fts5_escape` drops
+  stopwords query-side because porter does not (measured). **This changes user-visible search
+  results on SQLite:** inflected queries now match, and stopword-only queries now match
+  nothing.
+
+  Three of FTS5's four operator keywords (`NOT`, `AND`, `OR`) are themselves English
+  stopwords, so they are now dropped before quoting rather than quoted — which is exactly
+  what Postgres does (`plainto_tsquery('english', 'NOT hack')` → `'hack'`). That is strictly
+  safer: a caller cannot obtain operator semantics either way, and with `OR` removed they
+  cannot widen a query to a disjunction. `NEAR` is the one keyword Postgres keeps, so it is
+  still quoted, and it now carries the operator-neutralization property in the tests.
+
+  **The honest limit:** FTS5 `porter` and Postgres's snowball `english` are different
+  implementations and will not agree on every word in the language. The parity suite pins the
+  *mechanisms* — a stemmed match happens, stopwords are dropped, dropping them does not empty
+  the rest of the query, terms are AND-ed, case folds — rather than claiming stemmer
+  identity, which would be the same kind of overclaim as the comment this removes.
+
+  The stopword list is PostgreSQL 16's own `tsearch_data/english.stop` (127 entries) and is
+  **verified against Postgres at test time** rather than trusted as a hand-copied table: the
+  pg suite asserts every entry is still a stopword according to the server. A hand-maintained
+  list whose staleness nobody notices was the failure mode worth designing out.
+
 - **Search: `data_period_start_after` / `data_period_end_before` returned wrong results on
   SQLite.** The two predicates compared RFC 3339 timestamps **lexicographically as TEXT**,
   because they read out of `body_json` (chrono serde output — `Z` suffix, 0/3/6/9 fractional

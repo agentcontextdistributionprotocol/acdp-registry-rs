@@ -1639,3 +1639,111 @@ The pattern across all of them: the failure is never the sentence. It is a check
 a set smaller than the claim, by someone who did not notice the difference. Three fresh gates
 caught what three careful readings by the author did not, and the cost of each catch was one
 commit instead of one release.
+
+## H-B — storage parity & correctness (unit H-B, lane-2, reconciled 2026-09-12)
+
+Ten `UNCONFIRMED` entries from `plans/h-b-storage-parity.md`. All five PRs (#228, #229, #231,
+#232, #233) were already merged when this ran, so nothing here gated a release; the pass
+settles the record.
+
+**Method deviation, recorded not waived.** `/reconcile` §3 calls for a fresh Opus subagent per
+entry (and Fable for one-way doors). This session is instructed not to spawn agents, so the
+analyses ran in-context. What that costs is analyst independence — a self-analysis cannot catch
+an error rooted in a misreading still held — so every entry below is settled on a **measurement
+or a code fact**, not on a re-reading of my own prose, and the one entry that turns on product
+judgement rather than fact is escalated rather than settled.
+
+### Settled by Opus — 9 entries
+
+1. **`ACDP_REQUIRE_PG` inherits `is_ok()` semantics (`=0` enables require-mode).**
+   **CONFIRMED.** Matches `ACDP_REQUIRE_CONFORMANCE` (`conformance.rs:2704-2708`) byte-for-byte
+   and carries that gate's own "do not improve this to a truthiness check" comment. Two
+   require-flags in one repo disagreeing about `=0` is a worse trap than one being surprising.
+   Reversal is one line.
+
+2. **Phase 1 gates 23 of 34 pg tests.** **RESOLVED — the entry was stale.** lane-3's #227
+   applied the same helper to `crates/acdp-registry-server/tests/pg_integration.rs`. Verified in
+   the tree rather than taken on report: that file now has `require_pg()` present, 11
+   `#[tokio::test]` and 11 gated call sites; `acdp-registry-pg/tests/store_contract.rs` has 23
+   and 23. **Gating is 34 of 34.** The caveat stated in #228's body is closed, and it closed
+   without either lane editing the other's file — the shape went through the coordinator.
+
+3. **`unixepoch(…, 'subsec')` rather than a canonical stored column.** **CONFIRMED, with the
+   upgrade path recorded rather than taken.** Query-side only, so no stored bytes change —
+   which matters more than it first appears: `body_json`'s exact bytes are the `content_hash`
+   preimage, so normalizing them would break signature verification. The `data_period` filter
+   remains a scan; a generated canonical column plus an index is the upgrade, deferred because
+   no volume has been measured. Revisit when search latency is actually observed, not before.
+
+4. **B2 split out of Phase 2.** **RESOLVED — stale.** The split is complete; B2 shipped in
+   #231. Its open question was which semantics to adopt, which entry 5 records.
+
+5. **The stopword table is verified against Postgres rather than trusted.** **CONFIRMED.** The
+   pg suite asserts every one of the 127 entries is still a stopword per the live server, with a
+   negative control so it cannot pass vacuously. This is the entry most worth keeping: a
+   hand-copied table whose staleness nobody notices is the failure mode, and the check converts
+   it into a verified one. The uncheckable direction — Postgres *gaining* a stopword this list
+   lacks, unenumerable from SQL — is documented on the constant.
+
+6. **B3 fixed by reconciliation, not a read snapshot.** **CONFIRMED.** Two preconditions were
+   verified in the code before relying on the cheaper fix, and the plan had rejected this
+   approach on the second: `lifecycle_events` has no `DELETE` in either backend (append-only),
+   and the event and denormalized flag are written in one transaction. So the pruning hazard the
+   plan feared does not exist here. Reconciliation also beats a snapshot on shape — it makes the
+   served pair self-consistent by construction, so a future read path that forgets a transaction
+   cannot reintroduce the contradiction, and it is one shared helper rather than two
+   hand-mirrored per-backend transactions (Postgres would have needed `REPEATABLE READ`
+   explicitly, since `READ COMMITTED` re-snapshots per statement).
+
+7. **B5's busy timeout is a constant, and has no behavioural test.** **CONFIRMED as an accepted,
+   documented gap — recommendation: do NOT add a test.** This is the only unguarded change in
+   the unit and it is not being quietly confirmed away. Reddening it means holding
+   `BEGIN IMMEDIATE` across a slow callback and racing a second writer against a wall clock;
+   that test is timing-dependent, and a flaky guard gets deleted, which leaves a worse record
+   than an honest gap. The change configures an existing mechanism explicitly instead of
+   inheriting sqlx's implicit 5s. Making it tunable needs a field in `acdp-registry-types`,
+   outside this unit's path scope — filed as a follow-up rather than smuggled in.
+
+8. **B7 is a parity fix, not a live exploit closed.** **CONFIRMED, and it drops out of the
+   critical tier on measurement.** The schema change is a widening, so no value can fail to fit
+   and nothing needed migrating. Whether it is a one-way door was measured, not argued: `MAX(version)`
+   in the live database is **2** and **zero** rows exceed `i32::MAX`, so `BIGINT` → `INTEGER`
+   would succeed today. It is therefore reversible in practice, at the cost of another table
+   rewrite, and is settled here rather than escalated.
+   **Two corrections stand in the record, one of them mine.** The finding called the narrowing
+   unreachable "because `put()` has no production callers" — false, the casts were in
+   `commit_publish` and the row INSERT. I then concluded it was reachable — **also false**:
+   measured, a publish carrying `version = 3_000_000_000` is refused on both backends because
+   the request builder requires `version == 1` for a first publish and `prev + 1` after.
+   Reaching 2^31 needs ~2 billion sequential supersessions.
+
+9. **`lineages` is write-only and was deliberately NOT dropped.** **CLOSED as a finding handed
+   onward, not a decision implemented.** Verified exhaustively: `INSERT` only, and zero
+   `SELECT`/`JOIN`/`UPDATE` anywhere in the repository — src, tests and migrations swept, not
+   just the two store files. Two independent reasons not to act: dropping a table is a one-way
+   door this unit had no mandate for, and `crates/acdp-registry-server/tests/pg_integration.rs`
+   TRUNCATEs it, so removal requires an edit outside this unit's path scope. The evidence is
+   handed to the coordinator as a standalone decision. Cost of inaction, measured: one extra row
+   INSERT per publish, inside a transaction that already writes several.
+
+### Escalated to the human — 1 entry
+
+10. **`q=` semantics: Postgres wins; SQLite raised to it via `porter` + a verified stopword
+    list.** **LEFT UNCONFIRMED pending the human.** Not because it is irreversible — the FTS
+    index is derived data and the stopword filter is one query-side line, so reverting restores
+    the prior behaviour exactly — but because the choice is a **product judgement** on a public
+    API, and I decided it against a defensible alternative on grounds that are the human's
+    domain more than mine.
+    - **Taken:** SQLite adopts Postgres. Keeps stemming on the production backend. Parity is
+      pinned per-mechanism, because FTS5 `porter` and snowball `english` are different
+      implementations and will not agree on every word.
+    - **Rejected:** Postgres adopts SQLite (`simple` config). Would have given **exact
+      structural** parity — literal token matching both sides, no word list, no stemmer mismatch
+      possible — at the cost of removing stemming from the backend real users search.
+    - **My recommendation: confirm as taken.** Paying in production search quality to buy a
+      cleaner testing property is the wrong trade, and the residual gap is documented rather
+      than hidden. But the reverse is arguable and the human should get the choice.
+    - **User-visible effect already shipped:** on SQLite, inflected queries now match
+      (`q=running` finds "run report") and stopword-only queries now match nothing. Postgres
+      behaviour is unchanged. No documentation was falsified — `docs/` describes no `q=`
+      behaviour and makes no backend-equivalence claim (checked).

@@ -9,6 +9,7 @@ use acdp::types::lifecycle::{retraction_state, LifecycleEvent, LifecycleEventTyp
 use acdp::types::primitives::{AgentDid, ContentHash, CtxId, LineageId, Status, Visibility};
 use acdp::types::publish::PublishResponse;
 use acdp::types::search::{SearchParams, SearchResponse, SearchResult};
+use acdp_registry_store::lifecycle::reconcile_retraction;
 use acdp_registry_store::{
     decode_cursor, encode_cursor, ExtendedRegistryStore, LogEntryRecord, Page,
 };
@@ -414,6 +415,14 @@ impl RegistryStore for PgStore {
             // RFC-ACDP-0013 §4.1: full retrieval serves the event array
             // inside registry_state (omitted, not [], when empty).
             let events = events_for_ctx(&self.pool, ctx_id.as_str()).await?;
+            // B3: the row and the events are two separate reads with no shared
+            // snapshot, so a retraction committing between them would otherwise
+            // be served as `status: "active"` alongside a `retracted` event —
+            // contradicting the §7.2 precedence this projection is documented to
+            // guarantee. Reconciling here makes the served pair self-consistent
+            // whichever read is fresher.
+            ctx.registry_state.status =
+                reconcile_retraction(ctx.registry_state.status.clone(), &events);
             if !events.is_empty() {
                 ctx.registry_state.lifecycle_events = Some(events);
             }
@@ -440,6 +449,9 @@ impl RegistryStore for PgStore {
             for r in &rows {
                 let mut ctx = row_to_context(r)?;
                 if let Some(events) = events_by_ctx.remove(ctx.body.ctx_id.as_str()) {
+                    // B3: same reconciliation as `get()` — see the comment there.
+                    ctx.registry_state.status =
+                        reconcile_retraction(ctx.registry_state.status.clone(), &events);
                     if !events.is_empty() {
                         ctx.registry_state.lifecycle_events = Some(events);
                     }
@@ -804,7 +816,10 @@ impl RegistryStore for PgStore {
                     });
                 };
                 let prev_lineage: String = row.try_get("lineage_id").map_err(map_sqlx_err)?;
-                let prev_version: i32 = row.try_get("version").map_err(map_sqlx_err)?;
+                // B7: i64, matching SQLite. `version` is BIGINT since
+                // migration 012 — see that file for why the old `i32` silently
+                // wrapped for any u32 above 2^31-1.
+                let prev_version: i64 = row.try_get("version").map_err(map_sqlx_err)?;
                 let prev_status: String = row.try_get("status").map_err(map_sqlx_err)?;
                 let prev_agent: String = row.try_get("agent_id").map_err(map_sqlx_err)?;
                 let prev_contributors: Vec<String> =
@@ -858,7 +873,7 @@ impl RegistryStore for PgStore {
                         });
                     }
                 }
-                if req.version as i32 != prev_version + 1 {
+                if i64::from(req.version) != prev_version + 1 {
                     return Err(AcdpError::SupersededTarget {
                         reason: acdp::error::SupersessionReason::VersionMismatch,
                         message: format!(
@@ -1424,7 +1439,7 @@ async fn insert_body<'c>(
     .bind(status.as_str())
     .bind(visibility)
     .bind(context_type)
-    .bind(body.version as i32)
+    .bind(i64::from(body.version))
     .bind(body.supersedes.as_ref().map(|c| c.as_str().to_string()))
     .bind(&body.title)
     .bind(body.description.clone())

@@ -1325,7 +1325,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   the only place it currently runs.
 - **Blast radius if wrong:** someone sets `ACDP_REQUIRE_PG=0` expecting to disable the gate
   and gets a red run. Cost to reverse: one line. Visible immediately, not silently.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — matches the sibling gate byte-for-byte; see DECISIONS.md H-B #1.
 
 ## Phase 1 gates 23 of 34 pg tests; the other 11 belong to lane-3
 
@@ -1343,7 +1343,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   tests instead of 34. The gate is strictly better than the status quo either way; the risk
   is only that someone reads "pg is gated" as covering all 34. Mitigated by saying 23-of-34
   explicitly in the PR body rather than implying completeness.
-- **Status:** UNCONFIRMED
+- **Status:** RESOLVED (2026-09-12) — lane-3's #227 landed the same helper; gating is now **34 of 34**, verified in the tree. See DECISIONS.md H-B #2.
 
 ## `unixepoch(…, 'subsec')` over a canonical stored timestamp column for `data_period`
 
@@ -1364,7 +1364,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   with very many contexts pays for it in search latency. Nothing is stored differently, so
   reversal is a one-line revert with no data migration. If latency is ever observed, (c) is
   the upgrade path and this entry is the record of why it was deferred.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — query-side only; the canonical-column upgrade stays deferred until latency is measured. See DECISIONS.md H-B #3.
 
 ## B2 split out of Phase 2 rather than shipped alongside B1
 
@@ -1385,4 +1385,187 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** `q=` keeps diverging between backends until B2 lands. Mitigated
   by the corrected comment, which now states the divergence with measured numbers instead of
   denying it, so nobody builds on a false guarantee in the meantime.
-- **Status:** UNCONFIRMED — the (a)-vs-plan choice is the decision B2 must settle.
+- **Status:** RESOLVED (2026-09-12) — the split is complete; B2 shipped in #231. See DECISIONS.md H-B #4.
+
+## `q=` semantics: Postgres wins, SQLite raised to it via porter + a verified stopword list
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 2b, B2)
+- **Assumed:** of the two ways to make `q=` agree, keeping Postgres's behaviour and changing
+  SQLite is the right trade.
+- **Chose:** SQLite adopts Postgres. `tokenize = 'porter unicode61'` (migration 013) for
+  stemming, plus query-side stopword removal in `fts5_escape` using PostgreSQL 16's own
+  `english.stop`. Postgres is the production backend, stemming is better search behaviour,
+  and the cost falls on SQLite's FTS index — derived data, rebuilt from `contexts`, so the
+  change is reversible and no context data is rewritten. Measured before committing to it:
+  porter stems *through* FTS5 phrase quoting, so `fts5_escape` keeps quoting every token and
+  loses none of its operator-neutralizing property.
+- **Alternatives:** (a) **pg adopts SQLite** (`simple` instead of `english`) — would give
+  *exact structural* parity with no word list and no stemmer mismatch possible, and was
+  genuinely tempting for that reason; rejected because it removes stemming from the
+  production backend, a real search-quality regression, to buy a testing property. (b) Ship
+  approximate parity without saying so — rejected; that is the same overclaim as the comment
+  this phase deleted.
+- **Blast radius if wrong:** SQLite search results change — inflected queries start matching,
+  stopword-only queries stop matching. Reversible by restoring the previous tokenizer and
+  rebuilding the derived index; no data migration either way. The residual correctness gap is
+  that porter and snowball disagree on some words, so parity is pinned per-mechanism rather
+  than proven across the language — stated on `fulltext::PG_ENGLISH_STOPWORDS` and in the
+  parity suite's docs rather than left implicit.
+- **Status:** UNCONFIRMED — **escalated to the human**. Reversible, but a product judgement on a public API taken against a defensible alternative. Recommendation: confirm as taken. See DECISIONS.md H-B #10.
+
+## The stopword table is verified against Postgres rather than trusted
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 2b, B2)
+- **Assumed:** a hand-copied 127-entry table will go stale and nobody will notice, which is
+  the characteristic failure of hand-maintained tables.
+- **Chose:** keep the table (it must be available to SQLite at runtime, with no database in
+  reach) but *check* it: the pg parity suite asserts, for every entry, that
+  `to_tsvector('english', w)` is empty according to the live server, plus a negative control
+  so the check cannot pass vacuously. Drift reddens a test instead of quietly skewing search.
+- **Alternatives:** query Postgres at runtime (impossible for the SQLite backend, which may
+  run with no Postgres anywhere); trust the copy (the failure mode above); derive it from a
+  crate (adds a dependency for 127 strings).
+- **Blast radius if wrong:** the one direction the check cannot cover is Postgres *gaining* a
+  stopword this list lacks — their list is a file not enumerable from SQL. Then SQLite would
+  keep a term Postgres drops, and that specific divergence would go unnoticed. Documented on
+  the constant; it is the reason the suite pins mechanisms rather than claiming exhaustive
+  agreement.
+- **Status:** CONFIRMED (2026-09-12) — the pg suite checks all 127 entries against the live server. See DECISIONS.md H-B #5.
+
+## B3 fixed by reconciling status against events, not by taking a read snapshot
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 3, B3)
+- **Assumed:** making the served object self-consistent by construction is worth more than
+  making one call site take a consistent snapshot.
+- **Chose:** a shared `reconcile_retraction(status, events)` in `acdp-registry-store`, applied
+  in `get()` and `lineage()` on both backends. Retraction wins from either source. The
+  property this buys over a transaction is that a *future* read path which forgets the
+  snapshot cannot reintroduce the bug — the fix is in the shape of the data, not in the
+  discipline of the caller. It is also one shared helper rather than two hand-mirrored
+  per-backend transactions, so the backends cannot drift on what "consistent" means.
+- **Two preconditions verified against the code first**, because the cheap fix is only sound
+  if they hold, and **my own plan had rejected this approach on the second one**: (a)
+  `lifecycle_events` is append-only — no `DELETE` exists in either backend, so the event log
+  can never be missing a retraction the denormalized flag knows about; (b) the event and the
+  flag are written in one transaction, so only the reads could ever disagree. The plan's
+  objection — "deriving from events discards the column and breaks if events are pruned" —
+  described a hazard this codebase does not have.
+- **Alternatives:** (a) a read transaction per call — sqlite WAL gives a consistent snapshot
+  on `BEGIN DEFERRED`, but Postgres `READ COMMITTED` does *not* (each statement re-snapshots),
+  so it would have needed `REPEATABLE READ` set per backend: more moving parts, and it fixes
+  only the call sites that remember to do it. (b) One statement aggregating events as JSON —
+  atomic by construction and one round trip, but it encodes the event wire shape in SQL, so
+  the mapping would have to stay in sync with the Rust struct by hand.
+- **Blast radius if wrong:** a context retracted and then republished could, under a torn
+  read, be served as `retracted` slightly after becoming active again. Stale, never
+  self-contradictory, and stale-toward-retracted is the safe direction to be wrong about
+  whether data has been withdrawn. Reversal is deleting four call-site lines.
+- **Status:** CONFIRMED (2026-09-12) — both preconditions verified in code; reconciliation beats a snapshot on shape. See DECISIONS.md H-B #6.
+
+## B5's busy timeout is an in-crate constant, not a config field — and has no behavioural test
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 4, B5)
+- **Assumed:** an explicit value that is written down beats an implicit one inherited from a
+  dependency, even if it is not yet tunable.
+- **Chose:** a named `SQLITE_BUSY_TIMEOUT` constant (30s) in the sqlite crate. The finding
+  asked for it to come "from config", but the storage config lives in `acdp-registry-types`,
+  outside this change's path scope — adding a field there is a separate change, flagged rather
+  than smuggled in.
+- **Stated limit — this one has NO falsifying test, unlike every other guard in this unit.**
+  Reddening it deterministically means holding `BEGIN IMMEDIATE` across a slow callback and
+  racing a second writer against a wall clock; such a test is timing-dependent, and a flaky
+  guard gets deleted, which is worse than an honest gap. The change is a one-line
+  configuration of an existing mechanism, and it is recorded here as untested rather than
+  described as guarded.
+- **Blast radius if wrong:** 30s is too long for a caller that would rather fail fast, or too
+  short for a pathological disk. Either way it is one constant, and the old behaviour was an
+  undocumented 5s from sqlx.
+- **Status:** CONFIRMED (2026-09-12) as an accepted, documented gap — recommendation is NOT to add a flaky timing test. See DECISIONS.md H-B #7.
+
+## B7 is a parity fix, not a live exploit closed — and both the finding and my own read were wrong
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 4, B7)
+- **Assumed, then measured:** the finding said the `as i32` narrowing was unreachable "because
+  `put()` has no production callers". That reason is **false** — the casts were in
+  `commit_publish` and in the row INSERT, both on the live publish path. I then concluded it
+  was therefore reachable, and **that was also false**: measured on both backends, a publish
+  carrying `version = 3_000_000_000` is refused before the store sees it, because the request
+  builder requires `version == 1` for a first publish and `prev + 1` for a supersession.
+  Reaching 2^31 needs ~2 billion sequential supersessions.
+- **Chose:** widen `contexts.version` to `BIGINT` and use `i64::from` anyway. It removes a real
+  divergence (SQLite was already lossless), it is a widening so nothing can fail to fit, and
+  the cost is one table rewrite. Keeping a narrowing cast on the publish path because today's
+  validation happens to prevent it would be relying on a constraint enforced in a different
+  crate.
+- **Alternatives:** leave it and document — rejected, the divergence is exactly what this unit
+  exists to remove; assert on `version` at the store boundary instead — duplicates validation
+  the SDK already does, in the wrong layer.
+- **Blast radius if wrong:** `INTEGER` → `BIGINT` rewrites the table under an ACCESS EXCLUSIVE
+  lock. Acceptable at this scale, worth scheduling on a very large `contexts`.
+- **Status:** CONFIRMED (2026-09-12) — measured reversible (MAX(version)=2, zero rows over i32::MAX), so it drops out of the critical tier. See DECISIONS.md H-B #8.
+
+## `lineages` is write-only and was deliberately NOT dropped
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 4, B8)
+- **Assumed:** a table written on every insert and read by nothing is dead write amplification
+  worth removing.
+- **Verified exhaustively before deciding:** `lineages` has `INSERT` only
+  (`sqlite/src/store.rs`, `pg/src/store.rs`) and **zero** `SELECT`/`JOIN`/`UPDATE` anywhere in
+  the repository — src, tests, and migrations all swept, not just the two store files.
+- **Chose: do not drop it.** Two reasons, either sufficient. (a) Dropping a table is a one-way
+  door and this unit has no mandate for one. (b) `crates/acdp-registry-server/tests/pg_integration.rs`
+  TRUNCATEs it in test setup, so removing the table means editing a file outside this change's
+  path scope — the finding cannot be actioned without a cross-boundary edit even if it were
+  desirable.
+- **Blast radius if wrong:** every insert keeps paying for one extra row write. Measured cost:
+  one INSERT per publish, inside a transaction that already writes several rows.
+- **Status:** CLOSED (2026-09-12) — finding handed to the coordinator with its evidence; no action taken here. See DECISIONS.md H-B #9.
+
+- **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
+  evidence rather than actioned here.
+
+## H-A / P2 — 408 is not given an RFC-ACDP-0007 §5 envelope
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P2)
+- **Assumed:** that a middleware-generated 408 cannot be given an honest §5 error envelope
+  from inside this lane's claim.
+- **Chose:** scope P2 to 413 only. `acdp_wire_code`
+  (`crates/acdp-registry-types/src/error.rs:138-201`) has no timeout arm and falls through to
+  `internal_error`, and `AcdpError` has no timeout variant. Emitting `internal_error` for a
+  client-side timeout attributes a client condition to a server fault — worse than the current
+  silence, because it would be actively misleading in exactly the logs an operator reaches for.
+  Minting `request_timeout` changes the shared §5 wire-code registry, which lives in
+  `acdp-registry-types` and is outside this lane's granted paths.
+- **Alternatives:** (a) emit `internal_error` for 408 — rejected as actively wrong; (b) invent a
+  `request_timeout` string locally in the rewriter without registering it in §5 — rejected as a
+  silent, unilateral extension of a shared wire contract; (c) edit `acdp-registry-types`
+  anyway — rejected, outside the claim, and raised as a claim-request instead.
+- **Blast radius if wrong:** none to correctness. A 408 continues to behave exactly as it does
+  on `main` today (media type stamped by the outermost `if_not_present` layer, no envelope).
+  The cost is that a client parsing error envelopes uniformly still gets no `error.code` on a
+  timeout. Reversible in one commit once a §5 code exists.
+- **Status:** UNCONFIRMED
+
+## H-A / P1 — the 408 `x-request-id` is correct by construction but not pinned by a test
+
+- **Plan:** plans/h-a-wire-surface-observability.md (phase P1, acceptance criterion 2)
+- **Assumed:** that the 408 arm gets `x-request-id` for the same reason the 413 arm does — both
+  are generated by layers now sitting inside the relocated request-id pair.
+- **Chose:** state this as an honest coverage limit rather than claim it as tested. `TimeoutLayer`
+  is constructed with a hard-coded `Duration::from_secs(30)` in `build_router` and nothing in the
+  config plumbs it, so pinning the 408 would mean either a 30-second test or making the timeout
+  configurable purely to test it. The falsification that moves the request-id pair back inside
+  the body limit reddens the whole middleware-generated class, of which the 408 is a member — so
+  the mechanism is evidenced, the specific arm is not.
+- **Alternatives:** (a) claim AC2 covers 408 because the mechanism is shared — rejected; that is
+  precisely the "asserted from reasoning rather than a probe" pattern this unit exists to fix;
+  (b) make the timeout configurable — rejected as scope creep into a phase that is about layer
+  order, though it is the right follow-up if a 408 test is ever wanted.
+- **Blast radius if wrong:** a future refactor could move the timeout layer outside the
+  request-id pair and lose the id on 408s with no test failing. Bounded: the 413 guard covers the
+  same layer boundary, so the regression would have to be specific to the timeout layer alone.
+- **Status:** UNCONFIRMED
+||||||| 26860a5
+||||||| b57934d
+- **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
+  evidence rather than actioned here.

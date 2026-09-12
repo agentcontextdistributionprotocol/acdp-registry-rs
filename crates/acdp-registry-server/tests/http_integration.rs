@@ -332,11 +332,15 @@ async fn acdp_endpoints_use_acdp_json_content_type() {
 }
 
 #[tokio::test]
-async fn oversized_body_returns_413_as_acdp_json() {
-    // RFC-ACDP-0007 §4: even a framework-generated rejection — here the 413
-    // from the outer RequestBodyLimitLayer, which bypasses both the per-route
-    // content-type layer and RegistryError::into_response — must carry the
-    // ACDP media type.
+async fn oversized_body_returns_413_as_acdp_json_chunked() {
+    // The STREAMED path: no `Content-Length`, so `RequestBodyLimitLayer` wraps
+    // the body and the 413 is produced from INSIDE the router, where the
+    // per-route `acdp+json` layer already covers it.
+    //
+    // This is what the original single test exercised. Its comment credited the
+    // OUTERMOST `if_not_present` layer, which is not what was covering it -- and
+    // it never touched the Content-Length short-circuit at all. Split so each
+    // path is named and asserted separately.
     let h = harness(true).await;
     let big = vec![b'x'; 2 * 1024 * 1024]; // 2 MiB > 1 MiB default cap
     let resp = h
@@ -357,7 +361,241 @@ async fn oversized_body_returns_413_as_acdp_json() {
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok()),
         Some("application/acdp+json"),
-        "framework 413 must still carry the ACDP media type",
+        "framework 413 (streamed) must still carry the ACDP media type",
+    );
+    // Parse defensively: `body_to_json` panics inside a shared helper on
+    // non-JSON, which would make this test's own red message unreachable and
+    // report the failure at the wrong file:line.
+    let raw = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+    assert_eq!(
+        v["error"]["code"],
+        "payload_too_large",
+        "RFC-ACDP-0007 §5: a 413 must carry the error envelope, not framework prose. \
+         Raw body was: {}",
+        String::from_utf8_lossy(&raw),
+    );
+}
+
+#[tokio::test]
+async fn oversized_body_returns_413_as_acdp_json_with_content_length() {
+    // The SHORT-CIRCUIT path. `RequestBodyLimit::call` inspects the
+    // `Content-Length` HEADER and, when it exceeds the cap, returns its own
+    // response WITHOUT calling inner -- and that response hard-sets
+    // `Content-Type: text/plain; charset=utf-8`. So the outermost
+    // `if_not_present` layer cannot correct it (a Content-Type is already
+    // present), and nothing inside the router ever runs.
+    //
+    // Setting Content-Length here is therefore the entire point of this test:
+    // omit it and the request silently takes the streamed path above, passing
+    // against the defect. That is exactly how the original test came to assert
+    // something untrue about a path it never reached.
+    let h = harness(true).await;
+    let big = vec![b'x'; 2 * 1024 * 1024]; // 2 MiB > 1 MiB default cap
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .header(axum::http::header::CONTENT_LENGTH, big.len())
+                .body(Body::from(big))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/acdp+json"),
+        "framework 413 (Content-Length short-circuit) must still carry the ACDP media type",
+    );
+    let raw = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+    assert_eq!(
+        v["error"]["code"],
+        "payload_too_large",
+        "RFC-ACDP-0007 §5: the short-circuit 413 must carry the error envelope, \
+         not tower-http's plain-text prose. Raw body was: {}",
+        String::from_utf8_lossy(&raw),
+    );
+}
+
+#[tokio::test]
+async fn envelope_rewrite_preserves_cors_headers_on_413() {
+    // REGRESSION GUARD. The 413 envelope rewriter runs OUTSIDE `CorsLayer`, so
+    // an implementation that synthesizes a fresh `Response` (rather than
+    // transplanting the envelope onto the original parts) silently discards
+    // every header CORS added. The result is a correct RFC-ACDP-0007 §5 body
+    // that a browser client is not allowed to read -- strictly worse than the
+    // plain-text 413 it replaced, for the exact consumer the envelope serves.
+    //
+    // The repo had no CORS coverage at all, so nothing would have caught it.
+    let mut cfg = config(true);
+    cfg.registry.cors.allowed_origins = vec!["https://ui.test".into()];
+    let h = harness_from_config(cfg).await;
+    let big = vec![b'x'; 2 * 1024 * 1024];
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .header(axum::http::header::ORIGIN, "https://ui.test")
+                .header(axum::http::header::CONTENT_LENGTH, big.len())
+                .body(Body::from(big))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("https://ui.test"),
+        "the 413 envelope rewrite must preserve CORS headers added by the layer \
+         inside it -- otherwise a browser client cannot read the error it was given",
+    );
+    let v = body_to_json(resp).await;
+    assert_eq!(v["error"]["code"], "payload_too_large");
+}
+
+#[tokio::test]
+async fn cors_preflight_carries_a_request_id() {
+    // `CorsLayer` answers a preflight itself and never calls inner, so this
+    // response is generated entirely outside the router. Both docs now state
+    // that every response carries `x-request-id`; this is what makes that
+    // sentence true rather than aspirational.
+    let mut cfg = config(true);
+    cfg.registry.cors.allowed_origins = vec!["https://ui.test".into()];
+    let h = harness_from_config(cfg).await;
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/contexts")
+                .header(axum::http::header::ORIGIN, "https://ui.test")
+                .header(axum::http::header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.headers().get("x-request-id").is_some(),
+        "a CORS preflight answered by CorsLayer must still carry x-request-id -- \
+         the request-id layers must sit OUTSIDE the CORS layer",
+    );
+}
+
+#[tokio::test]
+async fn every_response_carries_a_generated_request_id() {
+    // The registry mints a UUIDv4 `x-request-id` when the caller supplies none
+    // (`MakeRequestUuid`). Before this guard, `SetRequestIdLayer` was applied
+    // BEFORE `PropagateRequestIdLayer`, and `Router::layer` makes the later call
+    // the OUTER one -- so Propagate ran first and read a request header that Set
+    // had not yet written. The generated id reached no response at all, on any
+    // path, including a plain 200. Only a client-supplied id echoed back, which
+    // is why the defect was invisible to anyone testing with an explicit header.
+    let h = harness(true).await;
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let id = resp
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    assert!(
+        id.is_some(),
+        "GET /healthz must carry a server-generated x-request-id (got None) -- \
+         PropagateRequestIdLayer must sit INSIDE SetRequestIdLayer, i.e. be applied FIRST",
+    );
+    let id = id.unwrap();
+    assert_eq!(
+        id.len(),
+        36,
+        "the generated id should be a UUIDv4 (36 chars), got {id:?}",
+    );
+}
+
+#[tokio::test]
+async fn client_supplied_request_id_is_echoed_unchanged() {
+    // The complement of the guard above: minting must not clobber a caller's
+    // own correlation id. This passed before the layer fix too -- it is here so
+    // the fix cannot regress it, not as evidence the fix works.
+    let h = harness(true).await;
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/healthz")
+                .header("x-request-id", "client-supplied-abc-123")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let ids: Vec<&str> = resp
+        .headers()
+        .get_all("x-request-id")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["client-supplied-abc-123"],
+        "a client-supplied x-request-id must be echoed exactly once, unchanged",
+    );
+}
+
+#[tokio::test]
+async fn middleware_generated_413_carries_a_request_id() {
+    // `RequestBodyLimitLayer` SHORT-CIRCUITS on the `Content-Length` header
+    // (tower-http `limit/service.rs`) and never calls inner. Setting
+    // Content-Length explicitly is therefore load-bearing: without it the
+    // request takes the streamed path, is rejected from INSIDE the router, and
+    // the test passes even against the defect. That is exactly why
+    // `oversized_body_returns_413_as_acdp_json` -- which sets no Content-Length
+    // -- never exercised the path its own comment describes.
+    let h = harness(true).await;
+    let big = vec![b'x'; 2 * 1024 * 1024]; // 2 MiB > 1 MiB default cap
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .header(axum::http::header::CONTENT_LENGTH, big.len())
+                .body(Body::from(big))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        resp.headers().get("x-request-id").is_some(),
+        "the 413 synthesized by RequestBodyLimitLayer must carry x-request-id -- \
+         the request-id layers must sit OUTSIDE the body-limit layer",
     );
 }
 
