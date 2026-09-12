@@ -403,21 +403,27 @@ post-filtered with a bounded refill loop (up to 6 inner pages), so a page may
 return fewer than `limit` rows near the end of a result set even though
 `next_cursor` is set — keep paging until `next_cursor` is absent.
 
-**`total_estimate` is omitted entirely for a tenant-scoped request.** The key is
-**absent** — not `null`, and not `0`, so "withheld" cannot be read as "none
-found". A request that asserts no tenant — no `X-Tenant-Id` **and** no `tenant`
-claim in a bearer token, since `tenant_for_request` resolves both — still carries
-it.
+**`total_estimate` is returned for every caller, including a tenant-scoped one,
+and it is the caller's own count.** For a request that asserts a tenant it is the
+number of §4.5-visible matches **within that tenant** — never the registry-wide
+figure.
 
-The reason for the omission has changed, and the number has not been re-enabled
-yet. It was omitted because it was **wrong**: the count was taken in the store
-before the handler applied the tenant predicate, so it described rows across
-every tenant and handed a tenant-scoped caller a population size for data it
-could not see. That is no longer the case — `search_in_tenant` counts inside the
-tenant predicate, so the number is now correct for the caller. It stays omitted
-**conservatively rather than necessarily**, and re-enabling it is a wire-visible
-change tracked in `ASSUMPTIONS.md` rather than something to infer from this
-paragraph.
+This paragraph previously documented the opposite, and the history is worth one
+sentence because the field's meaning changed rather than its presence. It was
+omitted from tenant-scoped responses because it was **wrong**: the count was
+taken in the store before the handler applied the tenant predicate, so it
+described rows across every tenant and handed a tenant-scoped caller a population
+size for data it could not see. `search_in_tenant` put the predicate in the same
+statement as the keyset and the count, so `COUNT(*) OVER ()` now rides a scan
+that only ever sees the caller's rows. The number is correct by construction, and
+withholding it would hide a figure the caller is entitled to and which discloses
+nothing.
+
+Two things a client should not infer. The count is **not** the page size: with
+`limit` smaller than the result set, `total_estimate` exceeds `matches.len()` and
+is the pre-page total. And it is an estimate in name only on these backends —
+`COUNT(*) OVER ()` is exact for the scan it rides — but treat it as advisory, per
+RFC-ACDP-0008, rather than as a value to paginate against.
 
 > **The cursor oracle described here previously is closed.** Recorded rather than
 > deleted, because the shape of it is worth knowing and because this paragraph
