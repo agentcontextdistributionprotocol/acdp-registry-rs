@@ -42,20 +42,20 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: clippy (sqlite default)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: clippy (postgres)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --all-targets -- -D warnings
       - name: clippy (playground)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --features storage-sqlite,playground \
             --all-targets -- -D warnings
       - name: clippy (memory)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-memory \
             --all-targets -- -D warnings
 
@@ -132,22 +132,22 @@ jobs:
       # exact.
       - name: clippy (postgres + playground)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-pg,playground \
             --all-targets -- -D warnings
       - name: clippy (memory + playground)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-memory,playground \
             --all-targets -- -D warnings
       - name: clippy (no storage backend)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features \
             --all-targets -- -D warnings
       - name: clippy (playground, no storage backend)
         run: |
-          cargo clippy -p acdp-registry-server \
+          cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features playground \
             --all-targets -- -D warnings
 
@@ -164,10 +164,10 @@ jobs:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: cargo check (sqlite default)
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
       - name: cargo check (postgres)
         run: |
-          cargo check -p acdp-registry-server \
+          cargo check --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --all-targets
 
@@ -184,7 +184,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: cargo doc
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --locked --workspace --no-deps
 
   test:
     name: tests
@@ -211,22 +211,22 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: cargo test (sqlite)
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
       - name: cargo test (playground)
         run: |
-          cargo test -p acdp-registry-server \
+          cargo test --locked -p acdp-registry-server \
             --features storage-sqlite,playground
       - name: cargo test (postgres)
         env:
           ACDP_REGISTRY_TEST_PG_URL: postgres://acdp:acdp@localhost:5432/acdp_registry
         run: |
-          cargo test -p acdp-registry-pg
-          cargo test -p acdp-registry-server \
+          cargo test --locked -p acdp-registry-pg
+          cargo test --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --test pg_integration
       - name: cargo test (memory)
         run: |
-          cargo test -p acdp-registry-server \
+          cargo test --locked -p acdp-registry-server \
             --no-default-features --features storage-memory
 
   # Runs the spec conformance suite against a SHA-pinned spec checkout.
@@ -285,7 +285,7 @@ jobs:
           ACDP_SPEC_DIR: ${{ steps.spec.outputs.path }}
           ACDP_REQUIRE_CONFORMANCE: "1"
         run: |
-          cargo test -p acdp-registry-server \
+          cargo test --locked -p acdp-registry-server \
             --features storage-sqlite,playground \
             --test conformance --test conformance_gate -- --nocapture
 
@@ -321,7 +321,7 @@ jobs:
         env:
           ACDP_REGISTRY_TEST_PG_URL: postgres://acdp:acdp@localhost:5432/acdp_registry
         run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov --locked --workspace --lcov --output-path lcov.info
       - name: coverage summary
         run: |
           echo '## Coverage' >> "$GITHUB_STEP_SUMMARY"
