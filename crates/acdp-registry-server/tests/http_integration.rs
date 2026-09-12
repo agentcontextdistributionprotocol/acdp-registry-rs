@@ -8601,15 +8601,21 @@ struct StoreCalls {
     get: std::sync::atomic::AtomicUsize,
     visible_ctx_ids: std::sync::atomic::AtomicUsize,
     tenant_of_ctx: std::sync::atomic::AtomicUsize,
+    /// Counted because P9's acceptance criterion names it, even though the
+    /// shipped handler never calls it: without this, a variant that batched
+    /// tenants in a SEPARATE query would satisfy every other assertion here
+    /// while doing two queries per page instead of one.
+    tenants_of_ctxs: std::sync::atomic::AtomicUsize,
 }
 
 impl StoreCalls {
-    fn snapshot(&self) -> (usize, usize, usize) {
+    fn snapshot(&self) -> (usize, usize, usize, usize) {
         use std::sync::atomic::Ordering::Relaxed;
         (
             self.get.load(Relaxed),
             self.visible_ctx_ids.load(Relaxed),
             self.tenant_of_ctx.load(Relaxed),
+            self.tenants_of_ctxs.load(Relaxed),
         )
     }
 }
@@ -8804,6 +8810,9 @@ impl ExtendedRegistryStore for CountingStore {
         &self,
         ctx_ids: &[&str],
     ) -> Result<std::collections::HashMap<String, String>, acdp::error::AcdpError> {
+        self.calls
+            .tenants_of_ctxs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner.tenants_of_ctxs(ctx_ids).await
     }
     async fn visible_ctx_ids(
@@ -8918,7 +8927,12 @@ async fn log_entries_answers_the_page_with_one_visibility_query() {
     );
     let after = calls.snapshot();
 
-    let (gets, visible, tenants) = (after.0 - before.0, after.1 - before.1, after.2 - before.2);
+    let (gets, visible, tenants, tenants_batched) = (
+        after.0 - before.0,
+        after.1 - before.1,
+        after.2 - before.2,
+        after.3 - before.3,
+    );
     assert_eq!(
         visible, 1,
         "exactly ONE batched visibility query per page (got {visible})"
@@ -8932,6 +8946,12 @@ async fn log_entries_answers_the_page_with_one_visibility_query() {
         tenants, 0,
         "no tenant header was sent, so the untenanted path must not pay for a \
          tenant lookup at all (got {tenants})"
+    );
+    assert_eq!(
+        tenants_batched, 0,
+        "and it must not pay for a BATCHED tenant lookup either -- the tenant \
+         predicate belongs inside the one visibility query, not beside it \
+         (got {tenants_batched})"
     );
 }
 
@@ -8996,6 +9016,12 @@ async fn log_entries_leaf_presence_is_tenant_scoped() {
         after.0 - before.0,
         0,
         "still zero per-record store reads under a tenant header"
+    );
+    assert_eq!(
+        after.3 - before.3,
+        0,
+        "the tenant predicate rides inside the SAME query -- a separate batched \
+         tenant lookup would be two queries per page, not one"
     );
 }
 
@@ -9071,8 +9097,13 @@ async fn log_entries_rejects_the_reserved_default_tenant() {
     // A version that resolved the tenant late would answer the same 400 while
     // still having touched the store -- correct on the wire, wrong about when.
     assert_eq!(
-        (after.0 - before.0, after.1 - before.1, after.2 - before.2),
-        (0, 0, 0),
+        (
+            after.0 - before.0,
+            after.1 - before.1,
+            after.2 - before.2,
+            after.3 - before.3,
+        ),
+        (0, 0, 0, 0),
         "a rejected tenant must cost ZERO store reads of any kind"
     );
 
@@ -9083,4 +9114,62 @@ async fn log_entries_rejects_the_reserved_default_tenant() {
     for e in v["entries"].as_array().expect("entries") {
         assert!(e.get("leaf").is_some(), "public rows stay public: {e}");
     }
+}
+
+/// A4 / SECURITY: `/log/entries` must gate `leaf` on the SAME
+/// `anonymous_public_reads` the retrieve it mirrors gates on.
+///
+/// `RegistryServer::retrieve` reads that flag off `self.caps` -- the
+/// `CapabilitiesDocument` baked in at `try_new` time -- NOT off
+/// `RegistryConfig`. That split is documented in this repo as GAP 3
+/// (`tests/common/mod.rs:227`), and it is a trap: the default harness
+/// hardcodes `caps.anonymous_public_reads: true` (`:104`) while the SHIPPED
+/// default is `false` (`acdp-registry-types/src/config.rs:488`, wired to caps
+/// at `acdp-registry-server/src/main.rs:1228`). So a test that flips
+/// `cfg.auth.anonymous_public_reads` and observes a 200 measures the harness's
+/// caps/config split and nothing about the binary.
+///
+/// This test therefore overrides the CAPS, which is the only thing that moves
+/// the real predicate. With the flag off, `can_retrieve`'s public arm is
+/// `anonymous_public_reads || requester.is_some()` -- false for an anonymous
+/// caller -- so a public context is NOT retrievable and §8.3 requires its
+/// `leaf` to be absent while its position stays disclosed.
+///
+/// The batched rewrite must pass this flag through rather than assume a value.
+/// Hardcoding `true` makes the endpoint disclose every public leaf in the
+/// registry to an unauthenticated caller on the shipped default config -- and
+/// because `auth.enabled` also defaults to false, on that config EVERY caller
+/// is anonymous.
+#[tokio::test]
+async fn log_entries_honours_anonymous_public_reads_from_caps() {
+    let mut cfg = config(false);
+    cfg.receipt.signing_key_seed_b64 = B64.encode(RECEIPT_SEED);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.log.enabled = true;
+    cfg.auth.anonymous_public_reads = false;
+
+    let mut caps = log_caps();
+    caps.anonymous_public_reads = false;
+    let h = build_harness_with_caps(cfg, caps, None).await;
+
+    log_publish(&h, 150, "anon-gated", Visibility::Public).await;
+
+    // Ground truth for the rule this endpoint mirrors: the retrieve itself
+    // refuses. If this ever stops being a 404, the premise below is void and
+    // the leaf assertion must be re-derived, not merely re-run.
+    let (status, v) = get_json(&h.router, "/log/entries?start=0&end=1").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let entries = v["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "{v}");
+    assert!(
+        entries[0].get("leaf_hash").is_some(),
+        "the POSITION is always disclosed, §8.3: {v}"
+    );
+    assert!(
+        entries[0].get("leaf").is_none(),
+        "an anonymous caller cannot retrieve this context when \
+         caps.anonymous_public_reads is false, so §8.3 forbids echoing its \
+         leaf -- a `leaf` here is a transparency-log disclosure of every \
+         public context to the world on the SHIPPED default config: {v}"
+    );
 }

@@ -2075,8 +2075,9 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   `docs/ARCHITECTURE.md` and `docs/MULTI-TENANCY.md` describe it.
 - **Blast radius if wrong:** public leaves would disappear from the log for anonymous
   auditors on a deployment that sets the flag — a silent transparency regression, not an error.
-- **Status:** CONFIRMED by wire probe. The rationale is also written into `handlers/log.rs`
-  at the call site, because the mistake is one a reader makes by being helpful.
+- **Status:** **RETRACTED — the claim above is FALSE and the probe that "confirmed" it was
+  invalid.** Kept in full, unedited, because the reasoning is the record. See the retraction
+  immediately below.
 
 - **Assumption:** the old handler-side tenant fallback
   (`tenant_of_ctx(...).unwrap_or_else(|| "default")`) had no behaviour to preserve.
@@ -2103,3 +2104,58 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 - **Blast radius:** a page that used to return 200 with some leaves omitted can now return 500.
   Strictly more honest, but it is a change, and calling this a pure refactor would be wrong.
 - **Status:** CONFIRMED as intended. Stated in the PR body, not just here.
+
+### RETRACTION of the `anonymous_public_reads: true` assumption above
+
+- **What was claimed:** that passing a literal `true` preserved `/log/entries` behaviour, and
+  that passing the configured value would make the endpoint *stricter* than the retrieve it
+  mirrors. Status was recorded as "CONFIRMED by wire probe".
+- **What is actually true:** the opposite direction. `RegistryServer::retrieve` ->
+  `can_retrieve` gates its public arm on `self.caps.anonymous_public_reads || requester.is_some()`
+  — off the `CapabilitiesDocument` baked in at `try_new`, **not** off `RegistryConfig`. The
+  binary copies `cfg.auth.anonymous_public_reads` into caps
+  (`crates/acdp-registry-server/src/main.rs`), and `AuthConfig::default()` ships that flag
+  `false` (`crates/acdp-registry-types/src/config.rs`). So on the shipped default a hardcoded
+  `true` **discloses** every public `leaf` to an anonymous caller that the old code refused —
+  and because `auth.enabled` also defaults to `false`, on that config every caller is anonymous.
+- **Why the probe was invalid, which is the part worth remembering:** it flipped
+  `cfg.auth.anonymous_public_reads` and observed a 200. The default test harness hardcodes
+  `caps.anonymous_public_reads: true` (`tests/http_integration.rs`), and the caps/config split is
+  *already documented in this repo* as GAP 3 (`tests/common/mod.rs`). The probe therefore
+  measured the harness's own split and could not have returned anything else. A measurement that
+  cannot fail is not evidence, and calling it a "wire probe" made it read as stronger than the
+  reasoning it replaced.
+- **How it was caught:** the pre-merge verification gate, reading the code rather than trusting
+  the claim. Not by a test — no test could see it, because every test in the suite inherits the
+  harness caps.
+- **Fix:** the flag is read from `state.server.capabilities().anonymous_public_reads`, the same
+  field `retrieve` reads, so the two are equal by construction rather than equal while config and
+  caps agree. `log_entries_honours_anonymous_public_reads_from_caps` overrides the CAPS and fails
+  against the hardcoded value; the disclosure was reproduced before the fix was written.
+- **Status:** CONFIRMED (the corrected statement), with a regression test that has been shown to
+  fail without the fix.
+
+- **Assumption (CORRECTED — an earlier version of this entry overstated it):** the `/search`
+  cursor oracle is closed at `limit=1`.
+- **What is true:** the anchor escapes whenever the refill loop stops on a page whose last *raw*
+  scanned row is foreign. At `limit=1` the loop keeps refilling, so the filter that hides the row
+  also consumes its anchor — that much was measured correctly. But the loop also stops when it
+  exhausts `SEARCH_REFILL_MAX_PAGES` (6), and `cursor = resp.next_cursor` is assigned *before*
+  that break (`handlers/context.rs`), so with enough consecutive foreign pages a foreign anchor
+  escapes at `limit=1` too. The honest statement is "at `limit>=2`, and at any `limit` once the
+  refill budget is exhausted" — not "never at `limit=1`". Generalising "every time" from one
+  six-row fixture was the error.
+- **Status:** UNCONFIRMED — A2 remains PARTIAL. `docs/HTTP-API.md` and the call-site comment now
+  state the corrected version.
+
+- **Assumption (latent, accepted knowingly):** dropping the `CtxId::parse` guard is safe.
+- **Context:** the old per-record path parsed each `ctx_id` and returned "not visible" for an
+  unparseable one before any lookup. `visible_ctx_ids` matches raw strings in SQL, so a
+  `log_leaves` row whose `ctx_id` is not a valid `CtxId` but which has a matching `contexts` row
+  would now yield a `leaf` where it previously would not.
+- **Why accepted:** unreachable today — `ctx_id`s are registry-minted through `CtxId`, and a leaf
+  only exists for a row that was committed through publish. Re-adding the guard means parsing
+  per record, which is the cost this phase exists to remove.
+- **What would make it reachable:** a migration or import path that writes `contexts` rows
+  without minting through `CtxId`. Anything of that kind must revisit this.
+- **Status:** UNCONFIRMED — recorded so it is a known latent rather than a rediscovery.

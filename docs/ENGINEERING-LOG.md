@@ -31,6 +31,55 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-A, phase P9 (lane-1) — /log/entries answers a page with one visibility query -->
+
+### Fixed
+
+- **Security (anonymous disclosure): `/log/entries` would have echoed every public `leaf` to an
+  unauthenticated caller on the shipped default configuration.** Caught by this repo's own
+  verification gate before merge, not in production — recorded because the way it survived
+  three tracked files is the part worth keeping. The batched rewrite below passed a hardcoded
+  `anonymous_public_reads: true`, justified by a "wire probe" that flipped
+  `cfg.auth.anonymous_public_reads` and observed a 200. That probe measured nothing.
+  `RegistryServer::retrieve` gates on `self.caps`, **not** on `RegistryConfig` — this repo
+  already documents that split as GAP 3 in `crates/acdp-registry-server/tests/common/mod.rs` —
+  and the default test harness hardcodes `caps.anonymous_public_reads: true`. So the 200 came
+  from the caps value the probe never touched. Since `AuthConfig::default()` ships
+  `anonymous_public_reads: false` *and* `auth.enabled: false`, on the default config every
+  caller is anonymous and every public leaf would have been disclosed. The flag is now read
+  from `state.server.capabilities()` — the same field `retrieve` reads — so the batched call
+  equals the per-record retrieve **by construction** rather than only while config and caps
+  agree. `log_entries_honours_anonymous_public_reads_from_caps` overrides the caps, which is
+  the only thing that moves the real predicate, and it fails on the hardcoded value.
+
+### Changed
+
+- **`GET /log/entries` answers a whole page with one visibility query.** It resolved `leaf`
+  visibility one record at a time: a blocking `RegistryServer::retrieve` dispatch per entry,
+  plus — under an `X-Tenant-Id` header — a `tenant_of_ctx` per entry. On a full 256-record page
+  (RFC-ACDP-0012 §8.3 RECOMMENDS a cap of at least 256) that is 256 blocking-pool dispatches and
+  up to 512 store round-trips to answer one request. It is now a single
+  `ExtendedRegistryStore::visible_ctx_ids` call, which both SQL backends override with one
+  query. That method has been merged and dormant since #246; the plan for this phase predates
+  it and prescribed a three-part workaround on the explicit grounds that a batched store method
+  was out of scope. That premise expired, so the workaround was not built.
+
+- **Responses are byte-identical for a given `anonymous_public_reads` — but this is not a pure
+  refactor, and two things change.** First, the flag above: get it wrong and the bytes differ
+  enormously, which is the whole of the security entry. Second, error surfacing: the old loop
+  never asked about a row it was about to hide, so a store error could reach the caller only
+  for rows that were *already visible*. The batched call covers the whole page including
+  invisible rows, so a page that used to return 200 with some leaves omitted can now return
+  500. Strictly more honest, still a behaviour change.
+
+- **The guard is the deliverable.** The improvement is invisible in the response, so nothing in
+  the suite could have noticed a revert. A `CountingStore` test wrapper counts `get`,
+  `visible_ctx_ids`, `tenant_of_ctx` and `tenants_of_ctxs`; the tests pin one batched query and
+  zero per-record reads with and without a tenant header, pin that no separate tenant lookup is
+  paid for either, and pin that the reserved `default` sentinel is refused before any row is
+  read. Every assertion was falsified individually against a mutation violating it alone,
+  rather than as a group — the first failing assertion masks every one below it.
+
 <!-- unit H-A, phase P8 (lane-1) — tenant-scoped search stops reporting a cross-tenant count -->
 
 ### Fixed
@@ -3906,33 +3955,3 @@ hold entries from several releases. Use the commands.
   `docker/RAILWAY.md`, `docs/OPERATIONS.md` and `docs/AUTHENTICATION.md` still
   carry the false gating claim and are **not** this unit's to change; they are
   reported to their owners with quotes rather than edited.
-
-### `/log/entries` answers a page with one visibility query (H-A P9, A4)
-
-**Changed.** `GET /log/entries` resolved `leaf` visibility one record at a time: a blocking
-`RegistryServer::retrieve` dispatch per entry, plus — under an `X-Tenant-Id` header — a
-`tenant_of_ctx` per entry. On a full 256-record page (RFC-ACDP-0012 §8.3 RECOMMENDS a cap of at
-least 256) that is 256 blocking-pool dispatches and up to 512 store round-trips to answer one
-request. It now makes a single `ExtendedRegistryStore::visible_ctx_ids` call for the whole page,
-which both SQL backends override with one query.
-
-**Responses are byte-identical.** This is a cost change, not a wire change: the same entries
-carry the same `leaf_index`, `leaf_hash`, and the same `leaf` where §8.3 allows one.
-
-**One thing that is NOT identical, and it is not a refactor.** The old loop never asked about a
-row it was about to hide, so a `tenant_of_ctx` error could surface only for rows that were
-already visible. The batched call covers the whole page including invisible rows, so a store
-error can now surface on a page where it previously could not — a page that used to return 200
-with some leaves omitted can now return 500. Strictly more honest; still a behaviour change.
-
-**Why `anonymous_public_reads: true` is passed rather than the configured value.** The call this
-replaces went through `RegistryServer::retrieve`, which does not consult that flag — verified on
-the wire, not inferred. Passing the config value would make this endpoint stricter than the
-retrieve §8.3 defines it to mirror. The reasoning is at the call site too, because it is a
-mistake a reader makes by being helpful.
-
-**Guards.** The improvement is invisible in the response, so nothing in the suite could have
-noticed a revert — the guard is the deliverable. A `CountingStore` test wrapper counts `get`,
-`visible_ctx_ids` and `tenant_of_ctx`; three new tests pin one batched query and zero per-record
-reads, with and without a tenant header, and pin that the reserved `default` sentinel is refused
-before any row is read. Each assertion was falsified against a mutation that violates it alone.

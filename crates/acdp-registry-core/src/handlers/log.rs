@@ -479,35 +479,46 @@ pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
     // plus the tenant gate -- for the whole page, and both SQL backends
     // override it with a single query.
     //
-    // `anonymous_public_reads: true` is PRESERVING behaviour, not ignoring the
-    // config, and the distinction matters enough to measure rather than assert.
-    // The call this replaces used `RegistryServer::retrieve`, which does not
-    // consult that flag: with `auth.enabled = true` and
-    // `anonymous_public_reads = false`, an anonymous `GET /contexts/{ctx_id}`
-    // on a public context still returns 200 -- verified on the wire, not
-    // inferred. The flag gates `search`/`list_contexts`, which is how
-    // `docs/ARCHITECTURE.md` and `docs/MULTI-TENANCY.md` describe it.
+    // `anonymous_public_reads` is read from the SERVER'S CAPABILITIES, not from
+    // `state.config.auth`, because that is the field the call being replaced
+    // actually consulted: `RegistryServer::retrieve` -> `can_retrieve` gates its
+    // public arm on `self.caps.anonymous_public_reads || requester.is_some()`.
+    // Reading it from the same place makes this batched call equal to the old
+    // per-record retrieve BY CONSTRUCTION, rather than equal only as long as
+    // config and caps happen to agree.
     //
-    // So passing `state.config.auth.anonymous_public_reads` here -- the
-    // obvious-looking thing, and what a future reader will reach for -- would
-    // make this endpoint STRICTER than the retrieve it is supposed to mirror,
-    // and would break §8.3's own rule: `leaf` is present exactly where the
-    // requester could retrieve the context, and they demonstrably can.
+    // Both alternatives are wrong, and the second one silently:
+    //
+    //   * a hardcoded `true` discloses every public `leaf` to an anonymous
+    //     caller on the SHIPPED default (`anonymous_public_reads: false`,
+    //     `acdp-registry-types/src/config.rs`), and since `auth.enabled` also
+    //     defaults to false, on that config every caller is anonymous;
+    //   * `state.config.auth.anonymous_public_reads` is right in the binary
+    //     (`acdp-registry-server/src/main.rs` copies cfg -> caps) but not by
+    //     construction -- any other wiring that builds a `RegistryServer` with
+    //     caps that disagree with cfg makes this endpoint diverge from the
+    //     retrieve it is defined to mirror.
+    //
+    // This is GAP 3 in `tests/common/mod.rs`: authorization-relevant decisions
+    // come off `caps`, never off `RegistryConfig`. The default test harness
+    // hardcodes `caps.anonymous_public_reads: true`, so a test that flips the
+    // CONFIG value proves nothing here -- which is exactly how an earlier draft
+    // of this change convinced itself a hardcoded `true` was behaviour-preserving.
+    // `log_entries_honours_anonymous_public_reads_from_caps` overrides the caps.
     let ctx_ids: Vec<&str> = records.iter().map(|r| r.ctx_id.as_str()).collect();
-    let visible = if ctx_ids.is_empty() {
-        std::collections::HashSet::new()
-    } else {
-        state
-            .server
-            .store()
-            .visible_ctx_ids(
-                &ctx_ids,
-                requester.as_ref(),
-                requested_tenant.as_deref(),
-                true,
-            )
-            .await?
-    };
+    // No empty-slice guard: the range check above guarantees `start < end`, and
+    // all three `visible_ctx_ids` implementations early-return on an empty slice
+    // anyway. A guard here would be a branch no test could ever reach.
+    let visible = state
+        .server
+        .store()
+        .visible_ctx_ids(
+            &ctx_ids,
+            requester.as_ref(),
+            requested_tenant.as_deref(),
+            state.server.capabilities().anonymous_public_reads,
+        )
+        .await?;
 
     let mut entries = Vec::with_capacity(records.len());
     for record in &records {
