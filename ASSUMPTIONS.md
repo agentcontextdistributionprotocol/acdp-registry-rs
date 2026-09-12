@@ -2117,4 +2117,6 @@ bump.
   RED with a message naming exactly what happened ("expected the ISSUER guard to reject this token,
   but it was refused by something else ... Got: <new text>"). It fails loudly and locally, and the
   fix is one string. That is the acceptable direction for this coupling to break.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-12) — see DECISIONS.md, unit H-N. Opus-settled; the caret
+  requirement `"11"` means `cargo update` can break it without a manifest change, which is a wider
+  exposure than first written, and it still fails loudly and locally.
