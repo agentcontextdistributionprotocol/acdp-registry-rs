@@ -303,7 +303,7 @@ Query parameters (all optional):
 | `created_after`, `created_before` | RFC 3339 bounds on creation time. |
 | `data_period_start_after`, `data_period_end_before` | Bounds on the context data period. |
 | `expires_after`, `expires_before` | Bounds on expiry. |
-| `limit` | Page size, default 20. |
+| `limit` | Page size, default 20, **clamped to 100**. Values above the cap are served at the cap, not rejected; `0` floors to 1. |
 | `cursor` | Opaque pagination cursor from a prior `next_cursor`. |
 
 Response: a `SearchResponse` — `{ matches: [...], total_estimate, next_cursor }`.

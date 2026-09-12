@@ -6,6 +6,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Security (availability): `GET /contexts/search?limit=` could abort the registry
+  process from an unauthenticated request.** The handler sized its accumulator with
+  `Vec::with_capacity` directly from the caller-supplied `limit`, using `.max(1)` — a
+  floor, with no upper bound. `limit` is a `u32` off the query string and the route is
+  reachable without an `Authorization` header, so `?limit=4294967295` requested 893 GB in
+  one allocation and the process aborted with SIGABRT. The store-side `.min(100)` did not
+  help: it runs after the accumulator is allocated. `limit` is now clamped in the handler
+  to the same cap the stores enforce. Regression test landed deliberately red first, so
+  the PR's own CI history shows it catching the live defect.
+
+
 ### Changed
 
 - **Wire behaviour: the registry now emits a cache posture on requester-relative

@@ -894,6 +894,17 @@ pub async fn retrieve_body<S: ExtendedRegistryStore + 'static>(
 /// asserts a sparse result set drains completely across pages.
 const SEARCH_REFILL_MAX_PAGES: usize = 6;
 
+/// Upper bound on the caller-supplied `limit`, matching the clamp both store
+/// backends already apply (`sqlite/src/store.rs`, `pg/src/store.rs`: `.min(100)`).
+///
+/// The handler MUST clamp before it sizes any allocation from this value.
+/// `limit` arrives as a `u32` straight off the query string, so an unclamped
+/// `Vec::with_capacity(limit)` lets an unauthenticated caller ask the allocator
+/// for `u32::MAX * size_of::<SearchResult>()` in one shot and abort the process.
+/// The store-side clamp does not help: it runs inside the search call, after the
+/// accumulator is allocated.
+const SEARCH_LIMIT_MAX: u32 = 100;
+
 /// `GET /contexts/search`.
 ///
 /// When the caller asserts a tenant (JWT claim or `X-Tenant-Id` header)
@@ -967,7 +978,8 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
     visibility_filter: Option<Visibility>,
     requested_tenant: Option<String>,
 ) -> Result<SearchResponse, RegistryError> {
-    let target = params.limit.unwrap_or(20).max(1) as usize;
+    // clamp, not max: `.max(1)` is a floor and leaves the upper end unbounded.
+    let target = params.limit.unwrap_or(20).clamp(1, SEARCH_LIMIT_MAX) as usize;
     // Inner pages always ask for `target` rows so a healthy tenant gets
     // close to the right page in a single hop. Set once; only `cursor`
     // changes per iteration. The fan-out is capped by
