@@ -1344,3 +1344,45 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   is only that someone reads "pg is gated" as covering all 34. Mitigated by saying 23-of-34
   explicitly in the PR body rather than implying completeness.
 - **Status:** UNCONFIRMED
+
+## `unixepoch(…, 'subsec')` over a canonical stored timestamp column for `data_period`
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B Phase 2a, B1)
+- **Assumed:** a query-side numeric conversion is the right fix, rather than normalizing the
+  stored representation or adding a generated canonical column.
+- **Chose:** `unixepoch(json_extract(body_json, '$.data_period.start'), 'subsec')` compared
+  against `unixepoch(?, 'subsec')`. Both sides go through one parser, so every combination of
+  `Z` vs `+00:00` and 0/3/6/9 fractional digits normalizes at once. Verified the bundled
+  SQLite is **3.46.0** (`libsqlite3-sys-0.30.1/sqlite3/sqlite3.h:149`); `'subsec'` needs ≥3.42.
+- **Alternatives:** (a) bind a `Z`-normalized string — **measured insufficient**, `'…00Z'`
+  still sorts after `'…00.500Z'`; (b) migrate `body_json` to a canonical timestamp form —
+  rejected outright, those bytes are the `content_hash` preimage, so rewriting them breaks
+  signature verification; (c) a generated canonical column plus an index — defensible and
+  index-friendly, but a schema change for a filter that has no index today and no measured
+  volume.
+- **Blast radius if wrong:** the filter does a full scan and converts per row, so a registry
+  with very many contexts pays for it in search latency. Nothing is stored differently, so
+  reversal is a one-line revert with no data migration. If latency is ever observed, (c) is
+  the upgrade path and this entry is the record of why it was deferred.
+- **Status:** UNCONFIRMED
+
+## B2 split out of Phase 2 rather than shipped alongside B1
+
+- **Plan:** `plans/h-b-storage-parity.md` (H-B, B2)
+- **Assumed:** the plan's "make SQLite adopt Postgres's `q=` semantics" is still the right
+  call, but it cannot be delivered to the same standard as B1 in the same phase.
+- **Chose:** ship B1 and the harness now; move B2 to its own phase. Reason found while
+  implementing: matching pg means FTS5's `porter` tokenizer, which is **not** snowball
+  `english`, plus a stopword list this repo would have to hand-maintain. The resulting
+  parity would be pinned per-word rather than structural — and a hand-maintained table
+  cannot catch the words nobody thought to add. Letting that ride along with B1's
+  exactly-correct fix would have put a weak parity claim behind a strong one.
+- **Alternatives:** (a) make pg adopt SQLite's semantics (`simple` instead of `english`) —
+  gives *exact* structural parity and needs no word list, but removes stemming from the
+  production backend, a real search-quality regression; (b) ship approximate parity now and
+  call it done — rejected, it is the same species of overclaim as the comment this phase
+  deleted.
+- **Blast radius if wrong:** `q=` keeps diverging between backends until B2 lands. Mitigated
+  by the corrected comment, which now states the divergence with measured numbers instead of
+  denying it, so nobody builds on a false guarantee in the meantime.
+- **Status:** UNCONFIRMED — the (a)-vs-plan choice is the decision B2 must settle.

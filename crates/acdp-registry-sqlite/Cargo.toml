@@ -26,3 +26,6 @@ uuid        = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# `features = ["test-support"]` pulls in the shared cross-backend parity
+# assertions that tests/parity.rs runs against this backend.
+acdp-registry-store = { path = "../acdp-registry-store", version = "0.1.2", features = ["test-support"] }
