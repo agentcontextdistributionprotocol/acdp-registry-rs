@@ -2313,6 +2313,34 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   requirement `"11"` means `cargo update` can break it without a manifest change, which is a wider
   exposure than first written, and it still fails loudly and locally.
 
+## H-A P10 (A10) — the route-classification guard names what it cannot parse
+
+- **Assumption:** `NON_DATA_ROUTES` reverse containment is not redundant with the equality
+  assertion that landed in PR3.
+- **Verified, not reasoned:** removing `.route("/.well-known/jwks.json", ...)` from the core
+  router while leaving its table row standing passes assertions 1, 2 and 3 and fails only the new
+  one. Equality is blind to it because removing a route decrements the scanned count and the call
+  count together; assertion 2 is blind because it runs mounted ⊆ classified, and a table row
+  matching nothing subtracts nothing from `unclassified`.
+- **Why it matters:** a row that matches no route reads as coverage. It also silently shrinks what
+  assertion 2 can catch, because a later route reusing that path would be "already classified".
+- **Status:** CONFIRMED by falsification.
+
+- **Assumption (and the correction that produced it):** a source scanner for route registrations
+  must scan the whole source, never line by line.
+- **Why:** the first draft of `non_literal_route_forms` scanned per line and reported seven false
+  positives. `crates/acdp-registry-core/src/lib.rs` registers seven routes with `.route(` at the
+  end of one line and the path on the next; a per-line scan sees an empty argument and calls it
+  non-literal. Whitespace between `(` and the path legitimately includes a newline.
+- **This is the same defect that defeated a grep earlier in this unit** — a phrase spanning a line
+  wrap, invisible to a line-oriented tool — reproduced in code written hours after that lesson was
+  recorded. Knowing the failure mode did not prevent writing it again in a different medium.
+- **Fix, and why this shape rather than a patched regex:** `non_literal_route_forms` is now the
+  exact inverse of `mounted_route_paths` — same scan, same "is the first non-whitespace token a
+  quote" test, opposite branch taken. Two functions that must agree about what a literal is now
+  cannot disagree, rather than agreeing by inspection.
+- **Status:** CONFIRMED — the seven false positives are gone and the real injection is still the
+  only form reported.
 ## The caps/config invariant is made unrepresentable for new callers, not enforced for existing ones
 
 - **Plan:** plans/h-o-caps-testability.md
