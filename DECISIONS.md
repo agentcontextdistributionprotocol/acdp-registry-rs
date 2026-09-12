@@ -2121,3 +2121,101 @@ cost nothing but time, because the gap was pinned by a marker test that failed t
 ruling was applied and whose failure message instructed its own deletion. A gap held behind a
 failing-on-resolution marker cannot outlive the question by being forgotten; a gap held in a
 comment can.
+
+## 17. `cargo-mutants` is viable here, but only with `--test-workspace=true` (H-M, #216)
+
+**Status: measured, not adopted.** This entry records numbers so the next lane inherits a
+measurement instead of a guess. No CI job was added — see "Why no workflow" below.
+
+**The finding that matters is not the timing.** `cargo-mutants` defaults to testing each mutant
+with a **package-scoped** command. Mutating `acdp-registry-core` produces:
+
+```
+cargo test --verbose --package=acdp-registry-core@0.1.2
+```
+
+That runs core's own 80 unit tests and nothing else. This repo's coverage does not live there: it
+lives in `acdp-registry-server`'s integration suites. So the default configuration reports
+survivors for code that **is** covered, by tests it never ran.
+
+Demonstrated on one mutant, both ways:
+
+| scope | command | `receipt.rs:58:21` `replace \|\| with && in validated_fragment` |
+|---|---|---|
+| default (package) | `cargo test --package=acdp-registry-core@0.1.2` | **MISSED** |
+| `--test-workspace=true` | `cargo test --verbose --workspace` | **CAUGHT** |
+
+The killing test is `malformed_retired_receipt_key_fails_startup` in
+`crates/acdp-registry-server/src/main.rs`, which asserts a `'#'` in a retired key fragment fails
+startup. It is in a different package from the mutant, so package scoping cannot see it. Under
+`--test-workspace=true` the whole of `receipt.rs` comes back **7 caught, 2 unviable, 0 missed** —
+the file has no coverage gap, and the lone survivor was an artifact of scope.
+
+**A naive baseline would therefore have been worse than no baseline**, because a survivor list
+full of false positives is indistinguishable from a real one without re-deriving each entry.
+
+**Measurements** (this machine, 2026-09-12, `cargo-mutants 27.1.0`, warm `target/`):
+
+| quantity | value | how obtained |
+|---|---|---|
+| install cost | 23s, +7.8 MiB in `~/.cargo/bin` | `cargo install cargo-mutants` |
+| mutants, whole workspace | 1383 | `cargo mutants --list --workspace` |
+| mutants, `acdp-registry-core` | 472 | `--list -p acdp-registry-core` |
+| mutants, `handlers/log.rs` | 65 — note three different `log.rs` files exist (8 / 15 / 65) | `--list --file …` |
+| mutants, the bounded scope below | 206 (`receipt.rs` 9, `handlers/log.rs` 65, `handlers/context.rs` 132) | `--list --file …` |
+| `receipt.rs`, workspace-scoped | 9 mutants in 82s, baseline build 26s | run below |
+| build directory on disk | **2.3 GiB, per `-j` job** | `du -sh $TMPDIR/cargo-mutants-*.tmp` mid-run |
+| free disk during runs | never below 30 GiB (from 32 GiB) | `df -g /` before/after each run |
+| CI's playground suite alone | 16s warm, 305 tests | `cargo test --locked -p acdp-registry-server --features storage-sqlite,playground` |
+
+Reproduce the run the per-mutant cost comes from:
+
+```
+cargo mutants --file 'crates/acdp-registry-core/src/receipt.rs' --test-workspace=true --timeout 900
+```
+
+**Extrapolation — an estimate, and labelled as one.** Basis: **9 mutants from one 273-line leaf
+module**, n=7 viable. Subtracting the 26s baseline build leaves 56s for 9 mutants, so **~6.2s per
+mutant** marginal under `--test-workspace=true` (9.2s if the one-off baseline build is amortised
+over this small a run; it vanishes over a large one). Applied to 1383 workspace mutants that is
+**~2.4 hours**, and applied to the 206-mutant bounded scope below **~21 minutes**. Treat both as
+**lower bounds**, for three reasons: `receipt.rs` is a leaf module whose mutants trigger the cheapest possible rebuild, where
+`handlers/context.rs` (132 mutants, the largest single file in scope) forces its dependents to
+rebuild; mutants that induce a hang cost the full `--timeout` each and their number here is
+unmeasured; and a faithful test command is more expensive than the one measured — see next.
+
+**No single `cargo test` reproduces CI, and `cargo-mutants` runs exactly one command per mutant.**
+CI's `test` job runs three, with different package scopes and feature sets:
+
+```
+cargo test --locked --workspace                                             # default features
+cargo test --locked -p acdp-registry-server --features storage-sqlite,playground
+cargo test --locked -p acdp-registry-pg  (+ a --features storage-pg server run)
+```
+
+`--test-workspace=true` covers only the first. `--features storage-sqlite,playground` cannot be
+added while mutating core — `cargo-mutants` applies `--features` to the *mutated* package's
+baseline build, which fails outright (`the package 'acdp-registry-core' does not contain this
+feature: storage-sqlite`). So reaching CI-equivalent coverage requires a custom `--test-tool` or a
+wrapper script running all three. Adding the playground suite's measured 16s to each mutant puts
+the estimate nearer **~22s/mutant**, i.e. **~8.5 hours** for the workspace and **~76 minutes** for
+the bounded scope. Until that wrapper exists, **survivors in code reachable only under the
+`playground`, `storage-sqlite` or `storage-pg` features are expected false positives.**
+
+**Verdict: viable now, as a scheduled job over a bounded file set — not per-PR, and not
+workspace-wide.** Disk is not the constraint (2.3 GiB per job against 30+ GiB free); wall-clock is.
+Concretely, for whoever picks up #216 steps 1–3:
+
+1. `--test-workspace=true` is **mandatory**, not an optimisation. Without it the baseline is noise.
+2. Scope the first baseline to a bounded set rather than the workspace. `receipt.rs` +
+   `handlers/log.rs` + `handlers/context.rs` is 206 mutants, ~21 min estimated (~76 min with the
+   wrapper in point 3). That set is a choice made here for being the densest core logic, **not**
+   a scope #216 names — #216 names only `conformance.rs`, and its step 1 is fault injection over
+   `src/` generally, which is the full 1383.
+3. Build the three-command wrapper before trusting any survivor in feature-gated code, or restrict
+   the scope to code the default-feature workspace suite actually reaches.
+
+**Why no workflow file.** The unit deliberately excluded one. A scheduled `cargo-mutants` job whose
+survivor baseline had never been produced is the same mistake #249 avoided: an issue closed by an
+unverified artifact is worse than an open issue. The measurement above is the prerequisite that was
+missing, and #216 stays open with it recorded.
