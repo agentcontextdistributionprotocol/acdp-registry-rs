@@ -9,12 +9,13 @@ use acdp_registry_auth::extract_bearer;
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::{event::WebhookEvent, RegistryError};
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use chrono::Utc;
 use serde::Deserialize;
 
+use crate::extract::AcdpQuery;
 use crate::state::AppState;
 
 /// Query-string DTO mirroring `acdp::types::search::SearchParams`.
@@ -984,7 +985,7 @@ const SEARCH_LIMIT_MAX: u32 = 100;
 pub async fn search<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
-    Query(q): Query<SearchQuery>,
+    AcdpQuery(q): AcdpQuery<SearchQuery>,
 ) -> Result<Json<SearchResponse>, RegistryError> {
     let requester = caller_from_headers(&state, &headers)?;
     let query_text = q.q.clone();
