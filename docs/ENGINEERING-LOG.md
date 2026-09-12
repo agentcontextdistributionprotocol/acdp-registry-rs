@@ -31,6 +31,62 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit H-H-w (lane-3) — wiring H-H's dormant tenant predicate into /contexts/search.
+     The fix a doc sentence said still needed building. -->
+
+### Fixed
+
+- **Security (cross-tenant disclosure): a tenant-scoped `/contexts/search` could hand back a
+  `next_cursor` anchored on another tenant's row, and that is now closed.** `next_cursor` is
+  unsigned plaintext base64 of `{mint_ms}:{anchor_ms}:{ctx_id}` anchored on the last row the store
+  **scanned**, not the last row returned. While tenant narrowing was a handler-side post-filter the
+  scan saw other tenants' rows, so the retain dropped the row while the anchor had already been
+  computed from it — a tenant-scoped caller could walk cursors to recover foreign `ctx_id`s and
+  their ordering. No post-filter could have fixed it: dropping a row after the fact does not
+  un-scan it.
+
+  A tenant-scoped request is now served by `ExtendedRegistryStore::search_in_tenant`, which carries
+  the predicate in the same statement as the keyset and the count, so the scan never sees another
+  tenant's rows and the anchor can only be one of the caller's own.
+
+  **Nothing was built for this.** `search_in_tenant` shipped with H-H and sat merged-and-dormant
+  because no caller existed — the same shape as `visible_ctx_ids` before P9. The docs said *"closing
+  it requires the tenant predicate in the store's search SQL"*, which was accurate only while the
+  wiring was missing, so that sentence is corrected in the same change.
+
+- **`search_cursor_oracle_remains_open_for_tenant_scoped_caller` is deleted**, as its own comment
+  instructed: *"If you are reading this because it just failed: that is the good outcome. Confirm
+  the cursor now only anchors on the caller's own rows, then delete this test and say so in the
+  changelog."* This is that note.
+
+  **Deleted, not relaxed, and confirmed causal before removal.** A test that asserts a defect still
+  exists is the acceptance criterion for its fix, written by whoever could still reproduce it — so
+  it was worth more than a guard written afterwards, and it was checked properly rather than assumed
+  to be the reason: with the predicate in place it failed with its own designed message ("EXPECTED
+  the residual leak and did not observe it") while its setup demonstrably still ran (three foreign
+  rows created); changing **only** the tenant argument from `Some(tenant)` to `None` made it pass
+  again. That isolates the failure to the single value that closes the oracle rather than to
+  anything else that moved on `main`.
+
+### Changed
+
+- **`total_estimate` stays omitted for a tenant-scoped request, but the reason changed.** It was
+  omitted because it was *wrong* — the store counted before the handler applied the tenant
+  predicate. `search_inner` puts `AND tenant_id = ?` in the same statement as `COUNT(*) OVER ()`,
+  so the count is now tenant-scoped and honest. The key is withheld **conservatively rather than
+  necessarily**; re-enabling it is wire-visible and ships as its own reviewable unit rather than
+  buried in a wiring change.
+
+- **One gate was carried by hand, deliberately.** `RegistryServer::search` is not a thin wrapper: it
+  rejects an anonymous search with **403 `not_authorized`** when `caps.anonymous_public_reads` is
+  false *before* delegating to the store (RFC-ACDP-0008 §6.3, fixture `vis-009`) — not an empty
+  `200`, which would still confirm the registry exists and that the query ran. `search_in_tenant` is
+  a store entry point with no such gate, so routing through it means carrying the gate or silently
+  downgrading a normative 403. The untenanted path is left on `server.search` untouched, and the
+  gate is replicated on the tenant path only, reading the flag from `capabilities()` — the same
+  field `server.search` reads, so the two agree by construction rather than while config and caps
+  happen to match.
+
 <!-- unit H-A, phase P10 (lane-1) — the route-classification guard names what it cannot parse -->
 
 ### Fixed
