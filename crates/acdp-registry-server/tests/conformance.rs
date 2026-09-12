@@ -397,10 +397,11 @@
 //! character). `rate-001` -- "black-box conformance testing cannot deterministically
 //! trigger a rate limit," per its own text -- gets DIRECT coverage via
 //! `rate001_publish_rate_limit_trips_429_with_retry_after`, which is not a missing seam:
-//! `limits.publish_rate_per_minute` (`config.rs:560-561`) is a live config knob enforced
+//! `limits.publish_rate_per_minute` (`acdp-registry-types/src/config.rs`) is a live config knob enforced
 //! by the in-process fixed-window `AgentRateLimiter` (`rate_limit.rs`, wired at
-//! `state.rs:86-89`), already proven end-to-end for the sibling challenge limiter
-//! (`http_integration.rs:889-922`, `challenge_endpoint_is_rate_limited`). This test
+//! `AgentRateLimiter::new` in `acdp-registry-core/src/state.rs`), already proven
+//! end-to-end for the sibling challenge limiter (`challenge_endpoint_is_rate_limited`
+//! in `http_integration.rs`). This test
 //! exercises the SAME limiter on the publish path for real: a harness configured with
 //! `publish_rate_per_minute = 1`, one publish that succeeds, a second (different content,
 //! same producer) that trips the limiter, and asserts the REAL HTTP response -- 429,
@@ -5360,8 +5361,9 @@ fn wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted() {
 // `anc001_well_formed_anchor_is_accepted_and_round_trips`'s own doc comment
 // above; also `docs/ENGINEERING-LOG.md`).** This repo's `POST /contexts` returns HTTP
 // **200** on a successful publish
-// (`crates/acdp-registry-core/src/handlers/context.rs:656`,
-// `Ok(Json(response))`), never the fixtures' own literal `201`. Every
+// (`Ok(Json(response))`, the success return of `publish_inner` in
+// `crates/acdp-registry-core/src/handlers/context.rs`), never the fixtures'
+// own literal `201`. Every
 // status this section asserts is the CORRECTED value (200/200/409/200/200
 // for `idem-001`..`005`), not the fixture literal -- each test below also
 // asserts the fixture's OWN literal separately, as a sanity check that the
@@ -5898,7 +5900,7 @@ async fn idem005_no_support_ignores_idempotency_key_header() {
 /// (`PlaygroundConfig::default()`), which is exactly the "unpinned"
 /// precondition that routes a publish into the branch under test -- see
 /// `enforce_pinned_signature`'s `PinOutcome::Skipped` arm
-/// (`playground.rs:109-111`) for the empty-`pinned_keys` case.
+/// (`acdp-registry-core/src/playground.rs`) for the empty-`pinned_keys` case.
 ///
 /// Fails on unfixed `main`: two publishes of the same body with the same
 /// `Idempotency-Key` come back with the SAME `ctx_id` there, because the
@@ -6748,8 +6750,9 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
 /// note above this section), this one genuinely exercises code THIS repo
 /// owns and calls on the publish path: `acdp::time::trunc_ms`, the exact
 /// function `acdp-registry-sqlite`/`acdp-registry-pg`'s stores call when
-/// minting `created_at` (`crates/acdp-registry-sqlite/src/store.rs:1040`,
-/// `crates/acdp-registry-pg/src/store.rs:933`) -- reachable here as a pure
+/// minting `created_at` (the `acdp::time::trunc_ms(now)` call in
+/// `crates/acdp-registry-sqlite/src/store.rs` and
+/// `crates/acdp-registry-pg/src/store.rs`) -- reachable here as a pure
 /// function of a `DateTime<Utc>`, with no server/store/auth needed.
 ///
 /// Per vector: truncate `registry_clock_at_acceptance` (or, when absent,
@@ -7790,7 +7793,7 @@ fn schema_producer(seed: u8) -> Producer {
 /// `Option<_>` with `skip_serializing_if = "Option::is_none"`, so a `None`
 /// serializes as an OMITTED key, never a literal JSON `null`. Reaching the
 /// registry's own rejection path (`serde_json::from_slice::<PublishRequest>`
-/// in `acdp-registry-core`'s `handlers/context.rs:322-323`, which maps any
+/// in `acdp-registry-core`'s `handlers/context.rs`, which maps any
 /// deserialization failure to `AcdpError::SchemaViolation` -> HTTP 400 /
 /// `schema_violation`, BEFORE hash/signature verification or
 /// `validate_post_schema` ever run) requires posting raw JSON instead.
@@ -7868,7 +7871,7 @@ type SchemaBodyPatch = (&'static str, fn(&mut Value, &Value));
 /// PRODUCE is exactly a shape a strict consumer parsing this registry's own
 /// output would never have to reject, and a shape a strict consumer WOULD
 /// reject is exactly a shape this registry's own `serde_json::from_slice::
-/// <PublishRequest>` (`handlers/context.rs:322`) or `CapabilitiesDocument`
+/// <PublishRequest>` (`handlers/context.rs`) or `CapabilitiesDocument`
 /// deserialization also rejects, for the identical closed-schema /
 /// non-nullable-optional reason.
 ///
@@ -11275,12 +11278,15 @@ fn rate_producer(seed: u8) -> Producer {
 /// registry, so this fixture is informative... implementers MUST self-test
 /// by submitting publishes faster than their advertised limit." This is NOT
 /// a missing seam: `limits.publish_rate_per_minute`
-/// (`acdp-registry-types/src/config.rs:560-561`) is a live config knob
+/// (`acdp-registry-types/src/config.rs`) is a live config knob
 /// enforced by the in-process fixed-window `AgentRateLimiter`
 /// (`acdp-registry-core/src/rate_limit.rs`, wired at
-/// `acdp-registry-core/src/state.rs:86-89`) that the publish handler
-/// already checks (`acdp-registry-core/src/handlers/context.rs:391-398`,
-/// keyed on the signing `agent_id`, before the expensive verify/persist
+/// `AgentRateLimiter::new` in `acdp-registry-core/src/state.rs`) that the publish
+/// handler already checks (the `limiter.peek(req.agent_id.as_str())` call in
+/// `acdp-registry-core/src/handlers/context.rs` --
+/// a `peek`, deliberately not a `check`, so an unverified `agent_id` cannot
+/// spend another agent's budget; keyed on the signing `agent_id`, before the
+/// expensive verify/persist
 /// pipeline) and that emits `RegistryError::RateLimited` ->
 /// 429/`rate_limited`/`Retry-After`
 /// (`acdp-registry-types/src/error.rs`) -- already proven end-to-end for
@@ -12517,14 +12523,18 @@ async fn log003_consistency_proof_golden_recomputed() {
 // registry PUBLISHES is the key it SIGNS with, and until this test
 // nothing anywhere asserted the two were the same.
 //
-// Measured, not argued: setting `receipt.rs:100` to `&[0u8; 32]` — so the
+// Measured, not argued: setting the published-key argument of
+// `verification_method_entry` in `crates/acdp-registry-core/src/receipt.rs`
+// (`&key.verifying_key_bytes()`) to `&[0u8; 32]` — so the
 // registry publishes an all-zero key while still signing with the real one
 // — left the entire workspace suite green at 524 passed / 0 failed,
 // byte-identical to baseline. The three tests that look like they cover
 // this do not:
 //
-//   * `receipt.rs:221` is the only read of `publicKeyMultibase` in the
-//     repo and asserts `starts_with('z')` + resolvability — all-zeros
+//   * `did_document_retains_retired_keys_in_verification_method_only`
+//     (`crates/acdp-registry-core/src/receipt.rs`) held the only read of
+//     `publicKeyMultibase` in the repo and asserted `starts_with('z')` +
+//     resolvability — all-zeros
 //     satisfies both;
 //   * `did_json_serves_receipt_key_and_404s_without_one` asserts fragment
 //     *ids*, never a key value;
@@ -12632,4 +12642,149 @@ async fn receipt_verifies_against_the_key_served_at_did_json() {
         format!("did:web:{AUTHORITY}#receipt-key-1"),
         "the receipt must name the same key id the DID document declares active"
     );
+}
+
+/// H-K: this file may not cite source by line number.
+///
+/// It carried 14 such citations and **four were already wrong** when this test
+/// was written — not fragile, wrong: `challenge_endpoint_is_rate_limited` had
+/// moved 239 lines from its cited range, the two `acdp::time::trunc_ms` call
+/// sites 141 and 94, and `Ok(Json(response))` 54. A line number is a claim that
+/// decays on every edit to a file this one does not own, and nothing reported
+/// the decay.
+///
+/// **The one that survived is the lesson.** The `Ok(Json(response))` citation
+/// quoted its target text alongside the number. The number rotted exactly like
+/// the others, but the quote still resolves under `grep`, so that citation
+/// degraded to *searchable* while a bare `file:line` degrades to *wrong and
+/// silent*. Every citation here now names its construct and drops the number,
+/// which is the surviving half rather than a new convention.
+///
+/// SCOPE, and why it needs no path exception: only **comment** lines are
+/// scanned. A `file.rs:NNN` inside a string literal is data, not a citation —
+/// this file deliberately feeds a synthetic `panic at src/store` path (with a
+/// line number) to
+/// `sanitizes_internal_error_details` to prove such a path never reaches a
+/// client, and converting it would destroy the test. Comment-versus-code is the
+/// real distinction between a citation and a fixture, so drawing the line there
+/// is principled, not an allowlist.
+///
+/// The marker pattern is built at runtime so this doc comment cannot match
+/// itself — the same reason `no_tracked_file_contains_a_conflict_marker` builds
+/// its markers rather than writing them.
+#[test]
+fn this_file_cites_constructs_and_never_line_numbers() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conformance.rs");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+
+    // `.rs` + ':' + digit, assembled so the literal never appears in this file.
+    let needle = format!("{}{}", ".rs", ':');
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut comment_lines = 0usize;
+    let mut non_comment_hits = 0usize;
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim_start();
+        let is_comment = t.starts_with("//") || t.starts_with("/*") || t.starts_with('*');
+        if !is_comment {
+            if line
+                .match_indices(needle.as_str())
+                .any(|(at, _)| line[at + needle.len()..].starts_with(|c: char| c.is_ascii_digit()))
+            {
+                non_comment_hits += 1;
+            }
+            continue;
+        }
+        comment_lines += 1;
+        for (at, _) in line.match_indices(needle.as_str()) {
+            let after = &line[at + needle.len()..];
+            if after.starts_with(|c: char| c.is_ascii_digit()) {
+                offenders.push(format!("{}: {}", i + 1, line.trim()));
+                break;
+            }
+        }
+    }
+
+    // Guard the scan itself, by named members rather than a floor (Rule 55/64):
+    // a floor cannot detect a scan that silently matched nothing, which is what
+    // a broken comment test or a changed needle produces.
+    assert!(
+        comment_lines > 1000,
+        "only {comment_lines} comment lines seen in {} — the scan is broken, so \
+         the check below would pass vacuously",
+        path.display()
+    );
+    // The comment-only scoping must be doing real work: at least one NON-comment
+    // line has to match the pattern, or the scoping is untested and could be
+    // dropped without any test noticing.
+    //
+    // This deliberately counts matches found by the scan itself rather than
+    // asserting a fixture's text. The first version checked
+    // `text.contains("panic at src/store")` and passed vacuously — satisfied by
+    // this very doc comment rather than by the fixture, which is the
+    // assert-the-mechanism-not-the-symptom failure in miniature.
+    assert!(
+        non_comment_hits >= 1,
+        "no non-comment line matches the pattern, so the comment-only scoping is \
+         exercised by nothing and could be deleted silently. The fixture that \
+         exercises it is the synthetic panic path fed to \
+         `sanitizes_internal_error_details`."
+    );
+
+    assert!(
+        offenders.is_empty(),
+        "these comments cite source by line number:\n  {}\n\nLine numbers decay \
+         on every edit to a file this one does not own, silently: four of the \
+         original fourteen were already pointing at unrelated code. Name the \
+         construct — the function, the test, the call — and drop the number.",
+        offenders.join("\n  ")
+    );
+
+    // The constructs the conversion introduced must still exist. Named members,
+    // because this asserts specific claims rather than completeness; the
+    // no-line-pins rule above is what enforces completeness.
+    // conformance.rs -> tests -> <crate> -> crates -> workspace root
+    let root = path
+        .ancestors()
+        .nth(4)
+        .expect("crates/<crate>/tests/<file> is four below the workspace root");
+    for (construct, file) in [
+        (
+            "fn challenge_endpoint_is_rate_limited",
+            "crates/acdp-registry-server/tests/http_integration.rs",
+        ),
+        (
+            "acdp::time::trunc_ms",
+            "crates/acdp-registry-sqlite/src/store.rs",
+        ),
+        (
+            "acdp::time::trunc_ms",
+            "crates/acdp-registry-pg/src/store.rs",
+        ),
+        (
+            "Ok(Json(response))",
+            "crates/acdp-registry-core/src/handlers/context.rs",
+        ),
+        (
+            "fn publish_inner",
+            "crates/acdp-registry-core/src/handlers/context.rs",
+        ),
+        (
+            "fn verification_method_entry",
+            "crates/acdp-registry-core/src/receipt.rs",
+        ),
+        (
+            "PinOutcome::Skipped",
+            "crates/acdp-registry-core/src/playground.rs",
+        ),
+    ] {
+        let body =
+            std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"));
+        assert!(
+            body.contains(construct),
+            "this file cites `{construct}` in `{file}`, which no longer contains \
+             it. The citation is now as wrong as the line numbers it replaced."
+        );
+    }
 }
