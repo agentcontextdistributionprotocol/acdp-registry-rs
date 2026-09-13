@@ -2994,3 +2994,99 @@ still open, and this is the outcome:
   moving the steps to their own job is one commit, and becomes correct the moment the contexts change.
 - **Status:** UNCONFIRMED — the leader or the human may prefer to make the settings change and take
   the parallel form.
+
+## U-504 — #216: the mutation ratchet extended to `handlers/context.rs` (2026-09-13, lane-2)
+
+Ten entries. All resolved in-context this unit (see the declared `/reconcile` deviation in
+DECISIONS.md 19), so none is left dangling for a later pass.
+
+1. **Assumed:** the survivor budget may rise from 1 to 8, rather than the unit being obliged to kill
+   all 28 or keep the old ceiling.
+   - **Chose:** raise it, with a per-survivor written argument and the honest comparison stated where
+     the number lives (`MUTANTS_EXPECTED_SCOPE` tripled, 74 → 213; the comparable figure is 28, not 1).
+   - **Alternatives:** hold at 1 (rejected: only reachable by narrowing the scope back, which is the
+     defect the equality check on scope exists to catch); kill all 28 (rejected on evidence — 8 are
+     not killable today, four being genuine equivalents).
+   - **Blast radius:** a budget that is slack rather than a list would let a real survivor hide.
+     Mitigated by naming all 8 in the env block and verifying by content that the measured set equals
+     the documented set.
+   - **Status:** CONFIRMED (2026-09-13) — measured 8/8, set-identical to the documented list.
+
+2. **Assumed:** the ratchet's `timeout != 0` rule should become a named ceiling of 1.
+   - **Chose:** budget the one provably non-terminating mutant (`context.rs:1277:12`); a second
+     timeout still fails. The original rule was reasoned about *slow tests*, which remains right and
+     is a different case.
+   - **Alternatives:** leave `!= 0` (rejected: the scheduled job would go red on its first run for a
+     mutant no test can convert into a fast failure); drop the timeout check (rejected: that is the
+     category exemption the original reasoning warned about).
+   - **Blast radius:** a genuinely slow test could hide one survivor. Bounded to one, and the error
+     message now distinguishes the two causes and names the fix for each.
+   - **Status:** CONFIRMED (2026-09-13) — measured `:1277` TIMEOUT at the full 300s, `:1223` MISSED
+     in 10s, from the same targeted run.
+
+3. **Assumed:** `-j1` is the right parallelism for the scheduled job, against the intuition that more
+   jobs are faster.
+   - **Chose:** `-j1`. Measured on one 18-mutant shard: `-j6`/`-j8` each exceeded 10 min with every
+     mutant still building; `-j1` took 1m55s (~6.4s/mutant).
+   - **Blast radius:** none beyond wall-clock; reversible in one line.
+   - **Status:** CONFIRMED (2026-09-13); approved by the leader as an in-grant call.
+
+4. **Assumed:** `parse_visibility`'s `"public"` and `"restricted"` arms (`:81`, `:82`) are equivalent
+   mutants rather than coverage gaps.
+   - **Chose:** argue them, on a measurement rather than a reading: search returns only PUBLIC rows to
+     every requester (probed with anonymous, an audience member, and the row's own producer). The
+     sibling `"private"` arm was CAUGHT, which is what a redundant-guard site looks like.
+   - **CONTINGENT, and the contingency is recorded in the workflow beside the number:** both become
+     real coverage gaps the moment search serves restricted rows to entitled requesters, and the
+     budget must then drop to 6.
+   - **Status:** CONFIRMED (2026-09-13) as equivalent *under current §4.5 search semantics*.
+
+5. **Assumed:** `lifecycle_outcome`'s two survivors (`:1399`) should be deferred rather than asserted
+   from `http_integration.rs`.
+   - **Chose:** defer with a named follow-up. `/metrics` is deliberately not mounted in that harness
+     (404, measured) and `metrics_integration.rs` is a separate binary precisely to isolate the
+     process-global `metrics` recorder (its own module doc). Asserting there would put 158 tests
+     behind shared mutable state.
+   - **Alternatives:** mount `/metrics` in the http harness (rejected: breaks the isolation that file
+     exists to maintain); claim-request `metrics_integration.rs` (rejected: low-value label, and the
+     unit already carries enough surface).
+   - **Status:** DEFERRED — settled by a rejected-transition label assertion in
+     `metrics_integration.rs`, which is the named follow-up.
+
+6. **Assumed:** the did:web lifecycle survivor (`:1542`) cannot be killed within this unit.
+   - **Chose:** accept with a follow-up, having *verified* rather than assumed it: a did:web-signed
+     retract was written and fails at `key_resolution_unreachable`, because `retract_verified`
+     resolves through a real `WebResolver` and playground mode does not bypass it.
+   - **Worth surfacing beyond this unit:** the whole did:web lifecycle branch has zero coverage, and
+     structurally cannot have any until an HTTPS fixture serves `agents.test`'s did.json.
+   - **Status:** DEFERRED — settled by that fixture, which would also unblock did:web publish.
+
+7. **Assumed:** AC-8's fourth invariant should ban a hardcoded 40-hex ref in `mutants.yml`.
+   - **CHANGED.** As proposed it would have been a broken guard: `mutants.yml` legitimately carries
+     four 40-hex **action** pins (`rust-toolchain@`, `rust-cache@`, `install-action@`, its own
+     `checkout-spec@`), because pinning actions by SHA is correct and required.
+   - **Chose:** narrow it to a literal on a `ref:` line, plus a test asserting action pins are NOT
+     flagged. A guard that fails against the correct file is a guard that gets deleted.
+   - **Status:** CHANGED (2026-09-13) — narrowed before shipping, caught by running it against the
+     real file rather than against the idea of the file.
+
+8. **Assumed:** AC-8's invariants should be a pure function over both workflows' text rather than
+   assertions against the real paths.
+   - **Chose:** the pure function. Two reasons, one of them forced: `.github/workflows/ci.yml` is
+     outside this unit's grant, so falsifying by editing it was never available; and each invariant
+     then gets its own falsification against a valid-YAML restructuring.
+   - **Status:** CONFIRMED (2026-09-13) — all four falsified, and the falsification test itself
+     falsified by disabling each check in turn.
+
+9. **Assumed:** the refill loop's six survivors can be killed by one test if it asserts *how far the
+   scan got* rather than the matches.
+   - **Chose:** discriminate on `next_cursor` — resume an unfiltered search from it and count what
+     remains (10 of 70 when the cap holds, 60 when the loop gives up after one page, no cursor at all
+     when it runs to exhaustion). The matches are empty either way and cannot tell them apart.
+   - **Status:** CONFIRMED (2026-09-13) — all six killed, each by the number it should change.
+
+10. **Assumed:** killing these survivors needs no claim on `crates/acdp-registry-core/src/handlers/context.rs`.
+    - **Chose:** no claim-request. Mutating a file needs no write access, and every one of the 20
+      kills is an additive test in the granted `http_integration.rs`. A surviving mutation means a
+      missing test, not a wrong implementation — which held for all 20.
+    - **Status:** CONFIRMED (2026-09-13); the leader confirmed no claim-request was needed.
