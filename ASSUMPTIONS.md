@@ -2495,3 +2495,41 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   listing — the rejected first draft of #133.
 - **Status:** CONFIRMED under the configuration named, which is the only configuration in which the
   claim means anything.
+
+## U-501 (#242) — charging publishes that fail late
+
+- **Assumption:** schema validation can be excluded from the identity oracle without weakening
+  it.
+- **Reasoning:** `publish_identity_proven_offline` recomputes `content_hash` and verifies the
+  offline signature, but deliberately does not call `validate_publish_request`. Schema validity
+  is not part of an identity proof: if the hash binds the body and the signature binds the hash
+  to `agent_id`'s key, then `agent_id` signed this body whether or not the body is schema-legal.
+  Excluding it makes the oracle *broader* (more publishes chargeable), not laxer in the
+  dangerous direction, and a producer flooding signed-but-schema-invalid publishes is precisely
+  the noisy producer the limiter exists to throttle.
+- **Status:** CONFIRMED by construction. Reversible in one line if it is ever wrong — adding the
+  call can only reduce what is charged, never permit an unproven charge.
+
+- **Assumption:** the oracle cannot cause a request to be rejected that is accepted today.
+- **Evidence:** it returns `bool`, not `Result`, and every failure path inside it returns
+  `false`. A `false` only skips arming; the request proceeds into the SDK unchanged and the SDK
+  produces the authoritative error. The full 142-test `http_integration` suite passes unchanged,
+  including every existing did:key, playground and production-path acceptance test.
+- **Status:** CONFIRMED.
+
+- **Assumption:** charging on panic and on client cancellation is correct, not a bug.
+- **Reasoning:** both mean the verify work was really spent. Suppressing the charge unless the
+  handler returned normally would hand a free channel to anyone able to induce either.
+  `an_armed_charge_fires_when_the_scope_unwinds` pins the panic half.
+- **Status:** CONFIRMED, and deliberate. Recorded because a future reader is more likely to
+  read it as an oversight than as a decision.
+
+- **Assumption:** the production `did:web` branch cannot be charged from inside this repo at an
+  acceptable cost.
+- **Evidence:** `publish_verified_in_tenant` resolves the DID document over the network inside
+  the SDK call. Establishing identity in the handler first would need a second resolution per
+  publish — a second network round-trip, a second SSRF surface, and a cache that can disagree
+  with the SDK's. Not attempted; the seam is designed in
+  `plans/cross-repo/acdp-rs-publish-charge-seam.md` and filed upstream.
+- **Status:** UNCONFIRMED — this is a judgement about cost, not a measured fact. It is the one
+  claim in this unit a reviewer should push back on if they disagree about the trade.

@@ -8073,12 +8073,20 @@ async fn credential_endpoints_are_never_stored() {
 /// the limiter leaves the budget untouched.
 ///
 /// The failure used here is a bound producer asserting a tenant it is not bound
-/// to. That is rejected at `set_tenant_of_ctx` (`context.rs:624`), which sits
-/// between the `peek` (`:412`) and the `record` (`:700`) -- i.e. squarely inside
-/// the window this change is about. Same producer for both arms, because the
-/// budget is per-agent and two different producers would prove nothing.
+/// to, rejected by `tenant_for_publish` -- which runs after the `peek` but
+/// BEFORE the branch dispatch, so before anything could have proven the signer.
+/// Same producer for both arms, because the budget is per-agent and two
+/// different producers would prove nothing.
+///
+/// RENAMED for #242, which made the old name (`..._fails_late_...`) actively
+/// misleading: late failures on the `did:key` and pinned-playground branches ARE
+/// charged now. The distinction this test pins is not early-vs-late in the
+/// pipeline, it is **before-vs-after the signer is proven** -- the tenant check
+/// is on the unproven side, so it must still cost nothing. See
+/// `late_failures_are_charged_on_exactly_two_of_the_four_publish_branches` for
+/// the other side of that line.
 #[tokio::test]
-async fn a_publish_that_fails_late_does_not_consume_the_agents_budget() {
+async fn a_publish_that_fails_before_the_signer_is_proven_does_not_consume_the_agents_budget() {
     let mut cfg = config(true);
     cfg.auth.enabled = true;
     cfg.auth.require_tenant = true;
@@ -8099,7 +8107,7 @@ async fn a_publish_that_fails_late_does_not_consume_the_agents_budget() {
             .unwrap()
     };
 
-    // EXACTLY as many late failures as the budget (2), not more. This count is
+    // EXACTLY as many pre-proof failures as the budget (2), not more. This count is
     // load-bearing in both directions:
     //   - at most `budget` failures, so that even under the OLD charge-on-attempt
     //     behaviour every one of them still reaches the tenant check and 403s.
@@ -9211,5 +9219,359 @@ async fn log_entries_honours_anonymous_public_reads_from_caps() {
          caps.anonymous_public_reads is false, so §8.3 forbids echoing its \
          leaf -- a `leaf` here is a transparency-log disclosure of every \
          public context to the world on the SHIPPED default config: {v}"
+    );
+}
+
+// ─── #242: publishes that fail LATE are charged where identity is proven ───
+
+/// #242, the headline case: a cryptographically flawless `did:key` publish that
+/// the registry then refuses must still spend the agent's budget.
+///
+/// The failure used here is the SDK's capabilities gate — this registry does not
+/// advertise `did:key`, so every attempt is a permanent 400
+/// `key_resolution_failed` raised *inside* `publish_verified_did_key_in_tenant`,
+/// i.e. after the handler has already proven the signer offline. No attempt ever
+/// succeeds, which is exactly what makes this discriminating: under the pre-fix
+/// tree the success-path `record` is unreachable, so the budget is NEVER spent
+/// and the producer can hammer a full verify plus a store round-trip forever.
+///
+/// Falsified: deleting the `charge.arm()` in the did:key branch makes the final
+/// assertion below see a third 400 instead of a 429.
+#[tokio::test]
+async fn a_did_key_publish_that_fails_late_is_charged() {
+    let mut cfg = config(false);
+    cfg.limits.publish_rate_per_minute = 2;
+    let h = harness_from_config(cfg).await;
+
+    let make = |title: &str| {
+        did_key_producer(70)
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap()
+    };
+
+    // Exactly the budget's worth of late failures, and each one is asserted to
+    // be the LATE failure rather than any earlier rejection -- otherwise this
+    // test would pass against a build that rejected did:key before the limiter.
+    for i in 0..2 {
+        let (status, v) = publish(&h.router, &make(&format!("late-{i}")), None).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "attempt {i} must reach the SDK and fail there: {v}"
+        );
+        assert_eq!(
+            v["error"]["code"], "key_resolution_failed",
+            "attempt {i} must fail at the capabilities gate, i.e. AFTER the \
+             handler proved the signer: {v}"
+        );
+    }
+
+    // THE assertion. The budget of 2 was spent entirely by failures.
+    let (status, v) = publish(&h.router, &make("over"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "two late failures must exhaust a budget of 2 (#242). Pre-fix this is \
+         another 400 key_resolution_failed, forever: {v}"
+    );
+}
+
+/// #242's security invariant, and the reason the charge is gated on an identity
+/// oracle instead of simply charging every attempt: **you still cannot spend
+/// another agent's budget by naming them.**
+///
+/// This is the exact A1/P5 attack. The request is a valid publish signed by one
+/// did:key producer, with `agent_id` overwritten to name a *victim*. The
+/// signature does not verify against the victim's key, so
+/// `publish_identity_proven_offline` returns false, the guard is never armed,
+/// and the victim's bucket is never touched — even though the attempt goes on to
+/// cost a full trip into the SDK.
+///
+/// Falsified: making the oracle return `true` unconditionally turns the victim's
+/// own publish below into a 429.
+#[tokio::test]
+async fn naming_a_victim_does_not_spend_their_budget() {
+    let mut cfg = config(false);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.limits.publish_rate_per_minute = 2;
+    let h = build_harness_with_caps(cfg, receipts_caps(), None).await;
+
+    let victim = did_key_producer(71);
+    let victim_req = |title: &str| {
+        victim
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap()
+    };
+    // The victim's DID, taken from a request they really signed rather than
+    // reconstructed by hand -- a hand-built DID that did not match would make
+    // the spoof land on a different bucket and quietly pass.
+    let victim_did = victim_req("victim-probe").agent_id.as_str().to_string();
+
+    // Signed by the attacker's key, but claiming to be the victim.
+    let spoof = |title: &str| {
+        let mut req = did_key_producer(72)
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        req.agent_id = AgentDid::new(&victim_did);
+        req
+    };
+
+    // Well past the victim's budget of 2. Every one is rejected, and each
+    // rejection is asserted NOT to be a 429 -- if the limiter started refusing
+    // these, the assertion below would be measuring the attacker's own bucket
+    // rather than the victim's.
+    for i in 0..5 {
+        let (status, v) = publish(&h.router, &spoof(&format!("spoof-{i}")), None).await;
+        assert_ne!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "spoof {i} must be rejected on identity grounds, not throttled: {v}"
+        );
+        assert!(status.is_client_error(), "spoof {i} must be rejected: {v}");
+    }
+
+    // THE assertion: the victim's budget is untouched, both units still there.
+    for i in 0..2 {
+        let (status, v) = publish(&h.router, &victim_req(&format!("victim-legit-{i}")), None).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the victim's publish {i} must succeed -- five spoofed attempts \
+             naming them must not have spent their budget: {v}"
+        );
+    }
+}
+
+/// The second half of the identity oracle, and the half a signature check alone
+/// cannot provide: **a captured envelope replayed under a different body must
+/// not spend the captured agent's budget.**
+///
+/// `verify_publish_request_signature_offline` verifies the signature over
+/// `content_hash`, but says nothing about whether `content_hash` describes the
+/// body in front of it. So the request below — a real victim-signed
+/// `(agent_id, content_hash, signature)` triple with the *title* swapped — passes
+/// that check while the attacker holds no key at all. Only recomputing
+/// `content_hash` over the body catches it, which is why
+/// `publish_identity_proven_offline` does that FIRST and refuses to charge on a
+/// mismatch.
+///
+/// Falsified: removing the `compute_content_hash` comparison from the oracle
+/// (leaving only the signature check) turns the victim's own publish below into
+/// a 429. Without this test that deletion reddens nothing in the entire suite.
+#[tokio::test]
+async fn a_replayed_envelope_over_a_different_body_does_not_spend_the_budget() {
+    let mut cfg = config(false);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.limits.publish_rate_per_minute = 2;
+    let h = build_harness_with_caps(cfg, receipts_caps(), None).await;
+
+    let victim = did_key_producer(73);
+    let victim_req = |title: &str| {
+        victim
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap()
+    };
+
+    // A genuinely victim-signed envelope, with the body swapped underneath it.
+    // `agent_id`, `content_hash` and `signature` are all untouched and all real.
+    let tampered = |n: usize| {
+        let mut req = victim_req("original-body");
+        req.title = format!("swapped-body-{n}");
+        req
+    };
+
+    for i in 0..5 {
+        let (status, v) = publish(&h.router, &tampered(i), None).await;
+        assert_ne!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "replay {i} must be rejected on hash grounds, not throttled: {v}"
+        );
+        assert_eq!(
+            v["error"]["code"], "hash_mismatch",
+            "replay {i} must fail the recomputed-hash check: {v}"
+        );
+    }
+
+    // THE assertion: the victim's budget of 2 is intact.
+    for i in 0..2 {
+        let (status, v) = publish(&h.router, &victim_req(&format!("victim-legit-{i}")), None).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the victim's publish {i} must succeed -- five replayed envelopes \
+             must not have spent their budget: {v}"
+        );
+    }
+}
+
+/// #242's honest scorecard: **which of the four publish branches charge a late
+/// failure, and which do not.** Acceptance criterion 1 for U-501 is "no silent
+/// partial" — so this test enumerates all four and pins the split by COUNT, not
+/// by a floor. A `>=` check would pass the very regression it exists to catch
+/// (an arm silently dropped), so the count is asserted with `assert_eq!`.
+///
+/// Every branch is probed identically, which is what makes the branch the only
+/// variable: a budget of 1, one publish that fails late, then the same publish
+/// again. If the first was charged the second is `429`; if it was not, the
+/// second repeats the original late failure.
+///
+/// | branch | late failure charged? | why |
+/// |---|---|---|
+/// | `did:key` | **yes** | identity proven offline in the handler before the SDK call |
+/// | playground, pinned | **yes** | `enforce_pinned_signature` proved it before the SDK call |
+/// | playground, unpinned | no, **by design, permanently** | nothing is verified at all, so there is no identity to charge; arming would key an insertion on an attacker-supplied `agent_id` — the shape #242 rejected |
+/// | production `did:web` | no, **remaining gap** | identity is established only inside the resolver-backed SDK call; closing it needs an SDK seam (see `plans/cross-repo/acdp-rs-publish-charge-seam.md`, filed upstream) |
+///
+/// The two "no" rows are NOT the same kind of thing and must not be collapsed:
+/// one is correct and must never change, the other is outstanding work.
+#[tokio::test]
+async fn late_failures_are_charged_on_exactly_two_of_the_four_publish_branches() {
+    // A supersession naming a context that does not exist. Signed as part of the
+    // body (via `supersede`, not by mutating the built request), so it survives
+    // the recomputed-hash check and fails where we want it to: on the store
+    // round-trip inside the publish call, well after any arm point.
+    let missing = || {
+        acdp::types::primitives::CtxId(
+            "acdp://registry.test/11111111-2222-4333-8444-555555555555".to_string(),
+        )
+    };
+
+    /// Send the same late-failing request twice against a budget of 1 and report
+    /// whether the first attempt was charged.
+    async fn charged(router: &axum::Router, req: &acdp::types::publish::PublishRequest) -> bool {
+        let (first, v1) = publish(router, req, None).await;
+        assert_ne!(
+            first,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the probe's FIRST attempt must reach the branch, not be throttled \
+             by a budget some earlier test spent: {v1}"
+        );
+        assert!(
+            first.is_client_error() || first.is_server_error(),
+            "the probe requires a FAILING publish; this one succeeded: {v1}"
+        );
+        let (second, _) = publish(router, req, None).await;
+        second == StatusCode::TOO_MANY_REQUESTS
+    }
+
+    let mut outcomes: Vec<(&str, bool)> = Vec::new();
+
+    // ── branch 1: did:key ────────────────────────────────────────────────
+    {
+        let mut cfg = config(false);
+        cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+        cfg.limits.publish_rate_per_minute = 1;
+        let h = build_harness_with_caps(cfg, receipts_caps(), None).await;
+        let req = did_key_producer(90)
+            .supersede(missing())
+            .version(2)
+            .title("did-key-late")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        outcomes.push(("did:key", charged(&h.router, &req).await));
+    }
+
+    // ── branch 2: playground, pinned + verified ──────────────────────────
+    {
+        let did = "did:web:agents.test:smoke-pinned-242";
+        let p = Producer::new(
+            SigningKey::from_bytes(&[91u8; 32]),
+            AgentDid::new(did),
+            format!("{did}#key-1"),
+        );
+        let mut cfg = config(true);
+        cfg.limits.publish_rate_per_minute = 1;
+        cfg.playground.pinned_keys = vec![PinnedAgentKey {
+            agent_did: did.into(),
+            public_key_b64: B64.encode(SigningKey::from_bytes(&[91u8; 32]).verifying_key_bytes()),
+            algorithm: "ed25519".into(),
+            valid_from: None,
+            valid_until: None,
+        }];
+        let h = harness_from_config(cfg).await;
+        let req = p
+            .supersede(missing())
+            .version(2)
+            .title("pinned-late")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        outcomes.push(("playground pinned", charged(&h.router, &req).await));
+    }
+
+    // ── branch 3: playground, unpinned (nothing verified) ────────────────
+    {
+        let mut cfg = config(true);
+        cfg.limits.publish_rate_per_minute = 1;
+        let h = harness_from_config(cfg).await;
+        let req = producer(92)
+            .supersede(missing())
+            .version(2)
+            .title("unpinned-late")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        outcomes.push(("playground unpinned", charged(&h.router, &req).await));
+    }
+
+    // ── branch 4: production did:web ─────────────────────────────────────
+    {
+        let mut cfg = config(false);
+        cfg.limits.publish_rate_per_minute = 1;
+        let h = harness_from_config(cfg).await;
+        let req = producer(93)
+            .supersede(missing())
+            .version(2)
+            .title("did-web-late")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        outcomes.push(("production did:web", charged(&h.router, &req).await));
+    }
+
+    // Per-branch, so a failure says WHICH branch moved rather than just "the
+    // count changed".
+    let expected: Vec<(&str, bool)> = vec![
+        ("did:key", true),
+        ("playground pinned", true),
+        ("playground unpinned", false),
+        ("production did:web", false),
+    ];
+    assert_eq!(
+        outcomes, expected,
+        "the #242 four-way split changed; if that is intentional, update the \
+         table in this test's doc comment and the block at the charge site in \
+         handlers/context.rs -- both describe this split to the next reader"
+    );
+
+    // And the count, asserted exactly. A `>= 2` here would pass against a build
+    // that silently dropped an arm and against one that armed an unauthenticated
+    // branch -- the two regressions this whole unit is about.
+    assert_eq!(
+        outcomes.iter().filter(|(_, c)| *c).count(),
+        2,
+        "exactly two of four branches charge late failures"
     );
 }
