@@ -106,8 +106,11 @@ jobs:
       # The guard's own falsification, re-run on every event instead of being
       # asserted once in a PR body. Several of its cases assert that the guard
       # REJECTS, two of them replaying the real tag sets from the runs named in
-      # the `tags:` comment above. The repo has no shellcheck, so this step is
-      # also the only thing standing between that script and silent rot.
+      # the `tags:` comment above. This is NOT redundant with the shellcheck in
+      # lint.yml, and both are kept deliberately: shellcheck proves the script is
+      # well-formed shell, this proves its logic still rejects the real incident
+      # data. Neither implies the other — the last-token bug that made the guard
+      # pass the very release it was written to reject was perfectly well-formed.
       - name: self-test the image-tag guard
         run: bash docker/assert-image-tags.sh --self-test
 
@@ -167,7 +170,7 @@ jobs:
             -e POSTGRES_USER=acdp -e POSTGRES_PASSWORD=acdp -e POSTGRES_DB=acdp_registry \
             --health-cmd "pg_isready -U acdp" --health-interval 2s --health-retries 15 \
             postgres:16-alpine
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             [ "$(docker inspect -f '{{.State.Health.Status}}' pg)" = healthy ] && break
             sleep 2
           done
