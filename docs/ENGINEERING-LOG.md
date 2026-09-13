@@ -31,6 +31,83 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-510 (lane-3) — CI now builds the feature configurations it checks; closes #265 -->
+
+### Fixed
+
+- **CI's feature-configuration steps type-checked but never linked, and five configurations were
+  never built at all.** `cargo clippy` and `cargo check` do not run codegen or the linker, so a
+  failure that appears only at those stages passed every one of them. Proven directly rather than
+  argued from documentation: with `target/debug/acdp-registry` removed, a **green**
+  `cargo clippy --all-targets` for a configuration leaves **no binary at all**, while `cargo build`
+  for the same configuration produces one (61M). Reproduced on a second configuration. A green
+  clippy cannot surface a link error because it never links.
+
+- **The count in #265 was four; the enumeration is nine, and two of the corrections matter.**
+  `ci.yml`'s `clippy` job runs nine feature-configuration checks — lane-1's four are the subset
+  W3-U10 added for #200. Cross-referencing against every step that actually links:
+  `storage-pg,playground`, `storage-memory,playground`, no-backend and `playground`-alone were
+  linked by **nothing**; the other four were linked only *incidentally*, by `cargo test` steps whose
+  feature lists happen to match, which any edit to those steps could have removed in silence — the
+  same fragility this file already documents for #221. And **`storage-pg`, the configuration that
+  ships, never had its binary linked in `ci.yml` either**: its test step passes
+  `--test pg_integration`, and `acdp-registry-server` is bin-only, so that links a test binary
+  rather than the server. It was covered solely by `docker.yml`'s image build
+  (`STORAGE_FEATURE=storage-pg`) — a different workflow, incidentally, which a path filter there
+  would have silently removed.
+
+- **Five `cargo build --locked … --all-targets` steps, each paired with its clippy step** and
+  carrying a byte-identical feature list, asserted programmatically rather than by eye. Additions,
+  not replacements: clippy is stronger on lints, build on codegen and linking, and neither subsumes
+  the other. Each shipped command line was extracted from the YAML and executed verbatim, so what
+  was tested is what runs.
+
+### Changed
+
+- **The build steps live inside the existing `clippy` job, deliberately.** That job is one of the
+  four contexts in branch protection's `required_status_checks`, so this coverage is merge-blocking
+  the day it lands. A new job would have produced a check that is *not* required and therefore could
+  not prevent a merge — the limitation U-508's `lint` gate hit, which is still awaiting a decision.
+  This is **not** the mislabelling U-508 refused when it declined to put shell linting inside
+  `rustfmt`: there the concern differed from the job's name, whereas building a feature
+  configuration is the same concern this job already served nine times. The distinction is concern
+  identity, not convenience. The job must not be renamed — those four names are a contract with
+  branch protection, and a required context that stops reporting leaves every PR waiting on a check
+  that never arrives.
+
+- **The `msrv` job's two `cargo check` steps stay `check`, by decision.** Their purpose is that
+  1.88 accepts the language and API surface, and both of their configurations are now linked at
+  stable. Codegen divergence between 1.88 and stable for identical source is a materially narrower
+  risk than an unlinked configuration. Recorded rather than silently skipped.
+
+### Added
+
+- **Cost, measured in CI rather than extrapolated from a laptop — and the laptop was wrong by 5x.**
+  Locally, warm, the five builds totalled 21s and each was usually *cheaper* than the clippy step
+  beside it, because clippy runs extra lint passes over the same graph. **In CI the `clippy` job went
+  from 39s to 2m27s: +108s, not +21s.** The local figure was optimistic because that machine had
+  already built every feature combination during the measurement pass, whereas the runner's cargo
+  cache holds no artifacts for combinations this repo had never built.
+  The conclusion survives but the margin is thin and must be quoted with it: jobs run in parallel and
+  `tests` is 2m45s, so PR latency is still set by `tests` — with **18 seconds** of headroom, not the
+  comfortable gap the local numbers implied. No per-PR/scheduled split was introduced, because one
+  would add a second place for the feature lists to go stale and a delay before a break is seen. But
+  the trigger for revisiting that is now explicit and near: **if the `clippy` job ever exceeds
+  `tests`, it becomes the critical path and the split should be reconsidered.** One more feature
+  configuration would likely do it.
+
+- **A finding that narrows #265's own risk claim, worth recording because it is easy to overstate
+  the fix.** The classic undefined-symbol link failure is **unreachable from this repo's source**:
+  `Cargo.toml` sets `unsafe_code = "forbid"`, and `forbid` cannot be overridden by `#[allow]`, so no
+  `extern "C"` declaration can exist here. Two falsification attempts died on this and on a related
+  point, and both failures are more informative than a success would have been: a `RUSTFLAGS`
+  link-argument probe is **not** a valid discriminator, because `RUSTFLAGS` also reaches build
+  scripts and proc-macros, which *are* linked — so clippy fails too. What the new steps therefore
+  close is real but bounded: dependency and native link failures under a particular feature
+  combination, environment-level link failures — this repo has an observed instance, the
+  `SDKROOT`/`ld-1267` failure, which passes clippy and fails only at link — and
+  post-monomorphization codegen errors in safe code.
+
 <!-- unit U-508 (lane-3) — shellcheck + actionlint, and what the gate cannot do -->
 
 ### Added

@@ -120,7 +120,14 @@ jobs:
 
           # No -e/--exclude and no .shellcheckrc: suppressions belong at their
           # site, with a reason, so they are reviewable in the diff that adds them.
-          xargs -r -a scripts.txt shellcheck --format=gcc
+          #
+          # `xargs … < file` rather than `xargs -a file`: `-a` is a GNU extension
+          # and BSD xargs rejects it, so the `-a` form made this gate impossible
+          # to run locally on macOS -- which is where this repo is developed.
+          # Found by hitting it. `-r` is dropped for the same reason; the
+          # zero-count check above already covers the empty case, so the only
+          # thing `-r` was protecting against cannot reach here.
+          xargs shellcheck --format=gcc < scripts.txt
 
       # actionlint covers workflow syntax, expression typing, and — via
       # shellcheck above — every `run:` block, including this file's own.

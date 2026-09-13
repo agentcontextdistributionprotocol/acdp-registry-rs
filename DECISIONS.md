@@ -2556,3 +2556,52 @@ Rejected: a second bumper call in `bump-spec.yml` (more moving parts, and `ci.ym
 that the bumper refuses to bump a file carrying two pin anchors at all — a file it silently declines
 is worse than one it was never pointed at); and duplicate-and-document, whose only honest mitigation
 is a check that fails on disagreement, which is more work than deriving.
+
+## Unit U-510 — CI builds the feature configurations it checks (lane-3, 2026-09-13)
+
+Two `UNCONFIRMED` entries from `plans/u-510-build-feature-configurations.md`, reconciled before
+ship. Neither is a one-way door — both are workflow-file placements reversible in a single commit —
+so both sit in Opus's tier and neither was escalated. Analysis ran in-thread (standing instruction
+against unrequested subagents), so each rests on an executed measurement rather than on agreement.
+
+### 1. Build steps inside the required `clippy` job, not a new job — CONFIRMED (Opus)
+
+**Assumed:** coverage that actually blocks a merge is worth more than a job name that describes
+itself perfectly.
+
+**Analysis.** `required_status_checks.contexts` is `["rustfmt","clippy","tests",
+"conformance (spec fixtures)"]`. A new `builds` job would be a check that is **not** required, so a
+failing feature build could not prevent a merge — which is precisely where U-508's `lint` gate sits,
+still awaiting a human decision on the same settings change. Shipping U-510's coverage in that state
+would have closed the gap on paper and left it open in practice.
+
+The apparent inconsistency with U-508 — which refused to put shell linting inside `rustfmt` — is not
+one. The test is **concern identity**: shell linting is a different concern wearing a
+Rust-formatting name; building a feature configuration is the same concern the `clippy` job already
+served nine times over. Mitigated further by step names (`build (postgres)` …) so a failing build is
+legible rather than arriving as a mysterious `clippy` failure.
+
+**Verdict:** confirm. Recorded with the reasoning because the next reader will otherwise see only
+the surface inconsistency.
+
+**Status:** `CONFIRMED (2026-09-13)`. Reversible — moving the steps to their own job is one commit,
+and would become the better choice the moment `lint`'s required-context question is answered, since
+the same answer would apply.
+
+### 2. The msrv job's `cargo check` steps stay `check` — CONFIRMED (Opus) as a bounded remainder
+
+**Assumed:** the msrv job's purpose is that 1.88 accepts the language and API surface, not that it
+links.
+
+**Analysis.** `cargo check` shares the exact defect this unit fixes — it does not codegen or link —
+so leaving it is knowingly leaving a remainder, and that is why it is recorded rather than skipped.
+The reason it is acceptable: both msrv configurations (`sqlite default`, `storage-pg`) are now linked
+at stable by this unit's new steps, so what goes unverified is narrowly *codegen divergence between
+1.88 and stable for identical source*. Converting them would buy that narrow case at the cost of
+MSRV-toolchain build time on every PR.
+
+**Verdict:** confirm as a bounded, stated remainder. The PR body, the `#265` closing comment and the
+engineering log all say it, so it cannot be mistaken for complete closure.
+
+**Status:** `CONFIRMED (2026-09-13)` as scope. The leader may prefer full closure; that is a
+`cargo check` → `cargo build` swap in two lines.
