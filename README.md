@@ -132,7 +132,9 @@ block used to silently overwrite the config file. Note that `${VAR:-false}` is
 **not** the same thing — it renders the literal string `"false"`, which is a real
 value and still overrides.
 
-> **Upgrading:** before this change an empty value either overrode with `""` or,
+> **Upgrading:** see [`docs/UPGRADING.md`](docs/UPGRADING.md), which is the
+> operator's pre-upgrade read for every version. For this change specifically:
+> before it, an empty value either overrode with `""` or,
 > for a number, boolean, or list field, failed the config load outright. If you
 > deploy `docker/docker-compose.yml`, upgrade the image at the same time — the
 > current recipe passes empty values that an older binary would reject at boot.
