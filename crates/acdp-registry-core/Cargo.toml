@@ -12,10 +12,10 @@ workspace = true
 
 [dependencies]
 acdp                  = { workspace = true }
-acdp-registry-auth    = { path = "../acdp-registry-auth", version = "0.1.2" }
-acdp-registry-store   = { path = "../acdp-registry-store", version = "0.1.2" }
-acdp-registry-types   = { path = "../acdp-registry-types", version = "0.1.2" }
-acdp-registry-webhook = { path = "../acdp-registry-webhook", version = "0.1.2" }
+acdp-registry-auth    = { path = "../acdp-registry-auth", version = "0.1.3" }
+acdp-registry-store   = { path = "../acdp-registry-store", version = "0.1.3" }
+acdp-registry-types   = { path = "../acdp-registry-types", version = "0.1.3" }
+acdp-registry-webhook = { path = "../acdp-registry-webhook", version = "0.1.3" }
 axum       = { workspace = true }
 chrono     = { workspace = true }
 http       = "1"
@@ -34,7 +34,7 @@ metrics-exporter-prometheus = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-acdp-registry-sqlite = { path = "../acdp-registry-sqlite", version = "0.1.2" }
+acdp-registry-sqlite = { path = "../acdp-registry-sqlite", version = "0.1.3" }
 # Test-only: needed to prove `make_request_span` actually RECORDS the request id.
 # A `Span`'s Debug impl emits metadata only -- no field names, no values -- so a
 # Debug-string assertion cannot distinguish a recorded id from a missing one. It
