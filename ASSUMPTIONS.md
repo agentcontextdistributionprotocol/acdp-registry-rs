@@ -2779,3 +2779,25 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   (`build (postgres)` etc.) making the failing step obvious, and by the comment in the job.
 - **Status:** UNCONFIRMED — cheap to move if the leader prefers the honest name and accepts
   non-blocking.
+
+## U-510 — reconcile outcome for the two entries above (append-only, so their original wording stands)
+
+Recorded as an appended resolution rather than by editing the two `Status:` lines in place. The board
+rule for `ASSUMPTIONS.md`, `DECISIONS.md` and `docs/ENGINEERING-LOG.md` this wave is **APPEND-ONLY**,
+and U-510's own acceptance criterion 6 enforces it mechanically (0 deletions). An in-place status
+edit produces deletions and would have failed that check — which is how the criterion caught the
+prose rule being broken. The entries above therefore keep the wording they had when the decision was
+still open, and this is the outcome:
+
+- **"the msrv job's `cargo check` steps stay `check`"** — **CONFIRMED (2026-09-13)** by Opus at
+  reconcile, as a *bounded, stated remainder* rather than as complete closure. Both msrv
+  configurations are now linked at stable by this unit's new build steps, so what goes unverified is
+  only codegen divergence between 1.88 and stable for identical source. Stated in the PR body, the
+  #265 closing comment and the engineering log, so it cannot be mistaken for the whole gap being
+  shut. Full reasoning: `DECISIONS.md`, U-510 decision 2.
+- **"build steps inside the required `clippy` job"** — **CONFIRMED (2026-09-13)** by Opus at
+  reconcile. The deciding factor is that a separately-named job would not be a required context and
+  therefore could not block a merge — the same position U-508's `lint` gate is stuck in, awaiting a
+  human decision on repo settings. Reversible in one commit, and it becomes the better choice the
+  moment that question is answered, since the same answer applies. Full reasoning: `DECISIONS.md`,
+  U-510 decision 1.
