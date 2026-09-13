@@ -78,6 +78,37 @@ impl RegistryConfig {
                 k != "ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON"
                     && k != "ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON"
             })
+            // #271: an EMPTY prefixed override is treated as ABSENT, not as an
+            // override with the empty value. `Self::empty_env_overrides_ignored`
+            // reports what this drops; `main.rs` warns on each at startup so the
+            // change is visible rather than silent.
+            //
+            // This exists because the two behaviours compose into a footgun:
+            // env beats the TOML file, and `docker compose` renders an UNSET
+            // variable as set-to-empty rather than absent. So every `${VAR:-}`
+            // passthrough in a compose `environment:` block silently replaced
+            // whatever the operator wrote in their TOML with "". The shipped
+            // recipe needed two separate caveats about this one rule
+            // (`docker/docker-compose.yml`), which is the signal that the rule
+            // was the defect rather than its documentation.
+            //
+            // Measured before changing it, because "is this breaking?" turns
+            // entirely on what empty did today, per TYPE, and the answer is not
+            // uniform:
+            //   number        -> hard ERROR ("invalid type: string \"\"")
+            //   bool          -> hard ERROR
+            //   Vec, non-list-parse-key -> hard ERROR ("expected a sequence")
+            //   Vec, list-parse-key     -> [""], a one-element list of nothing
+            //   String        -> overrides with ""
+            // Four of those five are a refusal to boot or a garbage value, so no
+            // deployment can have been relying on them. Only the `String` arm
+            // produced anything an operator could lean on, and no document in
+            // this repo promises that an empty env var clears a TOML value.
+            // Treating empty as absent therefore FIXES three hard errors and one
+            // nonsense value, and changes one arm from "override with empty" to
+            // "fall through". Recorded as a correction, not a breaking change --
+            // reasoning in ASSUMPTIONS.md and docs/ENGINEERING-LOG.md.
+            .filter(|(k, v)| !(k.starts_with("ACDP_REGISTRY_") && v.is_empty()))
             .collect();
         builder = builder.add_source(
             config::Environment::with_prefix("ACDP_REGISTRY")
@@ -106,7 +137,18 @@ impl RegistryConfig {
         // Railway "deploy from image" services) still needs a way to set
         // it, so accept a JSON-array escape hatch, applied after the
         // normal sources so it wins if both are somehow present.
-        if let Ok(json) = std::env::var("ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON") {
+        // #271: same rule as the snapshot filter above, with one deliberate
+        // difference -- `trim()` here, strict `is_empty()` there. Whitespace is
+        // never valid JSON, so a blank-but-not-empty value could only ever be an
+        // accident on this path, whereas for a plain string key " " may be meant. These hatches are read directly rather than
+        // through the snapshot, so they need the rule applied separately --
+        // without it an empty value reaches `serde_json::from_str("")` and fails
+        // the whole config load, which is the hard-error arm all over again.
+        if let Ok(json) = std::env::var("ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON")
+            .ok()
+            .filter(|j| !j.trim().is_empty())
+            .ok_or(())
+        {
             cfg.auth.tenant_agents = serde_json::from_str(&json).map_err(|e| {
                 config::ConfigError::Message(format!(
                     "ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON: invalid JSON array of \
@@ -119,7 +161,11 @@ impl RegistryConfig {
         // same fix. Needed to pin a stable, rotating identity (e.g. for key
         // rotation / historical-key receipt scenarios) on a deployment with
         // no TOML-file mechanism.
-        if let Ok(json) = std::env::var("ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON") {
+        if let Ok(json) = std::env::var("ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON")
+            .ok()
+            .filter(|j| !j.trim().is_empty())
+            .ok_or(())
+        {
             cfg.playground.pinned_keys = serde_json::from_str(&json).map_err(|e| {
                 config::ConfigError::Message(format!(
                     "ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON: invalid JSON array of \
@@ -128,6 +174,45 @@ impl RegistryConfig {
             })?;
         }
         Ok(cfg)
+    }
+
+    /// The `ACDP_REGISTRY_*` overrides that are present in the environment but
+    /// EMPTY, and which [`Self::load`] therefore ignores (#271).
+    ///
+    /// Exists so the drop is **visible**. Treating empty as absent is the right
+    /// default -- see the reasoning at the filter in `load` -- but it is still a
+    /// change in operator-visible behaviour, and the one arm that changes rather
+    /// than gets fixed is a `String` key that previously overrode with `""`. An
+    /// operator who was relying on that gets a startup warning naming the exact
+    /// variable instead of silently receiving their TOML value. A behaviour
+    /// change nobody can see is the part that turns into a support ticket.
+    ///
+    /// Recomputed from the environment rather than recorded during `load`, so it
+    /// needs no change to `load`'s signature and no new dependency in this crate
+    /// (it has no `tracing`). Callers decide how to report it.
+    ///
+    /// Mirrors `load`'s filters exactly: only prefixed keys, only those carrying
+    /// a nested `__` (a prefixed var without one is not a config path at all --
+    /// `ACDP_REGISTRY_CONFIG` is the file selector), and the two JSON escape
+    /// hatches, which `load` also now treats empty-as-absent.
+    pub fn empty_env_overrides_ignored() -> Vec<String> {
+        let mut keys: Vec<String> = std::env::vars()
+            .filter(|(k, v)| {
+                // STRICTLY empty, matching `load`'s snapshot filter exactly. An
+                // earlier draft trimmed here and not there, which would have made
+                // this function lie about a whitespace-only value: `load` would
+                // apply it, this would report it as ignored. The two rules have to
+                // be the same rule. Strict is the right one -- `docker compose`
+                // renders an unset variable as exactly "", and silently discarding
+                // a deliberate " " is a bigger surprise than applying it.
+                v.is_empty()
+                    && k.strip_prefix("ACDP_REGISTRY_")
+                        .is_some_and(|rest| rest.contains("__"))
+            })
+            .map(|(k, _)| k)
+            .collect();
+        keys.sort();
+        keys
     }
 
     /// Defaults suitable for local development (SQLite, no auth, no webhook).
@@ -1530,8 +1615,13 @@ backend = "sqlite"
         // TOML-file mechanism (e.g. Railway "deploy from image" services)
         // could not enable `did:key` at all.
         //
-        // SAFETY: no other test in this crate reads or writes process env, so
-        // the set/remove pair here cannot race a concurrent reader.
+        // Serialised on ENV_LOCK. This comment previously read "no other test in
+        // this crate reads or writes process env, so the set/remove pair here
+        // cannot race a concurrent reader" -- true when written, FALSE as of
+        // #271, which adds several env-driven precedence tests. `cargo test` runs
+        // them as threads in one process sharing one environment, so the note had
+        // to become a lock rather than stay an assurance.
+        let mut env = EnvGuard::new();
         let vars = [
             ("ACDP_REGISTRY_REGISTRY__AUTHORITY", "env-host"),
             ("ACDP_REGISTRY_REGISTRY__PORT", "9191"),
@@ -1565,13 +1655,13 @@ backend = "sqlite"
             ("ACDP_REGISTRY_TEST_PG_URL", "postgres://ignored"),
         ];
         for (k, v) in vars {
-            std::env::set_var(k, v);
+            env.set(k, v);
         }
 
         let cfg = RegistryConfig::load(None).expect("config loads with env overrides");
 
         for (k, _) in vars {
-            std::env::remove_var(k);
+            env.unset(k);
         }
 
         assert_eq!(cfg.registry.authority, "env-host");
@@ -1603,13 +1693,16 @@ backend = "sqlite"
         );
         assert_eq!(cfg.playground.pinned_keys[0].public_key_b64, "AAAA");
 
-        // Malformed JSON is rejected with an attributed error — a second,
-        // sequential (not concurrent) round-trip of the same env var within
-        // this same test, preserving the "only one test in this crate
-        // touches process env" invariant.
-        std::env::set_var("ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON", "not json");
+        // Malformed JSON is rejected with an attributed error. This used to be
+        // described as "a second, sequential round-trip within this same test,
+        // preserving the 'only one test in this crate touches process env'
+        // invariant" — that invariant no longer exists as of #271, and the
+        // EnvGuard above is what replaces it. Note this asserts MALFORMED JSON
+        // still errors, which is the complement of #271's change: empty is
+        // ignored, garbage is still rejected.
+        env.set("ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON", "not json");
         let err = RegistryConfig::load(None).unwrap_err();
-        std::env::remove_var("ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON");
+        env.unset("ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON");
         assert!(
             err.to_string().contains("TENANT_AGENTS_JSON"),
             "expected a TENANT_AGENTS_JSON-attributed error, got: {err}"
@@ -1657,5 +1750,318 @@ backend = "sqlite"
             "the rejection must NAME the offending key, or an operator upgrading \
              into a rename gets a parse failure they cannot act on: {err}"
         );
+    }
+
+    // ---- #271: an EMPTY env override is ignored, not applied ---------------
+
+    /// Every test that mutates process env takes this. `cargo test` runs tests
+    /// as threads in a single process, so the environment is shared mutable
+    /// state; without serialisation one test's `set_var` is visible inside
+    /// another's `RegistryConfig::load`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Holds ENV_LOCK and restores every variable it touched on drop --
+    /// **including when the test panics**.
+    ///
+    /// Without the restore-on-drop, a failing test never reaches its cleanup and
+    /// leaks its variables into every test that runs after it. Observed while
+    /// falsifying this unit: breaking the JSON-hatch filter reddened FOUR tests,
+    /// only one of which was actually testing the broken code -- the other three
+    /// inherited a leaked `ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON=""`. That is
+    /// the "an earlier failure masks the real one" hazard in test-fixture form,
+    /// and it makes a falsification run report the wrong culprit.
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            Self {
+                _lock: ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+                saved: Vec::new(),
+            }
+        }
+        /// Set `key`, remembering whatever it was so drop can put it back.
+        fn set(&mut self, key: &str, val: &str) {
+            self.remember(key);
+            std::env::set_var(key, val);
+        }
+        fn unset(&mut self, key: &str) {
+            self.remember(key);
+            std::env::remove_var(key);
+        }
+        fn remember(&mut self, key: &str) {
+            if !self.saved.iter().any(|(k, _)| k == key) {
+                self.saved.push((key.to_string(), std::env::var(key).ok()));
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in self.saved.drain(..) {
+                match v {
+                    Some(v) => std::env::set_var(&k, v),
+                    None => std::env::remove_var(&k),
+                }
+            }
+        }
+    }
+
+    fn toml_fixture(body: &str) -> std::path::PathBuf {
+        use std::io::Write;
+        // Thread id in the name: these run under ENV_LOCK, but a stale file from
+        // a previous run in the same temp dir would otherwise be reused.
+        let p = std::env::temp_dir().join(format!(
+            "acdp-u511-{}-{:?}.toml",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::File::create(&p)
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
+        p
+    }
+
+    const FIXTURE: &str = r#"
+[registry]
+authority = "from-toml"
+port = 7777
+[auth]
+jwt_secret = "c2VjcmV0LXZhbHVlLWZyb20tdG9tbC0zMmJ5dGVzIQ=="
+[storage]
+backend = "sqlite"
+"#;
+
+    /// The four precedence directions, each asserted separately so one cannot
+    /// mask another. Falsified individually: reverting the `!v.is_empty()`
+    /// filter reddens (1) alone, and deleting the env source entirely reddens
+    /// (2) alone.
+    #[test]
+    fn an_empty_env_override_is_ignored_and_a_set_one_still_wins() {
+        let mut env = EnvGuard::new();
+        let path = toml_fixture(FIXTURE);
+        let path = path.to_str().unwrap().to_string();
+        let key = "ACDP_REGISTRY_REGISTRY__AUTHORITY";
+
+        // (3) unset env + TOML value -> TOML wins. Established FIRST, so the
+        //     later arms are compared against a known baseline rather than an
+        //     assumed one.
+        env.unset(key);
+        assert_eq!(
+            RegistryConfig::load(Some(&path))
+                .unwrap()
+                .registry
+                .authority,
+            "from-toml",
+            "unset env must leave the TOML value alone",
+        );
+
+        // (1) EMPTY env + TOML value -> TOML wins. This is #271. Before the fix
+        //     this returned "".
+        env.set(key, "");
+        assert_eq!(
+            RegistryConfig::load(Some(&path))
+                .unwrap()
+                .registry
+                .authority,
+            "from-toml",
+            "an EMPTY override must be treated as absent, not applied as \"\"",
+        );
+
+        // (2) non-empty env + TOML value -> env wins. The property that must
+        //     NOT have been broken by the fix; without it the change would have
+        //     disabled env overrides altogether and (1) would still pass.
+        env.set(key, "from-env");
+        assert_eq!(
+            RegistryConfig::load(Some(&path))
+                .unwrap()
+                .registry
+                .authority,
+            "from-env",
+            "a non-empty override must still beat the TOML file",
+        );
+
+        env.unset(key);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// (4) unset env + no TOML file -> the built-in default.
+    #[test]
+    fn with_no_file_and_no_env_the_defaults_are_used() {
+        let mut env = EnvGuard::new();
+        let key = "ACDP_REGISTRY_REGISTRY__AUTHORITY";
+        env.unset(key);
+        env.unset("ACDP_REGISTRY_CONFIG");
+        let cfg = RegistryConfig::load(None).unwrap();
+        assert_eq!(
+            cfg.registry.authority,
+            RegistryConfig::defaults().registry.authority
+        );
+
+        // And an empty override does not disturb the default either -- the
+        // no-file path and the with-file path must agree about empty.
+        env.set(key, "");
+        let cfg = RegistryConfig::load(None).unwrap();
+        assert_eq!(
+            cfg.registry.authority,
+            RegistryConfig::defaults().registry.authority,
+            "an empty override must fall through to the default, not blank it",
+        );
+        env.unset(key);
+    }
+
+    /// The three shapes where an empty override was a HARD ERROR before #271 --
+    /// the config did not load at all. These are the arms that prove the change
+    /// is a fix rather than merely a different behaviour: no deployment can have
+    /// depended on a refusal to boot.
+    ///
+    /// Asserted per type, not as one loop over a list, because the failure modes
+    /// are different (`invalid type: string ""` for the scalars, `expected a
+    /// sequence` for the Vec) and a single combined assertion would pass if only
+    /// one of them were fixed.
+    #[test]
+    fn an_empty_override_no_longer_breaks_the_load_for_numbers_bools_or_lists() {
+        let mut env = EnvGuard::new();
+        let path = toml_fixture(FIXTURE);
+        let path = path.to_str().unwrap().to_string();
+
+        // number: previously `invalid type: string "", expected an integer`
+        env.set("ACDP_REGISTRY_REGISTRY__PORT", "");
+        let cfg = RegistryConfig::load(Some(&path))
+            .expect("an empty numeric override must not fail the load");
+        assert_eq!(cfg.registry.port, 7777, "the TOML port must survive");
+        env.unset("ACDP_REGISTRY_REGISTRY__PORT");
+
+        // bool: previously `invalid type: string "", expected a boolean`
+        env.set("ACDP_REGISTRY_AUTH__ENABLED", "");
+        let cfg = RegistryConfig::load(Some(&path))
+            .expect("an empty boolean override must not fail the load");
+        assert!(!cfg.auth.enabled, "the default must survive");
+        env.unset("ACDP_REGISTRY_AUTH__ENABLED");
+
+        // Vec, not a list-parse key: previously `expected a sequence`
+        env.set("ACDP_REGISTRY_AUTH__ADMIN_TOKENS", "");
+        let cfg = RegistryConfig::load(Some(&path))
+            .expect("an empty list override must not fail the load");
+        assert!(cfg.auth.admin_tokens.is_empty());
+        env.unset("ACDP_REGISTRY_AUTH__ADMIN_TOKENS");
+
+        // Vec, IS a list-parse key: previously produced [""], a one-element list
+        // of nothing -- not an error, but not a configuration anyone wanted.
+        env.set("ACDP_REGISTRY_AUTH__DID_METHODS", "");
+        let cfg = RegistryConfig::load(Some(&path))
+            .expect("an empty list-parse override must not fail the load");
+        assert_eq!(
+            cfg.auth.did_methods,
+            RegistryConfig::defaults().auth.did_methods,
+            "an empty did_methods override must fall through, not yield [\"\"]",
+        );
+        assert!(
+            !cfg.auth.did_methods.iter().any(|m| m.is_empty()),
+            "no empty DID method may survive into the config",
+        );
+        env.unset("ACDP_REGISTRY_AUTH__DID_METHODS");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The JSON escape hatches are read directly rather than through the
+    /// snapshot, so they need the rule applied separately. Empty JSON previously
+    /// failed the whole config load.
+    #[test]
+    fn an_empty_json_escape_hatch_is_ignored_rather_than_failing_the_load() {
+        let mut env = EnvGuard::new();
+        let path = toml_fixture(FIXTURE);
+        let path = path.to_str().unwrap().to_string();
+
+        for key in [
+            "ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON",
+            "ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON",
+        ] {
+            env.set(key, "");
+            RegistryConfig::load(Some(&path))
+                .unwrap_or_else(|e| panic!("empty {key} must not fail the load: {e}"));
+            // Whitespace-only is also never valid JSON -- see the deliberate
+            // `trim()` divergence documented at the call site.
+            env.set(key, "   ");
+            RegistryConfig::load(Some(&path))
+                .unwrap_or_else(|e| panic!("blank {key} must not fail the load: {e}"));
+            env.unset(key);
+        }
+
+        // A NON-empty hatch must still be honoured, or the filter above would
+        // have disabled the escape hatch entirely and the two asserts above
+        // would still pass.
+        env.set(
+            "ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON",
+            r#"[{"agent_did":"did:key:z6MkA","tenant_id":"tenant-a"}]"#,
+        );
+        let cfg = RegistryConfig::load(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.auth.tenant_agents.len(),
+            1,
+            "a set hatch must still apply"
+        );
+        env.unset("ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The reporting helper must agree with `load` exactly. A helper that named
+    /// a variable `load` had actually applied -- or stayed silent about one it
+    /// dropped -- would make the startup warning misinformation.
+    #[test]
+    fn the_ignored_override_report_matches_what_load_actually_drops() {
+        let mut env = EnvGuard::new();
+        let key = "ACDP_REGISTRY_REGISTRY__AUTHORITY";
+
+        env.unset(key);
+        assert!(
+            !RegistryConfig::empty_env_overrides_ignored().contains(&key.to_string()),
+            "an unset variable is not an ignored override",
+        );
+
+        env.set(key, "");
+        assert!(
+            RegistryConfig::empty_env_overrides_ignored().contains(&key.to_string()),
+            "an empty override must be reported so the warning can name it",
+        );
+
+        env.set(key, "x");
+        assert!(
+            !RegistryConfig::empty_env_overrides_ignored().contains(&key.to_string()),
+            "a variable that IS applied must never be reported as ignored",
+        );
+
+        // Strictly empty, not trimmed -- and this must match `load`. Asserting
+        // both halves together is the point: an earlier draft trimmed here and
+        // not in `load`, so the helper would have claimed a whitespace value was
+        // ignored while `load` applied it.
+        env.set(key, " ");
+        assert!(
+            !RegistryConfig::empty_env_overrides_ignored().contains(&key.to_string()),
+            "whitespace is not empty for this rule",
+        );
+        env.unset("ACDP_REGISTRY_CONFIG");
+        assert_eq!(
+            RegistryConfig::load(None).unwrap().registry.authority,
+            " ",
+            "...and `load` must agree: a whitespace value is APPLIED, not dropped",
+        );
+
+        // A prefixed variable with no nested `__` is not a config path at all
+        // (ACDP_REGISTRY_CONFIG is the file selector), so it is never reported.
+        env.set("ACDP_REGISTRY_NOTACONFIGPATH", "");
+        assert!(
+            !RegistryConfig::empty_env_overrides_ignored()
+                .iter()
+                .any(|k| k == "ACDP_REGISTRY_NOTACONFIGPATH"),
+            "a prefixed var without a nested __ is not an override",
+        );
+        env.unset("ACDP_REGISTRY_NOTACONFIGPATH");
+        env.unset(key);
     }
 }

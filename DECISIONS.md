@@ -2556,3 +2556,361 @@ Rejected: a second bumper call in `bump-spec.yml` (more moving parts, and `ci.ym
 that the bumper refuses to bump a file carrying two pin anchors at all — a file it silently declines
 is worse than one it was never pointed at); and duplicate-and-document, whose only honest mitigation
 is a check that fails on disagreement, which is more work than deriving.
+
+## U-512 — #267: `sha-` tags will NOT be made immutable by a CI check (2026-09-13, lane-1)
+
+**Decided by:** Opus (lane-1), under the autonomy ladder. Consequential but decidable and reversible
+in a commit; the assign named both outcomes as complete units. **Outcome: won't-do, with the
+residual risk accepted explicitly and a cheaper answer documented.**
+
+### What was asked
+
+Give `sha-<short>` registry-level immutability via a pre-push existence check that fails the job when
+the tag already exists, so a hand-run re-run of a `main` build cannot repoint it.
+
+### Why not
+
+**1. "Registry-level" is not available on this registry, so the name overstates whatever we build.**
+Checked rather than assumed: GHCR's package API for
+`orgs/agentcontextdistributionprotocol/packages/container/acdp-registry` exposes
+`created_at, html_url, id, name, owner, package_type, repository, updated_at, url, version_count,
+visibility` — and nothing for tag immutability, tag protection, or retention. There is no registry
+setting to turn on. Anything we ship is a **workflow** check.
+
+**2. A workflow check binds the workflow, not the tag.** The package is repo-scoped, so anyone who
+can push to the repo (or holds a PAT with `write:packages`) can `docker push` over a `sha-` tag
+directly, never touching this workflow. Stated as one sentence with its limit inside, per the
+assign's own instruction, the guarantee would read: *"this workflow will not repoint a `sha-` tag,
+though anyone with package write access still can."* That is materially weaker than what #267 asks
+for, and shipping it under the name "immutability" is the overclaim class this board keeps catching.
+
+**3. The immutable identifier already exists, costs nothing, and is the mechanism registries
+actually provide.** Every published image is addressable by digest
+(`...acdp-registry@sha256:<64-hex>`). Verified end-to-end: `docker buildx imagetools inspect
+:sha-33bb3a3 --format '{{.Manifest.Digest}}'` returns
+`sha256:002469d2dc7d6f1263a058010976f0ec7e4a2ba52c6db3cdece1e866a9a29df3`, which matches the digest
+the packages API records for that tag. A digest cannot be repointed by anyone, including us. The
+real problem #267 names — that the `sha-` prefix *invites* being read as content-addressed — is a
+documentation problem, and it is now fixed in `docker/RAILWAY.md` where operators choose a tag.
+
+**4. The fail-closed cost lands on the worst day.** The check fires on the re-run after an infra
+flake, which is exactly when the pipeline needs to move, and recovery means deleting a published tag
+by hand. We would be trading "a re-run can move a tag" for "a flake wedges publication until someone
+does registry surgery."
+
+**5. An escape hatch would make the guarantee nominal while keeping the complexity.** The obvious
+mitigation for (4) is a `workflow_dispatch` input permitting overwrite. But anyone who can re-run the
+job can also dispatch it with the input set, so the guarantee degrades to "immutable unless someone
+chose otherwise" — which is what we already have, with more moving parts. It is auditable, which is
+a real but small gain; it does not change who can move a tag.
+
+### The honest counter-argument, and why it does not carry
+
+A CI check **would** prevent the realistic accident: a maintainer clicking *Re-run all jobs* on a
+`main` build. That is the actual failure mode, not a malicious insider. Declining still seems right
+because the harm from that accident is bounded — the rebuilt image is from the same commit by
+construction (the tag encodes it), so what changes is build metadata, `image.created`, and the
+provenance attestation, not which source was built. The exposure is reproducibility and audit, not
+behaviour. And the fix for "someone pinned a mutable identifier" is to pin the immutable one, which
+now costs a documented one-liner.
+
+If that judgement is wrong, it is wrong cheaply: re-opening is a commit.
+
+### Residual risk, ACCEPTED not missed
+
+A hand-run re-run of a `main` build rebuilds that commit and moves its `sha-<short>` tag to a new
+digest. Anyone who pinned `sha-<short>` and expected content-addressing gets a different digest of
+the same source. This is **unchanged** by this unit and is stated in `docker/RAILWAY.md` in the same
+paragraph that describes the single-writer guarantee, so a reader choosing a tag meets the limit and
+the alternative together rather than discovering it later.
+
+### What is NOT reopened
+
+D-W5-11's double-build ruling stands and was not revisited.
+
+### What this unit changed
+
+`docker/RAILWAY.md` only: digest pinning documented as the answer, with the command, the reason a CI
+check is not it, and the cost of pinning a digest (it never picks up a fix). No workflow change, so
+U-503's `type=sha` single-writer gate, `flavor: latest=false`, `assert image tags` and `--self-test`
+are untouched.
+## Unit U-510 — CI builds the feature configurations it checks (lane-3, 2026-09-13)
+
+Two `UNCONFIRMED` entries from `plans/u-510-build-feature-configurations.md`, reconciled before
+ship. Neither is a one-way door — both are workflow-file placements reversible in a single commit —
+so both sit in Opus's tier and neither was escalated. Analysis ran in-thread (standing instruction
+against unrequested subagents), so each rests on an executed measurement rather than on agreement.
+
+### 1. Build steps inside the required `clippy` job, not a new job — CONFIRMED (Opus)
+
+**Assumed:** coverage that actually blocks a merge is worth more than a job name that describes
+itself perfectly.
+
+**Analysis.** `required_status_checks.contexts` is `["rustfmt","clippy","tests",
+"conformance (spec fixtures)"]`. A new `builds` job would be a check that is **not** required, so a
+failing feature build could not prevent a merge — which is precisely where U-508's `lint` gate sits,
+still awaiting a human decision on the same settings change. Shipping U-510's coverage in that state
+would have closed the gap on paper and left it open in practice.
+
+The apparent inconsistency with U-508 — which refused to put shell linting inside `rustfmt` — is not
+one. The test is **concern identity**: shell linting is a different concern wearing a
+Rust-formatting name; building a feature configuration is the same concern the `clippy` job already
+served nine times over. Mitigated further by step names (`build (postgres)` …) so a failing build is
+legible rather than arriving as a mysterious `clippy` failure.
+
+**Verdict:** confirm. Recorded with the reasoning because the next reader will otherwise see only
+the surface inconsistency.
+
+**Status:** `CONFIRMED (2026-09-13)`. Reversible — moving the steps to their own job is one commit,
+and would become the better choice the moment `lint`'s required-context question is answered, since
+the same answer would apply.
+
+### 2. The msrv job's `cargo check` steps stay `check` — CONFIRMED (Opus) as a bounded remainder
+
+**Assumed:** the msrv job's purpose is that 1.88 accepts the language and API surface, not that it
+links.
+
+**Analysis.** `cargo check` shares the exact defect this unit fixes — it does not codegen or link —
+so leaving it is knowingly leaving a remainder, and that is why it is recorded rather than skipped.
+The reason it is acceptable: both msrv configurations (`sqlite default`, `storage-pg`) are now linked
+at stable by this unit's new steps, so what goes unverified is narrowly *codegen divergence between
+1.88 and stable for identical source*. Converting them would buy that narrow case at the cost of
+MSRV-toolchain build time on every PR.
+
+**Verdict:** confirm as a bounded, stated remainder. The PR body, the `#265` closing comment and the
+engineering log all say it, so it cannot be mistaken for complete closure.
+
+**Status:** `CONFIRMED (2026-09-13)` as scope. The leader may prefer full closure; that is a
+`cargo check` → `cargo build` swap in two lines.
+
+## U-514 — #276: operator hazards travel in `docs/UPGRADING.md`, not in the changelog template (2026-09-13, lane-1)
+
+**Decided by:** Opus (lane-1), under the autonomy ladder. The assign offered two outcomes and named
+both as complete. **Outcome: option 2 — a stated convention with a gate — and the reason is a
+verification limit, not a preference.**
+
+### The gap, restated after measuring it
+
+Release notes are per-crate and generated by `release-plz` from commit **subjects**. A subject is one
+line and cannot carry "upgrade these two things together or the stack will not boot". So the #271
+version-coupling hazard existed in a commit body, `ASSUMPTIONS.md`, the README and an issue, and
+reached nobody performing an upgrade.
+
+### What was checked before pricing anything (Rule 147)
+
+- `release-plz generate-schema` — the tool's own schema — confirms `[changelog]` accepts `body`,
+  `commit_parsers`, `commit_preprocessors`, `protect_breaking_commits`. **The mechanism for option 1
+  exists.** It was not rejected as impossible.
+- The schema carries **no default for `body`**, so adopting a custom template means authoring a
+  complete replacement for release-plz's built-in one without having that built-in text
+  authoritatively. The current generated format (grouped sections, PR links) is good, and silently
+  regressing it is the likely failure.
+- **Squash-merge commit bodies on `main` are multi-commit concatenations.** `0e5bd14`'s body is
+  **1920 lines**; `30ba447` carries three units' full narratives. Rendering `commit.body` is not a
+  design with a drawback, it is unusable. Any viable option-1 design is therefore a *targeted footer*
+  convention — which is a convention needing enforcement, exactly like option 2, plus a template
+  rewrite.
+
+### Why option 2
+
+The assign's own constraint decided it: *"If your change only takes effect at release time, say how
+it was verified without releasing. 'It will work at the next release' is an undischarged claim."*
+
+A `body` template only renders during changelog generation. Verifying it locally requires
+`release-plz update`, which runs `cargo package --verify` across eight crates — slow, and it failed
+outright on this machine's toolchain. So a template rewrite would have shipped on an undischarged
+claim, with the release pipeline as the blast radius, **while a release PR (#278) is open**. A
+template change would regenerate that PR with an unverified template.
+
+Option 2 has no release-time component at all: nothing it touches runs during a release.
+
+### The convention, and what enforces it
+
+`docs/UPGRADING.md` is the operator's pre-upgrade read: one section per version, newest first, and a
+version with **no** operator-visible change says so explicitly — an absent section is
+indistinguishable from one nobody wrote.
+
+Named from the three places a reader or contributor actually lands: `CHANGELOG.md`'s lookup table
+*and* its "Where new entries go" section, `README.md`'s Configuration section, and `docs/README.md`'s
+index.
+
+`docker/assert-upgrade-notes.sh --check` fails the build when the workspace version has no section.
+It sits in `docker.yml` because that workflow builds the operator-facing artifact — same audience,
+same moment — and because it runs on `pull_request`, so the **release PR**, where the version bump
+actually happens, is gated before it merges.
+
+Four negative controls, wired as `--self-test` rather than asserted in prose: a missing section is
+rejected, a present one accepted (or the gate would reject everything and (1) would still pass), a
+**prefix** match is rejected (`## 0.1.40` must not satisfy 0.1.4 — during a release these differ by
+one trailing character), and a missing file is rejected distinctly from a missing section.
+
+### What this does not claim
+
+It does not put the hazard text inside the GitHub Release body. A reader who reads only the rendered
+release notes and never follows a link still does not see it. That is the residual limit of this
+choice, and option 1 remains available: if someone later has a way to exercise a changelog template
+without a release, the footer design is written up above and the convention this unit establishes is
+what such a template would render.
+## Unit U-513 — the falsified latency claim, corrected (lane-3, 2026-09-13)
+
+### 1. The correction is a distribution, not a better number — CONFIRMED (Opus)
+
+U-510's entry quoted "18 seconds of headroom" from **one sample of each job**, and paired it with a
+trigger that had **already fired before the sentence was written** (run 34766261172: clippy 98s vs
+tests 86s). Measured across n=5 post-change runs, clippy spans 98-176s and tests 86-165s — spreads of
+78s and 79s against per-run margins of 4-27s. **A margin smaller than the run-to-run spread is not a
+margin**, so the fix could not be a fresher number; any single-sample margin here is meaningless.
+
+The corrected text makes a categorical claim instead: before the change clippy was never near the
+critical path (slowest 54s vs tests' fastest 142s); after it, the distributions overlap and clippy led
+in **2 of 5** runs, one on `main`. Derived cost, mean of `max(0, clippy - tests)`: **~8s** against a
+~150s critical path.
+
+Edited **in place** under the narrow exception the assign granted, with the superseded figure left
+visible and the deletion count stated (**7** in `ENGINEERING-LOG.md`, 0 elsewhere). The normal
+append-only rule exists to stop lanes destroying each other's entries, not to preserve a defect —
+appending would have left the false sentence as the first thing a reader meets.
+
+### 2. The split: declined again, on re-derived grounds — CONFIRMED (Opus)
+
+The original decline rested on *"it relieves a job that is not the bottleneck"*, which is false in 2
+of 5 runs. Re-derived rather than restated: the scheduled split would buy ~8s and cost two things
+that survive — the feature lists become two sources of truth (this repo has already had a
+written-out list go stale silently, and `ci.yml` says so), and breakage detection is delayed by up to
+a day.
+
+**A third option is strictly better than both and is recorded rather than taken:** move the five
+build steps to a separate job running *in parallel*. Added latency becomes zero, and it *moves* the
+lists rather than copying them, so neither surviving objection applies. It is not taken because a new
+job is not a required context, so the builds would stop blocking merges — the property U-510 chose the
+`clippy` job to obtain. **The blocker is identical to U-508's `lint`: one branch-protection change
+unblocks both.**
+
+**Status:** declined, with the trigger recorded as fired and weighed so no reader concludes it went
+unnoticed.
+
+---
+
+## Decision: a CI gate that is not a required status check is a report, not a gate (U-516)
+
+**Context.** U-514 added `docker/assert-upgrade-notes.sh` to `docker.yml` and its `done` said the
+workflow "now blocks a release PR whose version has no `UPGRADING.md` section". Measured, that word
+was wrong:
+
+```
+$ gh api repos/.../branches/main/protection/required_status_checks
+  contexts: ["rustfmt","clippy","tests","conformance (spec fixtures)"]
+$ gh api repos/.../rules/branches/main   -> []
+$ gh api repos/.../rulesets              -> []
+$ gh pr checks 280 | grep -E '^build'
+  build   pass   2m47s   ...
+```
+
+`docker.yml` publishes the check named `build`. `build` is not a member of that four-element list,
+and no branch rule or ruleset supplies another. So a release PR missing its section gets a red
+`build` and a green merge button — #276's failure with a check-mark in front of it.
+
+This is the **third** site of the class already recorded for U-508 (`lint`) and U-510 (`clippy`'s
+feature-matrix builds): a check authored as a guard, published under a name nobody required. The two
+prior entries concluded "one branch-protection change unblocks both" and escalated. The class then
+produced a third instance *while the escalation was outstanding* — which is evidence that waiting on
+the settings change was the wrong remedy to depend on, not that it needed restating.
+
+**Decision.** Run the assertion inside a job whose check name is **already** required, and change no
+repo settings. `required_status_checks.contexts` is identical before and after this unit; no lane and
+no lanes leader has authority over it, and a design needing a fifth context would have been the wrong
+design for this unit.
+
+**Host job: `fmt` (check name `rustfmt`).** Chosen on dependencies, not convenience. The gate needs a
+checkout and nothing else — no feature-set toolchain, no services, no registry login — which is also
+`fmt`'s entire dependency set, so it introduces no new failure surface into a required job. It is the
+fastest required job (~6s vs ~2m30 `clippy`, ~2m57 `tests`), so a missing section reddens in seconds.
+And a bug in the step is diagnosable as itself there, rather than being read as a real test failure
+inside `tests`.
+
+The cost is that `rustfmt` now reddens for a reason unrelated to formatting. That is accepted: the
+job name is a required context and renaming it would violate the unchanged-contexts constraint, and
+the script's own failure output names the actual problem.
+
+**The `docker.yml` copy stays**, and for a measured reason rather than caution: `docker.yml` also
+triggers on the `acdp-registry-server/v*` tag push, which `ci.yml` never runs on. The two copies
+cover different windows — `ci.yml` the pull request, `docker.yml` the tag. Both call the same script,
+so they cannot drift in substance.
+
+**Status:** applied. The false "blocks" claim is corrected in `docker/assert-upgrade-notes.sh`'s
+header, in `CHANGELOG.md`, and here.
+
+### Addendum (U-516, AC8): a gate with no `if:` can silently not run
+
+Added mid-unit after lane-3 named the mechanism unprompted. A step with no explicit `if:` defaults to
+`if: success()`, so **any** earlier failing step skips it — and a skipped step reads like a passed one.
+In `docker.yml` three steps that can fail precede the gate (`checkout`, `setup-buildx-action`,
+`metadata-action`), plus `assert semver tag`, which is `if: startsWith(github.ref, 'refs/tags/')`, on
+the tag path. So the accurate description of the pre-U-516 state is not "reports but does not block";
+it is **"can silently not report, and still not block."**
+
+The first version of this unit reproduced the same defect in its new home: the gate was placed after
+`cargo fmt`, where a formatting error would have skipped it. Position alone was not the fix.
+
+Two defences, covering different failure modes:
+
+- **position** — immediately after `checkout`, so nothing that can currently fail precedes it;
+- **`if: ${{ !cancelled() }}`** — so that remains true when someone later inserts a step above it,
+  which position alone cannot guarantee. `!cancelled()` rather than `always()` because a cancelled
+  run should stop rather than press on.
+
+The same `if:` is applied to the `docker.yml` copy. That copy still cannot block, but it can now no
+longer fail to *report* on the tag-push path.
+
+**Control, run 34769860335, job `rustfmt` (103757349450).** A deliberate `exit 1` before the gate, and
+a copy of the gate with no `if:` beside the real one — two outcomes in one run:
+
+```
+3  failure  deliberate failure before the gate
+4  skipped  CONTROL - gate without if, must be SKIPPED
+5  failure  assert the version has operator upgrade notes   <- ran, and reported
+6  success  self-test the upgrade-notes gate
+```
+
+Same run, same preceding failure, opposite outcomes: that isolates the `if:` as the cause instead of
+assuming it.
+
+Also taken from lane-3: the self-test now runs **before** the assert in both workflows, matching
+U-503's ordering, so a vacuously-passing guard is caught before its verdict is trusted.
+
+**What was checked and is NOT a defect:** on the tag path, `assert semver tag` failing also skips
+`build + push` at `docker.yml`'s step 16, which likewise requires `success()`. So a skipped gate there
+never let a publish escape — the job goes red and nothing is pushed. What was lost was log legibility.
+The exposure case is the `pull_request` one above.
+
+### Correction to the addendum above (U-516): AC8 bought legibility, not exposure
+
+The addendum ends "The exposure case is the `pull_request` one above." **That is wrong, and it is my
+sentence, not the reviewer's.** Verified rather than reasoned:
+
+```
+$ gh api .../required_status_checks -q 'if (.contexts | index("build")) then "MEMBER" else "NOT" end'
+NOT
+```
+
+On a pull request the two paths are indistinguishable in outcome:
+
+| | job result | `build` required? | merge |
+|---|---|---|---|
+| gate **skipped** by an earlier failure | red | no | proceeds |
+| gate **ran and failed** | red | no | proceeds |
+
+So the `if: success()` default produced **no exposure at all** — in either direction, the merge was
+never blocked. The exposure came entirely from `build` not being a member of the contexts list, and
+would have persisted whatever the `if:` chain did.
+
+**The two halves of U-516 are orthogonal, and AC8 is the smaller one.** Moving the assertion into an
+already-required job is the whole of what closes the exposure; `!cancelled()` buys independence
+between two unrelated guards and a legible log — a skipped step reads like a passed one — and nothing
+more. Had AC8 shipped alone, the gate still could not have blocked a merge.
+
+Recorded because the error is instructive in shape: a correct mechanism (`if: success()` really does
+skip the step) carried a wrong consequence (that this let something through). The harmful step is the
+merge, and the merge's condition is the contexts list — which had been measured, correctly, twice the
+same day, and was not re-read when the consequence was written. Naming the mechanism is not the same
+as tracing it to the harm. Credit to lane-3 for the catch, on both ends.

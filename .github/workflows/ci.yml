@@ -23,6 +23,61 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+
+      # ── Why a docs gate lives in the rustfmt job (U-516) ──
+      #
+      # This assertion also runs in `docker.yml`, next to the artifact it
+      # describes. That copy REPORTS and cannot block: `docker.yml` publishes the
+      # check named `build`, and main's required_status_checks.contexts is exactly
+      # ["rustfmt","clippy","tests","conformance (spec fixtures)"] -- `build` is
+      # not a member, so a release PR missing its UPGRADING.md section gets a red
+      # `build` and a green merge button. No lane and no lanes leader has
+      # authority over repo settings, so the fix is to run the same assertion in a
+      # job whose check name is ALREADY required, not to ask for a fifth context.
+      #
+      # `rustfmt` is that job because the gate needs a checkout and nothing else --
+      # no feature-set toolchain, no services, no buildx, no registry login --
+      # which is this job's entire dependency set too. It is also the fastest
+      # required job (~6s), so a missing section reddens in seconds rather than
+      # after the ~3min `tests` job, and a bug in this step is diagnosable here
+      # instead of being read as a real test failure.
+      #
+      # ── Why it is FIRST, and why it still carries an `if:` (U-516 AC8) ──
+      #
+      # A step with no `if:` defaults to `if: success()`, so ANY earlier failing
+      # step skips it silently. That is how the docker.yml copy could fail to run
+      # at all -- `setup-buildx-action` and `metadata-action` precede it there --
+      # leaving "the gate never ran" indistinguishable from "the gate passed".
+      # Simply moving it here would have reproduced that: placed after `cargo fmt`,
+      # a formatting error would skip the docs gate.
+      #
+      # Both defences are deliberate, and they cover different things:
+      #   - position (immediately after checkout) means nothing that can fail
+      #     currently precedes it;
+      #   - `if: ${{ !cancelled() }}` means that stays true when someone later
+      #     inserts a step above it, which position alone cannot guarantee.
+      # `!cancelled()` rather than `always()`: a cancelled run should stop, and
+      # `always()` would also fire after a manual cancellation.
+      #
+      # Consequence accepted: a missing section and a formatting error now both
+      # report on the same run, instead of the first hiding the second.
+      #
+      # The self-test runs BEFORE the assert, matching U-503's ordering: a guard
+      # that passes vacuously must be caught before its verdict is trusted. The
+      # assert saying "has a section" is only meaningful once the controls have
+      # shown the check can still reject one.
+      #
+      # Keep the `docker.yml` copy: it additionally triggers on the
+      # `acdp-registry-server/v*` tag push, which ci.yml never sees. This one
+      # blocks the pull request; that one covers the tag.
+      - name: self-test the upgrade-notes gate
+        if: ${{ !cancelled() }}
+        run: bash docker/assert-upgrade-notes.sh --self-test
+
+      - name: assert the version has operator upgrade notes
+        if: ${{ !cancelled() }}
+        run: bash docker/assert-upgrade-notes.sh --check
+
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
@@ -48,6 +103,42 @@ jobs:
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --all-targets -- -D warnings
+
+      # #265: the clippy steps in this job type-check and lint their feature
+      # configurations; they do NOT codegen or link them. Verified directly
+      # rather than inferred: with target/debug/acdp-registry removed, a GREEN
+      # `cargo clippy --all-targets` for a configuration leaves no binary at all,
+      # while `cargo build` for the same configuration produces one (61M). So a
+      # clippy step cannot surface a link error for its configuration, because it
+      # never links it.
+      #
+      # Which configurations were actually unlinked, before these steps existed:
+      # `storage-pg,playground`, `storage-memory,playground`, no-backend, and
+      # `playground` alone were linked by NOTHING. `storage-pg` -- the
+      # configuration that ships -- had its binary linked only by docker.yml's
+      # image build (STORAGE_FEATURE=storage-pg), i.e. by a different workflow,
+      # incidentally; its test step here passes `--test pg_integration`, and this
+      # crate is bin-only, so that links a test binary and not the server. The
+      # remaining configurations are linked by `cargo test` steps whose features
+      # happen to match -- coverage any edit to those steps could remove in
+      # silence, which is the same fragility the #221 note below describes.
+      #
+      # These are ADDITIONS, not replacements. clippy is stronger on lints,
+      # build is stronger on codegen and linking; neither subsumes the other.
+      # Measured: build is 2-10s per configuration and is usually CHEAPER than
+      # the clippy step beside it, and this job is not on the critical path
+      # (tests ~2m36s vs clippy ~39s), so PR latency does not move.
+      #
+      # Each build step must keep its feature list byte-identical to the clippy
+      # step above it. Do not rename this job: `clippy` is one of the four
+      # contexts in branch protection's required_status_checks, and a required
+      # context that stops reporting leaves every PR waiting on a check that
+      # never arrives.
+      - name: build (postgres)
+        run: |
+          cargo build --locked -p acdp-registry-server \
+            --no-default-features --features storage-pg \
+            --all-targets
       - name: clippy (playground)
         run: |
           cargo clippy --locked -p acdp-registry-server \
@@ -148,21 +239,41 @@ jobs:
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-pg,playground \
             --all-targets -- -D warnings
+      - name: build (postgres + playground)
+        run: |
+          cargo build --locked -p acdp-registry-server \
+            --no-default-features --features storage-pg,playground \
+            --all-targets
       - name: clippy (memory + playground)
         run: |
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-memory,playground \
             --all-targets -- -D warnings
+      - name: build (memory + playground)
+        run: |
+          cargo build --locked -p acdp-registry-server \
+            --no-default-features --features storage-memory,playground \
+            --all-targets
       - name: clippy (no storage backend)
         run: |
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features \
             --all-targets -- -D warnings
+      - name: build (no storage backend)
+        run: |
+          cargo build --locked -p acdp-registry-server \
+            --no-default-features \
+            --all-targets
       - name: clippy (playground, no storage backend)
         run: |
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features playground \
             --all-targets -- -D warnings
+      - name: build (playground, no storage backend)
+        run: |
+          cargo build --locked -p acdp-registry-server \
+            --no-default-features --features playground \
+            --all-targets
 
       # Closes #221. `acdp-registry-types` has its own default = ["axum"]
       # feature pair, and its no-default build is a supported consumer

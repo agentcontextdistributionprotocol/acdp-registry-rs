@@ -2827,6 +2827,49 @@ than assumed.
 - **Blast radius if wrong:** one file moves. No behaviour depends on which file the steps live in.
 - **Status:** UNCONFIRMED — cheap to reverse; recorded so the choice is visible rather than assumed.
 
+## U-511 — #271: an empty env override is treated as absent (2026-09-13, lane-1)
+
+- **Assumption:** this is a correction of wrong semantics, not a breaking change — so it is
+  decided here rather than escalated as `blocked`.
+- **Evidence, measured before deciding rather than argued from intuition.** What an empty override
+  did *today* is not uniform; it depends on the field's type, and four of the five arms are a
+  refusal to boot or a garbage value that no deployment can have depended on:
+
+  | field type | behaviour with an empty env override, BEFORE this change |
+  |---|---|
+  | number | hard ERROR — `invalid type: string "", expected an integer` |
+  | bool | hard ERROR — `expected a boolean` |
+  | `Vec`, not a list-parse key | hard ERROR — `expected a sequence` |
+  | `Vec`, list-parse key | `[""]` — a one-element list of nothing |
+  | `String` | overrode with `""` |
+
+  Only the `String` arm produced something an operator could lean on. No document in this repo
+  promises that an empty env var clears a TOML value — the sole mention anywhere is U-509's own log
+  entry describing it as a trap. `docker/config.docker.toml` keeps `jwt_secret` commented out, so
+  the shipped recipe's behaviour is unchanged either way.
+- **Why it is still made loud:** the one arm that genuinely changes is a `String` override, and a
+  silent change of meaning is what turns into a support ticket. `empty_env_overrides_ignored()`
+  plus a startup `warn!` in `main.rs` names every variable that was dropped.
+- **Status:** CONFIRMED as a correction. Decided under the autonomy ladder, not escalated, because
+  the enumeration shows the old behaviour was unusable in four of five arms and undocumented in the
+  fifth.
+
+- **Assumption (WRONG as first written, caught during implementation):** that the reporting helper
+  and the loader could each decide "empty" independently.
+- **What is actually true:** the first draft used `v.trim().is_empty()` in the helper and
+  `v.is_empty()` in `load`. A whitespace-only value would then be **applied by `load` and reported
+  as ignored by the helper** — the warning would have been misinformation. Both now use strict
+  `is_empty()`, and `the_ignored_override_report_matches_what_load_actually_drops` asserts the two
+  agree on exactly that case. The JSON escape hatches keep `trim()` deliberately, because
+  whitespace is never valid JSON; that divergence is documented at its site.
+- **Status:** CONFIRMED by falsification — reverting the helper to `trim()` reddens exactly one test.
+
+- **UNCONFIRMED — an upgrade-ordering hazard, stated rather than assumed away.** The recipe now
+  passes `ACDP_REGISTRY_AUTH__ENABLED: ${...:-}`, which renders as an empty string. A registry
+  binary from *before* this change rejects an empty boolean with a hard error, so pulling the new
+  `docker-compose.yml` against an older image breaks the boot. Called out in README's Configuration
+  section. Not mitigated in code: the alternative is omitting the passthrough, which leaves the gap
+  #271 was filed about.
 ### 9. `mutants.yml` derives the spec pin from `ci.yml` instead of restating it
 **Status: CONFIRMED (2026-09-13)** — decided and settled in the same pass, because the evidence
 that forced it was a bot PR already in flight rather than a judgement call.
@@ -2848,3 +2891,106 @@ file it silently declines to bump is worse than one never pointed at). Duplicate
 deriving is less work).
 **Blast radius.** Low, and the extraction fails loudly: it asserts exactly one 40-hex `ref:`, exactly
 one `checkout-spec@` `uses:` line, and that the ref follows it.
+
+## U-510 — the msrv job's `cargo check` steps stay `check` rather than becoming builds
+
+- **Plan:** `plans/u-510-build-feature-configurations.md` (Open question 1)
+- **Assumed:** that verifying the 1.88 toolchain *accepts* the language and API surface is the
+  msrv job's purpose, and that linking at MSRV is not required once every configuration is linked
+  at stable.
+- **Chose:** leave both `cargo check` steps as `check`, and say so in the PR, the log and here
+  rather than let a reader assume the gap was closed everywhere. `cargo check` shares the exact
+  defect this unit fixes — it does not codegen or link — so this is a deliberately unclosed
+  remainder, not an oversight.
+- **Reasoning:** codegen divergence between 1.88 and stable *for identical source* is a much
+  narrower risk than a configuration nothing ever links, and both msrv configurations are now
+  linked at stable by this unit's new steps.
+- **Alternatives:** convert to `cargo build` (closes it completely, costs MSRV-toolchain build time
+  for the narrower risk); add a separate MSRV build job (a new non-required check, so non-blocking —
+  the U-508 `lint` problem again).
+- **Blast radius if wrong:** a codegen defect that only 1.88 exhibits would still pass CI. Narrow,
+  and it would be caught by the stable build for any source-level cause.
+- **Status:** UNCONFIRMED — the leader may prefer the complete closure.
+
+## U-510 — build steps inside the required `clippy` job rather than a new, honestly-named job
+
+- **Plan:** `plans/u-510-build-feature-configurations.md` (Open question 2)
+- **Assumed:** that coverage which actually blocks a merge is worth more than a job name that
+  describes itself perfectly.
+- **Chose:** inside the existing `clippy` job. It is one of the four contexts in
+  `required_status_checks`, so the new builds gate merges immediately. A new job would be a check
+  that is not required and therefore cannot prevent a merge — exactly where U-508's `lint` sits,
+  still awaiting a decision. Shipping this unit's coverage in that state would have left the gap
+  effectively open.
+- **The inconsistency with U-508 is apparent, not real, and is argued in the PR rather than
+  glossed:** U-508 refused to put shell linting inside `rustfmt` because that is a *different
+  concern* wearing a Rust-formatting name. Building a feature configuration is the *same* concern
+  this job already serves nine times over. The test is concern identity, not convenience.
+- **Alternatives:** a new `builds` job (honest name, non-blocking — rejected); renaming `clippy` to
+  something broader (**rejected and dangerous** — those four names are a contract with branch
+  protection, and a required context that stops reporting leaves every PR waiting forever).
+- **Blast radius if wrong:** a reader sees "clippy" fail on a build error. Mitigated by step names
+  (`build (postgres)` etc.) making the failing step obvious, and by the comment in the job.
+- **Status:** UNCONFIRMED — cheap to move if the leader prefers the honest name and accepts
+  non-blocking.
+
+## U-510 — reconcile outcome for the two entries above (append-only, so their original wording stands)
+
+Recorded as an appended resolution rather than by editing the two `Status:` lines in place. The board
+rule for `ASSUMPTIONS.md`, `DECISIONS.md` and `docs/ENGINEERING-LOG.md` this wave is **APPEND-ONLY**,
+and U-510's own acceptance criterion 6 enforces it mechanically (0 deletions). An in-place status
+edit produces deletions and would have failed that check — which is how the criterion caught the
+prose rule being broken. The entries above therefore keep the wording they had when the decision was
+still open, and this is the outcome:
+
+- **"the msrv job's `cargo check` steps stay `check`"** — **CONFIRMED (2026-09-13)** by Opus at
+  reconcile, as a *bounded, stated remainder* rather than as complete closure. Both msrv
+  configurations are now linked at stable by this unit's new build steps, so what goes unverified is
+  only codegen divergence between 1.88 and stable for identical source. Stated in the PR body, the
+  #265 closing comment and the engineering log, so it cannot be mistaken for the whole gap being
+  shut. Full reasoning: `DECISIONS.md`, U-510 decision 2.
+- **"build steps inside the required `clippy` job"** — **CONFIRMED (2026-09-13)** by Opus at
+  reconcile. The deciding factor is that a separately-named job would not be a required context and
+  therefore could not block a merge — the same position U-508's `lint` gate is stuck in, awaiting a
+  human decision on repo settings. Reversible in one commit, and it becomes the better choice the
+  moment that question is answered, since the same answer applies. Full reasoning: `DECISIONS.md`,
+  U-510 decision 1.
+
+## U-513 — n=5 supports a categorical latency claim but no numeric one
+
+- **Plan:** `plans/u-513-correct-latency-claim.md` (Open question 1)
+- **Assumed:** that 5 post-change CI runs are enough to say "`clippy` is *sometimes* the critical
+  path" but not enough to quote any margin.
+- **Chose:** make only the categorical claim. "Sometimes" needs a single instance and there are two
+  (one on `main`); a margin needs the spread to be smaller than the difference, and here the spreads
+  are 78s and 79s against per-run margins of 4-27s. So no headroom figure is quoted in either
+  direction, and the corrected text says why rather than just omitting it.
+- **Alternatives:** gather more samples first — rejected, because it would delay correcting a
+  measurably false sentence that is on `main` right now, and because no realistic n rescues a margin
+  an order of magnitude below the spread; quote a fresh single sample — rejected, that repeats the
+  original error with a newer number, which is precisely what the assign forbids.
+- **Blast radius if wrong:** a reader takes "sometimes the critical path" as settled when it is based
+  on 5 runs. Mitigated by stating n in the table itself.
+- **Status:** UNCONFIRMED — more runs will sharpen the frequency; the categorical claim will not
+  change unless clippy's distribution moves.
+
+## U-513 — the builds stay in the required `clippy` job rather than moving to a parallel job
+
+- **Plan:** `plans/u-513-correct-latency-claim.md` (Open question 2)
+- **Assumed:** that keeping feature builds merge-blocking is worth ~8s of mean added PR latency.
+- **Chose:** keep them in `clippy`. The parallel-job form is **strictly better on every axis except
+  one**: latency cost drops from ~8s to zero, and it *moves* the feature lists rather than copying
+  them, so it avoids the two-sources-of-truth objection that kills the scheduled split. The one axis
+  it loses on is decisive — a new job is a new check name, and `required_status_checks.contexts` is
+  enumerated (`rustfmt`, `clippy`, `tests`, `conformance (spec fixtures)`), so the builds would stop
+  blocking merges. U-510 put them inside `clippy` specifically to gain that property; trading it for
+  ~8s is the wrong way round.
+- **The coupling worth surfacing:** this is the same blocker as U-508's `lint`. One settings change —
+  adding contexts to branch protection — would unblock **two** improvements, not one.
+- **Alternatives:** scheduled split (rejected: duplicates the feature lists, and delays breakage
+  detection by up to a day); swap clippy for build on the four never-linked configs to halve the cost
+  (rejected: loses the lint coverage W3-U10 added for #200, trading one gap for another).
+- **Blast radius if wrong:** ~8s per PR persists until the settings decision. Trivially reversible —
+  moving the steps to their own job is one commit, and becomes correct the moment the contexts change.
+- **Status:** UNCONFIRMED — the leader or the human may prefer to make the settings change and take
+  the parallel form.

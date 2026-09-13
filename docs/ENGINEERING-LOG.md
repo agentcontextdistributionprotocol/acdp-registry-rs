@@ -31,6 +31,112 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-510 (lane-3) — CI now builds the feature configurations it checks; closes #265 -->
+
+### Fixed
+
+- **CI's feature-configuration steps type-checked but never linked, and five configurations were
+  never built at all.** `cargo clippy` and `cargo check` do not run codegen or the linker, so a
+  failure that appears only at those stages passed every one of them. Proven directly rather than
+  argued from documentation: with `target/debug/acdp-registry` removed, a **green**
+  `cargo clippy --all-targets` for a configuration leaves **no binary at all**, while `cargo build`
+  for the same configuration produces one (61M). Reproduced on a second configuration. A green
+  clippy cannot surface a link error because it never links.
+
+- **The count in #265 was four; the enumeration is nine, and two of the corrections matter.**
+  `ci.yml`'s `clippy` job runs nine feature-configuration checks — lane-1's four are the subset
+  W3-U10 added for #200. Cross-referencing against every step that actually links:
+  `storage-pg,playground`, `storage-memory,playground`, no-backend and `playground`-alone were
+  linked by **nothing**; the other four were linked only *incidentally*, by `cargo test` steps whose
+  feature lists happen to match, which any edit to those steps could have removed in silence — the
+  same fragility this file already documents for #221. And **`storage-pg`, the configuration that
+  ships, never had its binary linked in `ci.yml` either**: its test step passes
+  `--test pg_integration`, and `acdp-registry-server` is bin-only, so that links a test binary
+  rather than the server. It was covered solely by `docker.yml`'s image build
+  (`STORAGE_FEATURE=storage-pg`) — a different workflow, incidentally, which a path filter there
+  would have silently removed.
+
+- **Five `cargo build --locked … --all-targets` steps, each paired with its clippy step** and
+  carrying a byte-identical feature list, asserted programmatically rather than by eye. Additions,
+  not replacements: clippy is stronger on lints, build on codegen and linking, and neither subsumes
+  the other. Each shipped command line was extracted from the YAML and executed verbatim, so what
+  was tested is what runs.
+
+### Changed
+
+- **The build steps live inside the existing `clippy` job, deliberately.** That job is one of the
+  four contexts in branch protection's `required_status_checks`, so this coverage is merge-blocking
+  the day it lands. A new job would have produced a check that is *not* required and therefore could
+  not prevent a merge — the limitation U-508's `lint` gate hit, which is still awaiting a decision.
+  This is **not** the mislabelling U-508 refused when it declined to put shell linting inside
+  `rustfmt`: there the concern differed from the job's name, whereas building a feature
+  configuration is the same concern this job already served nine times. The distinction is concern
+  identity, not convenience. The job must not be renamed — those four names are a contract with
+  branch protection, and a required context that stops reporting leaves every PR waiting on a check
+  that never arrives.
+
+- **The `msrv` job's two `cargo check` steps stay `check`, by decision.** Their purpose is that
+  1.88 accepts the language and API surface, and both of their configurations are now linked at
+  stable. Codegen divergence between 1.88 and stable for identical source is a materially narrower
+  risk than an unlinked configuration. Recorded rather than silently skipped.
+
+### Added
+
+- **Cost, measured in CI rather than extrapolated from a laptop — and the laptop was wrong by 5x.**
+  Locally, warm, the five builds totalled 21s and each was usually *cheaper* than the clippy step
+  beside it, because clippy runs extra lint passes over the same graph. **In CI the `clippy` job went
+  from 39s to 2m27s: +108s, not +21s.** The local figure was optimistic because that machine had
+  already built every feature combination during the measurement pass, whereas the runner's cargo
+  cache holds no artifacts for combinations this repo had never built.
+  **CORRECTED BY U-513 — the sentence that stood here quoted a margin, and a margin was never
+  supportable.** It said *"`tests` is 2m45s, so PR latency is still set by `tests` — with 18 seconds
+  of headroom"*, and paired that with a trigger: *"if the `clippy` job ever exceeds `tests`, the split
+  should be reconsidered."* Both are withdrawn. The 18s figure was **one sample of each job**, and the
+  trigger had **already fired before the sentence was written** — run 34766261172 had clippy at 98s
+  against tests at 86s. The falsifying datum was in hand.
+  Measured properly, from GitHub-hosted runners with `Swatinem/rust-cache` and no local timings:
+
+  | | n | range | median | spread |
+  |---|---|---|---|---|
+  | `clippy`, after this change | 5 | 98-176s | 144s | **78s** |
+  | `tests`, same runs | 5 | 86-165s | 149s | **79s** |
+  | `clippy`, before | 7 | 28-54s | 33s | 26s |
+  | `tests`, before | 7 | 142-155s | 150s | 13s |
+
+  Per-run margins were `+12, -18, -27, +26, -4` seconds (positive = clippy leads). **Every one is far
+  smaller than either spread, and a margin smaller than the run-to-run spread is not a margin** — so
+  no headroom figure belongs here in either direction.
+  What the data *does* support is categorical rather than numeric: before this change `clippy` was
+  never near the critical path (its slowest run, 54s, was under tests' fastest, 142s); after it the
+  two distributions overlap and **`clippy` led in 2 of 5 runs**, one of them on `main`. So the change
+  moved `clippy` from *never* the critical path to *sometimes* it. Derived expected cost, as the mean
+  of `max(0, clippy - tests)` across those 5 runs: **~8s**, against a ~150s critical path.
+  **The trigger fired and was weighed; it did not go unnoticed.** The per-PR/scheduled split is still
+  declined, but on re-derived grounds, since the original reason ("it relieves a job that is not the
+  bottleneck") is false in 2 of 5 runs. The two objections that do survive: a scheduled job makes the
+  feature lists two sources of truth — this file already records that a written-out list goes stale
+  silently and that it *already did once* — and it delays breakage detection by up to a day.
+  **A strictly better third option exists and is recorded rather than taken:** move the five build
+  steps to a separate job running *in parallel* instead of on a schedule. `clippy` returns to ~33s,
+  the builds occupy ~111s of their own job, both sit under tests' median, and added latency is
+  **zero** rather than ~8s — and it *moves* the feature lists rather than copying them, so neither
+  surviving objection applies. It is not taken because a new job is a new check name, and branch
+  protection's required contexts are enumerated, so the builds would stop blocking merges — the exact
+  trade `lint.yml` is stuck in. Trading the blocking property for ~8s is the wrong way round. **That
+  makes one pending settings decision the unblocker for two improvements.**
+
+- **A finding that narrows #265's own risk claim, worth recording because it is easy to overstate
+  the fix.** The classic undefined-symbol link failure is **unreachable from this repo's source**:
+  `Cargo.toml` sets `unsafe_code = "forbid"`, and `forbid` cannot be overridden by `#[allow]`, so no
+  `extern "C"` declaration can exist here. Two falsification attempts died on this and on a related
+  point, and both failures are more informative than a success would have been: a `RUSTFLAGS`
+  link-argument probe is **not** a valid discriminator, because `RUSTFLAGS` also reaches build
+  scripts and proc-macros, which *are* linked — so clippy fails too. What the new steps therefore
+  close is real but bounded: dependency and native link failures under a particular feature
+  combination, environment-level link failures — this repo has an observed instance, the
+  `SDKROOT`/`ld-1267` failure, which passes clippy and fails only at link — and
+  post-monomorphization codegen errors in safe code.
+
 <!-- unit U-508 (lane-3) — shellcheck + actionlint, and what the gate cannot do -->
 
 ### Added
@@ -4887,3 +4993,229 @@ operator who set `auth.enabled = true` in the file would have it silently forced
 That is the same precedence trap the header already documents for `jwt_secret`. Logged as
 `UNCONFIRMED` in `ASSUMPTIONS.md` for a unit that can design the passthrough safely, rather than
 taken here to make a CI step convenient.
+
+## U-511 — #271: an empty env override is treated as absent
+
+Two behaviours composed into a footgun: an env var beats the TOML file, and `docker compose`
+renders an *unset* variable as **set-to-empty** rather than absent. So every `${VAR:-}` passthrough
+in a compose `environment:` block silently replaced whatever the operator wrote in their config
+file. The shipped recipe carried **two separate caveats about this one rule**, which is the signal
+that the rule was the defect rather than its documentation.
+
+### The measurement that decided "correction, not breaking change"
+
+The unit could have gone either way, and the deciding question — *could anyone be relying on the
+old behaviour?* — turns entirely on what empty did today. It is not uniform:
+
+| field type | empty override, BEFORE |
+|---|---|
+| number | hard ERROR (`invalid type: string ""`) |
+| bool | hard ERROR |
+| `Vec`, not a list-parse key | hard ERROR (`expected a sequence`) |
+| `Vec`, list-parse key | `[""]` — a one-element list of nothing |
+| `String` | overrode with `""` |
+
+Four of five arms are a refusal to boot or a value nobody wants, so no deployment can have depended
+on them. Only the `String` arm was leanable-on, and nothing in the repo documents it. Treating
+empty as absent therefore **fixes three hard errors and one garbage value** and changes one arm
+from "override with empty" to "fall through" — decided under the autonomy ladder rather than
+escalated.
+
+It is still made **loud**: `RegistryConfig::empty_env_overrides_ignored()` plus a startup `warn!`
+names every dropped variable. A behaviour change nobody can see is the part that becomes a support
+ticket.
+
+### `${VAR:-false}` is not the safe form, and that is the counter-intuitive part
+
+The obvious way to give the recipe an env path to enable auth is
+`ACDP_REGISTRY_AUTH__ENABLED: ${VAR:-false}`. **That is still a security regression after this
+change.** Verified with `docker compose config` rather than reasoned about: `${VAR:-false}` renders
+the literal string `"false"`, which is *non-empty*, so it is a real override and would force an
+operator's `auth.enabled = true` back to `false`. Only `${VAR:-}` — which renders `""` — becomes
+safe. The recipe uses that form, and both the inline caveat and the header paragraph it replaced
+now say what is true instead of warning about a trap that no longer exists.
+
+### The test-fixture defect the falsification pass exposed
+
+Falsifying the JSON-hatch filter reddened **four** tests, only one of which touched the broken
+code. The other three inherited a leaked `ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON=""` — the failing
+test panicked before reaching its own cleanup, and `cargo test` runs tests as threads sharing one
+environment. A falsification run that names the wrong culprit is worse than no falsification,
+because it sends the next reader to the wrong file.
+
+Fixed with an `EnvGuard` that holds the lock and restores every variable it touched **on drop,
+including on panic**. Re-running the same falsification now reddens exactly one test.
+
+Two comments were corrected as collateral, both of which had become false: the existing env test's
+`SAFETY` note claimed "no other test in this crate reads or writes process env" — already false
+before this unit, since that same test does two separate env round-trips — and its inner note about
+"preserving the only-one-test invariant". The invariant is now a lock, not an assurance.
+
+### Upgrade ordering, stated because it is a real hazard
+
+The recipe now passes an empty `ACDP_REGISTRY_AUTH__ENABLED`. A binary from before this change
+rejects an empty boolean outright, so pulling the new `docker-compose.yml` against an older image
+breaks the boot. Called out in README's Configuration section. Not mitigated in code — the
+alternative is omitting the passthrough, which leaves the gap #271 was filed about.
+
+## U-512 — #267: declining to make `sha-` tags immutable, and documenting what actually is
+
+#267 asked for a pre-push existence check so a hand-run re-run of a `main` build could not repoint
+`sha-<short>`. **Declined, with the argument recorded in `DECISIONS.md` and the residual risk
+accepted explicitly rather than left implied.**
+
+The deciding fact was checked rather than assumed: GHCR's package API exposes no tag-immutability,
+tag-protection or retention setting — the returned keys are `created_at, html_url, id, name, owner,
+package_type, repository, updated_at, url, version_count, visibility`. There is nothing at the
+registry to turn on, so anything shipped here would be a *workflow* check, and the package is
+repo-scoped, so anyone with package write can push over a tag without touching the workflow. Written
+as one sentence with its limit inside — which is how the assign asked for it — the guarantee would
+read: *"this workflow will not repoint a `sha-` tag, though anyone with package write access still
+can."* That is not what #267 asked for, and shipping it under the name "immutability" is the
+overclaim class this board keeps finding.
+
+Meanwhile the immutable identifier already exists and costs nothing: the digest. Verified
+end-to-end rather than asserted —
+
+```
+docker buildx imagetools inspect :sha-33bb3a3 --format '{{.Manifest.Digest}}'
+  -> sha256:002469d2dc7d6f1263a058010976f0ec7e4a2ba52c6db3cdece1e866a9a29df3
+```
+
+— which matches the digest the packages API records for that tag. So the real problem #267 names,
+that the `sha-` prefix *invites* being read as content-addressed, is a documentation problem.
+`docker/RAILWAY.md` now answers it where operators actually choose a tag, including the cost of
+pinning a digest (it never picks up a fix) so the trade is stated rather than sold.
+
+### The counter-argument, kept rather than buried
+
+A CI check **would** stop the realistic accident — a maintainer clicking *Re-run all jobs*. That is
+the honest case for implementing, and it is recorded in `DECISIONS.md` next to the reasons for
+declining rather than omitted to make the decision look cleaner. It does not carry because the harm
+is bounded: the rebuild is from the same commit by construction, so what differs is build metadata,
+`image.created` and the provenance attestation — reproducibility and audit, not behaviour.
+
+### On not manufacturing mechanism
+
+The escape hatch that would have made the fail-closed cost tolerable (a `workflow_dispatch` input
+permitting overwrite) is pullable by anyone who could re-run the job in the first place. It would
+have converted the guarantee into "immutable unless someone chose otherwise" — which is the status
+quo with more moving parts and a more reassuring name. A decision recorded with its reasoning beats
+a mechanism nobody wants.
+
+No workflow change, so U-503's `type=sha` single-writer gate, `flavor: latest=false`, `assert image
+tags` and its `--self-test` are all untouched and still running.
+
+## U-514 — #276: making an operator hazard reach the operator
+
+The #271 upgrade-ordering hazard — pull the image and `docker-compose.yml` together or the stack does
+not boot — lived in a commit body, `ASSUMPTIONS.md`, the README and an issue. Release notes are
+generated by `release-plz` from commit **subjects**, and a subject cannot carry it. So it reached
+nobody upgrading.
+
+### A premise that had to be disproved first
+
+Mid-unit the board reported that v0.1.4's release PR (#278) had **dropped the change entirely** —
+`acdp-registry-types` had no 0.1.4 section despite `config.rs` gaining 430 lines — and framed that as
+upstream of the whole question.
+
+It is staleness, not a defect. #278's branch parent is `0e5bd14`; `33bb3a3` (#275) is **not an
+ancestor of it**. The numbers close it completely: commits touching `crates/acdp-registry-types/`
+since its `v0.1.3` tag are **0 at #278's base** and **1 at current `main`**; for the server crate,
+**2 and 3**, matching exactly the two entries #278 shows. The release PR's content is correct output
+for the tree release-plz actually read.
+
+Worth recording because the caveat was *stated and then not used*: the same message that reported the
+finding also said the PR was BEHIND. Naming a limitation is not the same as gating on it.
+
+### What was checked before designing (Rule 147)
+
+`release-plz generate-schema` — the tool's own schema rather than recollection of its docs — confirms
+`[changelog]` accepts `body`, `commit_parsers`, `commit_preprocessors` and `protect_breaking_commits`.
+So option 1's mechanism **exists**; it was not rejected as impossible.
+
+Two facts then shaped the choice:
+
+- The schema carries **no default for `body`**, so adopting a template means authoring a full
+  replacement for release-plz's built-in one without having that text authoritatively. The generated
+  format today is good; silently regressing it is the realistic failure.
+- **Squash bodies on `main` are multi-commit concatenations** — `0e5bd14`'s body is **1920 lines**.
+  Rendering `commit.body` wholesale is unusable, so any viable template design reduces to a *targeted
+  footer convention*: a convention needing enforcement, exactly like option 2, plus a template rewrite.
+
+### Why option 2, in one sentence
+
+A `body` template only runs during changelog generation, verifying it locally needs
+`release-plz update` (which runs `cargo package --verify` across eight crates and failed on this
+toolchain), and a release PR is open right now — so shipping it would have meant an undischarged
+"it will work at the next release" with the release pipeline as the blast radius.
+
+### What landed
+
+`docs/UPGRADING.md`, one section per version, newest first, with 0.1.4 carrying the #271 hazard as a
+table of which pull combinations boot. A version with no operator-visible change **says so** — an
+absent section is indistinguishable from one nobody wrote.
+
+Named from where readers and contributors actually land: `CHANGELOG.md`'s lookup table *and* its
+"Where new entries go" section, `README.md`, and `docs/README.md`'s index.
+
+`docker/assert-upgrade-notes.sh` is what stops this being a convention with nothing behind it. It
+fails the build when the workspace version has no section, and it sits in `docker.yml` because that
+workflow builds the operator-facing artifact and runs on `pull_request` — so the **release PR**, where
+the version bump happens, is gated before it merges. Verified against a simulated 0.1.4 tree: the gate
+passes and the section carries the hazard.
+
+Four negative controls wired into `--self-test`. The one worth naming: `## 0.1.40` must **not**
+satisfy a check for `0.1.4`. During a release those differ by a single trailing character, and a
+prefix match would make the gate pass on the wrong section.
+
+### The limit of this choice, stated rather than left to be found
+
+The hazard text is not inside the rendered GitHub Release body. A reader who reads only the release
+notes and follows no link still does not see it. Option 1 remains available and its design is written
+up in `DECISIONS.md`; the convention established here is what such a template would render.
+
+## U-516 — the gate that reported: making an enforcement claim testable
+
+`docker/assert-upgrade-notes.sh` was added in U-514 with four negative controls, all of which fired
+in real CI. Every one of them tested whether the *script* discriminates. None tested whether the
+*workflow it ran in* could stop a merge. The unit then wrote "blocks" — a claim about the second
+thing, resting on evidence about the first.
+
+The controls were not weak; they were aimed one layer below the claim. A script that correctly
+rejects a missing section, running in a job nobody requires, produces exactly the same green
+transcript as a working gate. That is the whole failure mode, and it is invisible to any amount of
+testing of the script itself.
+
+What made it visible was a question the unit never asked: *which check name does this workflow
+publish, and is that name in `required_status_checks.contexts`?* Two `gh api` calls. The answer was
+`build`, and the list was `["rustfmt","clippy","tests","conformance (spec fixtures)"]`.
+
+Two things worth keeping separate here, because conflating them is how this recurs:
+
+**An equality, not a floor.** "At least one required job runs the script" cannot catch the case that
+actually occurred, where the name assumed to be required is spelled differently from the one GitHub
+publishes. The check has to be membership of a quoted name in a quoted list. `build` versus `docker`
+versus `rustfmt` is precisely that distance.
+
+**Observation and cause are separate sentences.** In the same window this unit ran, two sessions
+independently misattributed one real failure — `release-plz update` failing locally — first to the
+toolchain, then to a malformed macOS 27.0 SDK. Neither attribution was tested and both were wrong.
+Measured here with `RUSTC_WRAPPER=""`:
+
+```
+cargo package -p acdp-registry-types   -> rc=0     (0 intra-workspace deps)
+cargo package -p acdp-registry-server  -> rc=101   no matching package named `acdp-registry-auth`
+                                                   found; location searched: crates.io index
+```
+
+The cause is `release-plz.toml`'s `publish = false`: nothing in this workspace is on crates.io, so
+`cargo package` cannot resolve a path dependency on a sibling through the registry index. The
+discriminator is exact — the one crate with no intra-workspace dependency packages cleanly; the seven
+with at least one do not. Both wrong attributions pointed the same direction, at "local quirk,
+someone could work around it", when the truth is structural and would reproduce on a clean Linux
+runner. "Fails here, cause not established" would have been a complete and honest report; a confident
+wrong cause was not.
+
+This changes nothing about U-514's conclusion, and strengthens its stated reason: a `[changelog].body`
+template cannot be verified short of an actual release for seven of the eight crates, anywhere.

@@ -121,6 +121,24 @@ Configuration is loaded from a TOML file (`ACDP_REGISTRY_CONFIG` env var, or
 environment variables (double underscore separates levels). See
 [`config/registry.example.toml`](config/registry.example.toml).
 
+**An EMPTY `ACDP_REGISTRY_*` variable is treated as absent, not as an override**
+(#271). `ACDP_REGISTRY_REGISTRY__AUTHORITY=""` leaves your TOML value alone
+rather than blanking it; unset the variable or give it a value. Any empty
+variable that was ignored is named in a startup `warn!`.
+
+This exists because `docker compose` renders an unset variable as *set-to-empty*
+rather than absent, so every `${VAR:-}` passthrough in a compose `environment:`
+block used to silently overwrite the config file. Note that `${VAR:-false}` is
+**not** the same thing — it renders the literal string `"false"`, which is a real
+value and still overrides.
+
+> **Upgrading:** see [`docs/UPGRADING.md`](docs/UPGRADING.md), which is the
+> operator's pre-upgrade read for every version. For this change specifically:
+> before it, an empty value either overrode with `""` or,
+> for a number, boolean, or list field, failed the config load outright. If you
+> deploy `docker/docker-compose.yml`, upgrade the image at the same time — the
+> current recipe passes empty values that an older binary would reject at boot.
+
 Selected fields:
 
 | TOML key                          | Env var                                     | Notes |
