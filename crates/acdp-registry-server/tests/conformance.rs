@@ -11194,6 +11194,352 @@ async fn rev001_key_revocation_context_golden_accepted_and_self_signed_rejected(
     );
 }
 
+/// **pub-006 / pub-009 (RFC-ACDP-0001 §5.11 step 2) — U-533.**
+///
+/// Both fixtures exist to pin one rule: `signature.key_id`'s DID portion MUST
+/// equal `agent_id`, and a mismatch is **403 `key_not_authorized`**. They differ
+/// only in which methods the two DIDs use — `pub-006` mismatches within one
+/// method, `pub-009` mismatches across methods (`did:web` agent, `did:key` key).
+///
+/// # Why these are direct tests and not replays
+///
+/// Shape A skips any publish fixture whose expected status is not 400
+/// ("publish positive/authz outcome not deterministically replayable"), so
+/// neither has ever been requested by anything — both sat in
+/// `UNEXERCISED_FIXTURES`. The obvious repair is to let Shape A drive a 403.
+/// **Measured, that would have been wrong**, and in the specific way this suite
+/// has been bitten repeatedly:
+///
+/// Both fixture bodies carry a `signature.value` of **96 base64 characters where
+/// ed25519 requires 88**. Signature-shape validation therefore rejects them
+/// before §5.11 step 2 is ever reached — they would have replayed green on
+/// `400 invalid_signature` while asserting **nothing** about `key_not_authorized`.
+/// That is precisely the `pub-008` defect (`CODE_DIVERGENCES`, found by U-531's
+/// sweep) and the `did-ssrf-001..004` defect before it. Making them "replay"
+/// would have manufactured two new wrong-reason passes inside the very unit whose
+/// purpose is to remove them.
+///
+/// `pub-006` has a **second**, independent blocker: both its DIDs use the
+/// `did:agent:` method, which this registry does not support at all, so its
+/// `agent_id` would be refused by a different rule before the key-mismatch rule
+/// was reached.
+///
+/// Both blockers are **asserted below, not merely described**. If a spec bump
+/// ever corrects the signature length, the assertion fails and whoever sees it
+/// should reconsider replaying the fixture for real.
+///
+/// # What is asserted instead
+///
+/// The rule itself, driven through a pipeline that genuinely reaches it: a
+/// well-formed `did:key` publish (self-verifying, offline — no resolver, no SSRF
+/// surface) whose `key_id` DID is pointed at a *different* `did:key`. §5.11
+/// step 2 runs **before** method dispatch and before any DID resolution
+/// (`acdp-verify`'s `verify_signature_envelope`, reached from
+/// `verify_publish_request_signature`), so the mismatch is what fires.
+///
+/// **The control is the load-bearing half.** The same request with `key_id` left
+/// alone must be *accepted*. Without it, a 403 arriving for any unrelated reason
+/// would read as a pass — which is exactly how `pub-008` stayed green for so
+/// long. Asserting the negative is not enough; the positive has to hold too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pub006_pub009_key_id_did_must_equal_agent_id() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping pub-006/pub-009 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+
+    // ---- 1. Both fixtures, requested by id. This is what takes them out of
+    //         UNEXERCISED_FIXTURES: the list is about whether anything asks for
+    //         the fixture, which nothing did.
+    let Some(fx6) = find_fixture_by_id(&fixtures, "pub-006") else {
+        return;
+    };
+    let Some(fx9) = find_fixture_by_id(&fixtures, "pub-009") else {
+        return;
+    };
+
+    // ---- 2. Each fixture's own literals, so this test is pinned to the spec
+    //         rather than to a paraphrase of it.
+    for (label, fx) in [("pub-006", &fx6), ("pub-009", &fx9)] {
+        assert_eq!(
+            fx["expected"]["status"].as_u64(),
+            Some(403),
+            "{label} must expect 403, or this test is asserting the wrong rule: {fx}"
+        );
+        assert_eq!(
+            fx["expected"]["error_code"], "key_not_authorized",
+            "{label} must expect key_not_authorized: {fx}"
+        );
+        // The mismatch IS the subject: if a bump ever made these equal, the
+        // fixture would no longer be about this rule.
+        let agent = fx["request"]["body"]["agent_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{label}: body.agent_id missing: {fx}"));
+        let key_id = fx["request"]["body"]["signature"]["key_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{label}: signature.key_id missing: {fx}"));
+        let did_part = key_id.split_once('#').map(|(d, _)| d).unwrap_or(key_id);
+        assert_ne!(
+            did_part, agent,
+            "{label}: the fixture's key_id DID and agent_id must DIFFER -- that mismatch is the \
+             whole subject of the fixture: {fx}"
+        );
+    }
+
+    // ---- 3. Why each body cannot be replayed, as assertions rather than prose.
+    for (label, fx) in [("pub-006", &fx6), ("pub-009", &fx9)] {
+        let sig = fx["request"]["body"]["signature"]["value"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{label}: signature.value missing: {fx}"));
+        assert_eq!(
+            sig.len(),
+            96,
+            "{label}: this test asserts the RULE rather than replaying the fixture body, and the \
+             stated reason is that the body's signature.value is 96 base64 chars where ed25519 \
+             requires 88 (the `pub-008` defect). It is now {}. If a spec bump corrected the \
+             length, this fixture may be genuinely replayable -- reconsider driving it through \
+             Shape A instead of asserting the rule here.",
+            sig.len()
+        );
+    }
+    // pub-006's second, independent blocker.
+    let agent6 = fx6["request"]["body"]["agent_id"].as_str().unwrap();
+    assert!(
+        !agent6.starts_with("did:web:") && !agent6.starts_with("did:key:"),
+        "pub-006's recorded second blocker is that its agent_id uses a method this registry does \
+         not support ({agent6}), so its body would be refused by a different rule first. If that \
+         is no longer true, this test's reasoning needs revisiting: {fx6}"
+    );
+
+    // ---- 4. The rule, driven so that it is genuinely reached.
+    let app = did_key_harness(did_key_caps()).await;
+    let producer = Producer::new_did_key(SigningKey::from_bytes(&[77u8; 32]));
+    let build = || {
+        producer
+            .publish_request()
+            .title("u533: key_id DID must equal agent_id")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .acdp_version("0.2.0")
+            .build()
+            .unwrap()
+    };
+
+    // THE CONTROL, first: unmutated, this publish must be ACCEPTED. A 403 from
+    // any unrelated cause would otherwise read as a pass.
+    let (ok_status, ok_body) =
+        post_publish_json(&app, serde_json::to_value(build()).unwrap()).await;
+    assert_eq!(
+        ok_status,
+        StatusCode::OK,
+        "control: the unmutated did:key publish must be accepted, or the 403 below cannot be \
+         attributed to the key_id mismatch. body = {ok_body}"
+    );
+
+    // Now the only change is key_id's DID portion. `key_id` sits outside the
+    // §5.7 hash preimage, so content_hash stays valid and the hash gate is not
+    // what fires.
+    let mut req = build();
+    let foreign = Producer::new_did_key(SigningKey::from_bytes(&[78u8; 32]));
+    let foreign_did = serde_json::to_value(
+        foreign
+            .publish_request()
+            .title("x")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap(),
+    )
+    .unwrap()["agent_id"]
+        .as_str()
+        .expect("a did:key agent_id")
+        .to_string();
+    assert_ne!(
+        foreign_did,
+        req.agent_id.as_str(),
+        "the two throwaway producers must have different DIDs, or this mutation changes nothing"
+    );
+    // A did:key `key_id`'s fragment MUST equal its own method-specific
+    // identifier (`did:key:zABC#zABC`) -- the did:key document's only
+    // verification method is the key itself. Using `#key-1` here produced a
+    // `schema_violation` BEFORE §5.11 step 2, i.e. the wrong-reason pass this
+    // test's control exists to expose. It exposed mine.
+    let foreign_mb = foreign_did
+        .strip_prefix("did:key:")
+        .expect("a did:key DID starts with did:key:");
+    req.signature.key_id = format!("{foreign_did}#{foreign_mb}");
+
+    let (status, body) = post_publish_json(&app, serde_json::to_value(&req).unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a key_id whose DID portion differs from agent_id must be refused with 403 \
+         (RFC-ACDP-0001 §5.11 step 2), which is what pub-006 and pub-009 exist to pin. \
+         body = {body}"
+    );
+    assert_eq!(
+        body["error"]["code"], "key_not_authorized",
+        "and it must be key_not_authorized specifically -- `invalid_signature` or \
+         `schema_violation` here would mean the request was rejected before reaching §5.11 \
+         step 2, which is the wrong-reason pass this test exists to avoid. body = {body}"
+    );
+}
+
+/// **pub-010 (RFC-ACDP-0001 §5.4) — U-533.** A non-`did:web` entry in
+/// `contributors[]` is accepted: the field is attribution-only, and the registry
+/// treats entries as opaque DID strings.
+///
+/// # Why this is a direct test and not a replay
+///
+/// `pub-010` carries **no inline body**. Its `request` has only `body_summary`
+/// and `body_excerpt`, and the excerpt's signature is the literal placeholder
+/// `"<base64 signature that verifies under alice's did:web key>"` — the spec left
+/// it in prose precisely because a real signature cannot be written into a static
+/// fixture. Shape A's own first gate ("publish fixture has no inline body")
+/// therefore skips it, which is why nothing ever requested it.
+///
+/// # Two deviations, following the `anc-001` / `idem-001` precedent exactly
+///
+/// **Status.** The fixture's own literal is **201**; this repo's `POST /contexts`
+/// returns **200** (`Ok(Json(response))` in `handlers/context.rs`). Per the
+/// precedent established for `idem-001`/`idem-004` (see their section above),
+/// this test asserts the **corrected** value and **separately asserts the
+/// fixture's own literal**, so the deviation is demonstrably real rather than
+/// invented, and is neither faked nor "fixed" — the wire change is U-526, is
+/// escalated to a human, and is not this unit's to make.
+///
+/// **Agent method.** The fixture's `agent_id` is `did:web`, which would require
+/// live DID resolution. This test signs as `did:key` — self-verifying and
+/// offline — because the fixture's subject is `contributors[]`, not the agent's
+/// own method. The fixture's `did:web` agent_id is asserted below so the
+/// substitution is recorded rather than silent.
+///
+/// Neither deviation touches what the fixture actually pins: that a `did:key`
+/// contributor survives publish and round-trips on retrieval.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pub010_non_did_web_contributor_is_accepted_and_persisted() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping pub-010 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "pub-010") else {
+        return;
+    };
+
+    // ---- The fixture's own literals, including both deviations, so this test
+    //      is pinned to the spec and the corrections are visibly real.
+    assert_eq!(
+        fx["expected"]["status"].as_u64(),
+        Some(201),
+        "pub-010 fixture literal (pre-correction): this repo returns 200, and that deviation is \
+         only honest if the fixture really does say 201: {fx}"
+    );
+    assert_eq!(
+        fx["expected"]["outcome"], "success",
+        "pub-010 must be a success fixture: {fx}"
+    );
+    assert!(
+        fx["request"]["body"].is_null(),
+        "pub-010 is retired by a direct test because it has NO inline body. If a body was added, \
+         Shape A may now drive it and this test should be reconsidered: {fx}"
+    );
+    let fixture_agent = fx["request"]["body_excerpt"]["agent_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("pub-010: body_excerpt.agent_id missing: {fx}"));
+    assert!(
+        fixture_agent.starts_with("did:web:"),
+        "pub-010's own agent_id is did:web ({fixture_agent}); this test substitutes a did:key \
+         signer and that substitution is recorded here: {fx}"
+    );
+
+    // The contributor list is the subject. Take it from the fixture rather than
+    // retyping it, so the test cannot drift from what the fixture describes.
+    let fixture_contributors: Vec<String> = fx["request"]["body_excerpt"]["contributors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("pub-010: body_excerpt.contributors missing: {fx}"))
+        .iter()
+        .map(|c| {
+            c.as_str()
+                .unwrap_or_else(|| panic!("pub-010: contributor not a string: {fx}"))
+                .to_string()
+        })
+        .collect();
+    assert!(
+        fixture_contributors
+            .iter()
+            .any(|c| c.starts_with("did:key:")),
+        "pub-010 exists because contributors[] carries a NON-did:web entry; if none is present the \
+         fixture is no longer about this rule: {fx}"
+    );
+    assert!(
+        fixture_contributors
+            .iter()
+            .any(|c| c.starts_with("did:web:")),
+        "pub-010's list mixes methods (a did:web contributor alongside the did:key one), which is \
+         what makes it a method-tolerance case rather than a method-swap: {fx}"
+    );
+
+    // ---- Drive it.
+    let app = did_key_harness(did_key_caps()).await;
+    let producer = Producer::new_did_key(SigningKey::from_bytes(&[91u8; 32]));
+    let req = producer
+        .publish_request()
+        .title("u533: non-did:web contributor is attribution-only")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .acdp_version("0.2.0")
+        .contributors(fixture_contributors.iter().map(AgentDid::new).collect())
+        .build()
+        .unwrap();
+
+    let (status, body) = post_publish_json(&app, serde_json::to_value(&req).unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "pub-010: a did:key entry in contributors[] must be ACCEPTED. This repo returns 200 where \
+         the fixture's own literal is 201 (asserted above) -- the corrected value, per the \
+         anc-001/idem-001 precedent. body = {body}"
+    );
+    let ctx_id = body["ctx_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("pub-010: no ctx_id in {body}"))
+        .to_string();
+
+    // ---- Persisted, not merely accepted. "Accepted" alone would also pass if
+    //      the registry silently dropped the field, which is the more likely
+    //      defect and the one the fixture's rationale ("and persists them on the
+    //      body") actually cares about.
+    let (get_status, got) = anc_get(
+        &app,
+        &format!("/contexts/{}", pct_encode_path_segment(&ctx_id)),
+    )
+    .await;
+    assert_eq!(
+        get_status,
+        StatusCode::OK,
+        "pub-010: retrieval of the published context must succeed: {got}"
+    );
+    let served: Vec<String> = got["body"]["contributors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("pub-010: served body.contributors missing: {got}"))
+        .iter()
+        .map(|c| c.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        served, fixture_contributors,
+        "pub-010: contributors[] must round-trip EXACTLY as supplied, in order, including the \
+         did:key entry. A registry that accepted the publish and dropped or rewrote the field \
+         would satisfy a status-only assertion while failing the rule the fixture pins. \
+         served = {served:?}"
+    );
+}
+
 const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
 
 /// dk-001/002/004 (RFC-ACDP-0001 §5.11.1, conditional -- bundled with
