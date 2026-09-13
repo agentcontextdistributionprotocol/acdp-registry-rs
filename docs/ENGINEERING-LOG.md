@@ -5519,3 +5519,31 @@ drowned the one green that mattered. The green falsification is the informative 
 assertion works, a green proves the *test* does not — and it is the one that is easy to skim past,
 because a passing test after a deliberate break looks like a test that is merely lenient rather than
 one that never ran.
+
+## U-523 — a falsification that reddened nothing, and why that is the useful outcome
+
+Four assertions, four falsifications. Three reddened. The one for **415** reddened nothing, and the
+green was the informative result again — for a different reason than last time.
+
+Last unit a green falsification meant the test never ran. This time the test ran fine and asserted
+exactly what it claimed; **the thing I broke was not the thing it reads.** `AcdpBytes` hard-coded
+`StatusCode::UNSUPPORTED_MEDIA_TYPE` in its own rejection while `status_for_code` carried a 415 arm
+used only by `AcdpJson`. Breaking the shared arm left the publish path untouched, because the publish
+path never consulted it.
+
+That is worth more than the bug it revealed. The whole decision behind this unit is *the code decides
+the status, so code and status cannot disagree* — and the code contained two independent places where
+a status was chosen, which is precisely the drift the decision exists to prevent. **A guard against
+divergence that is itself duplicated has not removed the divergence; it has added a second copy of
+it.** The falsification is what surfaced that, and only because it was aimed at one arm rather than at
+"the suite".
+
+The fix was to make `AcdpBytes` derive its 415 from the same function, after which breaking that arm
+reddens both the publish matrix and `/auth/*` — one edit, two paths, which is the property the design
+claimed from the start and did not have.
+
+**The generalisable form:** when a falsification comes back green, resist reading it as "the assertion
+is lenient". Ask which of two different things happened — *the test never ran*, or *the test never
+reads what I varied*. Both are silent, both look like leniency, and they have opposite fixes: condition
+the skip, versus point the code at the single source it claims to use. See also `probe must read what
+you vary` — this is that rule applied to the guard rather than to the test.

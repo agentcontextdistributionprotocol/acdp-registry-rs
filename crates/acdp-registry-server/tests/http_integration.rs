@@ -8243,10 +8243,21 @@ async fn an_idempotent_replay_is_charged_like_any_other_successful_publish() {
 /// 400 Failed to deserialize query string: limit: invalid digit found in string
 /// ```
 ///
-/// **Statuses are asserted PER CASE, never as "not 400".** The whole point of
-/// the local rejection type is that 415 and 422 survive; an assertion that
-/// merely rejected 400 would pass against an implementation that collapsed
-/// them, which is the design this phase explicitly rejected.
+/// **Statuses are asserted PER CASE, never as "not 400".** The point of the
+/// local rejection type is that **415 and 413 survive** rather than collapsing
+/// into 400; an assertion that merely rejected 400 would pass against an
+/// implementation that collapsed them, which is the design this phase
+/// explicitly rejected.
+///
+/// **U-523 removed 422 from that list, and the distinction matters.** 415 and
+/// 413 survive because RFC-ACDP-0007 §5 *assigns* them to codes this registry
+/// emits. 422 was never assigned to anything — it appears nowhere in that RFC —
+/// and reached the wire only because `JsonRejection::JsonDataError` carries it
+/// and the extractor passed axum's status straight through. §5 pins
+/// `schema_violation` to 400, so the wrong-shape row below now asserts 400.
+/// "Do not collapse distinct statuses" and "do not invent a status the protocol
+/// does not use" are both true; the first was being read as licence for the
+/// second.
 ///
 /// The harness MUST enable auth: `/auth/*` is mounted only when
 /// `cfg.auth.enabled`, so without it every row below asserts against a 404 and
@@ -8296,12 +8307,15 @@ async fn extractor_rejections_return_the_rfc0007_envelope() {
             "unsupported_media_type",
         ),
         (
+            // U-523: was UNPROCESSABLE_ENTITY. RFC-ACDP-0007 §5 pins
+            // `schema_violation` to 400, and 422 appears nowhere in that RFC --
+            // it was axum's `JsonDataError` status passed straight through.
             "valid JSON, wrong shape",
             "POST",
             "/auth/challenge",
             Some("application/json"),
             r#"{"agent_id":123}"#,
-            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::BAD_REQUEST,
             "schema_violation",
         ),
         (
@@ -10814,6 +10828,77 @@ async fn the_two_media_type_gates_agree() {
              /contexts rejected={}, /auth/challenge rejected={}. One of the two \
              accept-set implementations has drifted from the other.",
             gated[0].1, gated[1].1
+        );
+    }
+}
+
+/// The `/admin/*` lifecycle gate must make the SAME accept/reject decision as
+/// `POST /contexts` (U-523).
+///
+/// A **sibling** of `the_two_media_type_gates_agree` rather than an extension of
+/// it, deliberately: that test's name is referenced from `conformance.rs`'s
+/// `CoverageMechanism::Direct` lists, and renaming a registered test reddens
+/// that verifier only after both changes merge.
+///
+/// `admin_retract` and `admin_republish` were the last two routed body-bearing
+/// handlers with no media-type gate. They now use the same `AcdpBytes`
+/// extractor and therefore the same accept-set — one implementation, not a
+/// third.
+///
+/// **What this deliberately does NOT constrain.** Only the gate's verdict —
+/// 415 or not — on a **present** `Content-Type`. It says nothing about the
+/// downstream outcome, which legitimately differs (`/admin/*` requires an admin
+/// token and a lifecycle-enabled build, `/contexts` does not), and nothing
+/// about an absent header, which all three routes now infer. It also does not
+/// constrain the RESPONSE media type: `/admin/*` sits outside the
+/// `application/acdp+json` response-header layer by design, so its 415 envelope
+/// is served as `application/json` while `/contexts`'s is not. That difference
+/// is intended and is not what this pins.
+#[tokio::test]
+async fn the_admin_media_type_gate_matches_the_publish_gate() {
+    let mut cfg = config(true);
+    cfg.auth.admin_tokens = vec!["secret-admin".into()];
+    let h = harness_from_config(cfg).await;
+
+    let types = [
+        "application/acdp+json",
+        "application/acdp+json; charset=utf-8",
+        "application/json",
+        "application/vnd.acdp+json",
+        "text/plain",
+        "text/plain; charset=utf-8",
+        "application/xml",
+        "application/jsonish",
+        "",
+    ];
+
+    for ct in types {
+        let mut gated = Vec::new();
+        for (route, auth) in [
+            ("/contexts", false),
+            ("/admin/contexts/ctx_nonexistent/retract", true),
+        ] {
+            let mut b = Request::builder()
+                .method("POST")
+                .uri(route)
+                .header("content-type", ct);
+            if auth {
+                b = b.header("authorization", "Bearer secret-admin");
+            }
+            let resp = h
+                .router
+                .clone()
+                .oneshot(b.body(Body::from(r#"{"reason":"x"}"#)).unwrap())
+                .await
+                .unwrap();
+            gated.push(resp.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        }
+        assert_eq!(
+            gated[0], gated[1],
+            "content-type {ct:?}: /contexts rejected={}, /admin/*/retract \
+             rejected={}. The admin gate has drifted from the publish gate — \
+             both must use the same `AcdpBytes` accept-set.",
+            gated[0], gated[1]
         );
     }
 }
