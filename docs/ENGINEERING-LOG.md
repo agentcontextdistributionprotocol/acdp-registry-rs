@@ -5547,3 +5547,53 @@ is lenient". Ask which of two different things happened — *the test never ran*
 reads what I varied*. Both are silent, both look like leniency, and they have opposite fixes: condition
 the skip, versus point the code at the single source it claims to use. See also `probe must read what
 you vary` — this is that rule applied to the guard rather than to the test.
+
+## An agreement test is blind to a uniform regression
+
+Two tests written earlier in this arc — `the_two_media_type_gates_agree` and
+`the_admin_media_type_gate_matches_the_publish_gate` — compare one route's verdict against another's.
+Breaking `status_for_code`'s 415 arm, the single shared centre both routes consult, left **both
+green**. The break moved both sides equally, so the property they assert was preserved while the
+behaviour they exist to protect was destroyed.
+
+This is not leniency and it is not hard-coding; I initially mislabelled it as the latter. It is
+structural: an assertion of the form `a == b` cannot see a change that maps `a -> a'` and `b -> b'`
+together, and a shared implementation guarantees that changes to it are exactly of that shape. **The
+more centralised the code, the blinder its agreement tests become** — which inverts the usual
+intuition that consolidating logic makes it easier to test.
+
+The fix is not to delete them. They still catch the thing they were written for: one route drifting
+away from another. The fix is that at least one test must pin the **absolute** verdict — what status
+this input actually produces — so a uniform move has something to break. That test is
+`every_acdp_bytes_route_shares_one_media_type_gate`, and breaking the shared arm reddens it.
+
+**How to tell in advance:** ask what happens if the code under test is *replaced wholesale* with
+something wrong. If every assertion still passes, the suite is measuring internal consistency rather
+than behaviour. Relational assertions (agree, match, round-trip, idempotent) all share this blind
+spot and all read as strong coverage.
+
+## Check the name against the thing before shipping the name
+
+`every_body_bearing_route_shares_one_media_type_gate` covered five of eight body-bearing routes, and
+the missing three did not use the gate it named. The test was correct; the name was a false claim
+about the system, and a name is the most quotable unit a test has — it is what a future reader greps
+for and what a summary repeats.
+
+Verifying it cost one grep of the route table and one read of the other extractor. That grep is what
+surfaced the actual finding of this unit: the two accept predicates are independent implementations
+that agree by coincidence. **The overclaiming name was the only thing pointing at it** — the code
+compiled, the tests passed, and nothing else in the run would have asked whether `/auth/*` shared
+the gate.
+
+## A falsification can be absorbed by an earlier assertion
+
+Four falsifications, three mechanisms visible. The third — remapping
+`JsonRejection::MissingJsonContentType` off 415 — was aimed at the absent-header assertion at the end
+of the test, but reddened the present-type loop above it instead, because axum returns that same
+rejection variant for a *wrong* content type as well as an absent one. The run came back red, the
+mechanism named was real, and the assertion actually targeted was never evaluated.
+
+A red falsification is therefore not proof that the assertion you aimed at works. **Read which
+assertion fired, not merely that one did.** Where an earlier assertion absorbs the change, the later
+one needs a separate falsification chosen to leave the earlier one satisfied — here, making
+`AcdpJson` infer an absent header, which is also the precise "cleanup" the assertion exists to block.
