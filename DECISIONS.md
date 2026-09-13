@@ -3159,3 +3159,45 @@ conformance job would have made this whole ratchet advisory.
 
 **Status:** applied. Covering the 12 required fixtures is deliberately NOT in this unit — it is real
 conformance work, scoped from #291.
+
+---
+
+## Decision: the wire code decides the HTTP status, not the extractor (U-523)
+
+**The defect.** Every wrong-shaped body on `/auth/*` answered **422 with `error.code =
+"schema_violation"`**. RFC-ACDP-0007 §5 is a table of `(code, status)` pairs and it pins
+`schema_violation` to **400** (`RFC-ACDP-0007-capabilities.md:228`). **422 appears nowhere in that
+RFC.** This was not a debatable status choice — it was a status the protocol does not define, reaching
+the wire because `AcdpJson` set `status: rej.status()` and axum's `JsonRejection::JsonDataError`
+carries 422.
+
+**The fix is structural, not a patch.** `status_for_code(code, fallback)` derives the status from the
+wire code, so a response whose code and status disagree is **unrepresentable** rather than merely
+tested against. It mirrors `http_status_for_acdp`'s own arms, so the extractor and the error type
+cannot drift apart about the same code.
+
+**The fallback is the part that was already right and had to be kept.** `extract.rs`'s original
+comment warned in its own words: *"The rejection's OWN status, never a hard-coded 400 … hard-coding
+400 would silently downgrade an oversized body."* Both rejection enums are `#[non_exhaustive]`, so an
+unrecognised future variant still keeps axum's status. **413 and 415 survive**, and each is
+individually falsified rather than assumed.
+
+**`/admin/*` folded in (was U-522).** `admin_retract` and `admin_republish` were the last two routed
+body-bearing handlers with no media-type gate; both now use `AcdpBytes` and take the **same
+absent-header choice** as `POST /contexts`. One extractor, one accept-set — three behaviours across
+three modules would have been worse than the single inconsistency this started from.
+
+**A count worth correcting:** the unit was assigned as "three ungated body handlers" in `admin.rs`.
+There are **two routed** ones. The third `body: Bytes` is the private `admin_lifecycle_transition`
+helper, which is not a route and takes its bytes as an ordinary parameter — a grep counting parameter
+types, not handlers.
+
+**Falsified individually, and one falsification exposed a real gap in this work.** Reverting
+`status_for_code` reddens the wrong-shape row; breaking the 413 arm reddens the oversize test;
+un-gating `admin_retract` reddens the admin agreement test. Breaking the **415** arm initially reddened
+**nothing**, because `AcdpBytes` hard-coded its own 415 instead of deriving it — so the two paths could
+have drifted exactly as this decision claims to prevent. `AcdpBytes` now derives it too, and the same
+falsification reddens both the publish matrix and `/auth/*`.
+
+**Status:** applied. Recorded in `docs/UPGRADING.md`, not `CHANGELOG.md` — the root changelog forbids
+version sections and `root_changelog_stays_a_pointer` enforces it.
