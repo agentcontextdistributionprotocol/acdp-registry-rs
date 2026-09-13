@@ -15,7 +15,7 @@ use axum::Json;
 use chrono::Utc;
 use serde::Deserialize;
 
-use crate::extract::AcdpQuery;
+use crate::extract::{AcdpBytes, AcdpQuery};
 use crate::rate_limit::PublishCharge;
 use crate::state::AppState;
 
@@ -356,7 +356,22 @@ pub(crate) fn reconcile_tenant_sources(
 pub async fn publish<S: ExtendedRegistryStore + 'static>(
     state: State<Arc<AppState<S>>>,
     headers: HeaderMap,
-    body: Bytes,
+    // U-520: `AcdpBytes` rather than a bare `Bytes`, so `POST /contexts`
+    // enforces the media-type gate RFC-ACDP-0007 §4.1/§5 requires and spec
+    // fixture `err-002` pins. This handler previously never looked at
+    // `Content-Type`: `text/plain` was parsed anyway and answered
+    // `schema_violation`, a code `extract.rs`'s own comment already described as
+    // stating "something false", because it asserts a structural validation that
+    // never ran.
+    //
+    // **The raw bytes are deliberately still raw.** Routing through `AcdpJson`
+    // would also have moved a wrong-shaped body from 400 to 422, which §5's
+    // status table forbids for `schema_violation` -- see `AcdpBytes`'s doc.
+    // Nothing about what this handler hashes or verifies changes: `body` is
+    // consumed exactly once, by the `from_slice` below, and the content hash is
+    // recomputed from the re-serialized struct
+    // (`publish_identity_proven_offline`), never from the received bytes.
+    AcdpBytes(body): AcdpBytes,
 ) -> Result<Json<PublishResponse>, RegistryError> {
     // FEAT-10: record the failure outcome centrally so every `?` early return
     // is captured by its wire code. Success outcomes (`inserted` /

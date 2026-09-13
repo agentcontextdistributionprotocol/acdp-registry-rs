@@ -5450,3 +5450,72 @@ this fed, and acdp-rs#279 for the upstream report.
 `acdp-client`'s own build stayed green — nothing in that crate observes `Send`-ness of its public
 futures — so the regression could only ever surface in a downstream axum consumer. Auto-traits are
 part of an async API's contract even though they appear in no signature.
+
+## U-520 PR A — the reuse that would have broken something else
+
+The obvious fix for an ungated `POST /contexts` was to route `publish` through the `AcdpJson`
+extractor that already gates `/auth/*`. It is the right instinct — one implementation of the
+accept-set, one envelope, one minted code — and it was wrong here for a reason that only showed up on
+the way to being measured.
+
+`AcdpJson` delegates to axum's `Json`, whose `JsonDataError` rejection carries **422**. So routing
+`publish` through it fixed the 415 and simultaneously moved *every wrong-shaped publish* from 400 to
+422. RFC-ACDP-0007 §5's status table pins `schema_violation` to 400. The reuse would have closed one
+conformance violation by opening another with a much wider blast radius.
+
+It surfaced as a one-line test failure — scenario A expected 400, got 422 — and the temptation at that
+moment is to adjust the expectation, because A is only supposed to assert "not rejected". Reading the
+spec's table instead is what turned a puzzling status into the reason not to take the obvious path.
+
+The fix that shipped keeps the reuse where it pays (`AcdpRejection`, the envelope, the code constant)
+and declines it where it costs (the deserializer and its status). The cost of that choice is a
+re-implemented six-line predicate, which is a genuine drift risk — so it is pinned by a test asserting
+both gates agree across a matrix of content types, rather than by the comment claiming they do.
+
+**Two things worth keeping from the measurement.**
+
+*The 104.* Gating an absent `Content-Type` reddened 104 of 159 integration tests. The fixture allows
+either reading, so the number is not a bug report — it is the shape of the client breakage the other
+reading would have caused, and it converted a coin-flip into an obvious decision. Scenario E accepts.
+
+*The two-line diff.* The entire non-comment change to `handlers/context.rs` is the import and the
+parameter type; the `body` binding is unchanged. That is also the evidence that nothing about hashing
+or signature verification moved — not a claim that it didn't, but a diff in which it could not have.
+When a change touches a signing path, the argument to reach for is one that makes the risky thing
+structurally absent rather than reviewed and found safe.
+
+## U-520 PR B — the falsification that failed, and what it caught
+
+Five of the six falsifications behaved. The sixth did not: mis-grading `err-002` as
+`RequiredByProfile` left the test **green**.
+
+The assertion was fine. The test never reached it. `registries/profiles.json` stores `profiles` as an
+**array** of objects with an `id` field, not a map keyed by profile name, so a `.get("acdp-registry-core")`
+returned `None`, the helper returned `None`, and the caller took its "spec unavailable, skipping"
+branch — reporting PASS while asserting nothing.
+
+Two things are worth separating here.
+
+The first is that **the skip branch is the hazard, not the lookup bug.** A lookup bug that panicked
+would have been obvious. What made it survive was a well-intentioned pattern copied from the
+surrounding tests: gracefully skip when the spec is unreachable. That pattern is correct for a
+developer running `cargo test` with no `ACDP_SPEC_DIR`, and it is exactly wrong in CI, where the spec
+IS reachable and a skip can only mean something is broken. The fix is not to remove the skip but to
+condition it: `assert!(!require_conformance())` before returning, which is the idiom `spec_fixtures()`
+already uses. A green skip and a green pass are indistinguishable in the summary line, and only one of
+them means anything.
+
+The second is that **I had already hit this exact shape an hour earlier and it did not transfer.**
+While measuring, my first Python probe of the same file crashed with `'NoneType' object is not
+subscriptable` on the same map-vs-array assumption; I fixed the probe, got my numbers, and then wrote
+the Rust against the assumption the probe had just disproved. The scratch tool and the shipped code
+were treated as different problems because they were written in different languages twenty minutes
+apart. When a throwaway script teaches you the shape of a file, that lesson belongs in a note, not in
+the script you are about to delete.
+
+**What this says about the practice, not the bug.** Falsifying every assertion individually is what
+separated these: had I falsified "the test suite" rather than each assertion, five reds would have
+drowned the one green that mattered. The green falsification is the informative one — a red proves the
+assertion works, a green proves the *test* does not — and it is the one that is easy to skim past,
+because a passing test after a deliberate break looks like a test that is merely lenient rather than
+one that never ran.

@@ -23,6 +23,37 @@ belongs in the per-crate changelogs.
 
 ## 0.1.4
 
+**Wire change: `POST /contexts` now rejects an unaccepted `Content-Type` with 415.**
+
+Before 0.1.4 this endpoint never looked at `Content-Type`. It parsed the body whatever the header
+said, so a request sent as `text/plain` was answered **400 `schema_violation`**. It now answers
+**415 `unsupported_media_type`** and does not parse the body at all.
+
+This is a conformance fix — RFC-ACDP-0007 §4.1/§5 and spec fixture `err-002` require it, and
+`schema_violation` was stating something false, since it asserts a structural validation that never
+ran. But it is a behaviour change on a success-adjacent path, so check it before upgrading:
+
+| what you send to `POST /contexts` | before 0.1.4 | 0.1.4 |
+|---|---|---|
+| `application/acdp+json` | parsed | parsed — **unchanged** |
+| `application/acdp+json; charset=utf-8` | parsed | parsed — **unchanged** |
+| `application/json` | parsed | parsed — **unchanged** |
+| **no `Content-Type` header** | parsed | parsed — **unchanged** |
+| `text/plain`, `application/xml`, anything else | 400 `schema_violation` | **415 `unsupported_media_type`** |
+
+**Who needs to act:** only a client sending a `Content-Type` that is neither `application/json` nor
+an `application/*+json` type. Media-type *parameters* are ignored, so `; charset=utf-8` is fine, and
+omitting the header entirely is still accepted — that was deliberate, because requiring it would
+break every publisher that does not send one.
+
+A client that already sends `application/acdp+json`, or none at all, sees no difference.
+
+**Unchanged:** what is hashed and what is verified. The handler still receives the raw bytes and the
+content hash is still recomputed from the re-serialized request, exactly as before.
+
+**Not changed in this release:** `/admin/*` handlers are still ungated (tracked separately), and
+`/auth/*` continues to reject a missing `Content-Type` with 415, which it always has.
+
 **Upgrade the image and `docker/docker-compose.yml` together.** If you deploy the compose recipe,
 pulling one without the other does not boot.
 
