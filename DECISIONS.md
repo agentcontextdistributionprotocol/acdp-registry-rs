@@ -2408,3 +2408,13 @@ wired into `docker.yml` and runs on every workflow event.
 case table survives a move to a Rust test unchanged if the convention is later unwelcome.
 
 **Status:** `CONFIRMED (2026-09-13)`.
+
+### 2 (resolved). `{{is_default_branch}}` in `enable=` for `type=sha` — CONFIRMED (Opus), by run 34763580595
+
+The deferral above is closed by the evidence it named, not by a later opinion. PR #264's own
+`docker` run computed `tag-names: ["pr-264"]` — no `sha-` entry — against the pre-fix PR run
+34725795501's `["pr-262","sha-3617f76"]`. metadata-action does evaluate the handlebars in
+`enable=` for a `type=sha` rule; the gate fires; the fallback expression was never needed.
+`self-test the image-tag guard` and `assert image tags` both green, `build + push` skipped as a
+pull request requires. Recorded here because the next reader should not have to re-derive which
+run answered it.

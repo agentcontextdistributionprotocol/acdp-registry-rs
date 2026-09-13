@@ -2547,8 +2547,13 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   the only evidence that counts here, and it is free); pinning a newer action version (not
   needed, and a version bump is a separate change).
 - **Blast radius if wrong:** one failed CI step and a two-token edit. Nothing publishes.
-- **Status:** UNCONFIRMED — resolve from this PR's `docker` run output, specifically whether
-  the computed `tag-names` contain a `sha-` entry on a pull request.
+- **Status:** CONFIRMED (2026-09-13) by run **34763580595** — PR #264's own `docker` run, which
+  is the only thing that could settle it. `DOCKER_METADATA_OUTPUT_TAG_NAMES: pr-264` and
+  `"tag-names":["pr-264"]`: **no `sha-` entry**, where the pre-fix PR run 34725795501 computed
+  `["pr-262","sha-3617f76"]`. So the handlebars *is* evaluated in `enable=` for `type=sha`, the
+  gate fires, and the same gate suppresses the tag on the release path for the same reason.
+  `self-test the image-tag guard` and `assert image tags` both green; `build + push` skipped, as
+  a pull request must. The fallback expression was not needed and was not applied.
 
 ## U-503 — the double build is KEPT; only the mutable tag is fixed
 
