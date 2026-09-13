@@ -82,13 +82,19 @@ hold entries from several releases. Use the commands.
 
 ### Added
 
-- **Cost, measured instead of feared.** Per configuration, `build` is 2-12s warm and *usually
-  cheaper than the clippy step beside it*, because clippy runs additional lint passes over the same
-  crate graph. All five total 21s. And this job is not on the critical path — from a real run:
-  `tests` 2m36s, docker `build` 2m31s, `coverage` 1m29s, `clippy` **39s** — so with jobs in
-  parallel, PR latency is set by `tests` and does not move. No per-PR/scheduled split was
-  introduced: it would have added a second place for the feature lists to go stale, and a delay
-  before a break was seen, to relieve a job that is not the bottleneck.
+- **Cost, measured in CI rather than extrapolated from a laptop — and the laptop was wrong by 5x.**
+  Locally, warm, the five builds totalled 21s and each was usually *cheaper* than the clippy step
+  beside it, because clippy runs extra lint passes over the same graph. **In CI the `clippy` job went
+  from 39s to 2m27s: +108s, not +21s.** The local figure was optimistic because that machine had
+  already built every feature combination during the measurement pass, whereas the runner's cargo
+  cache holds no artifacts for combinations this repo had never built.
+  The conclusion survives but the margin is thin and must be quoted with it: jobs run in parallel and
+  `tests` is 2m45s, so PR latency is still set by `tests` — with **18 seconds** of headroom, not the
+  comfortable gap the local numbers implied. No per-PR/scheduled split was introduced, because one
+  would add a second place for the feature lists to go stale and a delay before a break is seen. But
+  the trigger for revisiting that is now explicit and near: **if the `clippy` job ever exceeds
+  `tests`, it becomes the critical path and the split should be reconsidered.** One more feature
+  configuration would likely do it.
 
 - **A finding that narrows #265's own risk claim, worth recording because it is easy to overstate
   the fix.** The classic undefined-symbol link failure is **unreachable from this repo's source**:
