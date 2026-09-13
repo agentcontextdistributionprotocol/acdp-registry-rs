@@ -63,6 +63,16 @@ readonly SHA_TAG_PREFIX='sha-'
 # token. `steps.meta.outputs.tags` may or may not end in a newline, and a guard
 # that quietly loses the last tag in its input is worse than no guard — the
 # self-test below caught exactly this while it was being written.
+# shellcheck disable=SC2020  # deliberate, and narrowed to this function only.
+# SC2020 warns against expecting `tr` to replace WORDS. This maps three
+# separator CHARACTERS (comma, space, tab) each to a newline, which is what
+# `tr` is for; the note fires only because set2's newlines repeat. Equalising
+# the set lengths does not silence it (the duplicates are the point), and the
+# alternatives are worse: unquoted parameter expansion trades this for SC2086
+# plus glob exposure needing `set -f`, and `sed` diverges between BSD and GNU
+# on `\n` in the replacement. The directive cannot sit on the offending line
+# itself, because a `#` between backslash-continued lines is part of the
+# command, not a comment — hence function scope, one code, with this reason.
 normalise_tags() {
     local raw="$1"
     printf '%s\n' "$raw" \

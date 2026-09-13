@@ -167,7 +167,7 @@ jobs:
             -e POSTGRES_USER=acdp -e POSTGRES_PASSWORD=acdp -e POSTGRES_DB=acdp_registry \
             --health-cmd "pg_isready -U acdp" --health-interval 2s --health-retries 15 \
             postgres:16-alpine
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             [ "$(docker inspect -f '{{.State.Health.Status}}' pg)" = healthy ] && break
             sleep 2
           done

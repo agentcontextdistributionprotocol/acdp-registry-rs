@@ -354,7 +354,7 @@ jobs:
           ACDP_REGISTRY_REGISTRY__PORT=8899 \
             ./target/debug/acdp-registry & SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if curl -fsS "http://127.0.0.1:8899/healthz" >/dev/null 2>&1; then break; fi
             if ! kill -0 "$SERVER_PID" 2>/dev/null; then
               echo "::error::the shipped config/registry.example.toml did not boot -- the README quick-start is broken"
@@ -481,10 +481,13 @@ jobs:
             --fail-under-lines 75
       - name: coverage summary
         run: |
-          echo '## Coverage' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # One append of one block, rather than four opens of the same file.
+          {
+            echo '## Coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         with:
           name: lcov
