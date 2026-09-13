@@ -2520,7 +2520,10 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 - **Blast radius if wrong:** low and local. The script is 1 file, invoked from 2 workflow
   steps; if the convention is unwelcome the logic moves to a Rust test in one commit, and the
   self-test table moves with it unchanged.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-13), Opus, at reconcile. The deciding point is not taste: the
+  convention-matching alternative was out of path grant, so it was never this lane's to choose.
+  Of the options actually available, this is the only one that could be falsified before merge,
+  and it was — see `DECISIONS.md`, U-503 decision 3.
 
 ## U-503 — metadata-action honours `{{is_default_branch}}` in `enable=` for `type=sha`
 
@@ -2570,5 +2573,10 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 - **Blast radius if wrong:** the leader overrules the call and the double build is collapsed in
   a follow-up unit. Nothing in this change forecloses that — the gate and the guard stay correct
   either way, since a single publishing path trivially satisfies the one-writer invariant.
-- **Status:** UNCONFIRMED — the leader named this as part of the defect and is entitled to
-  overrule the reasoning on evidence.
+- **Status:** CONFIRMED (2026-09-13), Opus, at reconcile — as the right call, *and* as one that
+  must stay visible rather than be quietly absorbed. Reversible: nothing here forecloses
+  collapsing the builds later, and a single publishing path satisfies the one-writer invariant
+  the guard asserts trivially, so a follow-up unit would find the guard already correct. Kept
+  visible by being argued in the PR body and carried in the lane's `done` report, not by
+  spending a separate board message on something already written where the leader reads it.
+  See `DECISIONS.md`, U-503 decision 1.
