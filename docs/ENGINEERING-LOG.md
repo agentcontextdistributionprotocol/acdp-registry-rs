@@ -5222,9 +5222,22 @@ template cannot be verified short of an actual release for seven of the eight cr
 
 ## U-504 — #216: the mutation ratchet extended to `handlers/context.rs` (2026-09-13, lane-2)
 
-Measured at **`27adef4`** with `cargo mutants -j1`, scope from `.cargo/mutants.toml`
-(`receipt.rs` + `handlers/log.rs` + `handlers/context.rs`), spec pinned to
-`d1f06d0d49b73d411a3983d3877321ccaccd38e7` with `ACDP_REQUIRE_CONFORMANCE=1`.
+Measured with `cargo mutants -j1`, scope from `.cargo/mutants.toml` (`receipt.rs` +
+`handlers/log.rs` + `handlers/context.rs`), `ACDP_REQUIRE_CONFORMANCE=1`.
+
+**Measured twice, at two spec pins, and the result is identical.** `main` moved the conformance
+pin from `d1f06d0d49b73d411a3983d3877321ccaccd38e7` to `16211e64cf54973526a7af71adc8aed8996c3ae1`
+during this unit (U-518's merge), and that diff touches the replayed fixtures — five modified
+(`can-004`, `dk-001`, `dk-002`, `dk-004`, `data-ref-007`) plus a new `err-002`. Since
+`mutants.yml` derives its pin from `ci.yml`, a baseline measured at the old pin would have been
+true of a spec CI no longer uses. So the full 8-shard run was repeated at `af6647d` against the
+new pin: **213 / 131 caught / 8 survivors / 1 timeout / 73 unviable, with the survivor set
+content-identical across both pins.** The caveat is therefore closed rather than carried.
+
+The new pin was obtained with `git -C ../acdp-spec-pinned archive <sha> | tar -x` into scratch —
+a pure READ of the sibling repo, which stayed at `d1f06d0` with a clean tree throughout. Moving
+another repo's checkout is a cross-repo write and is not a lane's call, least of all for a fixture
+other lanes may be running against.
 
 | | U-502 (74-mutant scope) | **U-504 (213-mutant scope)** |
 |---|---|---|
