@@ -479,7 +479,7 @@ pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
     // plus the tenant gate -- for the whole page, and both SQL backends
     // override it with a single query.
     //
-    // `anonymous_public_reads` is read from the SERVER'S CAPABILITIES, not from
+    // `public_arm_open` is read from the SERVER'S CAPABILITIES, not from
     // `state.config.auth`, because that is the field the call being replaced
     // actually consulted: `RegistryServer::retrieve` -> `can_retrieve` gates its
     // public arm on `self.caps.anonymous_public_reads || requester.is_some()`.

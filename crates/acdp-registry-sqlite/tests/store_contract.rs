@@ -906,7 +906,7 @@ mod transparency_log {
 // INDEPENDENT re-statement of RFC-ACDP-0008 §4.5 (not the implementation's
 // former predicate) is the oracle, and the SQL result set MUST equal it
 // across the full matrix {public, restricted, private} × {anonymous, owner,
-// audience-reader, unauthorized-other} × anonymous_public_reads.
+// audience-reader, unauthorized-other} × public_arm_open.
 
 mod visibility_sql {
     use super::*;
@@ -1055,7 +1055,7 @@ mod visibility_sql {
             let is_owner = requester.as_ref() == Some(&agent(OWNER));
             let is_reader = requester.as_ref() == Some(&agent(READER));
 
-            // ── search × anonymous_public_reads ──
+            // ── search × public_arm_open ──
             for anon_reads in [true, false] {
                 let params = SearchParams {
                     domain: Some(dom.to_string()),
@@ -1085,7 +1085,7 @@ mod visibility_sql {
                     "total_estimate must equal the §4.5-visible count: role={role} anon_reads={anon_reads}"
                 );
 
-                // ── list_contexts × anonymous_public_reads (REG-11 Phase 2) ──
+                // ── list_contexts × public_arm_open (REG-11 Phase 2) ──
                 let page = store
                     .list_contexts(50, None, requester.as_ref(), Some(tenant), anon_reads)
                     .await
@@ -1147,7 +1147,7 @@ mod visibility_sql {
             }
         }
 
-        // Anonymous caller with anonymous_public_reads: only the 6 public
+        // Anonymous caller with the public arm open: only the 6 public
         // rows are disclosable. Ask for a page of 4.
         let params = SearchParams {
             domain: Some(dom.to_string()),

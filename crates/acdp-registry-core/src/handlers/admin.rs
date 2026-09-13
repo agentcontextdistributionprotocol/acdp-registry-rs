@@ -84,13 +84,18 @@ pub async fn admin_list<S: ExtendedRegistryStore + 'static>(
     // SQL arms require a non-NULL requester DID, which an admin token
     // never supplies.
     let admin_requester: Option<&acdp::types::primitives::AgentDid> = None;
-    // `true` here is a TRANSLATION, not a policy choice, and not this route
-    // ignoring `anonymous_public_reads`. The store parameter is named for one
-    // caller's use case; what the predicate actually consumes is "does the
-    // public arm evaluate true for this caller". With `requester = None` that
-    // arm is `(? IS NOT NULL OR ?anon)`, which collapses to `?anon` alone — so
-    // `true` is the ONLY representable way to say *authenticated but unnamed*
-    // in a vocabulary that has no term for it.
+    // `true` here says exactly what it means, now that the parameter is named
+    // for what the predicate consumes: the public arm is open for this caller.
+    // With `requester = None` that arm is `(? IS NOT NULL OR ?public_arm_open)`,
+    // which collapses to `?public_arm_open` alone, so `true` is how an
+    // *authenticated but unnamed* caller is expressed.
+    //
+    // This comment used to open by insisting `true` was "a TRANSLATION, not a
+    // policy choice, and not this route ignoring `anonymous_public_reads`" --
+    // because under the old parameter name it read as a bypass, and three
+    // readers in a row took it for one. The apology is kept in this one
+    // sentence rather than deleted, because the paragraph below still exists to
+    // stop a fourth reader, and it is worth knowing the name was the reason.
     //
     // Do not "fix" this to read the flag. Honouring it here is the rejected
     // first draft of #133: on the shipped default (`false`) it zero-rows every
