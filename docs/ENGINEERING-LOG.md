@@ -6058,3 +6058,31 @@ corrections too. It surfaced only because a mutant's failure output quoted the *
 restore is not a revert to known-good; it is a jump to an arbitrary past state whose contents you must
 remember, and what it eats is the most recent work — the work you are least likely to re-derive because
 you believe it is done.
+
+## U-535 — a differential with a shared centre points at the wrong file
+
+`parity.rs` cross-checked the RFC-ACDP-0008 §4.5 disclosure rule across what its own comment called
+three implementations. Two of the three were the same function: the trait default body is
+`retrieve_visible` plus a tenant check, and the N-call reference calls `retrieve_visible` directly.
+
+The interesting part is the failure mode. A shared-centre differential does not just miss a defect in
+the centre — it **misattributes** it. With `retrieve_visible` broken, the leg that consults it agrees
+with itself and stays green; the SQL, derived separately, is the only thing that can disagree; so the
+report reads "the SQL disagrees". Falsified at baseline: the old legs printed
+`over-disclosure: []` and blamed the batch for under-disclosing, which is precisely backwards.
+
+Fix: `EXPECTED_BY_SPEC`, a literal per-requester table transcribed from the RFC, with **both**
+implementations compared against it. Falsification, per backend and per leg:
+
+| mutation | anchor names the Rust rule | anchor names the SQL |
+|---|---|---|
+| `retrieve_visible`: `None => false` → `None => true` | 4 | 0 |
+| SQLite `LIST_VISIBILITY_SQLITE`: second-arm `AND` → `OR` | 0 | 6 |
+| Postgres `LIST_VISIBILITY_PG`: second-arm `AND` → `OR` | 0 | 6 |
+
+Attribution is correct in both directions, on both backends. The two SQL mutations also fired the new
+named outsider pins (2 each), which is what those pins exist for.
+
+The generalisable lesson: **count the distinct expressions a suite can bottom out in, not the number
+of comparisons it performs.** Two differentials terminating at the same leaf give the coverage of one,
+and the doc comment claiming otherwise is itself the defect.
