@@ -1,0 +1,84 @@
+# cargo-mutants configuration — the mutation oracle for #216 (unit U-502).
+#
+# WHAT THIS IS FOR. `conformance.rs`'s anti-vacuity guards prove a registered test
+# EXISTS (a substring search, plus the compile-checked `DIRECT_FNS` table added by
+# #249). Neither can prove a test ASSERTS anything: a test that exists, compiles,
+# runs, and asserts nothing satisfies both. Only breaking the code and watching the
+# test go red proves that. This file configures that oracle.
+#
+# THE DOCUMENTED COMMAND IS JUST:
+#
+#     cargo mutants
+#
+# and it must stay that short, because every setting below is load-bearing.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS FILE IS AT `.cargo/mutants.toml` AND NOT `mutants.toml` AT THE ROOT
+# ---------------------------------------------------------------------------
+# `cargo-mutants` reads `.cargo/mutants.toml` AUTOMATICALLY. A root-level
+# `mutants.toml` is read only when every invocation passes `--config mutants.toml`.
+#
+# That difference is a correctness property here, not a preference. `test_workspace`
+# below is MANDATORY (see next block); a run that omits it produces a survivor list
+# full of false positives, which is indistinguishable from a real one without
+# re-deriving every entry by hand — worse than no baseline at all. A config the tool
+# picks up by itself cannot be omitted by accident. A root file plus a required flag
+# makes "ran it without the flag" a one-typo mistake that silently yields a wrong
+# answer, and a wrong answer that looks right is the failure mode this whole unit
+# exists to remove.
+#
+# ---------------------------------------------------------------------------
+# `test_workspace` — MANDATORY, and the reason is measured, not stylistic
+# ---------------------------------------------------------------------------
+# Measured in DECISIONS.md #17 (unit H-M, PR #252). By default cargo-mutants tests
+# each mutant with a PACKAGE-scoped command:
+#
+#     cargo test --verbose --package=acdp-registry-core@0.1.3
+#
+# That runs acdp-registry-core's own unit tests and nothing else. This repo's
+# coverage does not live there — it lives in acdp-registry-server's integration
+# suites. So the default configuration reports survivors for code that IS covered,
+# by tests it never ran. Demonstrated on one mutant, both ways:
+#
+#   receipt.rs:58:21 `replace || with && in validated_fragment`
+#     package-scoped   -> MISSED
+#     test_workspace   -> CAUGHT, by `malformed_retired_receipt_key_fails_startup`
+#                         in crates/acdp-registry-server/src/main.rs — a DIFFERENT
+#                         package, which is precisely why package scoping is blind.
+#
+# Under test_workspace the whole of receipt.rs comes back 7 caught / 2 unviable /
+# 0 missed: no coverage gap, and the lone survivor was an artefact of scope.
+test_workspace = true
+
+# ---------------------------------------------------------------------------
+# THE RATCHETING SCOPE — 74 mutants, and every exclusion below is deliberate
+# ---------------------------------------------------------------------------
+# Measured at 5c401db: receipt.rs 9 + handlers/log.rs 65 = 74.
+#
+# NOT the whole workspace (1398 mutants at 5c401db, measured via `--no-config`).
+# At the ~6.2s/mutant marginal cost measured in DECISIONS.md #17 that is ~2.4h, and
+# #216 lists "blocking PRs on a full mutation run" as a non-goal. This is a
+# scheduled job over a bounded set, by design.
+#
+# NOT handlers/context.rs (134 mutants at 5c401db) even though it is the densest
+# core logic. It is held by another unit this wave and will change underneath this
+# one, so a budget keyed to it would go red for a reason unrelated to the property
+# it guards — and a red check nobody can explain gets disabled, after which the real
+# regression walks through. Tracked separately. The staleness is not hypothetical:
+# DECISIONS.md #17 recorded context.rs at 132 one day before this file measured 134,
+# and the workspace at 1383 against 1398 here.
+#
+# A NOTE ON WIDENING THIS. `--file` UNIONS with these globs rather than replacing
+# them (measured: config alone -> 9; config + `--file handlers/log.rs` -> 74). So a
+# stray `--file` can only ever widen a run, never silently narrow it to nothing.
+# To deliberately escape this scope, pass `--no-config`.
+examine_globs = [
+    "crates/acdp-registry-core/src/receipt.rs",
+    "crates/acdp-registry-core/src/handlers/log.rs",
+]
+
+# A floor under the auto-set per-mutant timeout. cargo-mutants derives the timeout
+# from the baseline `cargo test`, which is the right default; this only stops a
+# loaded machine from reporting a TIMEOUT where the real answer is CAUGHT. A mutant
+# that genuinely hangs still costs this much and no more.
+minimum_test_timeout = 300
