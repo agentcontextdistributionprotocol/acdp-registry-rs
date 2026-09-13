@@ -367,7 +367,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   nothing in this diff breaks — the ratchet still gains real teeth in the required `tests`
   job via the two unconditional tests; only the `Replayed`-mechanism half stays
   advisory-only, the same gap that exists today for the whole ratchet.
-- **Status:** UNCONFIRMED (awaiting a repo admin to action the branch-protection change).
+- **Status:** CONFIRMED (awaiting a repo admin to action the branch-protection change).
 - **Executed (2026-09-01):** a repo admin actioned the recorded recommendation.
   Re-verified via the same read-only call,
   `gh api repos/agentcontextdistributionprotocol/acdp-registry-rs/branches/main/protection`
@@ -812,7 +812,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   crates.io fetches.
 - **Blast radius if wrong:** releases stay stalled; no data or wire effect. Reversible by
   reverting one config file.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 
 ### The bootstrap run MINTS the new-shape tags — the one link with no local evidence
 - **Assumed:** `release-plz release` will create `acdp-registry-<crate>/v0.1.0` tags on the first
@@ -827,7 +827,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   first run that is green and PR-less but mints NO tags is a FAILURE, not a pass.
 - **Blast radius if wrong:** the stall persists in a new form; docker's tag trigger stays dead.
   No irreversible effect.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 - **Update, 2026-09-11 — PARTIALLY narrowed, still UNCONFIRMED.** The `release` path has now been
   exercised locally after all, which the paragraph above says was never done; that sentence was
   true when written and is now superseded rather than wrong. `release-plz release --dry-run`, run
@@ -884,7 +884,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Blast radius if wrong:** the docker trigger stays dead exactly as it is today — no
   regression, just no fix. The guard step cannot catch it, because the guard only runs once the
   workflow has already triggered.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 
 ### The `ACDP_BOT` App has `contents: write` + `pull-requests: write` on THIS repo
 - **Assumed:** yes, from `repository_selection: all` on the org App and its use in three existing
@@ -895,7 +895,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   `permission-contents` / `permission-pull-requests` rather than inheriting every installation
   permission (which would have included `workflows: write`).
 - **Blast radius if wrong:** the release-plz job fails at the mint step. Reversible in two lines.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 
 ### Rule-10 / rule-15 sweep: a FOREIGN pin went stale because of this branch, and I cannot fix it
 - **Observed:** `ASSUMPTIONS.md` (U-005's entry) cites `docker/RAILWAY.md:45`. That was correct at
@@ -2994,3 +2994,74 @@ still open, and this is the outcome:
   moving the steps to their own job is one commit, and becomes correct the moment the contexts change.
 - **Status:** UNCONFIRMED — the leader or the human may prefer to make the settings change and take
   the parallel form.
+
+## U-507 — reconciliation of this file's open entries (lane-3, 2026-09-13)
+
+Resolutions are **appended here**; only the status *token* on each entry's own status line was
+rewritten in place, per the narrow grant. Entries are addressed by line number as of base `f81013e`
+so the mapping is checkable. Every resolution names its evidence; none says "reviewed and confirmed".
+
+- **Scope, re-derived rather than inherited (read 17:08:08Z, base `5fd7cb5`).** **37 open items**
+  carrying **46 open status declarations**. Three earlier figures existed and all three are unfit:
+  `grep -c UNCONFIRMED` = **50** (counts prose — `:328` narrates a *past* status, `:379`
+  cross-references a flip); an anchored `^\s*-?\s*\*\*Status:?\*\*\s*UNCONFIRMED` = **28**, which
+  *undercounts* because this file's statuses also appear mid-prose-line (`:708`), with a
+  parenthetical (`**Status (updated 2026-09-01):**`), spelled `**Status of the original
+  assumption:`, with the **token wrapped onto the next line** (`:980`, `:1031`, `:1056`), and — 13
+  times — as a **bullet or heading label with no `Status` word at all** (`- **UNCONFIRMED —
+  awaiting human ruling:**`, `### OPEN — escalated, NOT decided here:`); and U-505's hand count of
+  **35** (`:2544`), which excluded two shapes it listed separately and predates 8 entries added
+  since. **U-505's enumeration and this one agree exactly** at 37 declarations before `:2537`
+  (U-505: 25 + 1 status-line, 9 bullet-is-status, +1 `###`-heading, +1 in-entry update; here: 26
+  status-labelled + 11 bullet-label). Two independent methods, same number.
+
+### Resolved: `conformance (spec fixtures)` is now a required context — entry `:338`, status `:370`
+
+**UNCONFIRMED → CONFIRMED.** The entry parked this on "awaiting a repo admin to action the
+branch-protection change". It has been actioned. Evidence, `gh api
+repos/agentcontextdistributionprotocol/acdp-registry-rs/branches/main/protection`, read
+2026-09-13T17:17:51Z:
+
+    required_status_checks.contexts = ["rustfmt","clippy","tests","conformance (spec fixtures)"]
+    strict = true
+
+- **A stale clause this unit could not fix.** `:370` now reads `CONFIRMED (awaiting a repo admin to
+  action the branch-protection change)`, which is self-contradictory: the parenthetical is false and
+  correcting it is a **prose** edit, outside the status-token grant. Flagged rather than silently
+  exceeded — it needs either a one-line grant extension or a follow-up. The token is the
+  machine-read fact and it is now true; the clause beside it is not.
+
+### Resolved: `git_only = true` and `git_tag_name` are as recorded — entry `:800`, status `:815`
+
+**UNCONFIRMED → CONFIRMED.** Read from the file, not from the entry's own prose:
+`release-plz.toml:13` is `git_only = true`; `:36` is `git_tag_name = "{{ package }}/v{{ version }}"`.
+The reasoning is documented in place at `:15-18` (why `git_only` alone is sufficient and not a stale
+TODO) and `:29` (why changing the template orphans existing tags). `release-plz.toml` was **read
+only** — U-507 is explicitly barred from modifying it or #278.
+
+### Resolved: the new-shape tags were actually minted — entry `:817`, status `:830`
+
+**UNCONFIRMED → CONFIRMED.** This was recorded as "the one link with no local evidence". There is
+now remote evidence: `git ls-remote --tags origin 'refs/tags/acdp-registry-server/*'` returns four
+tags in the new shape — `v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.1.3` — each with its annotated `^{}` peel,
+so they are real annotated tags pushed by the bot, not lightweight local artefacts.
+
+### Resolved: GitHub's ref matcher accepts `acdp-registry-server/v*` — entry `:875`, status `:887`
+
+**UNCONFIRMED → CONFIRMED**, by a real push event rather than by reading the docs. Run
+**34734871991**: `event=push`, `head_branch=acdp-registry-server/v0.1.3`, workflow `docker`,
+`conclusion=success`, against `docker.yml`'s trigger
+`on.push = {branches: [main], tags: ['acdp-registry-server/v*']}`. The run existing is the proof —
+the workflow cannot start unless the pattern matched the ref.
+
+- **Method note, because the first attempt produced a false negative:** `gh run list --workflow
+  docker.yml --limit 40` filtered on `headBranch` returned **nothing**, because 40 runs no longer
+  reach back that far. The absence was an artefact of the window, not of the fact. Querying the run
+  directly settled it.
+
+### Resolved: `ACDP_BOT` holds `contents: write` + `pull-requests: write` — entry `:889`, status `:898`
+
+**UNCONFIRMED → CONFIRMED**, demonstrated by exercised permission rather than by reading a settings
+page. `app/acdp-deps-bot` has opened PRs **#225, #230, #236, #272, #278** (`pull-requests: write`),
+and the four annotated release tags above were pushed by the same release-plz flow
+(`contents: write`). A permission that has been used is better evidence than one that is listed.
