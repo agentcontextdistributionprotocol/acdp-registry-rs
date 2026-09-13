@@ -1,5 +1,12 @@
 
 
+## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.1.3...acdp-registry-core/v0.1.4) - 2026-09-13
+
+### Fixed
+
+- *(rate-limit)* charge publishes that fail late where the signer is proven ([#242](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/242)) ([#263](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/263))
+
+
 ## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.1.2...acdp-registry-core/v0.1.3) - 2026-09-13
 
 ### Added
