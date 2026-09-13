@@ -3044,3 +3044,61 @@ proposed in acdp-rs#279 — the breakage is invisible to `acdp-client`'s build a
 downstream axum consumer.
 
 **Status:** #285 should be closed unmerged; the bump bot will re-propose once upstream ships the fix.
+
+---
+
+## Decision: gate `POST /contexts`'s media type without routing it through `AcdpJson` (U-520, PR A)
+
+**The defect.** `publish` took `body: Bytes` and never read `Content-Type`. Measured across all five
+scenarios of spec fixture `err-002-unsupported-media-type.json`, same body, only the header varied:
+
+```
+A  application/acdp+json                 -> 400 schema_violation
+B  application/acdp+json; charset=utf-8  -> 400 schema_violation
+C  text/plain                            -> 400 schema_violation   <-- MUST be 415
+D  application/json                      -> 400 schema_violation
+E  (absent)                              -> 400 schema_violation
+```
+
+Scenario C is a violation and the fixture rules out precisely what we emitted: *"the body MUST NOT be
+parsed: `schema_violation` is NOT conformant here, because it asserts a structural validation that
+never ran and is pinned to 400."* `extract.rs`'s own comment had written the same harm down while the
+extractor was being built — and `publish` was then never routed through it.
+
+**Found only because the fixture was asserted where it points.** `err-002` is replayed by nothing, and
+`extractor_rejections_return_the_rfc0007_envelope` pinned C and E on `/auth/challenge`, which routes
+through `AcdpJson` and was correct all along. U-519 measured that green as uninformative about the 415
+path; it was concealing a live wire defect.
+
+**Rejected: routing `publish` through `AcdpJson`** — the first thing tried, and the obvious reuse.
+Measured, it moves a wrong-shaped body from **400 to 422**, because `JsonRejection::JsonDataError`
+carries 422. **RFC-ACDP-0007 §5's status table pins `schema_violation` to 400.** So that fix would
+have traded one conformance violation for another, on a far wider path — every malformed publish,
+rather than only the ones with an unacceptable media type. This is the "turn one violation into
+another" trap named in the assign, arriving from an unexpected direction.
+
+**Adopted: a new `AcdpBytes` extractor** in `extract.rs` — the media-type gate, then the raw `Bytes`.
+It reuses `AcdpRejection`, the envelope shape and the minted `unsupported_media_type` code, and leaves
+the 400, the raw bytes and the 413 path exactly as they were. The whole non-comment change to
+`context.rs` is two lines — the import and the parameter type — so `from_slice`, the content-hash
+recomputation and signature verification are byte-identical downstream. **Nothing about what `publish`
+hashes or verifies changed.**
+
+**Scenario E (absent `Content-Type`) is ACCEPTED, and that is measured rather than preferred.** The
+fixture declares E "either" and asks only that a registry document its choice. Gating absent headers
+reddened **104 of 159** tests in `http_integration.rs`, every one a publish path sending no
+`Content-Type` — the shape of real client breakage, not a test artefact. `/auth/*` rejects absent
+headers and continues to; the fixture makes this a per-route choice.
+
+**The duplication is pinned, not trusted.** `media_type_accepted` re-implements axum's private
+`json_content_type` predicate (`mime` is not a direct dependency here, and adding one enters the
+`deny.toml` gate for six lines). Two implementations of one accept-set is how routes drift, so
+`the_two_media_type_gates_agree` asserts both paths agree across ten content types; breaking the
+`+json` suffix rule reddens it and names the drift direction.
+
+**Falsified, not asserted:** removing the gate reddens scenario C specifically (415 -> 400); breaking
+the accept-set reddens the agreement test at `application/acdp+json`.
+
+**Status:** applied. `/admin/*` has the same ungated shape on three handlers and is deliberately NOT
+fixed here — it is U-522, so that wire change is reviewed on its own terms rather than riding in on a
+publish fix.
