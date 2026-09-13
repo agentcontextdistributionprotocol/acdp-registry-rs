@@ -1387,7 +1387,17 @@ pub async fn retract<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     Path(ctx_id): Path<String>,
-    body: Bytes,
+    // U-524: `AcdpBytes`, the same extractor `publish` (#290) and the two
+    // `/admin/*` lifecycle handlers (#293) use -- so all five routed
+    // body-bearing handlers now share ONE accept-set and ONE absent-header
+    // choice (absent is inferred, not rejected). These two were left ungated by
+    // scope, not by decision: #290's grant named `POST /contexts` and #293's
+    // named `/admin/*`, which left the data-plane lifecycle writes in neither.
+    // The result was backwards -- the admin copies of retract/republish were
+    // gated while the producer-facing ones were not.
+    //
+    // The body stays raw: `lifecycle_transition` deserializes it itself.
+    AcdpBytes(body): AcdpBytes,
 ) -> Result<Json<acdp::types::body::FullContext>, RegistryError> {
     let r = lifecycle_transition(
         state,
@@ -1419,7 +1429,17 @@ pub async fn republish<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     Path(ctx_id): Path<String>,
-    body: Bytes,
+    // U-524: `AcdpBytes`, the same extractor `publish` (#290) and the two
+    // `/admin/*` lifecycle handlers (#293) use -- so all five routed
+    // body-bearing handlers now share ONE accept-set and ONE absent-header
+    // choice (absent is inferred, not rejected). These two were left ungated by
+    // scope, not by decision: #290's grant named `POST /contexts` and #293's
+    // named `/admin/*`, which left the data-plane lifecycle writes in neither.
+    // The result was backwards -- the admin copies of retract/republish were
+    // gated while the producer-facing ones were not.
+    //
+    // The body stays raw: `lifecycle_transition` deserializes it itself.
+    AcdpBytes(body): AcdpBytes,
 ) -> Result<Json<acdp::types::body::FullContext>, RegistryError> {
     let r = lifecycle_transition(
         state,

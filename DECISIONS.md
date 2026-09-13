@@ -3201,3 +3201,49 @@ falsification reddens both the publish matrix and `/auth/*`.
 
 **Status:** applied. Recorded in `docs/UPGRADING.md`, not `CHANGELOG.md` — the root changelog forbids
 version sections and `root_changelog_stays_a_pointer` enforces it.
+
+## U-524 — the last two ungated routed body handlers, and the accept predicate nobody had compared
+
+**`POST /contexts/{ctx_id}/retract` and `/republish` now use `AcdpBytes`.** They were the only
+routed body-bearing handlers still parsing whatever arrived. This was never a decision: #290's grant
+named `POST /contexts` and #293's named `/admin/*`, and the data-plane lifecycle writes fell in
+neither. The result was backwards — the **admin** copies of retract/republish enforced a media type
+while the **producer-facing** ones did not, for the same operation on the same resource.
+
+The non-comment diff per handler is an import and a parameter type. That is the point: the body
+still reaches `lifecycle_transition` as raw `Bytes`, so hashing, signature verification and
+deserialization are byte-identical to before. Only the accept check is new.
+
+**The test name was the finding.** The new matrix test was written as
+`every_body_bearing_route_shares_one_media_type_gate` — 5 routes x 9 content types, asserting the
+absolute 415 verdict rather than mere agreement between routes. Checking the name before shipping it
+showed it was false twice over: there are **eight** routed body-bearing handlers, not five, and the
+other three (`/auth/*`) do not use `media_type_accepted` at all. `AcdpJson` delegates to
+`axum::extract::Json` and maps `JsonRejection::MissingJsonContentType` to the §5 code
+(`extract.rs:294`). Renamed to `every_acdp_bytes_route_shares_one_media_type_gate`.
+
+**So there are two accept predicates, and they agree by coincidence.** `media_type_accepted`
+(hand-written: `application/json`, any `application/*+json`, absent accepted) and `axum::Json`'s
+mime-suffix rule are independent code. They currently return the same verdict for every *present*
+media type and deliberately differ on an *absent* one — `AcdpBytes` infers, `AcdpJson` 415s. Nothing
+made the first property true and nothing was holding it: an axum release that narrowed its suffix
+rule would split the wire behaviour of `/auth/*` from `/contexts` with no local edit at all.
+
+**Decision: pin the relationship rather than unify the predicates.** The new
+`the_two_accept_predicates_agree_on_every_present_media_type` asserts agreement across all nine
+present types and asserts the absent-header divergence **in both directions**. Unifying them was the
+tempting alternative and is rejected: routing `AcdpJson` through `media_type_accepted` would start
+accepting untyped bodies on `/auth/*`, the most attacker-controllable surface in the service
+(`lib.rs:150`) — a wire change, dressed as a consistency cleanup. The second assertion exists
+specifically so that cleanup reddens.
+
+**Falsified, four ways, each naming its own mechanism.** Dropping the `+json` suffix rule splits the
+families on `application/acdp+json`; making `AcdpBytes` reject absent reddens the `/contexts`
+direction; remapping `MissingJsonContentType` off 415 splits them on `text/plain`; making `AcdpJson`
+infer an absent header reddens the `/auth/*` direction. That fourth one was necessary, not
+redundant: axum returns `MissingJsonContentType` for a *wrong* content type as well as an absent
+one, so falsification three tripped the present-type loop and **never reached** the final assertion.
+An earlier assertion masking a later one is exactly the failure `falsify each assertion, not each
+test` describes, and it was live here.
+
+**Status:** applied. Wire change recorded in `docs/UPGRADING.md` under 0.1.4, not `CHANGELOG.md`.
