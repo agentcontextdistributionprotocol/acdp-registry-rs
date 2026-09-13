@@ -779,7 +779,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   (b) the draft justified leaving runtime semantics alone on the state being "unreachable
   through the real binary" — false, the admin reload endpoint validates nothing.
   **Status: CONFIRMED (corrected).**
-- **UNCONFIRMED — deliberately not decided here:** whether the shared playground validation
+- **RESOLVED (U-507, 2026-09-13) — the placement call was made, in `acdp-registry-core`:** whether the shared playground validation
   that #192 and #193 both need should live in `acdp-registry-types` or `acdp-registry-core`.
   Both issues suggest a shared validator; the placement call belongs to whoever takes them,
   with the whole surface in view. Not blocking this unit.
@@ -912,7 +912,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 
 ## W3-U1 — #192/#193: validating playground config at both doors (2026-09-10, lane-1)
 
-- **UNCONFIRMED — a deliberate departure from a written acceptance criterion.** The unit
+- **CONFIRMED (U-507, 2026-09-13) — a deliberate departure from a written acceptance criterion, now pinned by a test that names this very decision.** The unit
   assignment's AC3 says an unusable pinned-key list "MUST" be refused at startup and names
   "all entries expired" as qualifying. This unit **refuses the five structural defects**
   (unknown `algorithm`, non-base64 key material, wrong `ed25519`/`ecdsa-p256` byte length or
@@ -979,10 +979,10 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   (`handlers/log.rs:359`) and a stored leaf that no longer parses under the closed schema
   raises it locally; `store/src/log.rs`'s own tests pin the reject cases. **Status:
   CONFIRMED.**
-- **UNCONFIRMED and deliberately left alone:** that path answers `502`, which blames an
+- **CONFIRMED as a deliberate, documented non-decision (U-507, 2026-09-13) — still recorded, still not decided, and the reasoning is now in the code beside the mapping:** that path answers `502`, which blames an
   upstream for a local data fault. It is defensible (the wire code is registered to
   RFC-ACDP-0012 §11's federation meaning) and changing it is a wire change. Noted next to the
-  mapping in `error.rs` rather than fixed inside a docs pass. **Status: UNCONFIRMED —
+  mapping in `error.rs` rather than fixed inside a docs pass. **Status: CONFIRMED as a deliberate non-decision (U-507) — **Settled by:** a wire-contract change, **Owner:** the spec holder —
   recorded, not decided.**
 - **Assumption made explicit, because re-pointing would have hidden it:** the ten stale
   `417211f` citations in `conformance.rs` asserted counts that are **still true** at the CI
@@ -1002,7 +1002,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   `Cache-Control: private` or `no-store` on requester-relative responses is **not** decided
   here. `#190` was a false claim and is fixed by making the prose true; the wire question is
   `#205`. Shipping a header change inside a docs correction would be the same defect as the
-  original claim, pointing the other way. **Status: UNCONFIRMED — split out by design.**
+  original claim, pointing the other way. **Status: RESOLVED (U-507, 2026-09-13) — split out by design, and #205 then decided it: `private`, not `no-store` (`acdp-registry-core/src/lib.rs:107`).**
 
 ## W3-U5 — the quickstart did not boot (lane-1, 2026-09-11)
 
@@ -1057,9 +1057,9 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   REFUTED, HS256 scoping restored and the EdDSA carve-out given its own bullet.**
 - **Deliberately bounded, not assumed away:** this unit narrows `validate_config`'s
   validate-before-migrate contract to `jwt_secret` and does **not** restore it. The EdDSA PEM
-  case still fails late. Every document it touches is scoped to say so. **Status: OPEN, owned
+  case still fails late. Every document it touches is scoped to say so. **Status: OPEN (re-verified U-507 2026-09-13 — `validate_config` catches only an EMPTY EdDSA PEM; a MALFORMED one still fails late). **Settled by:** parsing the PEM there. Still owned
   by nobody, reported in this lane's `done`.**
-- **UNCONFIRMED — reported, not acted on:** that `.github/workflows/docker.yml` sets no
+- **SUPERSEDED by #270 (U-507, 2026-09-13) — no longer true; CI now boots the shipped stack, with and without auth:** that `.github/workflows/docker.yml` sets no
   `jwt_secret`, so CI never exercised the stack the repo ships and green CI was never evidence
   about the compose file. `.github/**` is not this lane's to change; the leader ruled it a
   separate unit.
@@ -1137,19 +1137,19 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **CONFIRMED by falsification, not by reading:** removing the data-plane layer reddens
   `cache_posture_covers_every_data_plane_route`; restoring it greens. Removing/moving the auth
   layer inside the limiter reddens `credential_endpoints_are_never_stored`.
-- **UNCONFIRMED — a CDN in "cache everything / ignore origin headers" mode defeats both
+- **UNCONFIRMED and unfalsifiable from this repo (re-checked U-507 2026-09-13). **Settled by:** an operator observing a real CDN. **Owner:** operators. A CDN in "cache everything / ignore origin headers" mode defeats both
   `private` and `Vary`.** No origin header can fix this. It stays an operator note in
   `RECEIPTS.md`, downgraded to defense-in-depth rather than deleted. Not testable from here.
-- **UNCONFIRMED — `private` carries no validators.** No `ETag`, no `Last-Modified`, no
+- **UNCONFIRMED — `private` carries no validators. Re-checked U-507 2026-09-13: the fix has NOT landed — there is no `ETag` anywhere in `acdp-registry-core`. **Settled by:** ETags plus explicit freshness. **Owner:** unassigned.** No `ETag`, no `Last-Modified`, no
   `max-age`, so a requester's *own* cache may briefly reuse a context retracted since. Accepted
   deliberately: they already held those bytes. **The future fix is ETags plus explicit
   freshness, NOT `no-store`** — reaching for `no-store` would trade a real client-caching
   capability for protection against caches that ignore directives anyway.
-- **UNCONFIRMED — `/log/checkpoint` inherits `private` it does not need.** It is hash-only and
+- **UNCONFIRMED — `/log/checkpoint` inherits `private` it does not need; still true (`if_not_present` at `lib.rs:121`; `handlers/log.rs` sets no cache header of its own). **Settled by:** an explicit short public TTL on that route. **Owner:** unassigned.** It is hash-only and
   requester-invariant (`handlers/log.rs`, `State` only). It gives up shared cacheability it has
   never used. `if_not_present` was chosen precisely so an explicit short public TTL can be added
   later without touching the layer.
-- **UNCONFIRMED — `/metrics` was left out of scope, and the dismissal deserves revisiting.** It
+- **RESOLVED (U-507, 2026-09-13) — #218 is CLOSED/COMPLETED, and this entry's own announcement mechanism fired: the `EXEMPT` row is gone, replaced by `no-store`, overriding, on both the 200 and 401 arms.** It
   is a direct Prometheus scrape target that sets no cache header, but it is also bearer-gated
   (`metrics.rs`), so its 200-vs-401 outcome is authorization-relative — the same gap #205 closed
   elsewhere, under the same CDN threat model. Tracked as **#218**, filed with the proposed
@@ -3498,3 +3498,54 @@ real and this unit declines to paper over it: **U-510 itself established that `c
 codegens nor links**, so this job does not prove the workspace *builds* on 1.88. Confirming it outright
 would use my own unit's finding to justify ignoring my own unit's gap. **Settled by:** converting both
 steps to `cargo build`. **Owner:** the leader.
+
+### Batch 7 — five items, of which three closed themselves while nobody was looking
+
+The pattern worth naming: three of these were not resolved by argument but by *other work landing*.
+Nobody went back to flip them, which is the failure mode this whole unit exists to correct.
+
+**`## W2-U1 — #185 pinned-keys guard hoist` → RESOLVED.** The entry left the placement of the shared
+playground validator ("`acdp-registry-types` or `acdp-registry-core`") to "whoever takes them". They
+were taken and it landed in **core**: `validate_playground_config` at
+`crates/acdp-registry-core/src/playground.rs:259`, called from **two** doors —
+`acdp-registry-server/src/main.rs:338` (startup) and `acdp-registry-core/src/handlers/admin.rs:182`
+(the admin reload path, which is #192's). Both **#192 and #193 are CLOSED/COMPLETED**. So it is not
+merely placed, it is genuinely *shared*, which was the point.
+
+**`## W3-U1 — validating playground config at both doors` → CONFIRMED, and pinned by a test.** The
+deliberate departure (refuse the five structural defects, warn loudly on an all-expired list) is still
+what ships, and it is protected by an assertion that names the decision:
+`main.rs:1874` reads `.expect("an all-expired list must WARN, not refuse — see DECISIONS W3-U1-b")`.
+A deliberate deviation guarded by a test citing its own decision record is the strongest form this can
+take — someone changing it has to delete a message telling them not to.
+
+**`## Run-close sweep — #190/#191` → two of its three open declarations settled.**
+- The `502`-for-a-local-data-fault mapping is **confirmed as a deliberate, documented non-decision**:
+  `cross_registry_resolution_failed` is still the mapping (`error.rs:199`) and the 400-vs-502 reasoning
+  is written beside it (`:155-175`). **Settled by:** a wire-contract change. **Owner:** the spec holder.
+- The `private`-vs-`no-store` scope boundary is **RESOLVED**: it was split out to #205 by design, and
+  #205 decided it — `private`, with the reasoning at `acdp-registry-core/src/lib.rs:107`
+  ("`private` rather than `no-store`: the threat is shared caches"). Split-out items are exactly the
+  ones that rot, because the split reads like a resolution.
+
+**`## W3-U5 — the quickstart did not boot` → one half superseded, one half still open, and the
+distinction is precise.**
+- **SUPERSEDED by #270:** the claim that `docker.yml` sets no `jwt_secret` so "CI never exercised the
+  stack the repo ships" is no longer true. `docker.yml` now runs *the documented quickstart boots*,
+  *…with auth enabled*, and a self-test of the boot guard, with 4 `jwt_secret` references and
+  `docker/assert-quickstart-boots.sh` shipped.
+- **Still OPEN, and narrowed:** `validate_config` (`main.rs:123`) catches only an **empty** EdDSA PEM;
+  it never parses one, so a **malformed** PEM still fails late — exactly as the entry said. Empty is
+  not malformed, and confirming this from the presence of an EdDSA branch alone would have been wrong.
+  **Settled by:** parsing the PEM in `validate_config`.
+
+**`## #205 — Cache-Control posture` → one of four RESOLVED, three still open with owners.**
+- **RESOLVED — `/metrics`.** #218 is **CLOSED/COMPLETED**, and this entry predicted its own resolution
+  signal: *"the exemption is load-bearing in the test suite … deleting that line is how the fix
+  announces itself."* The line is gone. `NON_DATA_ROUTES` now carries `/metrics` as *"`no-store`,
+  overriding, on both the 200 and the 401 arm … Closed #218."* An entry that specifies how its own
+  closure will be detectable is the best-designed thing in this file.
+- **Still open, each re-checked rather than restated:** the CDN threat (unfalsifiable from this repo —
+  **owner:** operators); `private` carries no validators (**verified the fix has not landed: no `ETag`
+  anywhere in `acdp-registry-core`**); and `/log/checkpoint`'s inherited `private` (`if_not_present` at
+  `lib.rs:121`, and `handlers/log.rs` sets no cache header of its own).
