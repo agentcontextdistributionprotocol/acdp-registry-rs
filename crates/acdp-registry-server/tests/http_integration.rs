@@ -9684,3 +9684,256 @@ async fn log_proof_ctx_id_is_withheld_from_a_foreign_tenant() {
          the refusal itself confirms the ctx_id exists: {v}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// U-504: the tenant gates on the context READ surface.
+//
+// Found by the mutation oracle (#216), not by review. Extending the ratchet's
+// scope to `handlers/context.rs` produced 28 survivors, and five of them were
+// the same shape U-502 found once in `handlers/log.rs`: a tenant comparison
+// that no test ever executes in both directions.
+//
+// The gap was invisible to a reader because it looks covered. Four test files
+// mention `X-Tenant-Id` 26 times, and `retrieve_with_tenant` (:751) exercises
+// exactly this gate on `GET /contexts/{id}` — the ENVELOPE route. Nothing
+// carried a tenant header to `/contexts/{id}/body`, `/lineages/{id}` or
+// `/lineages/{id}/current`: the tenant-header sites and the requests to those
+// three routes do not overlap on a single line.
+//
+// As in U-502 the framing is deliberate and it is the honest one: **the code is
+// correct, no disclosure ships, these are unguarded correct properties.** Every
+// gate below works today. Nothing would have noticed if one stopped working.
+// ---------------------------------------------------------------------------
+
+/// Publish a two-version lineage into `tenant` and return
+/// `(lineage_id, v1_ctx_id)`.
+///
+/// The v1 body is fetched WITHOUT a tenant header on purpose — that request is
+/// the untenanted path (`requested_tenant == None`), which skips the gate
+/// entirely, so the fixture cannot be broken by the very gate under test.
+async fn tenant_lineage(h: &Harness, seed: u8, tenant: &str) -> (String, String) {
+    let app = &h.router;
+    let p = producer(seed);
+    let v1_req = p
+        .publish_request()
+        .title("tenant-lineage-v1")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(app, &v1_req, Some(tenant)).await;
+    assert_eq!(status, StatusCode::OK, "v1 publish body = {v}");
+    let v1_ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+    let lineage_id = v["lineage_id"].as_str().unwrap().to_string();
+
+    let (status, v1_body_json) = get_json_with_tenant(
+        app,
+        &format!("/contexts/{}/body", pct_encode_path_segment(&v1_ctx_id)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "v1 body fetch = {v1_body_json}");
+    let v1_body: acdp::types::body::Body = serde_json::from_value(v1_body_json).unwrap();
+
+    let v2_req = p
+        .supersede_body(&v1_body)
+        .title("tenant-lineage-v2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(app, &v2_req, Some(tenant)).await;
+    assert_eq!(status, StatusCode::OK, "v2 publish body = {v}");
+
+    (lineage_id, v1_ctx_id)
+}
+
+/// `GET /contexts/{id}/body` must still serve the tenant that owns the row.
+///
+/// First of two directions for `handlers/context.rs:1018` (`if &stored !=
+/// tenant`). Split from its sibling because inverting that operator breaks BOTH
+/// directions at once, and a single test asserting both would stop at whichever
+/// assertion ran first and leave the other never evaluated.
+#[tokio::test]
+async fn context_body_is_served_to_the_owning_tenant() {
+    let h = harness(true).await;
+    let (_lineage, ctx_id) = tenant_lineage(&h, 170, "tenant-body-a").await;
+
+    let (status, v) = get_json_with_tenant(
+        &h.router,
+        &format!("/contexts/{}/body", pct_encode_path_segment(&ctx_id)),
+        Some("tenant-body-a"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owning tenant must still be served the bare body; a gate that \
+         denies the MATCHING tenant is inverted: {v}"
+    );
+    assert_eq!(
+        v["title"], "tenant-lineage-v1",
+        "and it must be the body itself, so this asserts the gate OPENING \
+         rather than merely a 200: {v}"
+    );
+}
+
+/// The direction with teeth: a foreign tenant must not receive the body.
+///
+/// Inverting `!=` at `handlers/context.rs:1018` makes a mismatched tenant fall
+/// through and serve another tenant's producer-signed body. `/contexts/{id}`
+/// (the envelope) is covered by `tenancy_stamp_and_filter_roundtrip`; `/body`
+/// is a separate route with its own copy of the gate and had none.
+#[tokio::test]
+async fn context_body_is_withheld_from_a_foreign_tenant() {
+    let h = harness(true).await;
+    let (_lineage, ctx_id) = tenant_lineage(&h, 171, "tenant-body-a").await;
+
+    let (status, v) = get_json_with_tenant(
+        &h.router,
+        &format!("/contexts/{}/body", pct_encode_path_segment(&ctx_id)),
+        Some("tenant-body-b"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a foreign tenant must not receive another tenant's body: {v}"
+    );
+    assert_eq!(
+        v["error"]["code"], "not_found",
+        "and it must be `not_found`, not a distinguishable forbidden — a \
+         refusal that says 'exists but denied' is itself the disclosure: {v}"
+    );
+}
+
+/// `GET /lineages/{id}` must list the owning tenant's own versions.
+///
+/// This is the test that pins `handlers/context.rs:1328` (`t == &tenant` inside
+/// the `retain`). Inverting that comparison does not weaken the filter — it
+/// takes its exact complement, dropping every row the caller owns. So this
+/// direction fails with an EMPTY list where two versions were expected.
+#[tokio::test]
+async fn lineage_lists_the_owning_tenants_versions() {
+    let h = harness(true).await;
+    let (lineage_id, _ctx) = tenant_lineage(&h, 172, "tenant-lineage-a").await;
+
+    let (status, v) = get_json_with_tenant(
+        &h.router,
+        &format!("/lineages/{}", pct_encode_path_segment(&lineage_id)),
+        Some("tenant-lineage-a"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "lineage fetch = {v}");
+    let arr = v.as_array().expect("lineage returns an array");
+    assert_eq!(
+        arr.len(),
+        2,
+        "the owning tenant must see both of its own versions; a `retain` whose \
+         comparison is inverted keeps exactly the rows the caller does NOT own \
+         and so returns an empty list here: {v}"
+    );
+    let titles: Vec<&str> = arr
+        .iter()
+        .map(|i| i["body"]["title"].as_str().unwrap())
+        .collect();
+    assert!(
+        titles.contains(&"tenant-lineage-v1") && titles.contains(&"tenant-lineage-v2"),
+        "and they must be the caller's OWN versions, named — not merely two of \
+         something: {titles:?}"
+    );
+}
+
+/// A foreign tenant must not see another tenant's lineage versions.
+///
+/// This is the test that pins `handlers/context.rs:1322` (`if !items.is_empty()`).
+/// Deleting that `!` skips the tenant `retain` whenever there IS something to
+/// filter — the precise case that matters — and returns the foreign rows.
+///
+/// **The control matters here and is not decoration.** This route answers
+/// `200 []` rather than `404`, so an empty array is consistent with two very
+/// different worlds: the filter worked, or the fixture never had rows at all. A
+/// test asserting only emptiness would pass against a lineage that was never
+/// published. The untenanted fetch proves the two rows are really there and
+/// really reachable, so the emptiness above it is attributable to the tenant
+/// filter and nothing else.
+#[tokio::test]
+async fn lineage_withholds_another_tenants_versions() {
+    let h = harness(true).await;
+    let (lineage_id, _ctx) = tenant_lineage(&h, 173, "tenant-lineage-a").await;
+    let uri = format!("/lineages/{}", pct_encode_path_segment(&lineage_id));
+
+    let (status, v) = get_json_with_tenant(&h.router, &uri, Some("tenant-lineage-b")).await;
+    assert_eq!(status, StatusCode::OK, "lineage fetch = {v}");
+    assert_eq!(
+        v.as_array().expect("array").len(),
+        0,
+        "a foreign tenant must see none of another tenant's versions: {v}"
+    );
+
+    // The control: the rows exist and are reachable untenanted.
+    let (status, all) = get_json_with_tenant(&h.router, &uri, None).await;
+    assert_eq!(status, StatusCode::OK, "untenanted lineage fetch = {all}");
+    assert_eq!(
+        all.as_array().expect("array").len(),
+        2,
+        "the fixture must really contain two versions, otherwise the emptiness \
+         asserted above proves nothing about the tenant filter: {all}"
+    );
+}
+
+/// `GET /lineages/{id}/current` must serve the owning tenant.
+///
+/// First of two directions for `handlers/context.rs:1361` (`if stored !=
+/// tenant`), split for the same reason as the `/body` pair.
+#[tokio::test]
+async fn lineage_current_is_served_to_the_owning_tenant() {
+    let h = harness(true).await;
+    let (lineage_id, _ctx) = tenant_lineage(&h, 174, "tenant-current-a").await;
+
+    let (status, v) = get_json_with_tenant(
+        &h.router,
+        &format!("/lineages/{}/current", pct_encode_path_segment(&lineage_id)),
+        Some("tenant-current-a"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owning tenant must still get its own current version: {v}"
+    );
+    assert_eq!(
+        v["body"]["title"], "tenant-lineage-v2",
+        "and it must be the head of the lineage, so this asserts the gate \
+         opening on the right row rather than merely a 200: {v}"
+    );
+}
+
+/// A foreign tenant must not learn another tenant's current version.
+///
+/// Inverting `!=` at `handlers/context.rs:1361` serves the head of a lineage
+/// the caller cannot see. The refusal is `not_found` and must stay
+/// indistinguishable from a lineage that does not exist — `lineage_unknown_id`
+/// already pins that shape for a genuinely absent id, and this pins that a
+/// PRESENT but foreign one is answered identically.
+#[tokio::test]
+async fn lineage_current_is_withheld_from_a_foreign_tenant() {
+    let h = harness(true).await;
+    let (lineage_id, _ctx) = tenant_lineage(&h, 175, "tenant-current-a").await;
+
+    let (status, v) = get_json_with_tenant(
+        &h.router,
+        &format!("/lineages/{}/current", pct_encode_path_segment(&lineage_id)),
+        Some("tenant-current-b"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a foreign tenant must not receive another tenant's current version: {v}"
+    );
+    assert_eq!(
+        v["error"]["code"], "not_found",
+        "and the refusal must not distinguish 'foreign' from 'absent': {v}"
+    );
+}
