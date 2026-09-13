@@ -5547,3 +5547,138 @@ is lenient". Ask which of two different things happened — *the test never ran*
 reads what I varied*. Both are silent, both look like leniency, and they have opposite fixes: condition
 the skip, versus point the code at the single source it claims to use. See also `probe must read what
 you vary` — this is that rule applied to the guard rather than to the test.
+
+## U-506 — making the coverage tables name what actually guards each family (2026-09-13, lane-2)
+
+`conformance.rs`'s family tables said the `log` family's emission half was covered by two
+golden-recompute tests. It is not. This unit makes the tables truthful and pins the citations that
+were holding nothing.
+
+### The finding, reproduced before anything was planned
+
+Mutating `handlers/log.rs`'s `root_for` to `String::new()` — gutting the Merkle root every log
+endpoint serves:
+
+| | with the root gutted |
+|---|---|
+| the whole conformance suite | **73 passed, 0 failed** |
+| the two tests `PARTIAL_DIRECT` names for `log` | **both pass** |
+| `http_integration.rs` | **11 failed** |
+
+**`EXCUSED`'s `log` entry argued that a direct pass "would assert something about acdp-crypto's
+merkle code, not about this registry" — and then, four lines later, offered two golden-recompute
+tests as proof that "the emission half IS covered". Its own argument applied to its own golden
+tests, and the entry did not notice.** `log001_leaf_root_and_inclusion_golden_recomputed` and
+`log003_consistency_proof_golden_recomputed` reach only `merkle::*`; they never enter
+`handlers/log.rs`.
+
+`PARTIAL_DIRECT` was **not** wrong, which is worth stating: it pins exactly what it claims to pin.
+The defect was prose inviting a stronger reading than the mechanism supports.
+
+**Classified as a DOCUMENTATION defect, not a coverage defect.** The tests that hold the handler
+path exist; they were simply unnamed. The opposite conclusion would have sent someone writing
+duplicate tests — which is why the survivor/gap distinction from U-504 is applied here explicitly.
+
+### The number in the file was wrong, and it was my own doing
+
+`source_test_fn_body`'s doc comment said the mutation was "CAUGHT by ten tests" and referred to "the
+whole 69-test suite". It is **eleven**: U-502 added
+`log_proof_ctx_id_is_served_to_the_owning_tenant` to that log suite *after* the sentence was
+written. Both figures were true when written, neither had anything holding it, and the later edit
+that expired the first was mine. The count now lives in `LOG_HANDLER_GUARD_COUNT` where an assertion
+reads it, and the suite size is no longer restated in prose at all.
+
+### The structural constraint, and the limit it forces
+
+`conformance.rs` and `http_integration.rs` are **separate integration-test binaries**. Rust cannot
+reference a `#[tokio::test]` function across them, so **#249's `direct_fn!`/`DIRECT_FNS` compile-time
+binding is structurally unavailable here** — not merely unused. Cross-binary names can only be
+verified by reading the other file's text: existence plus a test attribute, with the same substring
+ceiling documented on `covered_direct_families_have_present_test_functions`.
+
+**So this unit makes the tables more TRUTHFUL without making the guarantee STRONGER, and those are
+different axes.** Stated at the check rather than left for a reader to infer, because a more accurate
+table reads like a stronger guarantee and is not one.
+
+### The second, more general defect: a hand-maintained list cannot catch omissions
+
+`this_file_cites_constructs_and_never_line_numbers` already reads sibling files from disk and asserts
+a construct is present — the right idiom, already in the file. But its list is hand-maintained, and
+it named **1 of the 9** `http_integration.rs` test functions this file cites. The other eight —
+including `publish_enforces_the_err002_media_type_matrix`, cited as the test that enforces the
+`err-002` gate — were pinned by nothing and would rot silently on a rename.
+
+So `CROSS_BINARY_GUARDS` is checked by a **derived equality** rather than by a longer list: read the
+sibling from disk, compute its present test-attributed functions, intersect with what this file cites
+by word-boundary match, require the result to equal the table. A `>=` floor would pass the very
+scanner that is silently missing citations.
+
+**Two design corrections found while building the falsifications**, both recorded in the code rather
+than fixed quietly:
+
+1. **The set equality does not protect the `log` group.** Those eleven names are cited *only* by the
+   table, so deleting one shrinks both sides together and the equality stays satisfied.
+   `LOG_HANDLER_GUARD_COUNT = 11` is that group's guard. The nine prose-cited names need no count —
+   prose keeps citing them, so the set difference fires.
+2. **`assert_eq!(cited, tabled)` was structurally unfireable and was removed.** Tabling a name *is*
+   citing it, so `tabled ⊆ cited` always and the reverse half could never fail. An assertion that
+   cannot fire reads as coverage and provides none.
+
+### The survey of the other 21 entries, and why eight look wrong but are not
+
+19 `Direct` blocks and 3 `PARTIAL_DIRECT` entries were classified by `log`'s own signature: a test
+that reads fixture `vectors` and recomputes through a library without building a router cannot be
+holding a handler. **The parser was checked against the known count of 19 before its output was
+trusted** — its first version matched exactly one family and reported "no families at risk", which is
+what a broken extraction looks like: a confident zero. That is U-504's own lesson, applied to myself
+one unit later.
+
+Nine families' named tests never touch the HTTP surface. **Eight are correct anyway, for three
+different reasons, and the reasons matter more than the count:**
+
+- **`can`, `lin`, `caps`** — pure-vector families. Canonicalisation, lineage derivation and
+  capabilities validation *are* recomputations; no registry path exists to hold, so a golden test is
+  the complete and correct test.
+- **`rcpt`, `lhr`** — word-for-word the same "The producer half IS covered and stays pinned"
+  construction `log` used, and **sound**. Measured, not read: a `panic!` in `receipt.rs`'s
+  `build_signer` reddens both `rcpt001_…_and_remintable` and `lhr001_…_and_remintable`, so they
+  genuinely traverse this registry's producer code. `log`'s goldens reach only `acdp-crypto`. That is
+  the whole difference, and it is why identical wording was not enough to convict them.
+- **`wit`, `dk`, `err`** — their registry-side path is held in a **third** place neither test binary
+  can see. A `panic!` in `witness.rs`'s `verify_cosignature_against_own_log` leaves conformance (73
+  pass) and `http_integration` (0 failures) entirely green and reddens **five `witness::tests::*`
+  unit tests inside the core crate**. The table credits no coverage that does not exist; it never
+  claimed to enumerate in-crate unit tests, and the comment now says so.
+
+**So `log` was the only family whose table asserted something its named tests did not hold** — a
+measured claim about the other 21, not an assumption that the first defect found was the only one.
+
+**The bound, stated rather than implied:** this is a structural discriminator plus three targeted
+probes, **not** a per-family mutation sweep. That is the ratchet's job (#216, U-504). A family whose
+named tests *do* build a router could still assert the wrong thing about it and nothing here would
+notice.
+
+### Falsification
+
+Five assertions, each individually, each firing its own message: the fn scanner broken →
+"scanner is broken"; one log test dropped → "expected exactly 11"; a nonexistent name tabled → "no
+longer defines it"; a test listed twice → "appears twice"; a prose-cited test untabled → "does not
+list them". And **green against the unmodified tree**, because a guard that flags correct entries is
+a guard someone reverts.
+
+`http_integration.rs` was **READ ONLY** for this unit (lane-1 was writing it concurrently under
+U-523), so the "rot" assertion was falsified by varying the **table** rather than the sibling file —
+which exercises the same assertion. The guard was then re-run after merging lane-1's #293, which
+touched that file: it passes, so no name this unit depends on was renamed.
+
+`log`'s own claim was falsified the way the finding was made: with `root_for` gutted, the conformance
+suite stays green and the failing `http_integration` set is **set-identical** to the tabled eleven —
+equality, not a matching count.
+
+### A note on where the decisions are recorded
+
+U-506's grant covered `conformance.rs`, `docs/**` and `CHANGELOG.md`; it did **not** include
+`ASSUMPTIONS.md` or `DECISIONS.md`. None of this unit's four judgement calls is a one-way door — the
+derived equality over a hand list, removing the unfireable assertion, the count const, and Phase 3's
+scope bound are each one commit to reverse — and all four are documented at the code they govern. So
+they are recorded here rather than by reaching outside the grant.

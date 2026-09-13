@@ -8701,12 +8701,23 @@ const EXCUSED: &[(&str, &str)] = &[
          acdp-registry-core's required_fixtures or conditional_fixtures (log is absent \
          from CORE_INEXCUSABLE_FAMILIES). These fixtures carry no endpoint and no vectors \
          array, so a 'direct pass' would assert something about acdp-crypto's merkle \
-         code, not about this registry. The emission half IS covered and stays pinned: \
+         code, not about this registry. THAT ARGUMENT APPLIES TO THIS ENTRY'S OWN GOLDEN TESTS TOO, and until U-506 \
+         this entry did not notice -- so the emission claim is split into the two halves \
+         it was conflating. (1) The VECTOR half, pinned and real: \
          log-001 and log-003 are recomputed by \
          log001_leaf_root_and_inclusion_golden_recomputed and \
          log003_consistency_proof_golden_recomputed, pinned by PARTIAL_DIRECT and tied to \
          this sentence by \
          classification_reasons_naming_golden_tests_are_pinned_by_partial_direct. \
+         Those two recompute through acdp-crypto and NEVER EXECUTE handlers/log.rs -- \
+         measured, not argued: mutating root_for to String::new() guts the Merkle root \
+         every log endpoint serves, and both of them still pass, along with this whole \
+         suite. (2) The HANDLER half -- what a reader of the old sentence would have \
+         taken the two golden tests to hold -- is held by the ELEVEN tests in \
+         CROSS_BINARY_GUARDS's `log` group, all in http_integration.rs, and that same \
+         mutation turns all eleven red. They sit in another test binary, so they cannot \
+         be a Direct(...) entry and are pinned by text rather than by the compiler; see \
+         CROSS_BINARY_GUARDS for why that is structural and what it costs. \
          Reclassified from DEFERRED (#130) under the maintainer's explicit extension of \
          the Phase 14 lc ruling -- see the block comment above rcpt's entry.",
     ),
@@ -9306,7 +9317,15 @@ fn source_has_present_test_fn(name: &str) -> bool {
 /// Merkle root the log endpoints serve -- leaves all three presence oracles here GREEN
 /// (both text guards and `direct_fns_matches_the_coverage_tables_exactly`), and indeed
 /// the whole 69-test suite green in default mode, while the mutation oracle reports it
-/// CAUGHT by ten tests in `http_integration.rs`.
+/// CAUGHT by **eleven** tests in `http_integration.rs`, now named in
+/// `CROSS_BINARY_GUARDS` and counted by `LOG_HANDLER_GUARD_COUNT`.
+///
+/// **This said "ten", and it had quietly stopped being true.** U-502 added
+/// `log_proof_ctx_id_is_served_to_the_owning_tenant` to that log suite after this
+/// paragraph was written. The number was correct when written and had nothing
+/// holding it -- the same defect class U-506 fixes one level up -- so it now lives
+/// in a const that an assertion reads, and was re-measured by re-running the
+/// mutation rather than by trusting the prior sentence.
 ///
 /// #216 stays open for the scope the oracle does not yet cover, rather than being
 /// patched a fourth time here (it was on #130 until that issue closed; the mutation
@@ -13315,4 +13334,300 @@ async fn no_unexercised_fixture_is_actually_replayed() {
              either it is now exercised and should leave the list, or the list is wrong"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// U-506: cross-binary guards — the tests in `http_integration.rs` that this
+// file's claims actually rest on.
+//
+// **This answers a different question from `FIXTURE_COVERAGE` and from the
+// family partition, and they now live in one file, so say which is which:**
+//
+//   * `COVERED`/`EXCUSED`/`DEFERRED` partition the fixture FAMILIES and say how
+//     each family's obligations are discharged.
+//   * `FIXTURE_COVERAGE` (#292) keys individual FIXTURE IDS and accounts for all
+//     144 of them.
+//   * `CROSS_BINARY_GUARDS` (here) names TEST FUNCTIONS IN ANOTHER TEST BINARY
+//     that this file cites. It is not a coverage claim about fixtures at all; it
+//     exists so a citation cannot rot silently.
+//
+// ## Why this cannot be a `Direct(...)` entry, and why it is weaker
+//
+// `conformance.rs` and `http_integration.rs` are **separate integration-test
+// binaries**. Rust cannot reference a `#[tokio::test]` function in another test
+// binary, so #249's `direct_fn!`/`DIRECT_FNS` compile-time binding — the thing
+// that closed the presence half for in-file names, and which
+// `direct_fns_matches_the_coverage_tables_exactly` rests on — is **structurally
+// unavailable here**. There is no way to make the compiler hold these names.
+//
+// So the check below reads the other file's TEXT, which is strictly weaker:
+// existence plus a test attribute, with the same substring ceiling documented on
+// `covered_direct_families_have_present_test_functions`. **Naming a better test
+// does not make this verifier stronger.** U-506 made these tables more TRUTHFUL;
+// it did not make the guarantee stronger, and those are different axes.
+// ---------------------------------------------------------------------------
+
+/// The `log` handler-guard group's size, as an **equality**.
+///
+/// **Why this count exists when the citation equality already guards the other
+/// group.** The nine prose-cited tests are protected by
+/// `cited_cross_binary_tests_are_present_and_exactly_tabled`'s set equality:
+/// delete one from the table and the prose still cites it, so the derived set
+/// exceeds the table and the check fires. The eleven `log` tests have no such
+/// protection, because **the table is their only citation** — remove one and
+/// both sides shrink together and the equality stays satisfied. So the count is
+/// the guard for that group, and it is an equality rather than a `>=` floor for
+/// the usual reason: a floor passes the very scanner that is silently missing
+/// items.
+///
+/// It is **eleven, not ten**. `source_test_fn_body`'s doc comment said ten, which
+/// was true when written and stopped being true when U-502 added
+/// `log_proof_ctx_id_is_served_to_the_owning_tenant`. Re-measured for U-506 by
+/// the mutation that motivated the whole entry.
+const LOG_HANDLER_GUARD_COUNT: usize = 11;
+
+/// ## U-506's survey of every other family, and what it found
+///
+/// `log` was found by a mutation. The same question was then asked of every other
+/// family carrying a `Direct(...)` or `PARTIAL_DIRECT` entry — **do the named
+/// tests execute the path the entry credits them with?** — using a structural
+/// discriminator derived from `log`'s own signature: a test that reads fixture
+/// `vectors` and recomputes through a library, without ever building a router,
+/// cannot be holding a handler.
+///
+/// 19 `Direct` blocks and 3 `PARTIAL_DIRECT` entries were classified (the parser
+/// was checked against that known count before its output was trusted — an
+/// extraction expression that silently matches one family looks exactly like a
+/// clean bill of health). Nine families' named tests never touch the HTTP
+/// surface. **Eight of the nine are correct anyway**, for three different
+/// reasons, and the reasons matter more than the count:
+///
+/// * `can`, `lin`, `caps` — pure-vector families. Canonicalisation, lineage
+///   derivation and capabilities validation ARE recomputations; there is no
+///   registry path to hold, so a golden test is the complete and correct test.
+/// * `rcpt`, `lhr` — word-for-word the same "The producer half IS covered and
+///   stays pinned" construction `log` used, and **sound**. Measured, not read: a
+///   `panic!` planted in `receipt.rs`'s `build_signer` reddens
+///   `rcpt001_registry_receipt_golden_recomputed_and_remintable` and
+///   `lhr001_lineage_head_receipt_golden_recomputed_and_remintable`. Those two
+///   genuinely traverse this registry's own producer code. `log`'s two goldens
+///   reach only `acdp-crypto`'s merkle functions, which is the whole difference.
+/// * `wit`, `dk`, `err` — their registry-side path is held in a THIRD place
+///   neither this file nor `http_integration.rs` can see. A `panic!` in
+///   `witness.rs`'s `verify_cosignature_against_own_log` leaves both test
+///   binaries entirely green (73 pass, 0 http failures) and reddens five
+///   `witness::tests::*` unit tests inside the core crate. So the table credits
+///   no coverage that does not exist; it simply never claimed to enumerate
+///   in-crate unit tests, and this comment is where a reader learns that.
+///
+/// So **`log` was the only family whose table asserted something its named tests
+/// did not hold**, and that is a measured claim about the other 21 rather than an
+/// assumption that the first defect found was the only one.
+///
+/// The bound, stated rather than implied: this survey is a structural
+/// discriminator plus three targeted probes. It is **not** a per-family mutation
+/// sweep — that is the mutation ratchet's job (#216, U-504) and its scope is
+/// recorded in `docs/ENGINEERING-LOG.md`. A family whose named tests DO build a
+/// router could still assert the wrong thing about it, and nothing here would
+/// notice.
+/// Tests in `http_integration.rs` that this file cites, by what they hold.
+///
+/// The first group is U-506's finding. The rest were already cited in this
+/// file's prose and were pinned by nothing.
+const CROSS_BINARY_GUARDS: &[(&str, &[&str])] = &[
+    (
+        // Eleven, not ten: see `source_test_fn_body`'s doc comment for why that
+        // number drifted. These are the tests that actually execute
+        // `handlers/log.rs`; `PARTIAL_DIRECT`'s two `log` entries recompute the
+        // spec's golden VECTORS through `acdp-crypto` and never reach the
+        // handler, which is the distinction `EXCUSED`'s `log` entry now draws.
+        "log — the handler emission path (crates/acdp-registry-core/src/handlers/log.rs)",
+        &[
+            "checkpoint_is_bare_when_no_cosignatures",
+            "checkpoint_serves_verified_cosignatures_and_consumer_counts_them",
+            "cosignature_for_other_tuple_is_not_served_on_current_checkpoint",
+            "log_checkpoint_signs_verifies_and_advances",
+            "log_consistency_between_sizes_verifies",
+            "log_entries_hashes_reproduce_root_and_leaf_bytes",
+            "log_failed_publish_appends_no_leaf",
+            "log_inclusion_proof_at_historical_tree_size",
+            "log_inclusion_proof_folds_for_every_ctx",
+            "log_proof_ctx_id_is_served_to_the_owning_tenant",
+            "log_visibility_private_context",
+        ],
+    ),
+    (
+        "cited elsewhere in this file's prose as the test that holds a claim",
+        &[
+            "admin_status_requires_token_and_reports_health",
+            "anchors_round_trip_byte_exact_sqlite",
+            "challenge_endpoint_is_rate_limited",
+            "did_json_serves_receipt_key_and_404s_without_one",
+            "did_key_publish_mints_verifiable_receipt",
+            "empty_anchors_still_rejected_downstream_once_gate_passes",
+            "gate_fires_before_sdk_empty_vec_check_on_sub_0_5_0_registry",
+            "publish_enforces_the_err002_media_type_matrix",
+            "search_paginates_past_fully_hidden_pages",
+        ],
+    ),
+];
+
+/// `http_integration.rs`'s text, read from disk rather than `include_str!`.
+///
+/// Deliberate: `include_str!` would bake a second 10k-line file into this
+/// binary, and reading from disk is the idiom
+/// `this_file_cites_constructs_and_never_line_numbers` already uses for exactly
+/// this kind of cross-file citation check.
+fn sibling_http_integration_source() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/http_integration.rs");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// Present, test-attribute-registered functions in arbitrary source text.
+///
+/// Generalises `source_has_present_test_fn` (which is hard-wired to
+/// `OWN_SOURCE`) so the same present-and-registered notion applies to a sibling
+/// file. Same ceiling: a commented-out function is absent, but nothing here can
+/// tell whether the body asserts anything real.
+fn present_test_fns_in(text: &str) -> std::collections::BTreeSet<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = std::collections::BTreeSet::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        let rest = t
+            .strip_prefix("async fn ")
+            .or_else(|| t.strip_prefix("fn "));
+        let Some(rest) = rest else { continue };
+        let Some(name) = rest.split('(').next() else {
+            continue;
+        };
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        // Walk back over blank lines to the nearest attribute, exactly as
+        // `source_has_present_test_fn` does.
+        let mut j = i;
+        while j > 0 {
+            j -= 1;
+            let a = lines[j].trim();
+            if a.is_empty() {
+                continue;
+            }
+            if a.starts_with("#[test]") || a.starts_with("#[tokio::test") {
+                out.insert(name.to_string());
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// Does `text` cite `name` as a whole word?
+///
+/// Word-boundary, not `contains`: `log_visibility_private_context` must not be
+/// credited by a citation of some longer identifier that happens to contain it.
+fn cites_word(text: &str, name: &str) -> bool {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(name).any(|(at, _)| {
+        let before_ok = at == 0 || !text[..at].chars().next_back().is_some_and(is_ident);
+        let after = &text[at + name.len()..];
+        let after_ok = !after.starts_with(is_ident);
+        before_ok && after_ok
+    })
+}
+
+/// Every cross-binary name this file cites is present in `http_integration.rs`,
+/// and the table is **exactly** the set of such citations.
+///
+/// Two distinct failures, deliberately in one test because they share the
+/// derivation:
+///
+/// 1. **Rot.** A tabled name that no longer exists there as a test-attributed
+///    function — lane-1 renamed it, or it was deleted. Per U-506's assign this
+///    is a `conflict` to raise, not something to patch around.
+/// 2. **Omission, as an EQUALITY.** An `http_integration.rs` test cited anywhere
+///    in this file but absent from the table. A `>=` floor would pass the very
+///    scanner that is silently missing citations — which is precisely the defect
+///    U-506 found in `this_file_cites_constructs_and_never_line_numbers`, whose
+///    hand-maintained list names one of the nine tests this file cites.
+///
+/// **What assertion 2 can and cannot see.** Because the table's own entries are
+/// themselves citations in this file, the derived set always contains the table.
+/// So the equality's real content is the other direction: *no
+/// `http_integration.rs` test is cited here without being tabled.* It cannot
+/// flag a tabled entry that prose no longer mentions, and it does not need to —
+/// once tabled, the table IS the citation.
+#[test]
+fn cited_cross_binary_tests_are_present_and_exactly_tabled() {
+    let sibling = sibling_http_integration_source();
+    let sibling_tests = present_test_fns_in(&sibling);
+    assert!(
+        sibling_tests.len() > 100,
+        "only {} test functions found in http_integration.rs -- the scanner is \
+         broken, and a broken scanner reports an empty citation set as success",
+        sibling_tests.len()
+    );
+
+    // The `log` group is table-only-cited, so its size is its own guard. Keyed
+    // on the subject prefix rather than an index, so reordering the table cannot
+    // silently point this at the wrong group.
+    let log_group = CROSS_BINARY_GUARDS
+        .iter()
+        .find(|(subject, _)| subject.starts_with("log \u{2014} the handler emission path"))
+        .map(|(_, names)| *names)
+        .expect(
+            "CROSS_BINARY_GUARDS lost its `log` handler-emission group -- that group IS \
+             U-506's finding; if it closed to a stronger mechanism, delete this assertion \
+             deliberately rather than letting the lookup fail",
+        );
+    assert_eq!(
+        log_group.len(),
+        LOG_HANDLER_GUARD_COUNT,
+        "the log handler-guard group names {} tests, expected exactly {}. These are \
+         the tests that hold handlers/log.rs; one going missing here is invisible to \
+         the citation equality below, because the table is their only citation.",
+        log_group.len(),
+        LOG_HANDLER_GUARD_COUNT
+    );
+
+    let mut tabled: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for (subject, names) in CROSS_BINARY_GUARDS {
+        assert!(
+            !names.is_empty(),
+            "CROSS_BINARY_GUARDS subject \"{subject}\" names no tests at all"
+        );
+        for name in *names {
+            assert!(
+                sibling_tests.contains(*name),
+                "CROSS_BINARY_GUARDS (\"{subject}\") cites `{name}` in \
+                 http_integration.rs, which no longer defines it as a present, \
+                 test-attribute-registered function. If lane-1 renamed it, that is a \
+                 cross-lane conflict to raise rather than a name to quietly update."
+            );
+            assert!(
+                tabled.insert(*name),
+                "`{name}` appears twice in CROSS_BINARY_GUARDS -- one copy will rot"
+            );
+        }
+    }
+
+    let cited: std::collections::BTreeSet<&str> = sibling_tests
+        .iter()
+        .map(String::as_str)
+        .filter(|n| cites_word(OWN_SOURCE, n))
+        .collect();
+
+    // ONE direction only, and that is not an oversight. `tabled` is always a
+    // subset of `cited`, because a name written into CROSS_BINARY_GUARDS is
+    // thereby cited in this file -- so a `cited == tabled` equality could only
+    // ever fail through this same difference, and the reverse half would be an
+    // assertion that cannot fire. An unfireable assertion reads as coverage and
+    // provides none, so it is not written.
+    let untabled: Vec<&&str> = cited.difference(&tabled).collect();
+    assert!(
+        untabled.is_empty(),
+        "this file cites these http_integration.rs tests but CROSS_BINARY_GUARDS does \
+         not list them: {untabled:?}. A citation nothing pins rots silently on a \
+         rename -- add them to the table with what they hold."
+    );
 }
