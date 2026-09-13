@@ -1,5 +1,12 @@
 
 
+## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-webhook/v0.1.2...acdp-registry-webhook/v0.1.3) - 2026-09-13
+
+### Fixed
+
+- *(auth,webhook)* keep revocation revoked, stop the poller following redirects, and offer bound freshness ([#250](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/250))
+
+
 ## [0.1.2](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-webhook/v0.1.1...acdp-registry-webhook/v0.1.2) - 2026-09-11
 
 ### Other

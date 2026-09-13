@@ -1,5 +1,20 @@
 
 
+## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.1.2...acdp-registry-store/v0.1.3) - 2026-09-13
+
+### Fixed
+
+- answer a whole page of audit-log visibility checks in one query, on retrieve semantics ([#246](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/246))
+- *(store)* scope search by tenant in SQL so a cursor cannot name a foreign tenant's row ([#240](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/240))
+- stop serving a context as active alongside its own retraction event ([#232](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/232))
+- *(sqlite)* adopt Postgres full-text semantics so q= means one thing ([#231](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/231))
+- *(sqlite)* compare data_period bounds numerically, and add a cross-backend parity suite ([#229](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/229))
+
+### Other
+
+- *(store)* name the disclosure parameter for what the predicate consumes ([#262](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/262))
+
+
 ## [0.1.2](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.1.1...acdp-registry-store/v0.1.2) - 2026-09-11
 
 ### Other

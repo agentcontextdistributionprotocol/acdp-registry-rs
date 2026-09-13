@@ -1,5 +1,30 @@
 
 
+## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.1.2...acdp-registry-core/v0.1.3) - 2026-09-13
+
+### Added
+
+- *(search)* return total_estimate to tenant-scoped callers, as that tenant's count ([#260](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/260))
+- *(search)* scan inside the tenant so the cursor cannot anchor on a foreign row (H-H-w) ([#259](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/259))
+
+### Fixed
+
+- envelope the 415, minting `unsupported_media_type` per the owner's ruling ([#247](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/247))
+- extractor rejections speak the §5 envelope, at their original status ([#245](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/245))
+- unspoofable publish budget, and a rate-limit taxonomy that cannot drift ([#243](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/243))
+- make the cache posture honest and split liveness from readiness ([#239](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/239))
+- make x-request-id reach responses, and give the 413 a real envelope ([#235](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/235))
+- clamp ?limit= so an unauthenticated search cannot abort the process ([#226](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/226))
+
+### Other
+
+- *(store)* name the disclosure parameter for what the predicate consumes ([#262](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/262))
+- *(server)* rename the admin disclosure test to what it pins, and say at both sites why the handler is right ([#261](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/261))
+- one visibility query per /log/entries page, and no cross-tenant count in /search ([#255](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/255))
+- *(rate_limit,secure_compare,gate)* assert three properties that had tests named for them but no assertion of them (H-P) ([#254](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/254))
+- unit H-C — five CI guards that were never guarding, and four claims that were false ([#227](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/227))
+
+
 ## [0.1.2](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.1.1...acdp-registry-core/v0.1.2) - 2026-09-11
 
 ### Other
