@@ -27,6 +27,24 @@ anyhow             = { workspace = true }
 async-trait        = { workspace = true }
 axum               = { workspace = true }
 axum-server        = { workspace = true }
+# W5/U-530: an EXPLICIT rustls crypto provider, because the graph enables two.
+#
+# `axum-server`'s `tls-rustls` feature turns on rustls's `aws-lc-rs` (root
+# `Cargo.toml:35`) and `reqwest`'s `rustls-tls` turns on `ring` via
+# `hyper-rustls` (`:72`). Both edges are unconditional -- neither is
+# `optional` nor behind a storage feature -- so EVERY build variant carries
+# two providers and rustls refuses to pick one. Nothing in `crates/` called
+# `install_default`, so `registry.tls.enabled = true` panicked at startup
+# (rc=101) inside rustls's provider lookup, AFTER `main` had already logged
+# `listening` with the address. Measured, not inferred: U-532.
+#
+# `ring` rather than `aws-lc-rs`: it is what `hyper-rustls`/`tokio-rustls`
+# already select, and `aws-lc-rs` drags `aws-lc-sys` + `prebuilt-nasm` -- a
+# C/asm build dependency -- into the shipped binary's TLS path.
+#
+# This is a NORMAL dependency on purpose. It was previously `[dev-dependencies]`
+# only, which is precisely why the panic could not reach any test binary.
+rustls             = { version = "0.23", features = ["ring"] }
 base64             = { workspace = true }
 chrono             = { workspace = true }
 dotenvy            = { workspace = true }
@@ -63,34 +81,6 @@ uuid           = { workspace = true }
 # truncate-and-test database. SQLite tests use disposable tempfiles so
 # they don't need this.
 serial_test    = "3"
-# U-521: nameable only so the did:web TLS fixture can pick a CryptoProvider
-# explicitly. Two providers are enabled in this workspace -- `aws-lc-rs` via
-# `axum-server/tls-rustls` and `ring` via `hyper-rustls` <- `reqwest` <-
-# `acdp-client` -- and nothing in `crates/` calls `install_default`, so rustls
-# refuses to pick one and every TLS handshake fails at process level.
-#
-# **This is a dev-dependency and that is load-bearing, but not for the reason
-# the section heading suggests.** The workspace sets `resolver = "2"`
-# (`../../Cargo.toml:12`), under which dev-dependency features are NOT unified
-# into the normal build. Under `resolver = "1"` these lines WOULD be a production
-# change wearing a test-only label, so if that key ever changes this dependency
-# needs re-deciding, not merely re-testing.
-#
-# MEASURED, not reasoned -- `cargo tree -e features,no-dev` for this package is
-# byte-identical with and without this entry, both inverted-on-rustls (469 lines)
-# and forward (3406 lines). The same probe WITH dev edges does show the
-# difference, so "identical" is a real read and not a blind comparison.
-#
-# `Cargo.lock` does gain two edges (`rustls` under this package, and `log` under
-# `rustls`, whose default `logging` feature pulls it). That is not a
-# contradiction: the lock records the union of the dependency graph and is not
-# feature-resolved per target. The measurement above is what says the shipped
-# binary's resolution is unchanged.
-#
-# The equivalent gap in the PRODUCTION binary (`src/main.rs`'s
-# `bind_rustls` path, which no test enters) is NOT fixed here: it is filed as
-# U-530. This entry fixes the test binary only.
-rustls         = { version = "0.23", features = ["ring"] }
 # U-521 option B: generate the did:web fixture's CA+leaf chain at test runtime
 # instead of committing PEM files. `.gitignore:39-43` forbids TLS material
 # repo-wide (`*.pem`/`*.crt`/`*.key`) with its only negation an empty
@@ -99,6 +89,17 @@ rustls         = { version = "0.23", features = ["ring"] }
 # commits no private key, and removes the expiry problem entirely: nothing that
 # does not exist can lapse.
 #
-# Dev-only and provably outside the shipped feature graph for the same reason as
-# `rustls` above -- `resolver = "2"` -- measured the same way.
+# **Dev-only, and that is load-bearing for a reason the section heading does not
+# give.** The workspace sets `resolver = "2"` (`../../Cargo.toml:12`), under
+# which dev-dependency features are NOT unified into the normal build. Under
+# `resolver = "1"` this line WOULD be a production change wearing a test-only
+# label, so if that key ever changes this dependency needs re-deciding, not
+# merely re-testing.
+#
+# This paragraph arrived here from U-521's `rustls` dev-dependency, which U-530
+# deleted after promoting `rustls` to `[dependencies]`. It was moved rather than
+# deleted with that entry on purpose: it was written for a future reader, not
+# for U-521, and `rcgen` is now the only dev-only entry it still protects. The
+# `rustls` half of U-521's "byte-identical `no-dev` graph" measurement expired
+# the moment `rustls` became a normal dependency; the `rcgen` half did not.
 rcgen          = "0.14"

@@ -31,6 +31,75 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-507 (lane-3) — reconciling ASSUMPTIONS.md's open entries; the census, and what it caught -->
+
+### U-507 — `ASSUMPTIONS.md`'s open entries, reconciled against the tree
+
+`ASSUMPTIONS.md` is tracked, cumulative, and had grown past 3000 lines. Its open entries were being
+counted three different ways, none of them right, and several had been silently resolved by work that
+shipped weeks or hours earlier. This unit censused them, resolved what the tree could settle, and left
+the rest open with an owner.
+
+**The count was the first problem, and every available number was wrong.**
+
+| figure | what it actually counted |
+|---|---|
+| 50 | `grep -c UNCONFIRMED` — includes prose narrating a *past* status |
+| 28 | an `^`-anchored `**Status:**` pattern — misses five other live shapes |
+| 35 | a careful hand count, scoped to "deferred items", predating 8 later entries |
+| **37 items / 46 declarations** | every declaration, classified |
+
+The 28 is the interesting failure: it undercounts by the same mechanism that makes 50 overcount, one
+boundary over. This file writes statuses mid-prose-line, with a parenthetical between key and colon,
+with the **token wrapped onto the following line**, and — 13 times — as a **bullet or heading label
+with no `Status` word at all** (`- **UNCONFIRMED — awaiting human ruling:**`). A line-anchored pattern
+cannot see any of those, and returns a confident number rather than an error.
+
+**The census tool ships, at `docs/assumptions-status-census.py`.** A figure whose predicate lives in a
+scratch file is not reproducible, and the leader could not verify 32/32 precisely because no grep
+censuses this file — lowercase status words collide with ordinary English here ("cannot be confirmed
+after the fact"). The tool asserts its own partition is total, so an unseen sixth shape fails the run
+instead of quietly lowering the count. It independently reproduces the earlier hand count of 35,
+decomposed identically — two methods from opposite directions, same partition.
+
+**Result.**
+
+    open items at unit start              37
+    fully resolved                        24
+    deliberately still open (AC4/AC5)     13
+    open declarations        46  ->  16   (30 flipped to a resolved token)
+    status lines rewritten / deletions    51    verified AFTER the final merge
+
+**The equality caught two items the unit had walked past** — one a *second* declaration inside an
+entry whose first was already resolved. A floor (`>= 20 resolved`) would have passed with both still
+open, which is the argument for stating an equality rather than a threshold.
+
+**Three entries had already closed themselves.** The shared playground validator's placement (#192,
+#193), "CI never exercised the shipped stack" (#270), and `/metrics`' cache posture (#218) were all
+settled by other work landing, with nobody going back to flip them. That is the failure mode this unit
+exists to correct, and it will recur unless entries are re-read when related work merges.
+
+**The pattern worth copying: entries that specify their own closure signal.** `/metrics`' said
+*"deleting that line is how the fix announces itself"*; A2's said it must not be called closed until a
+named test was deliberately deleted. Both signals had already fired — the test was deleted in
+`f8a866d`, the same commit that landed the predicate, established with `git log -S` on the test name
+rather than from a changelog. An entry that says how its own resolution will be detectable is worth
+more than one that merely records a status.
+
+**What the unit declined to do.** Nothing was closed by inertia: two entries stay open because "nobody
+objected" is not evidence, and one of them forbids that reasoning in its own text. Four entries that
+belong to the human or the leader kept their open token and gained **Settled by** and **Owner** — split
+rather than lumped, because this file has used "escalated" for both. One out-of-grant defect is
+reported rather than repaired: `crates/acdp-registry-core/src/handlers/context.rs:1262-1277` cites a
+deleted test as machine-checking a residue and still calls landed work a requirement.
+
+**A method note, recorded because it recurred six times in one session.** Six sweeps in this unit
+returned a plausible number from the wrong input rather than an error: a body searched without its
+heading, a `docker-compose.yml` grepped at the repo root when the file is under `docker/`, and
+`INSERT INTO contexts` matching `contexts_fts` as a prefix. Two of those would have produced false
+findings against another lane's work. The pattern was correct every time; the input or the boundary
+was not, and nothing failed loudly.
+
 <!-- unit U-510 (lane-3) — CI now builds the feature configurations it checks; closes #265 -->
 
 ### Fixed
@@ -5989,6 +6058,34 @@ corrections too. It surfaced only because a mutant's failure output quoted the *
 restore is not a revert to known-good; it is a jump to an arbitrary past state whose contents you must
 remember, and what it eats is the most recent work — the work you are least likely to re-derive because
 you believe it is done.
+
+## U-535 — a differential with a shared centre points at the wrong file
+
+`parity.rs` cross-checked the RFC-ACDP-0008 §4.5 disclosure rule across what its own comment called
+three implementations. Two of the three were the same function: the trait default body is
+`retrieve_visible` plus a tenant check, and the N-call reference calls `retrieve_visible` directly.
+
+The interesting part is the failure mode. A shared-centre differential does not just miss a defect in
+the centre — it **misattributes** it. With `retrieve_visible` broken, the leg that consults it agrees
+with itself and stays green; the SQL, derived separately, is the only thing that can disagree; so the
+report reads "the SQL disagrees". Falsified at baseline: the old legs printed
+`over-disclosure: []` and blamed the batch for under-disclosing, which is precisely backwards.
+
+Fix: `EXPECTED_BY_SPEC`, a literal per-requester table transcribed from the RFC, with **both**
+implementations compared against it. Falsification, per backend and per leg:
+
+| mutation | anchor names the Rust rule | anchor names the SQL |
+|---|---|---|
+| `retrieve_visible`: `None => false` → `None => true` | 4 | 0 |
+| SQLite `LIST_VISIBILITY_SQLITE`: second-arm `AND` → `OR` | 0 | 6 |
+| Postgres `LIST_VISIBILITY_PG`: second-arm `AND` → `OR` | 0 | 6 |
+
+Attribution is correct in both directions, on both backends. The two SQL mutations also fired the new
+named outsider pins (2 each), which is what those pins exist for.
+
+The generalisable lesson: **count the distinct expressions a suite can bottom out in, not the number
+of comparisons it performs.** Two differentials terminating at the same leaf give the coverage of one,
+and the doc comment claiming otherwise is itself the defect.
 
 ## U-533 — required-but-unexercised 6 -> 1, and a retirement that cannot be faked
 
