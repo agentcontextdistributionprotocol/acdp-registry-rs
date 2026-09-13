@@ -441,7 +441,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Blast radius if wrong:** bounded and cheap. Worst case CI stays red on a dependabot
   branch that was already red; nothing reaches `main`. Reversal is `git revert` on an
   unmerged branch.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 
 ## REG-11 Phase 1 — #136's two non-mechanical bumps (serial_test MSRV, jsonwebtoken crypto provider)
 - **Plan:** `plans/backlog-reg11.md` (Phase 1)
@@ -908,7 +908,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **The durable fix** is the one CHARTER rule 15 already prescribes: cite by quoted content, not
   by line. This is the second time in two units that a docs-only edit invalidated a pin in a
   file the editing lane was not allowed to touch.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 
 ## W3-U1 — #192/#193: validating playground config at both doors (2026-09-10, lane-1)
 
@@ -3065,3 +3065,95 @@ the workflow cannot start unless the pattern matched the ref.
 page. `app/acdp-deps-bot` has opened PRs **#225, #230, #236, #272, #278** (`pull-requests: write`),
 and the four annotated release tags above were pushed by the same release-plz flow
 (`contents: write`). A permission that has been used is better evidence than one that is listed.
+
+### Addendum to batch 1 — two entries whose own bodies already answered them
+
+Recorded because both findings are stronger than the evidence I first cited, and because the method
+error that nearly hid them applies to the rest of this unit: **I flipped these on the status line and
+the heading, without reading the entry's trailing bullets.** An entry's `Update:` / `Executed:` /
+`Correction:` bullets sit *after* the status line, so a status-line-only read sees neither the
+evidence that discharges it nor the caveat that would block it. The remaining entries in this unit
+are read whole before any flip.
+
+- **`:338` / status `:370` — the status line contradicted its own entry body, for twelve days.** The
+  bullet immediately below it reads `**Executed (2026-09-01):** a repo admin actioned the recorded
+  recommendation`, with the same read-only `gh api …/branches/main/protection` call and the same
+  resulting `contexts`. So this was never "awaiting a repo admin": it was actioned on 2026-09-01,
+  recorded one line below the status, and nobody flipped the token. My own read at 17:17:51Z
+  re-confirms it independently, but the primary finding is the internal contradiction — which also
+  explains the stale `(awaiting a repo admin …)` clause flagged above: it has been false since
+  2026-09-01.
+
+- **`:817` / status `:830` — the `:831` update is superseded by this unit's evidence, and it names
+  the exact condition that supersedes it.** The update (2026-09-11) narrowed the claim to "the code
+  path is demonstrated, the remote write is not" and stated the discharge condition itself:
+  *"criterion 2a is still only dischargeable by observing the real post-merge run."* That run has
+  since happened. `git ls-remote --tags origin 'refs/tags/acdp-registry-server/*'` returns
+  `v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.1.3`, each with its annotated `^{}` peel — the remote write,
+  observed. The entry's own acceptance test ("a first run that is green and PR-less but mints NO tags
+  is a FAILURE") is therefore passed, not merely argued. The `:831` text stays as written: it was
+  true on 2026-09-11 and is superseded rather than wrong, and correcting its wording would be a
+  prose edit outside this unit's grant.
+
+- **Declaration count, stated because a reviewer comparing notes will hit it.** The leader's
+  independent pass lists `:831` as a real status declaration; this unit's extractor classifies it as
+  prose, because the token is not the bullet's leading label and because entry `:817` is already
+  counted once via `:830`. Counting it either way gives **37 items** — the number the work is scoped
+  by — and 46 or 47 declarations respectively. The divergence is a definitional one about whether an
+  update restating a status is a new declaration, not a disagreement about what is open.
+
+### Batch 2 — three resolved, one confirmed still-open, all anchored by quoted content
+
+Anchored by **quoted content, not line pins**, per CHARTER rule 15 — and per `:900`'s own finding,
+which this unit has now reproduced twice. Line numbers are given only as a convenience and are
+correct at base `f093db7`.
+
+**Resolved — `## REG-11 Phase 1 — extending #136's fix-forward past the planned two-file scope`**
+(status line `:444`, **UNCONFIRMED → CONFIRMED**). The extension was the right call and the work
+landed completely. A bound check rather than a spot check, because a partial migration would look
+identical to a finished one at any single call site:
+
+    thread_rng remaining in crates/ : 0 files
+    OsRng     remaining in crates/ : 0 files
+    SysRng    present in           : 2 files  (acdp-registry-auth/src/jwt.rs, acdp-registry-server/tests/http_integration.rs)
+    Cargo.toml                     : rand = "0.10", hmac = "0.13"
+
+All five call sites the entry enumerated are migrated, the direct dependencies are at the bumped
+versions, and `main` is green. The entry's own falsified premise ("the literal '2 files' premise is
+falsified") is exactly what the bound check confirms: it was five, and all five are done.
+
+**Resolved — `### Rule-10 / rule-15 sweep: a FOREIGN pin went stale because of this branch`**
+(status line `:911`, **UNCONFIRMED → CONFIRMED**). The observation is correct, and this unit has
+produced a **third instance of it** while verifying the second. The entry `### Left standing
+deliberately — docker/RAILWAY.md:57 and :68 are FALSE on main today` pins two lines that now land on
+blockquotes added by U-503; the `ACDP_REGISTRY_AUTH__JWT_SECRET` row it meant to cite has moved to
+`:112`. So the pattern is not "twice in two units" but at least three times, in three different
+files, always because a docs edit shifted lines under a citation the citing lane could not edit.
+**Its prescribed fix is adopted here:** this unit's own resolutions quote content. My batch-1
+resolutions cited line numbers and will drift for exactly the reason this entry documents.
+
+**Resolved — `### UNCONFIRMED: the four new steps run clippy, not cargo build`** (label form, no
+flippable token under the current grant — see the `blocked` message of 17:31Z). **Superseded by
+U-510 / #265.** The `clippy` job now runs **9 clippy steps and 5 `build (...)` steps**, so the
+"two classes of configuration — one lint-checked, one not" that the entry weighed no longer exists:
+every configuration is both linted and built. PR **#273**, merged `9df7c97`, closes **#265**. The
+entry's reasoning was sound at the time and its own escape hatch ("reverses in one line per step if
+the leader disagrees") was never needed — the gap was closed by addition, not reversal.
+
+**Still open, deliberately, with a trigger — `## predecessor_admission enforcement: store-level
+coverage, not end-to-end wiring`** (status line `:569`, stays **UNCONFIRMED**). Checked rather than
+assumed, and the residual is intact:
+
+- The only `predecessor_admission` references in `crates/acdp-registry-server/tests/` are three
+  occurrences of **`predecessor_admission: None`** in `pg_integration.rs`. That is test setup which
+  *disables* admission, not coverage of it — so those tests could not notice upstream dropping
+  `Some(..)`, which is precisely the residual the entry recorded.
+- `conformance.rs`'s `rev-001` fixture does now cite RFC-ACDP-0014 §4/§5, which could look like the
+  missing coverage. It is not: its own docstring scopes it as *"a single-vector ACCEPT golden,
+  structurally identical to sig-001/003"* for **key revocation**, plus a negative for §5 step 2. The
+  predecessor-admission reject path is still uncovered.
+- **What would settle it:** one end-to-end HTTP publish test that passes `Some(closure)` and asserts
+  the closure's `Err` surfaces as the RFC-ACDP-0014 §4 rejection. **Who owns it:** it must live in
+  `crates/acdp-registry-server/tests/conformance.rs`, which is **not** in U-507's grant — so it is a
+  unit for whoever holds that file, not a thing this unit may fix. Upstream spec issue **#57** still
+  governs whether a fixture will ever supply it.
