@@ -77,10 +77,6 @@ jobs:
       # would lint workflow syntax, say nothing about the shell, and still exit
       # 0 — a gate quietly covering less than it claims. Asserting presence is
       # what stops that being invisible.
-      - name: TEMPORARY falsification probe - actionlint must reject this
-        if: ${{ github.event_nam == 'push' }}
-        run: echo unreachable
-
       - name: linter versions
         run: |
           set -euo pipefail
