@@ -367,7 +367,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   nothing in this diff breaks — the ratchet still gains real teeth in the required `tests`
   job via the two unconditional tests; only the `Replayed`-mechanism half stays
   advisory-only, the same gap that exists today for the whole ratchet.
-- **Status:** UNCONFIRMED (awaiting a repo admin to action the branch-protection change).
+- **Status:** CONFIRMED (2026-09-01) — actioned by a repo admin and recorded in the "Executed" bullet below; independently re-verified 2026-09-13 (U-507).
 - **Executed (2026-09-01):** a repo admin actioned the recorded recommendation.
   Re-verified via the same read-only call,
   `gh api repos/agentcontextdistributionprotocol/acdp-registry-rs/branches/main/protection`
@@ -441,7 +441,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Blast radius if wrong:** bounded and cheap. Worst case CI stays red on a dependabot
   branch that was already red; nothing reaches `main`. Reversal is `git revert` on an
   unmerged branch.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 
 ## REG-11 Phase 1 — #136's two non-mechanical bumps (serial_test MSRV, jsonwebtoken crypto provider)
 - **Plan:** `plans/backlog-reg11.md` (Phase 1)
@@ -721,7 +721,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   publishes remain bound to DID-signature verification. This unit therefore does **not**
   claim unauthenticated publish is possible. Overstating it would have made the finding
   easier to dismiss. **Status: CONFIRMED.**
-- **UNCONFIRMED — awaiting human ruling:** whether `docker/RAILWAY.md` should require
+- **UNCONFIRMED — awaiting human ruling; re-checked 2026-09-13 (U-507) and still open. **Settled by:** the R3 ruling on whether the Railway recipe enables auth. **Owner:** the human — not the leader, which holds no authority over a product recipe decision.** The question is whether `docker/RAILWAY.md` should require
   `ACDP_REGISTRY_AUTH__ENABLED = true`. Raised as `blocked`, forwarded by the leader, not
   acted on. The documentation of the gap ships regardless; only the recipe change waits.
 - **Not re-litigated:** `auth.enabled = false` in the compose stack stays (leader-confirmed;
@@ -779,7 +779,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   (b) the draft justified leaving runtime semantics alone on the state being "unreachable
   through the real binary" — false, the admin reload endpoint validates nothing.
   **Status: CONFIRMED (corrected).**
-- **UNCONFIRMED — deliberately not decided here:** whether the shared playground validation
+- **RESOLVED (U-507, 2026-09-13) — the placement call was made, in `acdp-registry-core`:** whether the shared playground validation
   that #192 and #193 both need should live in `acdp-registry-types` or `acdp-registry-core`.
   Both issues suggest a shared validator; the placement call belongs to whoever takes them,
   with the whole surface in view. Not blocking this unit.
@@ -812,7 +812,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   crates.io fetches.
 - **Blast radius if wrong:** releases stay stalled; no data or wire effect. Reversible by
   reverting one config file.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 
 ### The bootstrap run MINTS the new-shape tags — the one link with no local evidence
 - **Assumed:** `release-plz release` will create `acdp-registry-<crate>/v0.1.0` tags on the first
@@ -827,7 +827,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   first run that is green and PR-less but mints NO tags is a FAILURE, not a pass.
 - **Blast radius if wrong:** the stall persists in a new form; docker's tag trigger stays dead.
   No irreversible effect.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 - **Update, 2026-09-11 — PARTIALLY narrowed, still UNCONFIRMED.** The `release` path has now been
   exercised locally after all, which the paragraph above says was never done; that sentence was
   true when written and is now superseded rather than wrong. `release-plz release --dry-run`, run
@@ -884,7 +884,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **Blast radius if wrong:** the docker trigger stays dead exactly as it is today — no
   regression, just no fix. The guard step cannot catch it, because the guard only runs once the
   workflow has already triggered.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 
 ### The `ACDP_BOT` App has `contents: write` + `pull-requests: write` on THIS repo
 - **Assumed:** yes, from `repository_selection: all` on the org App and its use in three existing
@@ -895,7 +895,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   `permission-contents` / `permission-pull-requests` rather than inheriting every installation
   permission (which would have included `workflows: write`).
 - **Blast radius if wrong:** the release-plz job fails at the mint step. Reversible in two lines.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 
 ### Rule-10 / rule-15 sweep: a FOREIGN pin went stale because of this branch, and I cannot fix it
 - **Observed:** `ASSUMPTIONS.md` (U-005's entry) cites `docker/RAILWAY.md:45`. That was correct at
@@ -908,11 +908,11 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **The durable fix** is the one CHARTER rule 15 already prescribes: cite by quoted content, not
   by line. This is the second time in two units that a docs-only edit invalidated a pin in a
   file the editing lane was not allowed to touch.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED
 
 ## W3-U1 — #192/#193: validating playground config at both doors (2026-09-10, lane-1)
 
-- **UNCONFIRMED — a deliberate departure from a written acceptance criterion.** The unit
+- **CONFIRMED (U-507, 2026-09-13) — a deliberate departure from a written acceptance criterion, now pinned by a test that names this very decision.** The unit
   assignment's AC3 says an unusable pinned-key list "MUST" be refused at startup and names
   "all entries expired" as qualifying. This unit **refuses the five structural defects**
   (unknown `algorithm`, non-base64 key material, wrong `ed25519`/`ecdsa-p256` byte length or
@@ -925,7 +925,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   report rather than taken silently. **If the leader wants AC3's literal reading, the change
   is small and localized** — the warning branch becomes an `Err` — but it should arrive as a
   config key (`playground.refuse_on_no_live_pin`) rather than a default, because refusing is
-  plainly wrong for the lax case. **Status: UNCONFIRMED.**
+  plainly wrong for the lax case. **Status: UNCONFIRMED (re-checked U-507 2026-09-13 — and deliberately NOT closed by silence). The flag was raised in the done report as the entry says, and no `playground.refuse_on_no_live_pin` key exists anywhere in the tree, so the shipped behaviour is unchanged. Settled by: the leader either requesting AC3's literal reading or declining it. Owner: the leader.**
 - **Resolved from this file's own W2-U1 entry above:** that entry left placement of the
   shared validator (`acdp-registry-types` vs `acdp-registry-core`) deliberately undecided for
   whoever took #192/#193. Taken here: **`acdp-registry-core`**, because the rules being
@@ -979,10 +979,10 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   (`handlers/log.rs:359`) and a stored leaf that no longer parses under the closed schema
   raises it locally; `store/src/log.rs`'s own tests pin the reject cases. **Status:
   CONFIRMED.**
-- **UNCONFIRMED and deliberately left alone:** that path answers `502`, which blames an
+- **CONFIRMED as a deliberate, documented non-decision (U-507, 2026-09-13) — still recorded, still not decided, and the reasoning is now in the code beside the mapping:** that path answers `502`, which blames an
   upstream for a local data fault. It is defensible (the wire code is registered to
   RFC-ACDP-0012 §11's federation meaning) and changing it is a wire change. Noted next to the
-  mapping in `error.rs` rather than fixed inside a docs pass. **Status: UNCONFIRMED —
+  mapping in `error.rs` rather than fixed inside a docs pass. **Status: CONFIRMED as a deliberate non-decision (U-507) — **Settled by:** a wire-contract change, **Owner:** the spec holder —
   recorded, not decided.**
 - **Assumption made explicit, because re-pointing would have hidden it:** the ten stale
   `417211f` citations in `conformance.rs` asserted counts that are **still true** at the CI
@@ -1002,7 +1002,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   `Cache-Control: private` or `no-store` on requester-relative responses is **not** decided
   here. `#190` was a false claim and is fixed by making the prose true; the wire question is
   `#205`. Shipping a header change inside a docs correction would be the same defect as the
-  original claim, pointing the other way. **Status: UNCONFIRMED — split out by design.**
+  original claim, pointing the other way. **Status: RESOLVED (U-507, 2026-09-13) — split out by design, and #205 then decided it: `private`, not `no-store` (`acdp-registry-core/src/lib.rs:107`).**
 
 ## W3-U5 — the quickstart did not boot (lane-1, 2026-09-11)
 
@@ -1057,9 +1057,9 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   REFUTED, HS256 scoping restored and the EdDSA carve-out given its own bullet.**
 - **Deliberately bounded, not assumed away:** this unit narrows `validate_config`'s
   validate-before-migrate contract to `jwt_secret` and does **not** restore it. The EdDSA PEM
-  case still fails late. Every document it touches is scoped to say so. **Status: OPEN, owned
+  case still fails late. Every document it touches is scoped to say so. **Status: OPEN (re-verified U-507 2026-09-13 — `validate_config` catches only an EMPTY EdDSA PEM; a MALFORMED one still fails late). **Settled by:** parsing the PEM there. Still owned
   by nobody, reported in this lane's `done`.**
-- **UNCONFIRMED — reported, not acted on:** that `.github/workflows/docker.yml` sets no
+- **SUPERSEDED by #270 (U-507, 2026-09-13) — no longer true; CI now boots the shipped stack, with and without auth:** that `.github/workflows/docker.yml` sets no
   `jwt_secret`, so CI never exercised the stack the repo ships and green CI was never evidence
   about the compose file. `.github/**` is not this lane's to change; the leader ruled it a
   separate unit.
@@ -1124,7 +1124,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   human ruling on whether the Railway recipe should enable auth). Editing them now would
   conflict with that patch and pre-empt the ruling. Verified this commit leaves it applying
   cleanly.
-- **Status: UNCONFIRMED — blocked on the R3 ruling, not on evidence.** The evidence is
+- **Status: SUPERSEDED — the standalone factual fix landed, independently of R3 (U-507, 2026-09-13).** The evidence is
   settled; only the remedy is open. **If R3 is declined, these two lines still need a
   standalone factual fix** — they do not become true by the recipe staying auth-off.
 
@@ -1137,19 +1137,19 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **CONFIRMED by falsification, not by reading:** removing the data-plane layer reddens
   `cache_posture_covers_every_data_plane_route`; restoring it greens. Removing/moving the auth
   layer inside the limiter reddens `credential_endpoints_are_never_stored`.
-- **UNCONFIRMED — a CDN in "cache everything / ignore origin headers" mode defeats both
+- **UNCONFIRMED and unfalsifiable from this repo (re-checked U-507 2026-09-13). **Settled by:** an operator observing a real CDN. **Owner:** operators. A CDN in "cache everything / ignore origin headers" mode defeats both
   `private` and `Vary`.** No origin header can fix this. It stays an operator note in
   `RECEIPTS.md`, downgraded to defense-in-depth rather than deleted. Not testable from here.
-- **UNCONFIRMED — `private` carries no validators.** No `ETag`, no `Last-Modified`, no
+- **UNCONFIRMED — `private` carries no validators. Re-checked U-507 2026-09-13: the fix has NOT landed — there is no `ETag` anywhere in `acdp-registry-core`. **Settled by:** ETags plus explicit freshness. **Owner:** unassigned.** No `ETag`, no `Last-Modified`, no
   `max-age`, so a requester's *own* cache may briefly reuse a context retracted since. Accepted
   deliberately: they already held those bytes. **The future fix is ETags plus explicit
   freshness, NOT `no-store`** — reaching for `no-store` would trade a real client-caching
   capability for protection against caches that ignore directives anyway.
-- **UNCONFIRMED — `/log/checkpoint` inherits `private` it does not need.** It is hash-only and
+- **UNCONFIRMED — `/log/checkpoint` inherits `private` it does not need; still true (`if_not_present` at `lib.rs:121`; `handlers/log.rs` sets no cache header of its own). **Settled by:** an explicit short public TTL on that route. **Owner:** unassigned.** It is hash-only and
   requester-invariant (`handlers/log.rs`, `State` only). It gives up shared cacheability it has
   never used. `if_not_present` was chosen precisely so an explicit short public TTL can be added
   later without touching the layer.
-- **UNCONFIRMED — `/metrics` was left out of scope, and the dismissal deserves revisiting.** It
+- **RESOLVED (U-507, 2026-09-13) — #218 is CLOSED/COMPLETED, and this entry's own announcement mechanism fired: the `EXEMPT` row is gone, replaced by `no-store`, overriding, on both the 200 and 401 arms.** It
   is a direct Prometheus scrape target that sets no cache header, but it is also bearer-gated
   (`metrics.rs`), so its 200-vs-401 outcome is authorization-relative — the same gap #205 closed
   elsewhere, under the same CDN threat model. Tracked as **#218**, filed with the proposed
@@ -1188,7 +1188,7 @@ tests exist to prevent it.
 
 ## W3-U10 — CI builds every valid feature configuration (#200)
 
-### UNCONFIRMED: the four new steps run `clippy`, not `cargo build`
+### SUPERSEDED (U-510 / #265, 2026-09-13): the four new steps ran `clippy`, not `cargo build` — build steps now run beside them
 Issue #200 and the unit assignment both say "`--all-targets` builds; no test run needed."
 The four steps added to the `clippy` job run `cargo clippy … -- -D warnings` instead.
 Reasoning: all four *existing* feature steps are clippy, the job is measured at 24–43s so
@@ -1414,7 +1414,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   that porter and snowball disagree on some words, so parity is pinned per-mechanism rather
   than proven across the language — stated on `fulltext::PG_ENGLISH_STOPWORDS` and in the
   parity suite's docs rather than left implicit.
-- **Status:** UNCONFIRMED — **escalated to the human**. Reversible, but a product judgement on a public API taken against a defensible alternative. Recommendation: confirm as taken. See DECISIONS.md H-B #10.
+- **Status:** UNCONFIRMED — **escalated to the human**, re-checked 2026-09-13 (U-507) and still open. Reversible, but a product judgement on a public API taken against a defensible alternative. Recommendation unchanged: confirm as taken. **Settled by:** the owner accepting or rejecting the taken behaviour. **Owner:** the human. See DECISIONS.md H-B #10.
 
 ## The stopword table is verified against Postgres rather than trusted
 
@@ -1544,7 +1544,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   on `main` today (media type stamped by the outermost `if_not_present` layer, no envelope).
   The cost is that a client parsing error envelopes uniformly still gets no `error.code` on a
   timeout. Reversible in one commit once a §5 code exists.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (U-507, 2026-09-13) — the constraint is unchanged: `AcdpError` still has no timeout variant and `acdp_wire_code` no timeout arm, so 413-only remains correct.
 
 ## H-A / P1 — the 408 `x-request-id` is correct by construction but not pinned by a test
 
@@ -1564,8 +1564,8 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** a future refactor could move the timeout layer outside the
   request-id pair and lose the id on 408s with no test failing. Bounded: the 413 guard covers the
   same layer boundary, so the regression would have to be specific to the timeout layer alone.
-- **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
-  evidence rather than actioned here.
+- **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this evidence
+  rather than actioned here. Re-checked 2026-09-13 (U-507): still undecided. **Settled by:** the coordinator ruling on the taxonomy. **Owner:** the leader — this one is genuinely the leader's, not the human's.
 
 
 ## H-A / P4 — A9: rate-limit scope taxonomy generated from one list
@@ -1604,7 +1604,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** an operator's `challenge_per_agent` alert loses volume to
   `challenge_global`. Disclosed in the CHANGELOG under `### Changed` and in an operator note in
   `docs/HTTP-API.md` next to the metric table, both stating the direction of the shift.
-- **Status:** UNCONFIRMED — the label rename is a deliberate, documented break of an existing
+- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13; unfalsifiable from this repo). **Settled by:** an operator confirming nothing alerts on the old series. **Owner:** operators. The label rename is a deliberate, documented break of an existing
   series; whether any deployment actually alerts on `challenge_per_agent` is not knowable here.
 
 
@@ -1639,7 +1639,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   to assert `window_start` and `count` directly.
 - **Blast radius if wrong:** a publish limiter that under- or over-charges. Bounded by the guards
   above, each falsified individually.
-- **Status:** UNCONFIRMED — the concurrency bound and the #242 gap are deliberate, documented
+- **Status:** CONFIRMED as deliberate trades (U-507, 2026-09-13) — the entry classifies them itself and both still hold: the concurrency bound and the #242 gap are deliberate, documented
   trades, not settled questions.
 
 ## `search_in_tenant`'s default treats the backend as untenanted rather than refusing
@@ -1971,7 +1971,7 @@ own and stable. Beyond AC2 there is an independent reason: axum's and serde's wo
 to change, so echoing it onto the wire grows an accidental contract that breaks on a dependency
 bump.
 
-### OPEN — escalated, NOT decided here: the §5 `code` for a 415
+### OPEN — escalated, NOT decided here: the §5 `code` for a 415 *(re-verified U-507 2026-09-13: still open; `acdp_wire_code` emits 24 codes and none is a media-type failure, so minting one remains unavoidable. **Owner:** the spec/canon holder, not this repo.)*
 
 - **The question:** enveloping a 415 requires a `code`, because `WireErrorBody::code` is a
   required `String` -- there is no "envelope without a code".
@@ -2063,9 +2063,8 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 
 - **Blast radius if wrong:** a client that depended on `total_estimate` under a tenant header now
   sees the key absent. That is the intended behaviour change and it is in the engineering log.
-- **Status:** UNCONFIRMED — A2 ships PARTIAL by design. The cursor oracle remains open and is
-  asserted by `search_cursor_oracle_remains_open_for_tenant_scoped_caller`; A2 must not be
-  described as closed until the store-side predicate lands and that test is deliberately deleted.
+- **Status:** RESOLVED (U-507, 2026-09-13) — **A2 is closed, and this entry specified exactly how to tell.**
+  It said A2 "must not be described as closed until the store-side predicate lands and that test is deliberately deleted". Both happened in the same commit: `f8a866d` (#259, *"scan inside the tenant so the cursor cannot anchor on a foreign row"*) landed the tenant-aware store search and deleted `search_cursor_oracle_remains_open_for_tenant_scoped_caller`. Established with `git log -S` on the test name, not by reading a changelog.
   **The `limit=1` claim in this section is superseded** by the correction under P9: a foreign
   anchor also escapes at ANY limit once the refill loop exhausts `SEARCH_REFILL_MAX_PAGES`,
   because `cursor` is assigned before that break. This fixture is too small to reach that exit.
@@ -2181,7 +2180,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   escapes at `limit=1` too. The honest statement is "at `limit>=2`, and at any `limit` once the
   refill budget is exhausted" — not "never at `limit=1`". Generalising "every time" from one
   six-row fixture was the error.
-- **Status:** UNCONFIRMED — A2 remains PARTIAL. `docs/HTTP-API.md` and the call-site comment now
+- **Status:** RESOLVED (U-507, 2026-09-13) — A2 is no longer PARTIAL; closed by `f8a866d` (#259), see the A2 resolution above. `docs/HTTP-API.md` and the call-site comment now
   state the corrected version.
 
 - **Assumption (latent, accepted knowingly):** dropping the `CtxId::parse` guard is safe.
@@ -2194,7 +2193,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   per record, which is the cost this phase exists to remove.
 - **What would make it reachable:** a migration or import path that writes `contexts` rows
   without minting through `CtxId`. Anything of that kind must revisit this.
-- **Status:** UNCONFIRMED — recorded so it is a known latent rather than a rediscovery.
+- **Status:** CONFIRMED (U-507, 2026-09-13) — verified unreachable today, and the trigger above is kept for whoever changes that. No path writes `contexts` rows outside the publish flow: the pg and sqlite migrations that appear to insert into `contexts` insert into **`contexts_fts`**, the FTS shadow table (`002_fts5.sql:15,33`, `013_fts5_porter.sql:44`), and no import or bulk-insert path exists. Recorded so it stays a known latent rather than a rediscovery.
 
 - **Record that would otherwise not ship: how P9's planned acceptance criteria were actually
   met.** `plans/` is gitignored (the literal `plans/` entry in `.gitignore`; not cited by line,
@@ -2369,7 +2368,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   another lane documented this same wave, so it is a decision for the leader and not a side effect
   of a wiring unit. Documenting (b) without implementing it would have left the docs describing code
   that does not exist — the failure this unit's second half exists to remove.
-- **Status:** UNCONFIRMED — the behaviour is deliberate and the docs match the code as shipped, but
+- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13 — deliberately NOT closed by inertia, which this entry explicitly forbids). **Settled by:** an explicit ruling. **Owner:** the leader. The behaviour is deliberate and the docs match the code as shipped, but
   the *decision* is open and should be closed explicitly rather than by inertia.
 ## H-A P10 (A10) — the route-classification guard names what it cannot parse
 
@@ -2426,7 +2425,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   reddens **only** the unit guard, because caps is the field the predicate actually reads. That
   directional result is what shows the end-to-end test measures caps rather than config, and it is
   why the config half needs its own assertion to be protected at all.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (U-507, 2026-09-13) — still accurate: the helper exists, no enforcing `debug_assert` was added, and the divergent site remains.
 
 ## H-A2-w — `total_estimate` returns for tenant-scoped callers
 
@@ -2461,7 +2460,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   not part of this change. lane-3 left them deliberately for the same reason and said so at
   handover. Deleting them here would ship an unfalsified behaviour change inside a diff whose
   stated purpose is a one-field wire addition.
-- **Status:** UNCONFIRMED — a separate unit if anyone wants it, with its own evidence.
+- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13) — a separate unit if anyone wants it, with its own evidence. **Settled by:** scheduling that unit. **Owner:** the leader.
 
 ## H-U — the store parameter is renamed for what the predicate consumes
 
@@ -2531,7 +2530,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   publish — a second network round-trip, a second SSRF surface, and a cache that can disagree
   with the SDK's. Not attempted; the seam is designed in
   `plans/cross-repo/acdp-rs-publish-charge-seam.md` and filed upstream.
-- **Status:** UNCONFIRMED — this is a judgement about cost, not a measured fact. It is the one
+- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13; unmeasurable by construction, so evidence cannot close it). **Settled by:** a reviewer accepting or rejecting the trade. **Owner:** the reviewer. This is a judgement about cost, not a measured fact. It is the one
   claim in this unit a reviewer should push back on if they disagree about the trade.
 
 ## U-505 — index of deferred work surfaced from this file and DECISIONS.md (2026-09-13, lane-1)
@@ -2562,7 +2561,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   follow-up, and `acdp-ci/DELIVERY-STANDARD.md`'s status lines) were **not** verified to the same
   standard, because doing so means reading another repo's git history rather than its working tree.
   They are neither confirmed done nor confirmed live.
-- **Status:** UNCONFIRMED — the `ASSUMPTIONS.md` count of 35 is exact and bound-checked; the
+- **Status:** PARTIAL (U-507, 2026-09-13) — the `ASSUMPTIONS.md` count of 35 is CONFIRMED exact by independent re-derivation; the
   `DECISIONS.md` count of 42 is an upper bound on distinct items, not an exact count.
 ## U-503 — a shell script is the right home for a CI tag guard
 
@@ -2775,7 +2774,7 @@ than assumed.
   resolved environment. Fixed with a CI-only overlay (`compose.ci-auth-on.yml`) whose effect is
   proven by control (2) now firing.
 
-- **UNCONFIRMED — a gap in the shipped recipe, reported rather than fixed here.** The compose
+- **SUPERSEDED (U-507, 2026-09-13) — the recipe now DOES provide an environment path: `docker/docker-compose.yml:90` forwards `ACDP_REGISTRY_AUTH__ENABLED`. True when written:** The compose
   file's header tells operators to "set a real secret before enabling auth", but the recipe
   provides **no environment path to enable auth** — `ACDP_REGISTRY_AUTH__ENABLED` is not forwarded.
   An operator must edit `config.docker.toml`, which runs straight into the precedence caveat the
@@ -2810,8 +2809,8 @@ than assumed.
   every PR waiting forever.
 - **Blast radius if wrong:** the gate advises instead of blocking until one API call is made. Loud,
   not silent: the limitation is in the workflow header, the log entry, the PR body and `done`.
-- **Status:** UNCONFIRMED — the leader decides whether to make `lint` required, or to route it to
-  the human as a repo-settings change.
+- **Status:** PARTIAL (U-507, 2026-09-13) — the *technique* is now proven by U-516: a checkout-only gate
+  runs inside `ci.yml`'s `fmt` job (published `rustfmt`, a required context) and blocks merges with no settings change. `lint` itself is still a separate workflow publishing a non-required `lint` context, so the original ask is undischarged.
 
 ## U-508 — a separate lint.yml rather than jobs inside ci.yml
 
@@ -2825,7 +2824,7 @@ than assumed.
   combined job — rejected, `shellcheck` and `actionlint` failing for unrelated reasons under one
   check name is harder to read, though they do share a job here since both are seconds long.
 - **Blast radius if wrong:** one file moves. No behaviour depends on which file the steps live in.
-- **Status:** UNCONFIRMED — cheap to reverse; recorded so the choice is visible rather than assumed.
+- **Status:** CONFIRMED (U-507, 2026-09-13) — the stated reason still holds exactly: the linters need no Rust toolchain and no cargo cache, so they share nothing with `ci.yml`'s jobs. The *cost* of the separate file (a non-required context) is tracked as its own entry above and is not a defect in this choice.
 
 ## U-511 — #271: an empty env override is treated as absent (2026-09-13, lane-1)
 
@@ -2864,7 +2863,7 @@ than assumed.
   whitespace is never valid JSON; that divergence is documented at its site.
 - **Status:** CONFIRMED by falsification — reverting the helper to `trim()` reddens exactly one test.
 
-- **UNCONFIRMED — an upgrade-ordering hazard, stated rather than assumed away.** The recipe now
+- **CONFIRMED (U-507, 2026-09-13) — the hazard is real and is now documented where an upgrader will meet it (`docs/UPGRADING.md:110-124`), which is what this entry asked for: an upgrade-ordering hazard, stated rather than assumed away.** The recipe now
   passes `ACDP_REGISTRY_AUTH__ENABLED: ${...:-}`, which renders as an empty string. A registry
   binary from *before* this change rejects an empty boolean with a hard error, so pulling the new
   `docker-compose.yml` against an older image breaks the boot. Called out in README's Configuration
@@ -2910,7 +2909,7 @@ one `checkout-spec@` `uses:` line, and that the ref follows it.
   the U-508 `lint` problem again).
 - **Blast radius if wrong:** a codegen defect that only 1.88 exhibits would still pass CI. Narrow,
   and it would be caught by the stable build for any source-level cause.
-- **Status:** UNCONFIRMED — the leader may prefer the complete closure.
+- **Status:** PARTIAL (U-507, 2026-09-13) — verified unchanged: both msrv steps are still `cargo check --locked` (`ci.yml`, job `msrv`). The scope choice is defensible and the residual is real and unclosed — U-510 established that `cargo check` neither codegens nor links, so this job does **not** prove the workspace *builds* on 1.88, only that 1.88 accepts the surface. **Settled by:** converting both steps to `cargo build` if MSRV buildability is wanted. **Owner:** the leader. Not claimed as complete.
 
 ## U-510 — build steps inside the required `clippy` job rather than a new, honestly-named job
 
@@ -2931,8 +2930,8 @@ one `checkout-spec@` `uses:` line, and that the ref follows it.
   protection, and a required context that stops reporting leaves every PR waiting forever).
 - **Blast radius if wrong:** a reader sees "clippy" fail on a build error. Mitigated by step names
   (`build (postgres)` etc.) making the failing step obvious, and by the comment in the job.
-- **Status:** UNCONFIRMED — cheap to move if the leader prefers the honest name and accepts
-  non-blocking.
+- **Status:** CONFIRMED (U-507, 2026-09-13) — corroborated by independent adoption: U-516 placed its
+  own gate inside an already-required job for the same reason, so putting the build steps in `clippy` was the right shape, not merely the available one.
 
 ## U-510 — reconcile outcome for the two entries above (append-only, so their original wording stands)
 
@@ -2971,8 +2970,8 @@ still open, and this is the outcome:
   original error with a newer number, which is precisely what the assign forbids.
 - **Blast radius if wrong:** a reader takes "sometimes the critical path" as settled when it is based
   on 5 runs. Mitigated by stating n in the table itself.
-- **Status:** UNCONFIRMED — more runs will sharpen the frequency; the categorical claim will not
-  change unless clippy's distribution moves.
+- **Status:** CONFIRMED (U-507, 2026-09-13) — **the prediction was right on both halves, measured at n=13.**
+  Eight further CI runs (read 23:08:31Z) give clippy-minus-tests margins of `-92, -104, -70, -23, +4, -7, -9, -2`s. Combined with the original five (`+12, -18, -27, +26, -4`): **clippy led 3 of 13 runs**, so the frequency sharpened from 2-of-5 (40%) to 3-of-13 (23%) exactly as this entry said it would; and the categorical claim did not change, because clippy still leads sometimes and the widest per-run margin (+26s) remains far below the spreads (clippy 76-193s, tests 146-297s). The new set's single "lead" is **+4s**, which is noise, not headroom — quoting it as a margin would repeat U-510's original error with a fresher number.
 
 ## U-513 — the builds stay in the required `clippy` job rather than moving to a parallel job
 
@@ -2992,8 +2991,8 @@ still open, and this is the outcome:
   (rejected: loses the lint coverage W3-U10 added for #200, trading one gap for another).
 - **Blast radius if wrong:** ~8s per PR persists until the settings decision. Trivially reversible —
   moving the steps to their own job is one commit, and becomes correct the moment the contexts change.
-- **Status:** UNCONFIRMED — the leader or the human may prefer to make the settings change and take
-  the parallel form.
+- **Status:** UNCONFIRMED (re-examined U-507, 2026-09-13) — **U-516 does NOT discharge this one.** Its
+  move works because a checkout-only check needs no parallelism; these builds do, and parallelism needs a separate job, hence a new check name, hence a `required_status_checks.contexts` change. **Settled by:** that settings change. **Owner:** the human.
 
 ## U-504 — #216: the mutation ratchet extended to `handlers/context.rs` (2026-09-13, lane-2)
 
@@ -3170,3 +3169,432 @@ Plan: plans/u-521-didweb-fixture-and-metrics.md
      documented configuration path, not a live outage. I could not establish that from inside this
      unit's grant; the leader checked it.
    - **Status:** CONFIRMED (2026-09-13) — deferred to U-530 by decision, not by omission.
+
+## U-507 — reconciliation of this file's open entries (lane-3, 2026-09-13)
+
+Resolutions are **appended here**; only the status *token* on each entry's own status line was
+rewritten in place, per the narrow grant. Entries are addressed by line number as of base `f81013e`
+so the mapping is checkable. Every resolution names its evidence; none says "reviewed and confirmed".
+
+- **Scope, re-derived rather than inherited (read 17:08:08Z, base `5fd7cb5`).** **37 open items**
+  carrying **46 open status declarations**. Three earlier figures existed and all three are unfit:
+  `grep -c UNCONFIRMED` = **50** (counts prose — `:328` narrates a *past* status, `:379`
+  cross-references a flip); an anchored `^\s*-?\s*\*\*Status:?\*\*\s*UNCONFIRMED` = **28**, which
+  *undercounts* because this file's statuses also appear mid-prose-line (`:708`), with a
+  parenthetical (`**Status (updated 2026-09-01):**`), spelled `**Status of the original
+  assumption:`, with the **token wrapped onto the next line** (`:980`, `:1031`, `:1056`), and — 13
+  times — as a **bullet or heading label with no `Status` word at all** (`- **UNCONFIRMED —
+  awaiting human ruling:**`, `### OPEN — escalated, NOT decided here:`); and U-505's hand count of
+  **35** (`:2544`), which excluded two shapes it listed separately and predates 8 entries added
+  since. **U-505's enumeration and this one agree exactly** at 37 declarations before `:2537`
+  (U-505: 25 + 1 status-line, 9 bullet-is-status, +1 `###`-heading, +1 in-entry update; here: 26
+  status-labelled + 11 bullet-label). Two independent methods, same number.
+
+### Resolved: `conformance (spec fixtures)` is now a required context — entry `:338`, status `:370`
+
+**UNCONFIRMED → CONFIRMED.** The entry parked this on "awaiting a repo admin to action the
+branch-protection change". It has been actioned. Evidence, `gh api
+repos/agentcontextdistributionprotocol/acdp-registry-rs/branches/main/protection`, read
+2026-09-13T17:17:51Z:
+
+    required_status_checks.contexts = ["rustfmt","clippy","tests","conformance (spec fixtures)"]
+    strict = true
+
+- **A stale clause this unit could not fix.** `:370` now reads `CONFIRMED (awaiting a repo admin to
+  action the branch-protection change)`, which is self-contradictory: the parenthetical is false and
+  correcting it is a **prose** edit, outside the status-token grant. Flagged rather than silently
+  exceeded — it needs either a one-line grant extension or a follow-up. The token is the
+  machine-read fact and it is now true; the clause beside it is not.
+
+### Resolved: `git_only = true` and `git_tag_name` are as recorded — entry `:800`, status `:815`
+
+**UNCONFIRMED → CONFIRMED.** Read from the file, not from the entry's own prose:
+`release-plz.toml:13` is `git_only = true`; `:36` is `git_tag_name = "{{ package }}/v{{ version }}"`.
+The reasoning is documented in place at `:15-18` (why `git_only` alone is sufficient and not a stale
+TODO) and `:29` (why changing the template orphans existing tags). `release-plz.toml` was **read
+only** — U-507 is explicitly barred from modifying it or #278.
+
+### Resolved: the new-shape tags were actually minted — entry `:817`, status `:830`
+
+**UNCONFIRMED → CONFIRMED.** This was recorded as "the one link with no local evidence". There is
+now remote evidence: `git ls-remote --tags origin 'refs/tags/acdp-registry-server/*'` returns four
+tags in the new shape — `v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.1.3` — each with its annotated `^{}` peel,
+so they are real annotated tags pushed by the bot, not lightweight local artefacts.
+
+### Resolved: GitHub's ref matcher accepts `acdp-registry-server/v*` — entry `:875`, status `:887`
+
+**UNCONFIRMED → CONFIRMED**, by a real push event rather than by reading the docs. Run
+**34734871991**: `event=push`, `head_branch=acdp-registry-server/v0.1.3`, workflow `docker`,
+`conclusion=success`, against `docker.yml`'s trigger
+`on.push = {branches: [main], tags: ['acdp-registry-server/v*']}`. The run existing is the proof —
+the workflow cannot start unless the pattern matched the ref.
+
+- **Method note, because the first attempt produced a false negative:** `gh run list --workflow
+  docker.yml --limit 40` filtered on `headBranch` returned **nothing**, because 40 runs no longer
+  reach back that far. The absence was an artefact of the window, not of the fact. Querying the run
+  directly settled it.
+
+### Resolved: `ACDP_BOT` holds `contents: write` + `pull-requests: write` — entry `:889`, status `:898`
+
+**UNCONFIRMED → CONFIRMED**, demonstrated by exercised permission rather than by reading a settings
+page. `app/acdp-deps-bot` has opened PRs **#225, #230, #236, #272, #278** (`pull-requests: write`),
+and the four annotated release tags above were pushed by the same release-plz flow
+(`contents: write`). A permission that has been used is better evidence than one that is listed.
+
+### Addendum to batch 1 — two entries whose own bodies already answered them
+
+Recorded because both findings are stronger than the evidence I first cited, and because the method
+error that nearly hid them applies to the rest of this unit: **I flipped these on the status line and
+the heading, without reading the entry's trailing bullets.** An entry's `Update:` / `Executed:` /
+`Correction:` bullets sit *after* the status line, so a status-line-only read sees neither the
+evidence that discharges it nor the caveat that would block it. The remaining entries in this unit
+are read whole before any flip.
+
+- **`:338` / status `:370` — the status line contradicted its own entry body, for twelve days.** The
+  bullet immediately below it reads `**Executed (2026-09-01):** a repo admin actioned the recorded
+  recommendation`, with the same read-only `gh api …/branches/main/protection` call and the same
+  resulting `contexts`. So this was never "awaiting a repo admin": it was actioned on 2026-09-01,
+  recorded one line below the status, and nobody flipped the token. My own read at 17:17:51Z
+  re-confirms it independently, but the primary finding is the internal contradiction — which also
+  explains the stale `(awaiting a repo admin …)` clause flagged above: it has been false since
+  2026-09-01.
+
+- **`:817` / status `:830` — the `:831` update is superseded by this unit's evidence, and it names
+  the exact condition that supersedes it.** The update (2026-09-11) narrowed the claim to "the code
+  path is demonstrated, the remote write is not" and stated the discharge condition itself:
+  *"criterion 2a is still only dischargeable by observing the real post-merge run."* That run has
+  since happened. `git ls-remote --tags origin 'refs/tags/acdp-registry-server/*'` returns
+  `v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.1.3`, each with its annotated `^{}` peel — the remote write,
+  observed. The entry's own acceptance test ("a first run that is green and PR-less but mints NO tags
+  is a FAILURE") is therefore passed, not merely argued. The `:831` text stays as written: it was
+  true on 2026-09-11 and is superseded rather than wrong, and correcting its wording would be a
+  prose edit outside this unit's grant.
+
+- **Declaration count, stated because a reviewer comparing notes will hit it.** The leader's
+  independent pass lists `:831` as a real status declaration; this unit's extractor classifies it as
+  prose, because the token is not the bullet's leading label and because entry `:817` is already
+  counted once via `:830`. Counting it either way gives **37 items** — the number the work is scoped
+  by — and 46 or 47 declarations respectively. The divergence is a definitional one about whether an
+  update restating a status is a new declaration, not a disagreement about what is open.
+
+### Batch 2 — three resolved, one confirmed still-open, all anchored by quoted content
+
+Anchored by **quoted content, not line pins**, per CHARTER rule 15 — and per `:900`'s own finding,
+which this unit has now reproduced twice. Line numbers are given only as a convenience and are
+correct at base `f093db7`.
+
+**Resolved — `## REG-11 Phase 1 — extending #136's fix-forward past the planned two-file scope`**
+(status line `:444`, **UNCONFIRMED → CONFIRMED**). The extension was the right call and the work
+landed completely. A bound check rather than a spot check, because a partial migration would look
+identical to a finished one at any single call site:
+
+    thread_rng remaining in crates/ : 0 files
+    OsRng     remaining in crates/ : 0 files
+    SysRng    present in           : 2 files  (acdp-registry-auth/src/jwt.rs, acdp-registry-server/tests/http_integration.rs)
+    Cargo.toml                     : rand = "0.10", hmac = "0.13"
+
+All five call sites the entry enumerated are migrated, the direct dependencies are at the bumped
+versions, and `main` is green. The entry's own falsified premise ("the literal '2 files' premise is
+falsified") is exactly what the bound check confirms: it was five, and all five are done.
+
+**Resolved — `### Rule-10 / rule-15 sweep: a FOREIGN pin went stale because of this branch`**
+(status line `:911`, **UNCONFIRMED → CONFIRMED**). The observation is correct, and this unit has
+produced a **third instance of it** while verifying the second. The entry `### Left standing
+deliberately — docker/RAILWAY.md:57 and :68 are FALSE on main today` pins two lines that now land on
+blockquotes added by U-503; the `ACDP_REGISTRY_AUTH__JWT_SECRET` row it meant to cite has moved to
+`:112`. So the pattern is not "twice in two units" but at least three times, in three different
+files, always because a docs edit shifted lines under a citation the citing lane could not edit.
+**Its prescribed fix is adopted here:** this unit's own resolutions quote content. My batch-1
+resolutions cited line numbers and will drift for exactly the reason this entry documents.
+
+**Resolved — `### UNCONFIRMED: the four new steps run clippy, not cargo build`** (label form, no
+flippable token under the current grant — see the `blocked` message of 17:31Z). **Superseded by
+U-510 / #265.** The `clippy` job now runs **9 clippy steps and 5 `build (...)` steps**, so the
+"two classes of configuration — one lint-checked, one not" that the entry weighed no longer exists:
+every configuration is both linted and built. PR **#273**, merged `9df7c97`, closes **#265**. The
+entry's reasoning was sound at the time and its own escape hatch ("reverses in one line per step if
+the leader disagrees") was never needed — the gap was closed by addition, not reversal.
+
+**Still open, deliberately, with a trigger — `## predecessor_admission enforcement: store-level
+coverage, not end-to-end wiring`** (status line `:569`, stays **UNCONFIRMED**). Checked rather than
+assumed, and the residual is intact:
+
+- The only `predecessor_admission` references in `crates/acdp-registry-server/tests/` are three
+  occurrences of **`predecessor_admission: None`** in `pg_integration.rs`. That is test setup which
+  *disables* admission, not coverage of it — so those tests could not notice upstream dropping
+  `Some(..)`, which is precisely the residual the entry recorded.
+- `conformance.rs`'s `rev-001` fixture does now cite RFC-ACDP-0014 §4/§5, which could look like the
+  missing coverage. It is not: its own docstring scopes it as *"a single-vector ACCEPT golden,
+  structurally identical to sig-001/003"* for **key revocation**, plus a negative for §5 step 2. The
+  predecessor-admission reject path is still uncovered.
+- **What would settle it:** one end-to-end HTTP publish test that passes `Some(closure)` and asserts
+  the closure's `Err` surfaces as the RFC-ACDP-0014 §4 rejection. **Who owns it:** it must live in
+  `crates/acdp-registry-server/tests/conformance.rs`, which is **not** in U-507's grant — so it is a
+  unit for whoever holds that file, not a thing this unit may fix. Upstream spec issue **#57** still
+  governs whether a fixture will ever supply it.
+
+### Batch 3 — the widened grant applied, and the contradiction batch 1 shipped is now repaired
+
+The grant was widened at 17:37Z from "the status token" to "a complete status line — token plus its
+reason clause", after measurement showed the token-only form fit 6 of 41 remaining declarations.
+Append-only still governs every non-status line, so no `Assumed:` / `Chose:` / `Why:` / `Update:` /
+`Correction:` text is touched anywhere in this unit.
+
+- **`- **Status:** CONFIRMED (awaiting a repo admin to action the branch-protection change)` —
+  repaired.** Batch 1 could only rewrite the token, which left a true status welded to a false
+  clause. The line now records what actually happened: actioned 2026-09-01, recorded in the entry's
+  own `Executed` bullet, re-verified independently 2026-09-13. This was flagged in the file rather
+  than fixed by widening my own grant, which is why it survived to be repaired properly.
+
+- **`### UNCONFIRMED: the four new steps run clippy, not cargo build` → `SUPERSEDED`.** Evidence
+  recorded in batch 2 above; the heading is now flippable under the one-line treatment. Enumerated
+  rather than counted by string match, because the two differ here: the `clippy` job holds **17
+  steps**, of which **9** are named `clippy (…)` and **5** are named `build (…)`. The file contains
+  6 occurrences of the string `build (`, so a string count answers a different question than a step
+  count and cannot settle this one.
+
+- **`**Status: UNCONFIRMED — blocked on the R3 ruling, not on evidence.**` → `SUPERSEDED`.** Only
+  the bolded status span was rewritten; the sentence it shares a physical line with ("The evidence
+  is …") continues onto the next line and is untouched. The entry's own fallback clause is what
+  fired: *"If R3 is declined, these two lines still need a standalone factual fix"* — the standalone
+  fix landed, so the item closed without the ruling. `grep -ci 'never validated'` on
+  `docker/RAILWAY.md` is **0**, and the `ACDP_REGISTRY_AUTH__JWT_SECRET` row now states the opposite
+  of what the entry reports as false there.
+
+- **`## U-505 — index of deferred work` → `PARTIAL`, because only one of its two halves is closable
+  here.** The status asserted two things and they have different fates:
+  - *"the `ASSUMPTIONS.md` count of 35 is exact and bound-checked"* — **CONFIRMED**, by independent
+    re-derivation rather than by agreement. U-507's parser and U-505's hand enumeration reach the
+    same partition: 26 status-line declarations (U-505: 25 `UNCONFIRMED` + 1 `OPEN`) and 11
+    label-form (U-505: 9 bullet-is-status + 1 `###`-heading + 1 in-entry update), for 37
+    declarations before `:2537`. Two methods, built from opposite directions, same number.
+  - *"the `DECISIONS.md` count of 42 is an upper bound"* — **still open, and correctly so.** The
+    entry states the bound it could not close: items whose resolution lives in a sibling repo's
+    history (the spec-repo dispatch matrix, `acdp-ci/DELIVERY-STANDARD.md`) were not verified to the
+    same standard. **What would settle it:** classifying those 42 against the sibling repos'
+    history — a cross-repo *read*, which is permitted, but a unit's worth of work scoped to
+    `DECISIONS.md`. **Who owns it:** not U-507, whose grant is this file. Left as an upper bound
+    with the reason attached rather than silently promoted to exact.
+
+### Batch 4 — two verified against the tree, and the three AC6 entries U-516 touches
+
+**`## H-A / P2 — 408 is not given an RFC-ACDP-0007 §5 envelope` → CONFIRMED.** The constraint the
+decision rested on is unchanged, checked rather than assumed: `AcdpError` has **0** variants
+mentioning `Timeout`, and `acdp_wire_code` (`crates/acdp-registry-types/src/error.rs:138`) still has
+no timeout arm. The one `timeout` string in that file (`:528`, `"did:web timeout"`) is a did:web
+resolution message, not a §5 wire code — a grep for `timeout` alone would have read as a hit. So
+scoping P2 to 413 was right and remains right; emitting `internal_error` for a client-side timeout
+would still attribute a client condition to a server fault. **Residual, unchanged:** a client parsing
+envelopes uniformly still gets no `error.code` on a 408. **Settled by:** registering a
+`request_timeout` code in the shared §5 registry. **Owner:** whoever holds `acdp-registry-types` and
+the spec — not this unit.
+
+**`## The caps/config invariant is made unrepresentable for new callers` → CONFIRMED.** Still
+accurate in every part that matters: `with_anonymous_public_reads` exists
+(`crates/acdp-registry-server/tests/common/mod.rs:390`), the guard
+`the_helper_sets_both_knobs_not_just_one` is present in `caps_visibility.rs`, the divergent site
+`config_shipped_disclosure_default` is still there (`http_integration.rs:1579`, used at `:1676`), and
+**no enforcing `debug_assert` was added** — so the constructive-not-enforcing shape the entry
+describes is exactly what ships. **One number I deliberately did not contradict:** the entry says 75
+existing construction sites; a pattern for direct field assignment finds 39 lines today. The entry
+does not state its counting method, so 39 and 75 may be answers to different questions. Recorded as
+unverified rather than as a discrepancy — refuting a number requires matching how it was counted.
+
+#### AC6 — what U-516 discharged, and what it did not
+
+U-516's actual shape, measured rather than taken from its description:
+
+    ci.yml      job=fmt    published='rustfmt'  required=TRUE   step if=${{ !cancelled() }}
+    docker.yml  job=build  published='build'    required=FALSE  step if=${{ !cancelled() }}
+
+The gate runs in **two** places, and the `ci.yml` one sits in a job whose published name is already a
+required context — so it blocks merges **with no branch-protection change**. Both sites carry
+`!cancelled()`, which closes the skip-chain defect where an upstream failure silently skipped the gate.
+
+- **`## U-508 — "PR-blocking" means runs-and-can-fail, not listed-in-branch-protection` → PARTIAL.**
+  The *technique* is now proven in production, which is more than the entry could claim when written.
+  What is **not** discharged is the entry's own ask: `lint.yml` is still a separate workflow whose only
+  job publishes the non-required context `lint`, and `required_status_checks.contexts` is still
+  `["rustfmt","clippy","tests","conformance (spec fixtures)"]`. So `lint` still cannot block a merge —
+  but there is now a demonstrated second route (move its steps into an already-required job) that needs
+  no settings change at all. PARTIAL rather than CONFIRMED because the route is proven and untaken.
+
+- **`## U-510 — build steps inside the required clippy job` → CONFIRMED.** Corroborated by
+  independent adoption: U-516 reached for the same technique for the same reason. That turns the
+  original choice from "the available option" into "the shape this repo converges on", which is
+  stronger evidence than the entry could produce for itself.
+
+- **`## U-513 — the builds stay in the required clippy job rather than moving to a parallel job` →
+  stays UNCONFIRMED, deliberately.** This is the AC6 case that goes the *other* way, and it matters
+  that the reasoning is written rather than the status copied: U-516's move works precisely because a
+  checkout-only check has no parallelism to lose. These build steps do. Parallelism requires a
+  separate job, a separate job publishes a new check name, and a new check name is not in an
+  enumerated `contexts` list — so the blocker is untouched by U-516. **Settled by:** the
+  branch-protection change. **Owner:** the human. Flipping this one on U-516's evidence would have
+  been the exact error AC6 exists to prevent.
+
+### Batch 5 — AC5: the four entries that are not this unit's to resolve
+
+All four keep their original open token. **Zero flips in this batch, by design** — the job was to make
+each ask precise, not to answer it. Each status line was rewritten to carry a **Settled by** and an
+**Owner**, because an open item with no named owner is indistinguishable from a forgotten one.
+
+- **`awaiting human ruling: whether docker/RAILWAY.md should require ACDP_REGISTRY_AUTH__ENABLED`** —
+  still open. Owner named as **the human, not the leader**, which matters here: the leader has already
+  said in this run that it holds no authority over repo settings or product recipes, so recording it as
+  "the coordinator's" would park it with someone who cannot discharge it. Note the ask has **narrowed**
+  since it was written: the factual defect in that file was fixed independently (see batch 3's
+  `:1127`), so only the recipe change is still waiting.
+
+- **`escalated to the human — a product judgement on a public API`** — still open, recommendation
+  unchanged ("confirm as taken"). Verified that the situation it describes has not drifted:
+  `PG_ENGLISH_STOPWORDS` is still a hand-written const (`crates/acdp-registry-store/src/fulltext.rs:46`)
+  with a length check against Postgres at `:195`, so the trade the entry made — keep the table, verify
+  it rather than trust it — is still the shape that ships.
+
+- **`handed to the coordinator as a standalone decision`** — still open. **Owner: the leader**, and
+  this is the one of the four where that is correct rather than a deflection; the other three are the
+  human's. Worth distinguishing, because "escalated" has been used in this file for both.
+
+- **`OPEN — escalated, NOT decided here: the §5 code for a 415`** — still open, and **re-verified
+  rather than assumed**. `acdp_wire_code` emits **24** codes and **none describes a media-type
+  failure**, so enveloping a 415 still requires minting a code the canon lacks, which is a policy
+  decision for the spec holder. One precision: a filter for media-type-ish names flags
+  `unsupported_algorithm`, which matches only on the substring "unsupported" and is about signature
+  algorithms. It is not a media-type code, and a looser grep would have reported the gap as already
+  closed.
+
+### Batch 6 — the three entries this lane authored, resolved on fresh measurement
+
+These are U-508's, U-510's and U-513's own assumptions. Resolving one's own entries is where the
+temptation to confirm-by-familiarity is strongest, so each was re-measured rather than recalled.
+
+**`## U-513 — n=5 supports a categorical latency claim but no numeric one` → CONFIRMED, at n=13.**
+This entry made a falsifiable prediction — *"more runs will sharpen the frequency; the categorical
+claim will not change unless clippy's distribution moves"* — and it can now be checked instead of
+believed. Eight further CI runs, read 2026-09-13T23:08:31Z, give clippy-minus-tests margins of
+`-92, -104, -70, -23, +4, -7, -9, -2`s. With the original five (`+12, -18, -27, +26, -4`):
+
+    clippy led        3 of 13 runs        (original 2 of 5 = 40%; new 1 of 8 = 12%; combined 23%)
+    clippy range      76-193s             tests range   146-297s
+    widest margin     +26s                widest spread 151s
+
+Both halves held: the frequency sharpened (40% → 23%) and the categorical claim is unchanged, because
+clippy still sometimes leads and no margin is quotable. **The new set's one lead is `+4s`** — that is
+noise, and quoting it as headroom would reproduce U-510's original defect with a fresher number, which
+is the specific trap U-513 existed to fix.
+
+**`## U-508 — a separate lint.yml rather than jobs inside ci.yml` → CONFIRMED.** The stated reason is
+unchanged and still correct: the linters need no Rust toolchain and no cargo cache, so they share
+nothing with `ci.yml`'s jobs — the choice was about *sharing*, not about blocking. U-516 does not
+refute it; it only shows a required job is available if blocking is wanted. The cost of this choice (a
+non-required `lint` context) is tracked as its own entry and is not a defect in this decision.
+
+**`## U-510 — the msrv job's cargo check steps stay check rather than becoming builds` → PARTIAL, not
+CONFIRMED.** Verified unchanged: both steps are still `cargo check --locked` in `ci.yml`'s `msrv` job.
+The scope argument is defensible — MSRV asks whether 1.88 *accepts* the surface. But the residual is
+real and this unit declines to paper over it: **U-510 itself established that `cargo check` neither
+codegens nor links**, so this job does not prove the workspace *builds* on 1.88. Confirming it outright
+would use my own unit's finding to justify ignoring my own unit's gap. **Settled by:** converting both
+steps to `cargo build`. **Owner:** the leader.
+
+### Batch 7 — five items, of which three closed themselves while nobody was looking
+
+The pattern worth naming: three of these were not resolved by argument but by *other work landing*.
+Nobody went back to flip them, which is the failure mode this whole unit exists to correct.
+
+**`## W2-U1 — #185 pinned-keys guard hoist` → RESOLVED.** The entry left the placement of the shared
+playground validator ("`acdp-registry-types` or `acdp-registry-core`") to "whoever takes them". They
+were taken and it landed in **core**: `validate_playground_config` at
+`crates/acdp-registry-core/src/playground.rs:259`, called from **two** doors —
+`acdp-registry-server/src/main.rs:338` (startup) and `acdp-registry-core/src/handlers/admin.rs:182`
+(the admin reload path, which is #192's). Both **#192 and #193 are CLOSED/COMPLETED**. So it is not
+merely placed, it is genuinely *shared*, which was the point.
+
+**`## W3-U1 — validating playground config at both doors` → CONFIRMED, and pinned by a test.** The
+deliberate departure (refuse the five structural defects, warn loudly on an all-expired list) is still
+what ships, and it is protected by an assertion that names the decision:
+`main.rs:1874` reads `.expect("an all-expired list must WARN, not refuse — see DECISIONS W3-U1-b")`.
+A deliberate deviation guarded by a test citing its own decision record is the strongest form this can
+take — someone changing it has to delete a message telling them not to.
+
+**`## Run-close sweep — #190/#191` → two of its three open declarations settled.**
+- The `502`-for-a-local-data-fault mapping is **confirmed as a deliberate, documented non-decision**:
+  `cross_registry_resolution_failed` is still the mapping (`error.rs:199`) and the 400-vs-502 reasoning
+  is written beside it (`:155-175`). **Settled by:** a wire-contract change. **Owner:** the spec holder.
+- The `private`-vs-`no-store` scope boundary is **RESOLVED**: it was split out to #205 by design, and
+  #205 decided it — `private`, with the reasoning at `acdp-registry-core/src/lib.rs:107`
+  ("`private` rather than `no-store`: the threat is shared caches"). Split-out items are exactly the
+  ones that rot, because the split reads like a resolution.
+
+**`## W3-U5 — the quickstart did not boot` → one half superseded, one half still open, and the
+distinction is precise.**
+- **SUPERSEDED by #270:** the claim that `docker.yml` sets no `jwt_secret` so "CI never exercised the
+  stack the repo ships" is no longer true. `docker.yml` now runs *the documented quickstart boots*,
+  *…with auth enabled*, and a self-test of the boot guard, with 4 `jwt_secret` references and
+  `docker/assert-quickstart-boots.sh` shipped.
+- **Still OPEN, and narrowed:** `validate_config` (`main.rs:123`) catches only an **empty** EdDSA PEM;
+  it never parses one, so a **malformed** PEM still fails late — exactly as the entry said. Empty is
+  not malformed, and confirming this from the presence of an EdDSA branch alone would have been wrong.
+  **Settled by:** parsing the PEM in `validate_config`.
+
+**`## #205 — Cache-Control posture` → one of four RESOLVED, three still open with owners.**
+- **RESOLVED — `/metrics`.** #218 is **CLOSED/COMPLETED**, and this entry predicted its own resolution
+  signal: *"the exemption is load-bearing in the test suite … deleting that line is how the fix
+  announces itself."* The line is gone. `NON_DATA_ROUTES` now carries `/metrics` as *"`no-store`,
+  overriding, on both the 200 and the 401 arm … Closed #218."* An entry that specifies how its own
+  closure will be detectable is the best-designed thing in this file.
+- **Still open, each re-checked rather than restated:** the CDN threat (unfalsifiable from this repo —
+  **owner:** operators); `private` carries no validators (**verified the fix has not landed: no `ETag`
+  anywhere in `acdp-registry-core`**); and `/log/checkpoint`'s inherited `private` (`if_not_present` at
+  `lib.rs:121`, and `handlers/log.rs` sets no cache header of its own).
+
+### Batches 8-9 — the last eleven items, and the two the equality caught
+
+**`## H-A / P8 — A2: tenant-scoped search omits total_estimate` → RESOLVED, and this entry told us
+how to check.** It said A2 *"must not be described as closed until the store-side predicate lands and
+that test is deliberately deleted."* Both happened in **one commit**: `f8a866d` (#259, *"scan inside
+the tenant so the cursor cannot anchor on a foreign row"*) landed the tenant-aware store search **and**
+deleted `search_cursor_oracle_remains_open_for_tenant_scoped_caller`. Established with
+`git log -S` on the test name rather than from a changelog. The `RETRACTION` entry's matching "A2
+remains PARTIAL" line is resolved with it.
+
+- **A stale comment this unit cannot fix, reported per U-505's precedent.**
+  `crates/acdp-registry-core/src/handlers/context.rs:1262-1277` still says
+  `search_cursor_oracle_remains_open_for_tenant_scoped_caller` *"asserts the residue so that is
+  machine-checked rather than remembered"* — that test no longer exists — and still describes
+  *"pushing the tenant predicate into the store's search SQL"* as what closing it **requires**, which
+  `f8a866d` did. `crates/**` is outside U-507's grant, so this is reported, not repaired.
+
+**`docker-compose.yml`'s two paired entries, which resolve in opposite directions.** `:2778` said the
+recipe offers **no** environment path to enable auth; `:2867` said the recipe **now passes**
+`ACDP_REGISTRY_AUTH__ENABLED`. Both cannot be current, and the second is: **`docker/docker-compose.yml:90`**
+forwards it. So `:2778` is SUPERSEDED and `:2867` is CONFIRMED — the hazard it raises is real and is
+now documented where an upgrader meets it (`docs/UPGRADING.md:110-124`).
+
+- **Method note, because this nearly became a false finding against another lane's work.** A grep of
+  `docker-compose.yml` returned nothing and read as "not forwarded" — the file is
+  `docker/docker-compose.yml`, not at the repo root. The pattern was right and the path was wrong.
+
+**`### The caps/config RETRACTION`'s latent → CONFIRMED unreachable, with its trigger kept.** The
+assumption was that dropping the `CtxId::parse` guard is safe, reachable only via *"a migration or
+import path that writes `contexts` rows without minting through `CtxId`"*. No such path exists: there
+is no import or bulk-insert path, and the migrations that appear to insert into `contexts` insert into
+**`contexts_fts`**, the FTS shadow table (`002_fts5.sql:15,33`, `013_fts5_porter.sql:44`). A grep for
+`INSERT INTO contexts` matches `contexts_fts` as a **prefix** — that near-miss is why this was read
+rather than counted.
+
+**Four left open on their own terms, each with an owner:** the `challenge_per_agent` label rename
+(unfalsifiable here — **operators**); `/contexts/search`'s untenanted default and `total_estimate`'s
+return, both wanting an explicit ruling rather than closure by inertia, which one of them forbids in
+its own text (**the leader**); and U-501's cost judgement, which is unmeasurable by construction so
+evidence cannot close it (**the reviewer**). `H-A / P5`'s concurrency bound and #242 gap are
+**CONFIRMED as deliberate trades**, since the entry classifies them that way itself and both still hold.
+
+**The two the equality caught.** AC1's balance is not decoration: it surfaced two declarations this
+unit had walked past — `:928` (the all-expired refusal, a **second** declaration inside an item whose
+first one was already resolved) and the `CtxId` latent above. A floor (`>= 20 resolved`) would have
+passed with both still open. `:928` stays **UNCONFIRMED deliberately**: the flag was raised in the done
+report as the entry requires, no `playground.refuse_on_no_live_pin` key exists in the tree, and closing
+it because nobody objected for three days is exactly the inertia another entry in this file forbids.
+**Owner:** the leader.
