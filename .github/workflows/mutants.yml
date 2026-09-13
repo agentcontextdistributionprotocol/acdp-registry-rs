@@ -49,35 +49,59 @@ env:
   MUTANTS_EXPECTED_SCOPE: "213"
 
   # Surviving mutants at that sha. Each is enumerated with its own written reason
-  # in docs/ENGINEERING-LOG.md; this number is the machine-readable half of that
-  # list. It ratchets DOWN as survivors are killed and must never be raised
-  # without a reason recorded in the same commit.
+  # below; this number is the machine-readable half of that list. It ratchets DOWN
+  # as survivors are killed and must never be raised without a reason recorded in
+  # the same commit.
   #
-  # THIS NUMBER WENT UP, 1 -> 8, AND THAT NEEDS SAYING PLAINLY. It is not a
-  # relaxation: the scope tripled (74 -> 213) when handlers/context.rs entered
-  # it, and that file's 139 mutants had never been under an oracle. The first
-  # run over the new scope found 28 survivors. TWENTY OF THE 28 WERE KILLED with
-  # additive tests in http_integration.rs; these 8 are what is left, each with
-  # an argument rather than a shrug. The comparable figure is 28, not 1.
+  # 8 -> 5 (U-521). THREE MUTANTS RETIRED, at TWO sites -- the count is three
+  # because `lifecycle_outcome` emits two mutants at one line. U-521's assign said
+  # "two retired survivors"; that is two sites, and saying "two" of the mutants
+  # this budget counts would understate the change:
   #
-  # The 8 are EIGHT NAMED MUTANTS, not slack. Four are equivalent mutants -- no
-  # test can observe them because there is nothing to observe -- and four are
-  # blocked on infrastructure this suite does not have:
+  #   context.rs did:web `LifecycleEventType::Retracted` arm (was cited :1542:13,
+  #     now :1577:13) -- killed by `a_did_web_retract_retracts_rather_than_republishing`
+  #     in http_integration.rs, which stands up a real HTTPS server serving
+  #     `agents.test`'s did.json over a generated CA+leaf chain and points a
+  #     `WebResolver::with_test_endpoint` at it. That was the "missing test
+  #     infrastructure" the old entry named as the blocker.
+  #   context.rs `lifecycle_outcome` -> `""` (was :1399:5, now :1424:5)
+  #   context.rs `lifecycle_outcome` -> `"xyzzy"` (was :1399:5, now :1424:5)
+  #     -- both killed by `a_rejected_lifecycle_transition_is_counted_under_its_wire_code`
+  #     in metrics_integration.rs, which is where the old entry said the right home
+  #     was.
   #
-  # EQUIVALENT (the mutation changes nothing observable):
+  # ONE CORRECTION TO THE RETIRED ENTRY, because it was wrong in the alarming
+  # direction. It said deleting the did:web `Retracted` arm meant "a retract would
+  # be processed as a REPUBLISH". Running the mutant disproves that:
+  # `republish_verified` validates `event_type` itself, so the request returns 400
+  # `schema_violation`. did:web retracts break LOUDLY AND ENTIRELY rather than
+  # silently succeeding. A quietly-readvertised retracted context would have been a
+  # data-integrity hole; this is a denial of function. Worth fixing either way, but
+  # not the same finding.
+  #
+  # WHAT IS LEFT IS FIVE, AND ALL FIVE ARE EQUIVALENT MUTANTS -- there is no longer
+  # any survivor in this scope blocked on missing infrastructure. That is the real
+  # shape of this ratchet now: it cannot fall further without either a code change
+  # or search beginning to serve restricted rows.
+  #
+  # LINE NUMBERS BELOW WERE STALE AND ARE CORRECTED HERE. #295 inserted above them,
+  # shifting everything past ~line 600 by +15 (and `lifecycle_outcome` by +25).
+  # Verified by reading each line, not by arithmetic. Cited as `file:line` plus the
+  # expression, so the next reader can re-locate them after the next shift.
+  #
   #   handlers/log.rs:131:18   `== -> !=` in root_for. Carried unchanged from
   #     U-502 and NOT re-argued here: it guards only `log.cache_root(...)`,
   #     `root_for` returns the same root either way, and append-only makes any
   #     (size -> root) pair immutable. Only WHICH sizes get cached changes.
-  #   handlers/context.rs:1223:16  `delete !` on `if !matches.is_empty()` in
-  #     run_search_with_refill. H-H-w moved the tenant predicate into the search
-  #     SQL (`search_in_tenant`, :1160-1194), so every row reaching this retain
-  #     already belongs to the caller's tenant and skipping the block removes
-  #     nothing. Positive evidence, not inference: the retain's OWN comparison
-  #     `t == tenant` was CAUGHT at the same site. Two mutations at one site with
-  #     opposite verdicts is the signature of a redundant guard.
-  #   handlers/context.rs:81  delete match arm `"public"` in parse_visibility
-  #   handlers/context.rs:82  delete match arm `"restricted"` in parse_visibility
+  #   handlers/context.rs:1238:16  `delete !` on `if !matches.is_empty()` in
+  #     run_search_with_refill (was cited :1223:16). H-H-w moved the tenant
+  #     predicate into the search SQL, so every row reaching this retain already
+  #     belongs to the caller's tenant and skipping the block removes nothing.
+  #     Positive evidence, not inference: the retain's OWN comparison `t == tenant`
+  #     was CAUGHT at the same site. Two mutations at one site with opposite
+  #     verdicts is the signature of a redundant guard.
+  #   handlers/context.rs:81:9  delete match arm `"public"` in parse_visibility
+  #   handlers/context.rs:82:9  delete match arm `"restricted"` in parse_visibility
   #     Measured, not assumed: search returns only PUBLIC rows to every requester
   #     -- probed with an anonymous caller, an audience member, and the row's own
   #     producer, all of which see only the public row. So `?visibility=public`
@@ -87,43 +111,29 @@ env:
   #     arm still doing work, since it must yield zero where no filter would
   #     yield the visible public rows. These two become observable the moment
   #     search starts serving restricted rows to entitled requesters, and at that
-  #     point they are coverage gaps and this budget must drop to 6.
-  #   handlers/context.rs:627:39  `>` -> `>=` on `rec.expires_at > Utc::now()`.
-  #     The two differ only when a stored expiry equals the clock to the
-  #     nanosecond. `expired_idempotency_key_is_not_matched` already pins the
-  #     behaviour either side of the boundary; the boundary itself is not
-  #     reachable deterministically, and a test that waited for it would be a
-  #     flake generator.
+  #     point they are coverage gaps and this budget must drop to 3.
+  #   handlers/context.rs:642:39  `>` -> `>=` on `rec.expires_at > Utc::now()` in
+  #     publish_inner (was cited :627:39). The two differ only when a stored expiry
+  #     equals the clock to the nanosecond. `expired_idempotency_key_is_not_matched`
+  #     already pins the behaviour either side of the boundary; the boundary itself
+  #     is not reachable deterministically, and a test that waited for it would be
+  #     a flake generator.
   #
-  # BLOCKED ON MISSING TEST INFRASTRUCTURE (a real gap, named, not dismissed):
-  #   handlers/context.rs:1542:13  delete match arm `LifecycleEventType::Retracted`
-  #     in the **did:web** dispatch of lifecycle_transition -- a retract would be
-  #     processed as a REPUBLISH. The entire did:web lifecycle branch has zero
-  #     coverage: `signed_event_envelope` can only sign as did:key, so
-  #     `event.actor.starts_with("did:key:")` is true in every lifecycle test in
-  #     the repo. Verified unreachable rather than assumed: a did:web-signed
-  #     retract was written and it fails at `key_resolution_unreachable`, because
-  #     `retract_verified` resolves the actor through a real `WebResolver` and
-  #     playground mode does NOT bypass that. Covering it needs an HTTPS fixture
-  #     serving `agents.test`'s did.json with a trusted cert. FOLLOW-UP: that
-  #     fixture, which would also unblock the did:web half of publish.
-  #   handlers/context.rs:1399:5  `lifecycle_outcome` -> `String::new()`
-  #   handlers/context.rs:1399:5  `lifecycle_outcome` -> `"xyzzy"`
-  #     The function is `e.wire_code()` behind a metrics label, so the only
-  #     observer is a `/metrics` scrape. `/metrics` is deliberately NOT mounted in
-  #     the http_integration harness (404, measured), and metrics_integration.rs
-  #     exists as its own test binary precisely so "the process-global `metrics`
-  #     recorder is isolated from other integration tests" (its own module doc).
-  #     Asserting these here would install a global recorder into a binary built
-  #     without one and put 158 tests behind shared mutable state. The right home
-  #     is metrics_integration.rs, which is outside this unit's path grant.
-  #     FOLLOW-UP: a rejected-transition label assertion there.
+  # NEW FLOOR: 5. Nothing here is retired by more test infrastructure -- all five
+  # are equivalent. Two (the parse_visibility arms) become real coverage gaps if
+  # search ever serves restricted rows, and at that point this drops to 3.
   #
-  # NEW FLOOR: 8. Three of the eight are retired by one HTTPS did:web fixture
-  # plus one metrics assertion; two more are retired if search ever serves
-  # restricted rows. Nothing here is permanent except the three genuine
-  # equivalents (log.rs:131, context.rs:1223, context.rs:627).
-  MUTANTS_SURVIVOR_BUDGET: "8"
+  # MEASURED at 8768b07 over six verified shards, not one run: 213 total / 134
+  # caught / 5 missed / 73 unviable / 1 timeout. Every shard's outcomes.json
+  # carries an `end_time` (an interrupted run reports a partial `missed` list that
+  # looks exactly like a result), the four tallies sum to 213, and the shard sets
+  # were checked to partition exactly -- sizes summing to 213 AND the union of
+  # unique mutant names equalling 213, since the sum alone cannot catch an overlap
+  # and the union alone cannot catch a dropped shard. Against U-504's 131 caught /
+  # 8 missed that is exactly +3 caught / -3 missed, with unviable (73), timeout (1)
+  # and total (213) all unchanged -- which is the arithmetic this retirement should
+  # produce and is why the three kills are the only thing that moved.
+  MUTANTS_SURVIVOR_BUDGET: "5"
 
   # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
   # unconditional `timeout != 0` until U-504, on the stated reasoning that "a
@@ -131,13 +141,21 @@ env:
   # That reasoning is about SLOW TESTS and it still holds. It does not cover a
   # mutant that provably cannot terminate, and the new scope contains exactly one:
   #
-  #   handlers/context.rs:1277:12  `delete !` on `if !should_refill { break; }` in
-  #     run_search_with_refill. Inverting it breaks when the loop SHOULD refill and
-  #     loops forever when it should not -- which is every unfiltered search in the
-  #     suite. Non-termination cannot be converted into a fast assertion failure by
-  #     any test: the binary hangs and the verdict is TIMEOUT. Measured directly,
-  #     `-j1 --examine-re 'delete ! in run_search_with_refill'`: :1223:16 MISSED in
-  #     10s, :1277:12 TIMEOUT at the full 300s. A timeout here IS the detection.
+  #   handlers/context.rs:1292:12  `delete !` on `if !should_refill { break; }` in
+  #     run_search_with_refill (was cited :1277:12; #295 shifted it +15). Inverting
+  #     it breaks when the loop SHOULD refill and loops forever when it should not
+  #     -- which is every unfiltered search in the suite. Non-termination cannot be
+  #     converted into a fast assertion failure by any test: the binary hangs and
+  #     the verdict is TIMEOUT. Re-measured at 8768b07 in shard 4/8: still exactly
+  #     one timeout, still this mutant, 300s. The sibling `delete !` at :1238:16
+  #     (was :1223:16) is the MISSED equivalent above -- two `delete !` mutants in
+  #     one function with different verdicts, which is why both are cited by
+  #     expression and not by line alone.
+  #
+  #   NOTE for whoever next reads this: U-521 added a test that makes the refill
+  #   loop's OTHER survivors observable, and it did NOT change this verdict. A
+  #   hanging binary times out whatever any single test asserts, so no assertion
+  #   can convert this one -- predicted otherwise, measured, and wrong.
   #
   # Deliberately NOT relaxed to an unconditional pass: a SECOND timeout is exactly
   # the case the original reasoning warned about, and it fails this job. Budget is

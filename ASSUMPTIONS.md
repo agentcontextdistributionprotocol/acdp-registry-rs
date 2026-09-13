@@ -3091,6 +3091,86 @@ DECISIONS.md 19), so none is left dangling for a later pass.
       missing test, not a wrong implementation — which held for all 20.
     - **Status:** CONFIRMED (2026-09-13); the leader confirmed no claim-request was needed.
 
+## U-521 — retiring two accepted mutation survivors in `handlers/context.rs` (2026-09-13, lane-2)
+
+Plan: plans/u-521-didweb-fixture-and-metrics.md
+
+1. **Assumed:** the did:web TLS fixture should be a committed certificate, because generating one
+   needs `rcgen` and that means a dev-dependency plus lock churn.
+   - **CHANGED**, and the reason is policy rather than engineering. `.gitignore:39-43` forbids TLS
+     material repo-wide (`*.pem`/`*.crt`/`*.key`) under an explicit `# TLS material` header, and
+     `git ls-files` finds ZERO committed TLS material anywhere in the repo. The file's three
+     negations are otherwise deliberately non-secret (`!.env.example`, `!plans/cross-repo/`), and the
+     TLS block's own negation is an empty `.gitkeep` — there is no precedent for negating a
+     secret-bearing pattern.
+   - **Chose:** generate the CA+leaf chain per test process with `rcgen`. Committing it would have
+     required an exception to a secret-guard, which is repo policy — the leader confirmed that is
+     neither a lane's call nor the leader's, so (A) could only have been forwarded to the human.
+     Generating needs no exception, so there was nothing to escalate.
+   - **Also removes,** which is why this is a better outcome and not merely a permitted one: the
+     fixture directory, its README, the secret-scanner allowlist entry it said would be needed, and
+     `didweb_fixture_certificates_are_not_near_expiry` plus its helper (76 lines). Nothing persists,
+     so nothing can lapse, so there is no expiry guard to maintain. A guard for a problem that no
+     longer exists is worse than no guard: it implies something is being watched.
+   - **Cost, corrected against my own estimate:** I argued this as "2 new lock entries". Measured
+     **14** — `rcgen` declares `x509-parser` optional and Cargo.lock records optional deps whether or
+     not they compile. Exactly **3** are actually built (`rcgen`, `yasna`, `pem`); the other 11 are
+     lock-only. Neither `rcgen` nor `yasna` appears in the `no-dev` graph.
+   - **Status:** CHANGED (2026-09-13) — granted as option B after the stop-work.
+
+2. **Assumed:** "it's only a dev-dependency" is why adding `rustls` cannot affect the shipped binary.
+   - **CHANGED.** That is a claim about the **resolver**, not about the section heading. The
+     workspace sets `resolver = "2"` (`Cargo.toml:12`), under which dev-dependency features are not
+     unified into the normal build; under `resolver = "1"` the same entry would have been a
+     production change wearing a test-only label.
+   - **Chose:** measure it rather than cite it. `cargo tree -e features,no-dev` is byte-identical
+     with and without the entry (469-line inverted graph, 3406-line forward), **and** the same probe
+     with dev edges does show the difference — which is what makes the identical result evidence
+     rather than a blind diff.
+   - **Status:** CHANGED (2026-09-13) — the reasoning came from the leader; the measurement and the
+     control are mine. If `resolver` ever changes, both dev-deps need re-deciding, not re-testing.
+
+3. **Assumed:** the rejected-transition witness should be `invalid_lifecycle_transition`, the wire
+   code `lifecycle_outcome`'s own doc comment names.
+   - **CHANGED.** That rejection needs a published context, and `metrics_integration.rs`'s counters
+     are process-global with a single test owning the accumulation-sensitive assertions — including
+     `publish_total{outcome="inserted"} == 2`. The suite said so: "9 passed, 1 failed, two accepted
+     publishes: left 3.0, right 2.0".
+   - **Chose:** retract a `ctx_id` that does not exist — a rejection needing **no publish at all**,
+     whose error still flows through `lifecycle_outcome` because the metric wraps the whole
+     `lifecycle_transition` call. It perturbs no series that test pins, and the retract route carries
+     a different `route` label. Preserving that documented convention is worth more than the more
+     quotable wire code.
+   - **Rejected:** editing the other test's expected 2 to 3. It would have coupled two tests and left
+     the next person adding a publish at the same wall.
+   - **Status:** CHANGED (2026-09-13) — falsified by stubbing `lifecycle_outcome` to `""` and to
+     `"xyzzy"`; both fire, with the other 9 tests unaffected.
+
+4. **Assumed:** every assertion in the two new tests can be falsified individually.
+   - **DEFERRED as partly false**, and named rather than papered over. The stray-series loop (no
+     lifecycle event under `outcome=""` or `"xyzzy"`) cannot be fired by any mutation at its site,
+     because the count assertion above it always fails first; it is shown live only by a contrived
+     extra `("retract", "")` emission, and it guards double-recording rather than a gutted
+     `lifecycle_outcome`. Likewise `code == "not_found"` and the scrape-status assertion sit behind
+     the 404 precondition and are not independently falsifiable here.
+   - **Chose:** keep all three and say so in the test's doc comment. An assertion that cannot be
+     falsified at its site is not automatically decoration — but claiming it was falsified when it
+     was not is the failure this discipline exists to prevent.
+   - **Status:** DEFERRED (2026-09-13) — evidence that would settle it: a mutation that makes a
+     transition both recorded and misrecorded.
+
+5. **Assumed:** the production `bind_rustls` provider gap should be fixed in this unit, since the
+   fix is one line and I am already touching TLS setup.
+   - **Chose:** no. `src/main.rs` is outside the grant, and the leader filed it as U-530 with the
+     board recording in my own words that my dev-dep grant fixes the **test binary only** — so
+     approving the claim cannot later read as the finding having been handled.
+   - **Exposure, stated because the alarming version was available:** zero today.
+     `docker/config.docker.toml` disables in-process TLS deliberately (an edge terminates) and
+     `config/registry.example.toml` ships `cert_path`/`key_path` commented out. It is latent on a
+     documented configuration path, not a live outage. I could not establish that from inside this
+     unit's grant; the leader checked it.
+   - **Status:** CONFIRMED (2026-09-13) — deferred to U-530 by decision, not by omission.
+
 ## U-507 — reconciliation of this file's open entries (lane-3, 2026-09-13)
 
 Resolutions are **appended here**; only the status *token* on each entry's own status line was
