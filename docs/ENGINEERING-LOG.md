@@ -5219,3 +5219,59 @@ wrong cause was not.
 
 This changes nothing about U-514's conclusion, and strengthens its stated reason: a `[changelog].body`
 template cannot be verified short of an actual release for seven of the eight crates, anywhere.
+
+## U-518 — when the compiler names the site and not the cause
+
+`axum::handler::Handler` has two halves: the extractors must implement `FromRequestParts`/
+`FromRequest`, and the returned **future must be `Send`**. When the second half fails, the error
+points at the `.route(...)` line and says nothing about why:
+
+```
+the trait bound `fn(...) -> ... {retrieve::<...>}: Handler<_, _>` is not satisfied
+  --> crates/acdp-registry-core/src/lib.rs:79:42
+= note: Consider using `#[axum::debug_handler]` to improve the error message
+```
+
+`#[axum::debug_handler]` does not apply to a generic handler, so that suggestion is a dead end here.
+
+Two plausible causes were tested and eliminated before the right one — both about the *return* type,
+which is where the eye goes first. What made them cheap to eliminate was asserting the bound directly
+rather than reasoning about it:
+
+```rust
+fn assert_ir<T: axum::response::IntoResponse>() {}
+assert_ir::<axum::Json<acdp::types::body::FullContext>>();                    // compiles
+assert_ir::<Result<axum::Json<..::FullContext>, RegistryError>>();            // compiles
+```
+
+Both passed, which killed both hypotheses in one build and pointed at the future.
+
+**The technique worth keeping.** A future's type cannot be written down, but it can be *named by a
+call expression*, and that is enough to demand `Send` of it:
+
+```rust
+fn probe<S: ExtendedRegistryStore + 'static>(
+    st: State<Arc<AppState<S>>>, h: HeaderMap, p: Path<String>,
+) {
+    fn is_send<T: Send>(_: T) {}
+    is_send(handlers::retrieve::<S>(st, h, p));
+}
+```
+
+That converts axum's "not a `Handler`" into the full chain: the offending type, every `async fn`
+body it passes through, and the upstream file and line where it is held across an await — here
+`acdp-client-0.13.2/src/revocation.rs:459`, a `&dyn Fn(&KeyRevocation) -> bool` missing `+ Sync`.
+About twenty lines of output, all of it load-bearing. **Reach for this whenever a `Handler` bound
+fails and the extractors and return type are unchanged.**
+
+**And then prove it.** Naming a plausible cause is not establishing one — the two dead hypotheses
+were also plausible. The cause was confirmed by *repairing* it: `+ Sync` on the two parameters in a
+local copy of the upstream crate, wired in with `[patch.crates-io]`, and the symptom disappeared
+while nothing else changed. A one-line edit that makes the failure go away is an attribution;
+reading a diff and finding something that looks related is not. See `DECISIONS.md` for the decision
+this fed, and acdp-rs#279 for the upstream report.
+
+**The shape to remember:** a private helper's parameter can change a *public* future's auto-traits.
+`acdp-client`'s own build stayed green — nothing in that crate observes `Send`-ness of its public
+futures — so the regression could only ever surface in a downstream axum consumer. Auto-traits are
+part of an async API's contract even though they appear in no signature.
