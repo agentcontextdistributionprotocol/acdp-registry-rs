@@ -721,7 +721,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   publishes remain bound to DID-signature verification. This unit therefore does **not**
   claim unauthenticated publish is possible. Overstating it would have made the finding
   easier to dismiss. **Status: CONFIRMED.**
-- **UNCONFIRMED — awaiting human ruling:** whether `docker/RAILWAY.md` should require
+- **UNCONFIRMED — awaiting human ruling; re-checked 2026-09-13 (U-507) and still open. **Settled by:** the R3 ruling on whether the Railway recipe enables auth. **Owner:** the human — not the leader, which holds no authority over a product recipe decision.** The question is whether `docker/RAILWAY.md` should require
   `ACDP_REGISTRY_AUTH__ENABLED = true`. Raised as `blocked`, forwarded by the leader, not
   acted on. The documentation of the gap ships regardless; only the recipe change waits.
 - **Not re-litigated:** `auth.enabled = false` in the compose stack stays (leader-confirmed;
@@ -1414,7 +1414,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   that porter and snowball disagree on some words, so parity is pinned per-mechanism rather
   than proven across the language — stated on `fulltext::PG_ENGLISH_STOPWORDS` and in the
   parity suite's docs rather than left implicit.
-- **Status:** UNCONFIRMED — **escalated to the human**. Reversible, but a product judgement on a public API taken against a defensible alternative. Recommendation: confirm as taken. See DECISIONS.md H-B #10.
+- **Status:** UNCONFIRMED — **escalated to the human**, re-checked 2026-09-13 (U-507) and still open. Reversible, but a product judgement on a public API taken against a defensible alternative. Recommendation unchanged: confirm as taken. **Settled by:** the owner accepting or rejecting the taken behaviour. **Owner:** the human. See DECISIONS.md H-B #10.
 
 ## The stopword table is verified against Postgres rather than trusted
 
@@ -1564,8 +1564,8 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** a future refactor could move the timeout layer outside the
   request-id pair and lose the id on 408s with no test failing. Bounded: the 413 guard covers the
   same layer boundary, so the regression would have to be specific to the timeout layer alone.
-- **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this
-  evidence rather than actioned here.
+- **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this evidence
+  rather than actioned here. Re-checked 2026-09-13 (U-507): still undecided. **Settled by:** the coordinator ruling on the taxonomy. **Owner:** the leader — this one is genuinely the leader's, not the human's.
 
 
 ## H-A / P4 — A9: rate-limit scope taxonomy generated from one list
@@ -1971,7 +1971,7 @@ own and stable. Beyond AC2 there is an independent reason: axum's and serde's wo
 to change, so echoing it onto the wire grows an accidental contract that breaks on a dependency
 bump.
 
-### OPEN — escalated, NOT decided here: the §5 `code` for a 415
+### OPEN — escalated, NOT decided here: the §5 `code` for a 415 *(re-verified U-507 2026-09-13: still open; `acdp_wire_code` emits 24 codes and none is a media-type failure, so minting one remains unavoidable. **Owner:** the spec/canon holder, not this repo.)*
 
 - **The question:** enveloping a 415 requires a `code`, because `WireErrorBody::code` is a
   required `String` -- there is no "envelope without a code".
@@ -3433,3 +3433,34 @@ required context — so it blocks merges **with no branch-protection change**. B
   enumerated `contexts` list — so the blocker is untouched by U-516. **Settled by:** the
   branch-protection change. **Owner:** the human. Flipping this one on U-516's evidence would have
   been the exact error AC6 exists to prevent.
+
+### Batch 5 — AC5: the four entries that are not this unit's to resolve
+
+All four keep their original open token. **Zero flips in this batch, by design** — the job was to make
+each ask precise, not to answer it. Each status line was rewritten to carry a **Settled by** and an
+**Owner**, because an open item with no named owner is indistinguishable from a forgotten one.
+
+- **`awaiting human ruling: whether docker/RAILWAY.md should require ACDP_REGISTRY_AUTH__ENABLED`** —
+  still open. Owner named as **the human, not the leader**, which matters here: the leader has already
+  said in this run that it holds no authority over repo settings or product recipes, so recording it as
+  "the coordinator's" would park it with someone who cannot discharge it. Note the ask has **narrowed**
+  since it was written: the factual defect in that file was fixed independently (see batch 3's
+  `:1127`), so only the recipe change is still waiting.
+
+- **`escalated to the human — a product judgement on a public API`** — still open, recommendation
+  unchanged ("confirm as taken"). Verified that the situation it describes has not drifted:
+  `PG_ENGLISH_STOPWORDS` is still a hand-written const (`crates/acdp-registry-store/src/fulltext.rs:46`)
+  with a length check against Postgres at `:195`, so the trade the entry made — keep the table, verify
+  it rather than trust it — is still the shape that ships.
+
+- **`handed to the coordinator as a standalone decision`** — still open. **Owner: the leader**, and
+  this is the one of the four where that is correct rather than a deflection; the other three are the
+  human's. Worth distinguishing, because "escalated" has been used in this file for both.
+
+- **`OPEN — escalated, NOT decided here: the §5 code for a 415`** — still open, and **re-verified
+  rather than assumed**. `acdp_wire_code` emits **24** codes and **none describes a media-type
+  failure**, so enveloping a 415 still requires minting a code the canon lacks, which is a policy
+  decision for the spec holder. One precision: a filter for media-type-ish names flags
+  `unsupported_algorithm`, which matches only on the substring "unsupported" and is about signature
+  algorithms. It is not a media-type code, and a looser grep would have reported the gap as already
+  closed.
