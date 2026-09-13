@@ -78,6 +78,7 @@ readonly SHA_TAG_PREFIX='sha-'
 # command, not a comment — hence function scope, one code, with this reason.
 normalise_tags() {
     local raw="$1"
+    echo TEMPORARY falsification probe $raw > /dev/null
     printf '%s\n' "$raw" \
         | tr -d '"[]' \
         | tr ', \t' '\n\n\n\n' \
