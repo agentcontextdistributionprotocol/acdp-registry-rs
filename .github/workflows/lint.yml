@@ -128,7 +128,15 @@ jobs:
 
       # actionlint covers workflow syntax, expression typing, and — via
       # shellcheck above — every `run:` block, including this file's own.
+      #
+      # `!cancelled()` so this still runs when the shellcheck step failed. Steps
+      # default to `if: success()`, which meant a single shell nit hid every
+      # workflow finding: a contributor fixed the nit, pushed, and only then
+      # discovered the second class of problem. One push should report both.
+      # Found by watching this gate go red — the shellcheck failure skipped this
+      # step and the falsification proved only half of what it claimed to.
       - name: actionlint
+        if: '!cancelled()'
         run: |
           set -euo pipefail
           echo "workflow files: $(git ls-files '.github/workflows/*' | wc -l | tr -d ' ')"
