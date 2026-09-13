@@ -5863,3 +5863,129 @@ the assertion failed on its first run.
 That is the bound check working exactly as intended, on the person who wrote it, thirty seconds after
 writing it — and it is an argument for putting the number in as an equality even when you are
 confident. A `>=` would have accepted 14 silently forever.
+
+## U-521 — the mutation floor drops 8 -> 5, and the "blocked on infrastructure" class is empty
+
+*2026-09-13, lane-2. Supersedes "**New floor: 8**" in "### The 8 accepted survivors, each argued"
+(U-504) — that section stays as written because this log is append-only, and it was accurate at its
+own sha. This entry is the current baseline.*
+
+### The measurement
+
+**213 total / 134 caught / 5 survivors / 73 unviable / 1 timeout**, at `8768b07`, from the documented
+command `cargo mutants` (scope and test command come from `.cargo/mutants.toml`).
+
+Against U-504's **131 caught / 8 survivors**: exactly **+3 caught / -3 survivors**, with unviable
+(73), timeout (1) and total (213) all unchanged. That is the arithmetic three retirements should
+produce, and nothing else moved.
+
+**It was measured over six shards, not one run, and how it was judged matters more than the number.**
+Two long single runs were killed partway (see below), and an interrupted cargo-mutants run writes a
+partial `missed.txt` that is indistinguishable from a result by eye. So:
+
+- every shard's `outcomes.json` was checked to carry an **`end_time`** — the null case is the tell;
+- the four tallies were checked to **sum to 213**;
+- the shard sets were checked to **partition exactly**: sizes summing to 213 **and** the union of
+  unique mutant names equalling 213. The sum alone cannot catch an overlap and the union alone cannot
+  catch a dropped shard, so both are needed;
+- `4/8 + 5/8 == 2/4` and `6/8 + 7/8 == 3/4` were verified by listing before substituting finer shards
+  for a coarser one, rather than trusting that slice shards nest.
+
+One real contamination was caught this way: a leftover output directory from the *killed* shard run
+was still matched by a `*/mutants.out/caught.txt` glob, making the concatenated count 135 against a
+true 134. The per-shard sum disagreed with the glob, which is what surfaced it. **The totals above were
+computed from six explicitly named shards, never from a glob.**
+
+### The three retirements
+
+Both SITES were "BLOCKED ON MISSING TEST INFRASTRUCTURE" in U-504's list — three mutants across
+the two of them. Both blockers are now gone.
+
+**1. The did:web `LifecycleEventType::Retracted` arm** (`context.rs`, cited `:1542:13` then, `:1577:13`
+now). The blocker was real and structural: `signed_event_envelope` can only sign as `did:key`, so
+`event.actor.starts_with("did:key:")` was true in *every* lifecycle test in the repo, and
+`retract_verified` resolves the actor through a real `WebResolver` that playground mode does not
+bypass. Covering it needed a genuine HTTPS endpoint.
+
+`tests/didweb/mod.rs` now generates a **CA + leaf chain at test runtime with `rcgen`** and serves
+`agents.test`'s `did.json` over TLS on loopback, with `WebResolver::with_test_endpoint` pointed at it
+and trusting the generated CA. The DID keeps its real authority; only DNS is faked.
+
+**Why generated rather than committed, because it is a policy fact worth recording:** `.gitignore`'s
+`# TLS material` block forbids `*.pem`/`*.crt`/`*.key` repo-wide, its only negation is an empty
+`.gitkeep`, and `git ls-files` finds **zero** committed TLS material in this repo. Committing a fixture
+would have required an exception to a secret-bearing ignore rule — repo policy, not a lane's call and
+not the lane leader's either. Generating needs no exception, commits no private key, and deletes the
+expiry problem outright: nothing persists, so nothing can lapse, so there is no expiry guard to
+maintain.
+
+**And a correction to U-504's entry for this mutant, in the alarming direction.** It said the deleted
+arm meant "a retract would be processed as a REPUBLISH". Running the mutant disproves it:
+`republish_verified` validates `event_type` itself, so the request returns **400 `schema_violation`**.
+did:web retracts break *loudly and entirely* rather than silently succeeding. A quietly readvertised
+retracted context would have been a data-integrity hole; this is a denial of function. Worth fixing
+either way — not the same finding, and the wrong version was the scarier one.
+
+The mutant is killed by the **acceptance** assertion (the retract must return 200), not by the
+status assertion beside it. That status assertion guards a different class — a retract accepted but not
+persisted — which no mutation at this site can produce; it is written as a before/after pair on the
+context's state so it cannot pass against a response that never carries a status.
+
+**2 and 3. `lifecycle_outcome` -> `""` and -> `"xyzzy"`** (cited `:1399:5` then, `:1424:5` now). Two
+mutants at one line, which is why this retirement is three mutants at two sites.
+`a_rejected_lifecycle_transition_is_counted_under_its_wire_code` in `metrics_integration.rs` — the home
+U-504 named — asserts the `outcome` label equals the wire code the response actually carried, read from
+the response rather than hardcoded.
+
+**The witness deliberately needs no publish.** That binary's counters are process-global and a single
+test owns the accumulation-sensitive assertions, including `publish_total{outcome="inserted"} == 2`. The
+on-the-nose witness (a double retract, yielding `invalid_lifecycle_transition`) requires a published
+context, which turns that 2 into a 3 — the suite said so: *"9 passed, 1 failed, two accepted publishes:
+left 3.0, right 2.0"*. Retracting a `ctx_id` that does not exist exercises the same mechanism, because
+the metric wraps the whole `lifecycle_transition` call so any error flows through `lifecycle_outcome`,
+and it perturbs no series that test pins. Preserving that documented split was worth more than the more
+quotable wire code.
+
+### What is left is five, and all five are equivalent
+
+There is **no survivor in this scope blocked on missing infrastructure any more**. All five are
+equivalent mutants — `log.rs:131:18`, `context.rs:81:9`, `:82:9`, `:642:39`, `:1238:16` — each argued in
+`.github/workflows/mutants.yml` beside the budget. The ratchet cannot fall further without a code
+change, or without search beginning to serve restricted rows to entitled requesters, at which point the
+two `parse_visibility` arms become genuine coverage gaps and the floor drops to 3.
+
+**Line numbers in U-504's list were stale and are corrected in `mutants.yml`**: #295 inserted above
+them, shifting sites past ~line 600 by +15 and `lifecycle_outcome` by +25. Verified by reading each
+line, not by arithmetic, and now cited as `file:line` *plus the expression* so the next shift does not
+strand them.
+
+### The ratchet was re-falsified at the new value
+
+A check verified at 8 proves nothing about 5. Driving the workflow's three conditions against the env
+values read back out of the file: 5 survivors **passes**, 6 **fails**; scope 212 and 214 both **fail**
+(it is an equality, not a floor); 2 timeouts **fails**. The load-bearing pair is 5/6.
+
+`MUTANTS_EXPECTED_SCOPE` stays **213** — re-confirmed by the partition check, not assumed — and
+`MUTANTS_TIMEOUT_BUDGET` stays **1**, still the same provably non-terminating mutant
+(`:1292:12`, was `:1277:12`). U-521 added a test that makes the refill loop's other survivors
+observable and it did **not** change that verdict: a hanging binary times out whatever any single test
+asserts. I predicted otherwise, measured, and was wrong.
+
+### Two process failures from this unit, recorded because they nearly cost more than they did
+
+**A long background job was killed twice, and I misdiagnosed it.** Free disk had genuinely fallen
+82Gi -> 8Gi during the first run, so I diagnosed ENOSPC and had a full report drafted before reading
+`mutants.out/debug.log`, which ends `cargo_mutants::interrupt: interrupted` with **zero** ENOSPC matches
+anywhere. The disk fact was true and unrelated. A true, strongly-correlated fact survives every check
+you would run against a guess — only the causal link was invented. **Read the failing thing's own record
+before admitting correlated evidence**, because once you hold a mechanism you read the log for
+confirmation instead of for cause. (Separately: `du -sh` on a 208k-entry directory reported 77G where
+summing its entries gave ~4G. Sum the parts before a total drives a decision.)
+
+**A stale hand-saved copy silently reverted four corrections.** Restoring a file from a scratch copy
+taken *before* later edits reverted a doc-comment fix, a before/after assertion pair and two assertion
+messages. Nothing could have detected it: the file was valid and the suite had been green before those
+corrections too. It surfaced only because a mutant's failure output quoted the **old** message text. A
+restore is not a revert to known-good; it is a jump to an arbitrary past state whose contents you must
+remember, and what it eats is the most recent work — the work you are least likely to re-derive because
+you believe it is done.

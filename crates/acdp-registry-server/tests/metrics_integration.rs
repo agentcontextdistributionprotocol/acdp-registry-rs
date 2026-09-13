@@ -32,7 +32,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::net::SocketAddr;
 use tower::ServiceExt;
 
@@ -119,6 +119,20 @@ struct Harness {
 }
 
 async fn harness(cfg: RegistryConfig) -> Harness {
+    harness_with_caps(cfg, caps(), false).await
+}
+
+/// `harness` with an explicit capabilities document, and optionally with the
+/// RFC-ACDP-0013 lifecycle surface mounted.
+///
+/// Added by U-521 for the rejected-transition label assertion. `harness`
+/// delegates here with the original arguments, so no existing test's wiring
+/// changes.
+async fn harness_with_caps(
+    cfg: RegistryConfig,
+    caps: CapabilitiesDocument,
+    lifecycle: bool,
+) -> Harness {
     let db = tempfile::Builder::new()
         .prefix("acdp-metrics-")
         .suffix(".sqlite")
@@ -126,7 +140,13 @@ async fn harness(cfg: RegistryConfig) -> Harness {
         .unwrap();
     let store = SqliteStore::connect(db.path(), 1).await.unwrap();
     store.migrate().await.unwrap();
-    let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
+    let server = RegistryServer::try_new(store, caps, AUTHORITY).unwrap();
+    let server = if lifecycle {
+        server.with_lifecycle().expect("lifecycle enabled")
+    } else {
+        server
+    };
+    let server = Arc::new(server);
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
     let secret = JwtSecret::from_bytes(&[42u8; 32]);
     let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
@@ -909,4 +929,209 @@ fn every_rate_limit_scope_is_documented() {
         known.len(),
         "documented scopes {documented:?} vs emitted {known:?}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// U-521: the rejected-transition outcome label.
+//
+// U-504's mutation baseline left `handlers/context.rs:1399` as two accepted
+// survivors — replacing `lifecycle_outcome`'s body with `""` or `"xyzzy"`. That
+// function is `e.wire_code()` behind a metrics label, so its ONLY observer is a
+// `/metrics` scrape, and `/metrics` is deliberately not mounted in the
+// `http_integration.rs` harness.
+//
+// **This assertion belongs in THIS binary and nowhere else.** The module doc
+// above says why: this file runs in its own process so the process-global
+// `metrics` recorder is isolated from other integration tests. Asserting a
+// counter from `http_integration.rs` would put 160-odd tests behind shared
+// mutable state. That is a constraint to preserve, not an inconvenience to route
+// around.
+// ---------------------------------------------------------------------------
+
+/// `caps()` with lifecycle-capable version and `did:key` advertised.
+///
+/// `acdp-registry-lifecycle` refuses to mount below `0.3.0`, and the retract is
+/// signed as `did:key` so it needs no resolver — the did:web half of that
+/// dispatch is covered in `http_integration.rs`, which owns the TLS fixture.
+fn caps_lifecycle() -> CapabilitiesDocument {
+    let mut c = caps();
+    c.acdp_version = "0.3.0".into();
+    c.supported_did_methods = vec!["did:web".into(), "did:key".into()];
+    c
+}
+
+/// A did:key lifecycle event envelope for the producer derived from `seed`.
+fn signed_lifecycle_event(seed: u8, ctx_id: &str, event_type: &str, reason: &str) -> Value {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    let did = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+    let key_id = acdp::did::key::did_key_url(&did).expect("did:key url");
+    let event = LifecycleEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        acdp::types::primitives::CtxId(ctx_id.to_string()),
+        LifecycleEventType::parse(event_type).unwrap(),
+        chrono::Utc::now(),
+        AgentDid::new(did),
+        Some(reason.to_string()),
+    )
+    .expect("valid event")
+    .sign_with(key, key_id)
+    .expect("signed event");
+    serde_json::json!({ "event": event })
+}
+
+/// Percent-encode a path segment, mirroring `common::pct_encode_path_segment`.
+///
+/// A `ctx_id` is `acdp://registry.test/<uuid>` — it contains `:` and `/`, so an
+/// unencoded segment routes nowhere and the endpoint answers 404. This file does
+/// not use `common`, so it carries its own copy.
+fn pct_encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+async fn post_retract(app: &axum::Router, ctx_id: &str, envelope: &Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/contexts/{}/retract",
+                    pct_encode_path_segment(ctx_id)
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(envelope).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, v)
+}
+
+/// A REJECTED lifecycle transition must be counted under its own wire code.
+///
+/// **Kills both survivors at `handlers/context.rs:1399`.** `lifecycle_outcome`
+/// exists so a rejection is distinguishable from every other rejection — its doc
+/// comment says exactly that — and the only observer is the `outcome` label on
+/// `acdp_registry_lifecycle_event_total`. `retract` records it around the WHOLE
+/// `lifecycle_transition` call (`:1412`), so every error flows through it.
+///
+/// **The rejection is deliberately one that needs no publish.** This binary's
+/// counters are process-global, and by design a single test
+/// (`metrics_endpoint_exposes_request_and_domain_series`) owns the
+/// accumulation-sensitive assertions — including
+/// `publish_total{outcome="inserted"} == 2`. A double-retract would have been the
+/// on-the-nose witness (`invalid_lifecycle_transition`), but it needs a published
+/// context, which makes that 2 a 3 and breaks a test in a different file-section
+/// for reasons a reader would struggle to connect. Retracting a `ctx_id` that
+/// does not exist exercises the same mechanism — the error's `wire_code()`
+/// reaching the label — while touching no series that test pins. The route label
+/// differs too (`/contexts/{ctx_id}/retract`, not `/contexts/{ctx_id}`).
+///
+/// I tried it the other way first and the suite told me: 9 passed, 1 failed,
+/// "two accepted publishes: left 3.0, right 2.0". Preserving that convention is
+/// worth more than the more quotable wire code.
+///
+/// # Which assertions here are actually falsified, and which are masked
+///
+/// Falsified individually, each by breaking the CENTRE rather than the call site,
+/// and each observed firing at its own assertion with its own message:
+///
+/// * the `outcome=<wire code>` count — `lifecycle_outcome` stubbed to `""` and to
+///   `"xyzzy"`; both fire "must be counted under".
+/// * the `event="retract"` count — the event label at the call site changed to
+///   `"not_retract_at_all"`; fires "not some other event label".
+/// * the stray-series loop — no mutation at this site can fire it, because the
+///   count assertion above always fails first. Shown live by a deliberately
+///   contrived probe: emitting an *extra* `("retract", "")` event alongside the
+///   real one. It guards double-recording, not a gutted `lifecycle_outcome`.
+/// * the 404 precondition — the envelope replaced with `{"nonsense": true}`;
+///   fires "must be refused", naming the `schema_violation` it got instead.
+///
+/// **Masked, and named rather than claimed:** the `code == "not_found"` assertion
+/// and the scrape-status assertion sit behind the 404 precondition, so any input
+/// that changes the rejection trips that one first. They are not independently
+/// falsifiable here, and I am not going to pretend otherwise.
+#[tokio::test]
+async fn a_rejected_lifecycle_transition_is_counted_under_its_wire_code() {
+    let mut cfg = metrics_config();
+    cfg.lifecycle.enabled = true;
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    let h = harness_with_caps(cfg, caps_lifecycle(), true).await;
+
+    // A well-formed, validly-signed retract for a context that was never
+    // published: rejected inside `lifecycle_transition`, so the error reaches
+    // `lifecycle_outcome`, and nothing is inserted.
+    let ghost = format!("acdp://{AUTHORITY}/{}", uuid::Uuid::new_v4());
+    let (status, v) = post_retract(
+        &h.router,
+        &ghost,
+        &signed_lifecycle_event(77, &ghost, "retracted", "u521 ghost"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "retracting a context that does not exist must be refused, or there is no \
+         rejected transition to label: {v}"
+    );
+    let code = v["error"]["code"]
+        .as_str()
+        .expect("an error wire code")
+        .to_string();
+    assert_eq!(
+        code, "not_found",
+        "this test asserts the label equals the WIRE CODE, so it has to know which \
+         code it is: {v}"
+    );
+
+    let (status, _ct, body) = scrape(&h.router).await;
+    assert_eq!(status, StatusCode::OK, "metrics scrape");
+
+    // The label must be the wire code the response carried -- read from the
+    // response rather than hardcoded, so the two cannot drift apart.
+    let labelled = metric_sum(
+        &body,
+        &[
+            "acdp_registry_lifecycle_event_total",
+            &format!("outcome=\"{code}\""),
+        ],
+    );
+    assert!(
+        labelled >= 1.0,
+        "the rejected transition must be counted under outcome=\"{code}\"; got \
+         {labelled}. A constant body for `lifecycle_outcome` labels it \"\" or \
+         something fixed instead, which is the whole reason that function exists. \
+         Scrape was:\n{body}"
+    );
+    assert!(
+        metric_sum(
+            &body,
+            &["acdp_registry_lifecycle_event_total", "event=\"retract\""]
+        ) >= 1.0,
+        "and it must be counted under the retract event, not some other event \
+         label:\n{body}"
+    );
+    for wrong in ["outcome=\"\"", "outcome=\"xyzzy\""] {
+        let n = metric_sum(&body, &["acdp_registry_lifecycle_event_total", wrong]);
+        assert_eq!(
+            n, 0.0,
+            "no lifecycle event may be counted under {wrong} -- that is exactly what a \
+             gutted `lifecycle_outcome` produces. Scrape was:\n{body}"
+        );
+    }
 }

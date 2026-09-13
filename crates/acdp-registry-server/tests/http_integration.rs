@@ -26,6 +26,7 @@
 #![cfg(feature = "storage-sqlite")]
 
 mod common;
+mod didweb;
 
 use std::sync::Arc;
 
@@ -11108,5 +11109,194 @@ async fn the_two_accept_predicates_agree_on_every_present_media_type() {
         "`AcdpJson` must REJECT an absent Content-Type with 415. Routing it through \
          `media_type_accepted` to 'make the families consistent' would silently start \
          accepting untyped bodies on the `/auth/*` surface."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// U-521: the did:web lifecycle branch, which had no coverage and structurally
+// could not have any.
+//
+// U-504 left `handlers/context.rs:1542` as an accepted survivor: deleting the
+// `LifecycleEventType::Retracted` arm of `lifecycle_transition`'s **did:web**
+// dispatch sends a retract to `republish_verified` instead — the context comes
+// BACK. Nothing noticed, because `signed_event_envelope` signs only as did:key,
+// so `actor.starts_with("did:key:")` held in every lifecycle test here.
+//
+// The did:web retract was written then and did NOT work: it died at
+// `key_resolution_unreachable`, because `retract_verified` resolves the actor
+// through a real `WebResolver` and playground mode does not bypass it. That
+// diagnosis is now this test's falsification target.
+// ---------------------------------------------------------------------------
+
+/// A lifecycle harness whose resolver reaches an in-process HTTPS `did:web`
+/// server instead of the real internet.
+///
+/// **Why this builds its own harness instead of extending the shared one.**
+/// `common/mod.rs` hard-codes `WebResolver::new()` in both of its constructors
+/// and takes no resolver argument. Rather than add a parameter to a shared helper
+/// for one caller, this follows the precedent `metrics_integration.rs` already
+/// sets: a test that needs different wiring assembles it from the same public
+/// pieces (`RegistryServer`, `AuthService`, `AppStateInner`, `build_router`).
+async fn didweb_lifecycle_harness(resolver: Arc<WebResolver>) -> Harness {
+    let mut cfg = config(false);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.lifecycle.enabled = true;
+
+    let db = tempfile::Builder::new()
+        .prefix("acdp-didweb-")
+        .suffix(".sqlite")
+        .tempfile()
+        .unwrap();
+    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    store.migrate().await.unwrap();
+    let server = RegistryServer::try_new(store, caps_030(), AUTHORITY)
+        .unwrap()
+        .with_lifecycle()
+        .expect("lifecycle enabled");
+    let server = Arc::new(server);
+
+    let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+    let secret = JwtSecret::from_bytes(&[42u8; 32]);
+    let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
+    let auth = Arc::new(AuthService::new(
+        AuthConfig::default(),
+        challenges,
+        signer,
+        resolver,
+        AUTHORITY.into(),
+    ));
+    let state = AppStateInner::new(server, auth, None, cfg, None);
+    Harness {
+        router: build_router(state),
+        db: Some(db),
+    }
+}
+
+/// A lifecycle event signed by the **did:web** producer for `seed` — the
+/// identity `producer(seed)` publishes under.
+///
+/// `signed_event_envelope` hard-codes a did:key actor, which is precisely why the
+/// did:web arm of the dispatch was unreachable.
+fn signed_event_envelope_did_web(
+    seed: u8,
+    ctx_id: &str,
+    event_type: &str,
+    reason: Option<&str>,
+) -> Value {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    let event = LifecycleEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        acdp::types::primitives::CtxId(ctx_id.to_string()),
+        LifecycleEventType::parse(event_type).unwrap(),
+        chrono::Utc::now(),
+        AgentDid::new(didweb::didweb_for_seed(seed)),
+        reason.map(str::to_string),
+    )
+    .expect("valid event")
+    .sign_with(key, didweb::didweb_key_id_for_seed(seed))
+    .expect("signed event");
+    json!({ "event": event })
+}
+
+/// A did:web retract must retract — not republish.
+///
+/// **Kills the `LifecycleEventType::Retracted` arm of `lifecycle_transition`'s
+/// did:web dispatch**, U-504's accepted survivor.
+///
+/// **What deleting that arm actually does, measured rather than assumed.** The
+/// event falls through to `republish_verified`, and that function validates
+/// `event_type` itself — so the request comes back **400 `schema_violation`:
+/// "event_type 'retracted' does not match this endpoint (expected
+/// 'republished')"**. The defect is that did:web retracts break *entirely*, not
+/// that they silently succeed as republishes. I wrote the silent-republish
+/// version first and running the mutant disproved it; the distinction matters
+/// because the version I nearly recorded (a retracted context quietly
+/// readvertised as live) is a data-integrity hole, while the real one is a loud
+/// denial of function.
+///
+/// **Which assertion does the killing, stated because it is not the obvious
+/// one.** The mutant is caught by the *acceptance* assertion (the retract must
+/// return 200), not by the status assertion after it. That status assertion
+/// guards a different class — a retract accepted but not persisted — which no
+/// mutation at this site can produce. Rather than leave it unfalsifiable it is
+/// written as a **before/after pair** on the context's state, so it cannot pass
+/// against a response that never carries a status at all.
+///
+/// This is the first test in the repo to exercise the did:web half of
+/// `lifecycle_transition` at all. The control asserts the actor really is
+/// `did:web:`, because a did:key actor here would silently re-cover the arm
+/// `lc001_retraction_flow_end_to_end` already pins and prove nothing new.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_did_web_retract_retracts_rather_than_republishing() {
+    let addr = didweb::spawn_didweb_server().await;
+    let resolver = Arc::new(
+        WebResolver::with_test_endpoint(
+            didweb::ca_pem().as_bytes(),
+            didweb::DIDWEB_AUTHORITY,
+            addr,
+        )
+        .expect("test-endpoint resolver"),
+    );
+    let h = didweb_lifecycle_harness(resolver).await;
+
+    let req = producer(64)
+        .publish_request()
+        .title("u521-didweb-lifecycle")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "did:web publish must resolve through the fixture server: {v}"
+    );
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+    // The "before" half of the state pair: this context is definitely NOT
+    // retracted, so if the post-retract assertion could also pass here it would
+    // be decorative.
+    //
+    // The two responses carry the status in DIFFERENT places -- publish returns a
+    // summary with a top-level `status`, retract returns the full context with
+    // `registry_state.status`. Found by asserting the nested path here and
+    // getting `Null`. Reading each where it actually lives is the point; reading
+    // the nested path on both would have made this assertion vacuous rather than
+    // wrong, which is the more dangerous of the two.
+    assert_eq!(
+        v["status"], "active",
+        "a freshly published context must read `active`, or the retracted-status \
+         assertion below is not discriminating anything: {v}"
+    );
+
+    let envelope = signed_event_envelope_did_web(64, &ctx_id, "retracted", Some("u521 did:web"));
+    assert!(
+        envelope["event"]["actor"]
+            .as_str()
+            .unwrap()
+            .starts_with("did:web:"),
+        "the actor must be did:web, or this re-covers the did:key arm lc001 already \
+         pins: {envelope}"
+    );
+
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the did:web retract must get past key resolution and be accepted. THIS is \
+         the assertion that catches a deleted `Retracted` arm: without it the \
+         event reaches `republish_verified`, which rejects `event_type: \
+         'retracted'` with a 400 `schema_violation`. A \
+         `key_resolution_unreachable` here means something else -- the fixture \
+         server or the test-endpoint resolver is not wired: {v}"
+    );
+    assert_eq!(
+        v["registry_state"]["status"], "retracted",
+        "a did:web retract must RETRACT. Paired with the `active` assertion above, \
+         so this is a state CHANGE and not a field that happens to read \
+         `retracted`. Note this is NOT what catches the deleted match arm -- that \
+         mutation 400s at the assertion above; this one guards a retract that is \
+         accepted but does not persist: {v}"
     );
 }
