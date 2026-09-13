@@ -88,13 +88,42 @@ hold entries from several releases. Use the commands.
   from 39s to 2m27s: +108s, not +21s.** The local figure was optimistic because that machine had
   already built every feature combination during the measurement pass, whereas the runner's cargo
   cache holds no artifacts for combinations this repo had never built.
-  The conclusion survives but the margin is thin and must be quoted with it: jobs run in parallel and
-  `tests` is 2m45s, so PR latency is still set by `tests` — with **18 seconds** of headroom, not the
-  comfortable gap the local numbers implied. No per-PR/scheduled split was introduced, because one
-  would add a second place for the feature lists to go stale and a delay before a break is seen. But
-  the trigger for revisiting that is now explicit and near: **if the `clippy` job ever exceeds
-  `tests`, it becomes the critical path and the split should be reconsidered.** One more feature
-  configuration would likely do it.
+  **CORRECTED BY U-513 — the sentence that stood here quoted a margin, and a margin was never
+  supportable.** It said *"`tests` is 2m45s, so PR latency is still set by `tests` — with 18 seconds
+  of headroom"*, and paired that with a trigger: *"if the `clippy` job ever exceeds `tests`, the split
+  should be reconsidered."* Both are withdrawn. The 18s figure was **one sample of each job**, and the
+  trigger had **already fired before the sentence was written** — run 34766261172 had clippy at 98s
+  against tests at 86s. The falsifying datum was in hand.
+  Measured properly, from GitHub-hosted runners with `Swatinem/rust-cache` and no local timings:
+
+  | | n | range | median | spread |
+  |---|---|---|---|---|
+  | `clippy`, after this change | 5 | 98-176s | 144s | **78s** |
+  | `tests`, same runs | 5 | 86-165s | 149s | **79s** |
+  | `clippy`, before | 7 | 28-54s | 33s | 26s |
+  | `tests`, before | 7 | 142-155s | 150s | 13s |
+
+  Per-run margins were `+12, -18, -27, +26, -4` seconds (positive = clippy leads). **Every one is far
+  smaller than either spread, and a margin smaller than the run-to-run spread is not a margin** — so
+  no headroom figure belongs here in either direction.
+  What the data *does* support is categorical rather than numeric: before this change `clippy` was
+  never near the critical path (its slowest run, 54s, was under tests' fastest, 142s); after it the
+  two distributions overlap and **`clippy` led in 2 of 5 runs**, one of them on `main`. So the change
+  moved `clippy` from *never* the critical path to *sometimes* it. Derived expected cost, as the mean
+  of `max(0, clippy - tests)` across those 5 runs: **~8s**, against a ~150s critical path.
+  **The trigger fired and was weighed; it did not go unnoticed.** The per-PR/scheduled split is still
+  declined, but on re-derived grounds, since the original reason ("it relieves a job that is not the
+  bottleneck") is false in 2 of 5 runs. The two objections that do survive: a scheduled job makes the
+  feature lists two sources of truth — this file already records that a written-out list goes stale
+  silently and that it *already did once* — and it delays breakage detection by up to a day.
+  **A strictly better third option exists and is recorded rather than taken:** move the five build
+  steps to a separate job running *in parallel* instead of on a schedule. `clippy` returns to ~33s,
+  the builds occupy ~111s of their own job, both sit under tests' median, and added latency is
+  **zero** rather than ~8s — and it *moves* the feature lists rather than copying them, so neither
+  surviving objection applies. It is not taken because a new job is a new check name, and branch
+  protection's required contexts are enumerated, so the builds would stop blocking merges — the exact
+  trade `lint.yml` is stuck in. Trading the blocking property for ~8s is the wrong way round. **That
+  makes one pending settings decision the unblocker for two improvements.**
 
 - **A finding that narrows #265's own risk claim, worth recording because it is easy to overstate
   the fix.** The classic undefined-symbol link failure is **unreachable from this repo's source**:

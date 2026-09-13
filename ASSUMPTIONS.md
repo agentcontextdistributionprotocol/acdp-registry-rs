@@ -2955,3 +2955,42 @@ still open, and this is the outcome:
   human decision on repo settings. Reversible in one commit, and it becomes the better choice the
   moment that question is answered, since the same answer applies. Full reasoning: `DECISIONS.md`,
   U-510 decision 1.
+
+## U-513 — n=5 supports a categorical latency claim but no numeric one
+
+- **Plan:** `plans/u-513-correct-latency-claim.md` (Open question 1)
+- **Assumed:** that 5 post-change CI runs are enough to say "`clippy` is *sometimes* the critical
+  path" but not enough to quote any margin.
+- **Chose:** make only the categorical claim. "Sometimes" needs a single instance and there are two
+  (one on `main`); a margin needs the spread to be smaller than the difference, and here the spreads
+  are 78s and 79s against per-run margins of 4-27s. So no headroom figure is quoted in either
+  direction, and the corrected text says why rather than just omitting it.
+- **Alternatives:** gather more samples first — rejected, because it would delay correcting a
+  measurably false sentence that is on `main` right now, and because no realistic n rescues a margin
+  an order of magnitude below the spread; quote a fresh single sample — rejected, that repeats the
+  original error with a newer number, which is precisely what the assign forbids.
+- **Blast radius if wrong:** a reader takes "sometimes the critical path" as settled when it is based
+  on 5 runs. Mitigated by stating n in the table itself.
+- **Status:** UNCONFIRMED — more runs will sharpen the frequency; the categorical claim will not
+  change unless clippy's distribution moves.
+
+## U-513 — the builds stay in the required `clippy` job rather than moving to a parallel job
+
+- **Plan:** `plans/u-513-correct-latency-claim.md` (Open question 2)
+- **Assumed:** that keeping feature builds merge-blocking is worth ~8s of mean added PR latency.
+- **Chose:** keep them in `clippy`. The parallel-job form is **strictly better on every axis except
+  one**: latency cost drops from ~8s to zero, and it *moves* the feature lists rather than copying
+  them, so it avoids the two-sources-of-truth objection that kills the scheduled split. The one axis
+  it loses on is decisive — a new job is a new check name, and `required_status_checks.contexts` is
+  enumerated (`rustfmt`, `clippy`, `tests`, `conformance (spec fixtures)`), so the builds would stop
+  blocking merges. U-510 put them inside `clippy` specifically to gain that property; trading it for
+  ~8s is the wrong way round.
+- **The coupling worth surfacing:** this is the same blocker as U-508's `lint`. One settings change —
+  adding contexts to branch protection — would unblock **two** improvements, not one.
+- **Alternatives:** scheduled split (rejected: duplicates the feature lists, and delays breakage
+  detection by up to a day); swap clippy for build on the four never-linked configs to halve the cost
+  (rejected: loses the lint coverage W3-U10 added for #200, trading one gap for another).
+- **Blast radius if wrong:** ~8s per PR persists until the settings decision. Trivially reversible —
+  moving the steps to their own job is one commit, and becomes correct the moment the contexts change.
+- **Status:** UNCONFIRMED — the leader or the human may prefer to make the settings change and take
+  the parallel form.
