@@ -4471,3 +4471,82 @@ in-repo, and the cross-repo seam above is what removes it — along with the `di
 failure it exercises is a tenant-check rejection, which runs before the branch dispatch — the
 unproven side of the line. Its old name would have read as a direct contradiction of the new
 tests sitting beside it.
+
+## U-505 — making the repo's deferred work measurable
+
+The repo's real backlog was one open issue plus an unknown number of follow-ups recorded in
+prose inside two cumulative files that nothing scans. A follow-up nobody measures is
+indistinguishable from one that does not exist — and worse, because the prose records it, so it
+*reads* as tracked.
+
+### The count
+
+| source | deferred items | how bounded |
+|---|---|---|
+| `ASSUMPTIONS.md` (2535 lines) | **35** | exact; scanner bound-checked to 0 unexplained markers |
+| `DECISIONS.md` (2328 lines) | **42 candidate blocks** | superset by construction; prose mentions included deliberately |
+
+`DECISIONS.md` is **2328 lines, not the 6400+** the unit assignment estimated. All eight
+`file:line` citations in the assignment were exact.
+
+### Why the enumeration took three attempts, which is the transferable part
+
+A line-anchored `grep '^- \*\*Status:\*\*'` finds **88** of the 120 status markers in
+`ASSUMPTIONS.md`. The 32 it misses are not exotic:
+
+- markers wrapped mid-paragraph, because `grep` is line-based
+  (`... would have stayed green with the guard deleted outright. **Status: CONFIRMED`);
+- `**Status (updated 2026-09-01):**`, where a parenthetical sits between the key and the colon;
+- entries with **no `Status` line at all**, whose bullet *is* the status
+  (`- **UNCONFIRMED — awaiting human ruling:** ...`) — **9 of these**, structurally invisible to
+  any status-line scan;
+- one item that is an `###` **heading**, not a bullet
+  (`### UNCONFIRMED: the four new steps run clippy, not cargo build`);
+- one recorded only as an update inside another entry
+  (`- **Update, 2026-09-11 — PARTIALLY narrowed, still UNCONFIRMED.**`).
+
+The last two were found **only** by a bound check: assert that every `UNCONFIRMED` token in the
+file falls inside a counted block, then read the ones that do not. That check turned up five
+stragglers, of which three were genuine prose and two were real items the parser had missed. A
+scanner that is not bound-checked reports a confident number that is simply the number of items
+matching its own assumptions.
+
+### An open item is a claim about the past, and half of them had expired
+
+Every item verified against the tree rather than inferred from the record. Of the ones checked,
+**more were already fixed than were still live:**
+
+| recorded as deferred | actual state | evidence |
+|---|---|---|
+| `/metrics` sets no cache headers, dismissal deserves revisiting | **ALREADY DONE** | `lib.rs:265-271` sets `Cache-Control: no-store` via a route layer, with a comment covering exactly the 200-vs-401 concern raised |
+| EdDSA PEM case still fails late; `validate_config` narrowed to `jwt_secret` | **ALREADY DONE** | the EdDSA/PEM check is in `validate_config` (`main.rs:111-117`), and `validate_config` runs at `:83`, before every `store.migrate()` (`:677`, `:725`, `:758`) |
+| `acdp-playground` types webhooks as a closed `Literal` of three, dropping two lifecycle events | **ALREADY DONE** | `acdp_client/models.py` `WebhookType` now lists all four |
+| 14 cursor-error literals duplicated across two store crates | **ALREADY DONE** | consolidated into `acdp-registry-store/src/cursor.rs`; the `DECISIONS.md:1021-1022` line pins are dangling and now point at unrelated code |
+| `storage-memory` uncovered by CI | **ALREADY DONE** | `ci.yml:59`, `:154`, `:324` |
+| `dtolnay/rust-toolchain@master` — the loosest pin in the repo | **ALREADY DONE** | SHA-pinned at `6c977a6c…` in all 8 uses |
+| add `bump-spec.yml` to this repo | **ALREADY DONE** | `.github/workflows/bump-spec.yml` exists |
+
+### Still open, verified live, filed
+
+- **#265** — CI's four feature-configuration steps run `cargo clippy`, not `cargo build`
+  (`ci.yml:146-165`). Clippy does not run codegen or link, so a monomorphization or linker
+  failure passes all four. A disclosed deviation from #200 that nothing ever decided.
+- **#266** — `docker.yml` sets no `jwt_secret` and never boots the stack the quickstart ships.
+  This is the specific hole the W3-U5 defect escaped through, still open.
+- **acdp-website#43** — `webhooks.mdx` documents 2 of the registry's 4 webhook event types;
+  `context_retracted` and `context_republished` are absent from the public docs.
+
+### `plans/` is now partially tracked, and the exception is load-bearing
+
+`.gitignore` ignored all of `plans/`. `/plan`'s cross-repo handoff writes a design for another
+repo *here* (writing into a sibling needs a human gate; reading one never does) and then files an
+issue *there* linking a GitHub blob URL — which 404'd for every such handoff, because the file was
+never committed. acdp-rs#273 was filed that way and had to carry its design inline.
+
+Ruling: **`plans/cross-repo/` is tracked; the rest of `plans/` stays ignored.** Per-feature plans
+are per-run working documents and committing them adds churn; a cross-repo plan is a contract with
+another repo and has to be linkable.
+
+The form matters and was tested, not assumed: git does not descend into an excluded **directory**,
+so a bare `plans/` makes `!plans/cross-repo/` unreachable. Verified by reverting to the bare form
+and watching `git check-ignore` call the cross-repo file IGNORED again.

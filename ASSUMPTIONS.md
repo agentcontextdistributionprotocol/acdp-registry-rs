@@ -2534,6 +2534,36 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 - **Status:** UNCONFIRMED — this is a judgement about cost, not a measured fact. It is the one
   claim in this unit a reviewer should push back on if they disagree about the trade.
 
+## U-505 — index of deferred work surfaced from this file and DECISIONS.md (2026-09-13, lane-1)
+
+- **Index entry, not a status change.** No entry above was edited. U-505 enumerated the deferred
+  items in this file and in `DECISIONS.md`, verified them against the tree, and filed the still-live
+  ones as issues so they stop existing only as prose. Flipping any `UNCONFIRMED` above to
+  `CONFIRMED` is a separate unit (U-507) — in-place status edits collide with the keep-both-sides
+  resolution rule while other lanes are appending here.
+- **Counts.** `ASSUMPTIONS.md`: **35** deferred items (25 `Status: UNCONFIRMED`, 1 `Status: OPEN`,
+  9 whose bullet *is* the status and carry no `Status` line, plus 1 `###`-heading item and 1
+  recorded only as an in-entry update). `DECISIONS.md`: **42** candidate follow-up blocks, a
+  deliberate superset since prose mentions of a follow-up are indistinguishable from a record of
+  one without reading each.
+- **Filed as issues:** #265 (CI's feature-config steps run `clippy`, not `cargo build`), #266
+  (`docker.yml` never boots the shipped quickstart stack), acdp-website#43 (public webhook docs
+  list 2 of 4 event types).
+- **Verified ALREADY DONE, not re-filed:** `/metrics` cache headers (`lib.rs:265-271`); the EdDSA
+  PEM check and its ordering (`main.rs:111-117`, `:83` before `:677`); `acdp-playground`'s
+  `WebhookType`; the cursor-literal dedup (`acdp-registry-store/src/cursor.rs`); `storage-memory`
+  CI coverage; the `dtolnay/rust-toolchain` pin; `bump-spec.yml`.
+- **Known stale pointer, reported not repaired:** `DECISIONS.md:1021-1022` pins
+  `pg/src/store.rs:1644-1668` and `sqlite/src/store.rs:1740-1764`. Both ranges now hold unrelated
+  code. Not repaired here because `DECISIONS.md` is append-only this wave.
+- **The bound I could not close, stated plainly:** the 42 `DECISIONS.md` candidates were
+  classified by reading, and the ones resolvable from this repo's tree were verified. Items whose
+  resolution lives in a sibling repo's history (the spec-repo dispatch matrix in the `bump-spec`
+  follow-up, and `acdp-ci/DELIVERY-STANDARD.md`'s status lines) were **not** verified to the same
+  standard, because doing so means reading another repo's git history rather than its working tree.
+  They are neither confirmed done nor confirmed live.
+- **Status:** UNCONFIRMED — the `ASSUMPTIONS.md` count of 35 is exact and bound-checked; the
+  `DECISIONS.md` count of 42 is an upper bound on distinct items, not an exact count.
 ## U-503 — a shell script is the right home for a CI tag guard
 
 - **Plan:** `plans/u-503-immutable-sha-tag.md` (Phase 1)
