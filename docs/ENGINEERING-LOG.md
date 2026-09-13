@@ -1385,6 +1385,10 @@ hold entries from several releases. Use the commands.
   wholesale deletion and gutting but not `assert!(true)`-grade hollowing; the real
   fix is `cargo-mutants` or a fault-injection harness. #130 had been the de-facto
   anchor for that separate concern, so it was split out before #130 closed.
+  **Update (U-502): that fix has landed for a bounded scope** — `.cargo/mutants.toml`
+  and the scheduled `.github/workflows/mutants.yml`, baseline 74 mutants / 48 viable /
+  46 caught / 2 survivors. See the U-502 entry at the end of this file. `#216` remains
+  open for the rest. Left standing rather than rewritten: it was true when written.
 
 - **Corrected two false security claims in the Railway recipe, and disclosed its
   read posture** (#208). [`docker/RAILWAY.md`](docker/RAILWAY.md) claimed the
@@ -2095,6 +2099,11 @@ hold entries from several releases. Use the commands.
     all** — proving a test asserts something real needs a mutation oracle
     (`cargo-mutants` or fault injection over `src/`), not a text oracle.
     Recorded on `#130` rather than overclaimed in the file.
+    **Two updates, appended rather than rewritten, since both were true as
+    written:** the mutation-oracle thread moved from `#130` to `#216` when
+    `#130` closed; and the oracle now EXISTS for a bounded scope (U-502 —
+    `.cargo/mutants.toml`, scheduled `mutants.yml`, 46 of 48 viable mutants
+    caught, 2 survivors). See the U-502 entry at the end of this file.
   - `HARNESS_PROFILES`, `caps()`, `config()`, `KNOWN_FAMILIES`,
     `CORE_INEXCUSABLE_FAMILIES`, `EXCUSED` and `MIN_REPLAYED_EXCHANGES`
     are byte-identical to their prior contents — the ratchet was closed on
@@ -4545,6 +4554,157 @@ hold entries from several releases. Use the commands.
   carry the false gating claim and are **not** this unit's to change; they are
   reported to their owners with quotes rather than edited.
 
+### Added
+
+<!-- U-502 #216 mutation oracle (lane-2) -->
+
+- **A mutation oracle, the number it ratchets against, and the harness bug that
+  made the first number a lie** (`#216`). The conformance file has never been able
+  to prove that a test it vouches for *asserts* anything. Two mechanisms guard
+  those claims and both are PRESENCE oracles: the substring guards over
+  `include_str!` (`covered_direct_families_have_present_test_functions`,
+  `partial_direct_test_functions_are_present`) and the compile-checked
+  `DIRECT_FNS` table added by `#249`. A test that exists, compiles, runs and
+  asserts nothing satisfies every one of them. Breaking the code and watching the
+  test go red is the only thing that does not, and that is now wired.
+
+  **THE BASELINE, at `52c0111`, `cargo-mutants 27.1.0`, 6m at `-j4`:**
+
+  | outcome | count |
+  |---|---|
+  | mutants in scope | **74** |
+  | viable (the honest denominator) | **48** |
+  | **caught** | **46** |
+  | **survivors (missed)** | **2** (one since killed → budget **1**) |
+  | timeout | 0 |
+  | unviable (does not compile) | 26 |
+
+  **The committed survivor budget is 1** (survivor 1 below was killed rather than
+  accepted), in
+  `.github/workflows/mutants.yml`'s `env`, alongside an exact-equality check on
+  the scope size.
+
+  **Read the denominator honestly: 48, not 74.** The 26 unviable mutants are
+  mutations that do not compile — every one is
+  `replace <fn> -> <T> with Ok(Default::default())` (or similar) where `T` has no
+  `Default`; the five axum handlers `log_entries`/`log_proof`/`log_checkpoint`/
+  `inclusion_proof_response`/`consistency_proof_response` account for 20. There is
+  nothing there for a test to catch, so they are excluded from the claim rather
+  than counted toward it.
+
+  **A FIRST BASELINE OF "48 CAUGHT, 0 SURVIVORS" WAS MEASURED, BELIEVED, AND WAS
+  WRONG.** It is recorded here because the way it was wrong is the most useful
+  thing this unit produced. `cargo-mutants` tests each mutant in a `$TMPDIR` copy
+  of the tree and does not copy `.git` by default. `conformance_gate.rs`'s
+  `no_tracked_file_contains_a_conflict_marker` shells out to `git ls-files`, which
+  fails there; `cargo test` stops at the first failing test binary; and
+  `conformance_gate` runs *before* `http_integration`. So every mutant whose real
+  killer lived later was scored CAUGHT by that unrelated panic — **41 of the 48**,
+  i.e. every `handlers/log.rs` verdict. Only 7 were genuine, all in `receipt.rs`,
+  and only because core's unit tests happen to run before the poisoned gate. Had
+  that gate run earlier, all 74 would have been false.
+
+  The hazard was *already written down* in `.cargo/mutants.toml` — "a pre-existing
+  failure elsewhere in the workspace would mark mutants CAUGHT for the wrong
+  reason" — **and it was checked**: `cargo test --locked --workspace`, 632 passed,
+  0 failed, quoted as evidence the zero was real. The check was sound and its
+  answer was true. It was about **the tree we were standing in**, and the verdicts
+  come from **the tree the tool builds**. Naming a hazard is not checking it, and
+  checking something is not checking *it*. Fixed by `copy_vcs = true`; `.git` here
+  is a 4 KB worktree pointer, so it costs nothing.
+
+  What exposed it was not doubting the number — a 0 reads as success — but reading
+  the killing test's *name*: `no_tracked_file_contains_a_conflict_marker` cannot
+  possibly be killed by mutating `root_for`.
+
+  **THE HARNESS CONTROL, because a budget with no control is a number on trust.**
+  Under the harness and in the copy tree, `root_for -> String::new()` is CAUGHT by
+  the ten `http_integration` log tests that genuinely exercise it — matching a
+  by-hand mutation of the same line run *outside* the harness. Two independent
+  derivations agreeing. `.github/workflows/mutants.yml` also carries a standing
+  check for the same class: it fails if any single test is the SOLE failing test
+  for more than half the caught mutants. Falsified on the two real runs, not on
+  fixtures — the pre-`copy_vcs` run FAILS it (41 of 48 = 85%), the corrected run
+  passes (largest sole killer 8 of 46 = 17%). `cargo-mutants` cannot do this for
+  us: its unmutated baseline runs PACKAGE-scoped even under `test_workspace`
+  (`baseline.log` says `--package=acdp-registry-core`, the mutant logs say
+  `--workspace`), so it never builds the binary that was failing and a green
+  baseline is compatible with every verdict being noise.
+
+  **THE TWO SURVIVORS, enumerated with a reason each, not totalled.**
+
+  1. `handlers/log.rs:117:19` — `replace != with ==` in `requester_can_retrieve`.
+     **A real unasserted branch, and security-relevant.** Line 117 is
+     `if stored != tenant {`, the tenant gate. Inverted it is wrong both ways: a
+     matching tenant is DENIED, and a **mismatched tenant falls through to
+     `Ok(true)`** — disclosure across the tenant boundary. The function is live
+     (`:269`, `:303`) and gates the §8.2 `ctx_id` proof surface and every `leaf`
+     echo — i.e. `/log/proof?ctx_id=…`, not `/log/entries`, which moved to the
+     batched predicate in H-I-s (`:474` records that). No test reaches it: every
+     `/log/proof` test in `http_integration.rs` fetches via `get_json` with **no
+     `X-Tenant-Id`**, so `requested_tenant` is always `None` and the
+     `if let Some(tenant)` block never executes.
+     `log_entries_leaf_presence_is_tenant_scoped` looks like the guard and is not —
+     it exercises the batched `/log/entries` path, a different predicate.
+     **KILLED, not budgeted.** The claim on `http_integration.rs` was granted and
+     the two tests landed in the same commit as the ratchet:
+     `log_proof_ctx_id_is_served_to_the_owning_tenant` and
+     `log_proof_ctx_id_is_withheld_from_a_foreign_tenant` — two tests rather than
+     one because inverting the operator breaks **both** directions, and a single
+     test would stop at whichever assertion ran first and never evaluate the other.
+     Falsified: with `==` the first fails `left: 404, right: 200` (the owning tenant
+     denied) and the second `left: 200, right: 404` with the response body carrying
+     the other tenant's full `leaf` — `ctx_id`, `content_hash`, `key_fingerprint`,
+     `receipt_hash`. Reverted, both green. **Budget therefore 1, not 2.**
+
+     **Say what this is accurately.** The code is CORRECT: `!=` is the right
+     operator and no cross-tenant disclosure ships. What the oracle found is an
+     *unguarded correct property* — nothing executed the branch, so nothing would
+     have noticed if it stopped being correct. "Mutation testing found a
+     cross-tenant disclosure" would be false.
+  2. `handlers/log.rs:131:18` — `replace == with !=` in `root_for`.
+     **Accepted: an equivalent mutant.** Line 131 is `if tree_size == current {`
+     and it guards *only* `log.cache_root(...)`. `root_for` returns the same
+     `root` on both branches, and append-only makes any `(size → root)` pair
+     immutable, so a cached historical root is still correct and an uncached
+     current root is merely recomputed. Nothing observable changes — only which
+     sizes are cached. No assertion over responses can kill it; doing so would
+     need instrumentation counting merkle computations, which is a performance
+     harness, not a correctness one.
+
+  **WHAT THIS NUMBER DOES NOT COVER, stated where the number is rather than in a
+  footnote.** The scope is two files, chosen to be ones no other unit is editing:
+  `acdp-registry-core/src/receipt.rs` (9) and `src/handlers/log.rs` (65). It is
+  **not** the workspace, which is **1398** mutants at this sha — roughly 2.4h at
+  the ~6.2s/mutant marginal cost in `DECISIONS.md` #17. It deliberately excludes
+  `src/handlers/context.rs` (**134** at this sha), held by another unit this wave:
+  a budget keyed to a file being rewritten underneath it goes red for reasons
+  unrelated to what it guards, and a red check nobody can explain gets disabled.
+  The drift alone shows the exclusion was right — #17 measured `context.rs` at 132
+  and the workspace at 1383 one day earlier.
+
+  **And the conformance tests only assert under `ACDP_SPEC_DIR`.** 42 of the 70
+  tests in `conformance.rs` — essentially every `Direct`-registered family test the
+  coverage tables name — return early without it:
+  `let Some(fixtures) = spec_fixtures() else { … return; }`. The suite prints
+  `69 passed` either way (0.09s skipping versus 0.36s doing the work), so the
+  omission is invisible in a green log. The first baseline ran that way, meaning
+  the tests `#216` is *named after* contributed nothing to it. Both the local
+  re-measurement and the scheduled job now set `ACDP_SPEC_DIR` (pinned
+  `d1f06d0d…`, the same ref `ci.yml`'s conformance job uses) and
+  `ACDP_REQUIRE_CONFORMANCE=1`, so a broken spec checkout fails loudly instead of
+  42 tests quietly skipping. Verified by reading the work done rather than the
+  pass line: for the same mutant, the conformance binary takes **0.55s** in
+  require mode against **0.12s** in default, while a control binary of the same
+  test count is 0.04s in both. One conformance test remains out of reach —
+  `playground_compiled_in_but_runtime_disabled_keeps_admin_route`, which needs the
+  non-default `playground` feature. A three-command wrapper would triple every
+  mutant's cost (#17: ~6.2s → ~22s) to recover one test, so it is declined
+  deliberately rather than overlooked.
+
+  **`#216` stays open.** Its item 1 is fault injection over `src/` generally; this
+  is a bounded 74-mutant ratchet. PARTIAL BY DESIGN.
+
 ## U-501 — #242: publishes that fail late are now charged on two of four branches
 
 `P5` (`H-A`) split the publish limiter into `peek` (read-only, never inserts) before the
@@ -4705,6 +4865,45 @@ The form matters and was tested, not assumed: git does not descend into an exclu
 so a bare `plans/` makes `!plans/cross-repo/` unreachable. Verified by reverting to the bare form
 and watching `git check-ignore` call the cross-repo file IGNORED again.
 
+### Added
+
+<!-- U-502 #216 verification -->
+
+- **The mutation ratchet, verified by re-measurement rather than by assertion**
+  (`#216`, U-502). The entry above records the baseline at `52c0111`
+  (74 mutants / 48 viable / **46 caught / 2 survivors**) and states that one
+  survivor was killed. This is the confirmation that it actually was, run at
+  `6da5b7d` after the two tests landed:
+
+  | outcome | at `52c0111` | at `6da5b7d` |
+  |---|---|---|
+  | mutants in scope | 74 | **74** |
+  | caught | 46 | **47** |
+  | **survivors** | 2 | **1** |
+  | timeout | 0 | **0** |
+  | unviable | 26 | **26** |
+
+  8m at `-j6`. `handlers/log.rs:117:19` moved from MISSED to CAUGHT, and the log
+  for that mutant names its killers: exactly
+  `log_proof_ctx_id_is_served_to_the_owning_tenant` and
+  `log_proof_ctx_id_is_withheld_from_a_foreign_tenant` — the two tests written for
+  it, and nothing else. A mutant that changes verdict while the killing tests are
+  named is the whole claim; "we added a test and the number went down" would not
+  have been.
+
+  The one remaining survivor is `handlers/log.rs:131:18`, the `root_for` cache
+  equivalent mutant, accepted with its reasoning in the entry above.
+
+  The **committed** ratchet and harness checks were then run against this report,
+  extracted out of `.github/workflows/mutants.yml` itself so the text checked is
+  the text that runs: ratchet `rc=0` at `scope=74 / budget=1`, harness check `rc=0`
+  with the largest sole killer at 8 of 47 (17%), well under the 50% ceiling.
+
+  **Appended rather than edited into the entry above, deliberately.** That entry was
+  corrected in place while it existed only on an unmerged branch, and
+  `DECISIONS.md` #18 records that the licence for doing so expired the moment it was
+  pushed. It is pushed. So this is an append — which is the rule being applied to
+  its author rather than merely written down by them.
 ## U-509 — #266: the documented quickstart is now a CI property
 
 `.github/workflows/docker.yml` already booted a registry and hit `/healthz`. It did so by
