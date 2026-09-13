@@ -114,6 +114,12 @@ jobs:
       # artifact -- same audience, same moment -- and because it runs on
       # pull_request, so the release PR (where the version bump actually happens)
       # is gated before it merges.
+      # This copy REPORTS; it does not block. `build` is not in main's
+      # required_status_checks.contexts, so a failure here leaves the merge
+      # button green. The blocking copy is in ci.yml's `fmt` job, whose check
+      # name `rustfmt` IS required -- see the rationale there (U-516). This copy
+      # is kept because docker.yml also runs on the `acdp-registry-server/v*` tag
+      # push, which ci.yml never sees.
       - name: assert the version has operator upgrade notes
         run: bash docker/assert-upgrade-notes.sh --check
 

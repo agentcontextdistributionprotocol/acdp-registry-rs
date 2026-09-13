@@ -30,6 +30,35 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
+      # ── Why a docs gate lives in the rustfmt job (U-516) ──
+      #
+      # This assertion also runs in `docker.yml`, next to the artifact it
+      # describes. That copy REPORTS and cannot block: `docker.yml` publishes the
+      # check named `build`, and main's required_status_checks.contexts is
+      # exactly ["rustfmt","clippy","tests","conformance (spec fixtures)"] --
+      # `build` is not a member, so a release PR missing its UPGRADING.md section
+      # gets a red `build` and a green merge button. Neither the lanes leader nor
+      # any lane has authority over repo settings, so the fix is to run the same
+      # assertion inside a job whose check name is ALREADY required, rather than
+      # to ask for a fifth context.
+      #
+      # `rustfmt` is that job because the gate needs a checkout and nothing else
+      # -- no toolchain feature set, no services, no registry login -- which is
+      # this job's entire dependency set too. It is also the fastest required job
+      # (~6s), so a missing section reddens in seconds rather than after the
+      # ~3min `tests` job, and a bug in this step is diagnosable here instead of
+      # being conflated with a real test failure.
+      #
+      # Keep the `docker.yml` copy: `docker.yml` additionally triggers on the
+      # `acdp-registry-server/v*` tag push, which `ci.yml` never sees, so the two
+      # copies cover different windows. This one blocks the PR; that one covers
+      # the tag.
+      - name: assert the version has operator upgrade notes
+        run: bash docker/assert-upgrade-notes.sh --check
+
+      - name: self-test the upgrade-notes gate
+        run: bash docker/assert-upgrade-notes.sh --self-test
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest

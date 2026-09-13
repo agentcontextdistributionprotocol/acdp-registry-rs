@@ -2788,3 +2788,54 @@ unblocks both.**
 
 **Status:** declined, with the trigger recorded as fired and weighed so no reader concludes it went
 unnoticed.
+
+---
+
+## Decision: a CI gate that is not a required status check is a report, not a gate (U-516)
+
+**Context.** U-514 added `docker/assert-upgrade-notes.sh` to `docker.yml` and its `done` said the
+workflow "now blocks a release PR whose version has no `UPGRADING.md` section". Measured, that word
+was wrong:
+
+```
+$ gh api repos/.../branches/main/protection/required_status_checks
+  contexts: ["rustfmt","clippy","tests","conformance (spec fixtures)"]
+$ gh api repos/.../rules/branches/main   -> []
+$ gh api repos/.../rulesets              -> []
+$ gh pr checks 280 | grep -E '^build'
+  build   pass   2m47s   ...
+```
+
+`docker.yml` publishes the check named `build`. `build` is not a member of that four-element list,
+and no branch rule or ruleset supplies another. So a release PR missing its section gets a red
+`build` and a green merge button — #276's failure with a check-mark in front of it.
+
+This is the **third** site of the class already recorded for U-508 (`lint`) and U-510 (`clippy`'s
+feature-matrix builds): a check authored as a guard, published under a name nobody required. The two
+prior entries concluded "one branch-protection change unblocks both" and escalated. The class then
+produced a third instance *while the escalation was outstanding* — which is evidence that waiting on
+the settings change was the wrong remedy to depend on, not that it needed restating.
+
+**Decision.** Run the assertion inside a job whose check name is **already** required, and change no
+repo settings. `required_status_checks.contexts` is identical before and after this unit; no lane and
+no lanes leader has authority over it, and a design needing a fifth context would have been the wrong
+design for this unit.
+
+**Host job: `fmt` (check name `rustfmt`).** Chosen on dependencies, not convenience. The gate needs a
+checkout and nothing else — no feature-set toolchain, no services, no registry login — which is also
+`fmt`'s entire dependency set, so it introduces no new failure surface into a required job. It is the
+fastest required job (~6s vs ~2m30 `clippy`, ~2m57 `tests`), so a missing section reddens in seconds.
+And a bug in the step is diagnosable as itself there, rather than being read as a real test failure
+inside `tests`.
+
+The cost is that `rustfmt` now reddens for a reason unrelated to formatting. That is accepted: the
+job name is a required context and renaming it would violate the unchanged-contexts constraint, and
+the script's own failure output names the actual problem.
+
+**The `docker.yml` copy stays**, and for a measured reason rather than caution: `docker.yml` also
+triggers on the `acdp-registry-server/v*` tag push, which `ci.yml` never runs on. The two copies
+cover different windows — `ci.yml` the pull request, `docker.yml` the tag. Both call the same script,
+so they cannot drift in substance.
+
+**Status:** applied. The false "blocks" claim is corrected in `docker/assert-upgrade-notes.sh`'s
+header, in `CHANGELOG.md`, and here.
