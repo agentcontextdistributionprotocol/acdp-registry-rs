@@ -2326,3 +2326,95 @@ wrong; a maintainer is told. The alternatives are worse in kind, not just in cos
 dependency's type into this crate's public error enum for the benefit of one test.
 
 **Summary: 1 confirmed, 0 changed, 0 deferred, settled by Opus, 0 needing the human.**
+
+## Unit U-503 — the mutable `sha-` container tag (lane-3, 2026-09-13)
+
+Three `UNCONFIRMED` entries from `plans/u-503-immutable-sha-tag.md`, reconciled before ship and
+ranked by blast radius rather than by how consequential they sound. None is a one-way door —
+there is no schema, public API contract, auth model, data migration or external dependency
+among them, and every one is a workflow-config or file-location choice reversible in a single
+commit — so all three sit in Opus's tier and none was escalated. The analysis ran in-thread
+rather than in a fresh subagent (this session is under a standing instruction not to spawn
+agents unrequested); that is weaker than an independent read, so each decision below rests on
+an executed check or on primary evidence, not on agreement.
+
+### 1. The double build is KEPT; only the mutable tag is fixed — CONFIRMED (Opus)
+
+**Assumed:** that "the same commit gets built twice at all, producing two non-reproducible
+digests" — which the unit brief named as part of the defect — is in fact correct behaviour.
+
+**Analysis.** The two digests differ *deterministically*, not flakily, and both runs' `buildx`
+command lines say why: metadata-action stamps `org.opencontainers.image.version` as `main` on
+the main-push build and `0.1.3` on the release build, `image.created` differs, and buildx
+attaches `--attest type=provenance,mode=max,builder-id=…/runs/<run-id>`. Labels and provenance
+live in the config blob, so the manifests cannot agree. The obvious collapse — promoting the
+main digest with `buildx imagetools create` — would therefore publish a release image whose own
+OCI `version` label reads `main` and whose provenance names the main run. That trades a
+cosmetic problem (two digests for one source) for a substantive one (a release artifact that
+misreports its own release identity).
+
+**Verdict:** confirm. Ranked highest here not because it is expensive to reverse — it isn't —
+but because it **declines half of what a peer asked for**, which is the kind of thing that
+should never be settled silently. It stays visible by being argued in the PR body and carried
+in the lane's `done` report. A separate `fyi` to the leader was considered and rejected: the
+information is already going where the leader reads it, and `done` is the next scheduled
+contact, so a fourth message would spend coordination budget to say the same thing earlier.
+
+**Status:** `CONFIRMED (2026-09-13)`. Reversible — a follow-up that collapses the builds would
+find the guard already satisfied, since one publishing path trivially meets the one-writer
+invariant.
+
+### 2. metadata-action honours `{{is_default_branch}}` in `enable=` for `type=sha` — DEFERRED (Opus)
+
+**Assumed:** that the handlebars expression is evaluated in the `enable=` option of a
+`type=sha` rule, not only in the `type=raw` rule where this file already uses it.
+
+**Analysis.** Deliberately *not* resolvable at reconcile, and that is the judgement worth
+recording rather than papering over. The only evidence that counts is whether this PR's own
+`docker` run computes a `sha-` tag on a `pull_request` event, and that run does not exist until
+the branch is pushed. Reading the action's README would produce belief, not evidence. Deferring
+is safe because the assumption **fails closed and fast**: if unsupported, the PR's run computes
+a `sha-` tag on a pull request and the new `assert image tags` step fails the job at the assert,
+about a minute in, before the twenty-minute build — and nothing publishes on a pull request in
+any case, since `docker.yml` gates both the registry login and the push on
+`github.event_name != 'pull_request'`. Named fallback if it fires:
+`enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}`, a plain GitHub
+expression with identical semantics that preserves the in-PR firing property.
+
+**Verdict:** defer, explicitly, with the settling evidence named. This does **not** block the
+ship — it is not a one-way door, and the mechanism that would catch it is the same mechanism
+this unit exists to add.
+
+**Status:** `UNCONFIRMED` — resolve from the PR's `docker` run output at CI watch, specifically
+whether the computed `tag-names` contain a `sha-` entry on a pull request.
+
+### 3. A shell script is the right home for a CI tag guard — CONFIRMED (Opus)
+
+**Assumed:** that `docker/assert-image-tags.sh` is an acceptable home for this guard even
+though the repo contained no `*.sh` files before it and CI runs no `shellcheck`, `actionlint`
+or `yamllint`.
+
+**Analysis.** The convention-matching alternative — a Rust test under `crates/**` reading
+`docker.yml`, the shape used for the route-documentation guard — is **outside this unit's path
+grant**, so it was never this lane's to choose; taking it would have required a
+`claim-request`. Among the options actually available, the script is also the only one that
+could be falsified before merge, and was: `--self-test` rejects the real pre-fix tag sets from
+runs 34734871991 and 34725795501, and it caught a genuine defect in the guard's own input
+normaliser (a dropped final token) that had made it *pass* the release run it was written to
+reject. The absent linter is mitigated structurally rather than promised — the self-test is
+wired into `docker.yml` and runs on every workflow event.
+
+**Verdict:** confirm. Lowest blast radius of the three: one file, two workflow steps, and the
+case table survives a move to a Rust test unchanged if the convention is later unwelcome.
+
+**Status:** `CONFIRMED (2026-09-13)`.
+
+### 2 (resolved). `{{is_default_branch}}` in `enable=` for `type=sha` — CONFIRMED (Opus), by run 34763580595
+
+The deferral above is closed by the evidence it named, not by a later opinion. PR #264's own
+`docker` run computed `tag-names: ["pr-264"]` — no `sha-` entry — against the pre-fix PR run
+34725795501's `["pr-262","sha-3617f76"]`. metadata-action does evaluate the handlebars in
+`enable=` for a `type=sha` rule; the gate fires; the fallback expression was never needed.
+`self-test the image-tag guard` and `assert image tags` both green, `build + push` skipped as a
+pull request requires. Recorded here because the next reader should not have to re-derive which
+run answered it.

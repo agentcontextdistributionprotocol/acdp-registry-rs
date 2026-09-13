@@ -9,7 +9,7 @@ ghcr.io/agentcontextdistributionprotocol/acdp-registry:latest        # tip of ma
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:main          # tip of main
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1.0         # a release tag, leading `v` stripped
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1           # rolling major.minor
-ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every push
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every push to main
 ```
 
 > **`:latest` tracks the tip of `main`, not the last release.** Pin a version tag
@@ -22,6 +22,29 @@ ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every pus
 > (slash namespace). The older hyphen-named `acdp-registry-server-v0.1.0`
 > Release is a June 2026 baseline, built 124 commits earlier, and does **not**
 > describe this image.
+
+> **Which tag to deploy, and what it guarantees.** Deploy a **version tag** —
+> `:0.1` to follow patches within a minor, or an exact `:0.1.3` to pin one
+> release. That image is the artifact built from the release tag, and it is the
+> only one whose `org.opencontainers.image.version` label names the release it
+> is. Deploy `:latest` or `:main` only when you deliberately want the tip of
+> `main` and accept that it moves on every merge. Use `sha-<7-hex>` to name a
+> single main-line commit: it is published by the push-to-`main` build and by
+> nothing else, so cutting a release no longer re-points it.
+> **That is a single-writer guarantee, not registry-level immutability** — GHCR
+> tags stay mutable, and re-running a `main` build by hand will rebuild that
+> commit and move its `sha-` tag to the new digest.
+
+> **A release tag and `:latest` are different digests of identical source, and
+> that is by design.** When a release is cut, the merge to `main` and the release
+> tag both build the same commit, and the two images differ *deterministically*:
+> the build metadata stamps `org.opencontainers.image.version` as `main` in one
+> and as the version in the other, and each build carries its own provenance
+> attestation. So `:0.1.3` and `:latest` can report different digests for one
+> commit with nothing wrong — the release image is the one that knows it is a
+> release, which is why it is built rather than retagged. To confirm two tags
+> came from the same source, compare `org.opencontainers.image.revision`, which
+> carries the commit.
 
 Pull-request builds compute a `pr-<n>` tag but never push it — the login and push
 steps are skipped for `pull_request` events.
@@ -46,9 +69,11 @@ Railway needs to pull from GHCR. Either:
 ## Creating the Railway service (later)
 
 1. New Project → **Deploy from a Docker image**.
-2. Image: `ghcr.io/agentcontextdistributionprotocol/acdp-registry:latest`
-   (pin a version tag such as `0.1.0` for production stability — the image tag
-   carries no leading `v`).
+2. Image: `ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1` — a
+   version tag is the right default for anything you care about keeping stable,
+   and the image tag carries no leading `v`. Pin an exact patch (`:0.1.3`) to
+   stop even patch releases from moving under you; use `:latest` only if you
+   deliberately want the tip of `main`, per the tag guidance above.
 3. Add a **PostgreSQL** plugin (the image is built with `STORAGE_FEATURE=storage-pg`).
 4. Set the env vars below.
 5. Networking → expose the service; set the target port (see `$PORT` note).
