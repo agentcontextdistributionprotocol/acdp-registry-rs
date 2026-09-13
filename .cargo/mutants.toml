@@ -113,6 +113,7 @@ copy_vcs = true
 examine_globs = [
     "crates/acdp-registry-core/src/receipt.rs",
     "crates/acdp-registry-core/src/handlers/log.rs",
+    "crates/acdp-registry-core/src/handlers/context.rs",
 ]
 
 # A floor under the auto-set per-mutant timeout. cargo-mutants derives the timeout

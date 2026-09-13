@@ -46,31 +46,105 @@ env:
   # or deleted -- the survivor count falls with it, and a `<=` budget would read
   # that as an improvement. This assertion is what makes the budget below mean
   # anything.
-  MUTANTS_EXPECTED_SCOPE: "74"
+  MUTANTS_EXPECTED_SCOPE: "213"
 
-  # Surviving mutants at that sha. Each is enumerated with its own written reason in
-  # docs/ENGINEERING-LOG.md; this number is the machine-readable half of that list.
-  # It ratchets DOWN as survivors are killed and must never be raised without a
-  # reason recorded in the same commit.
+  # Surviving mutants at that sha. Each is enumerated with its own written reason
+  # in docs/ENGINEERING-LOG.md; this number is the machine-readable half of that
+  # list. It ratchets DOWN as survivors are killed and must never be raised
+  # without a reason recorded in the same commit.
   #
-  # The 1 is ONE NAMED MUTANT, not slack:
-  #   handlers/log.rs:131:18  `== -> !=` in root_for -- an EQUIVALENT MUTANT, and
-  #     the only accepted survivor. It guards only `log.cache_root(...)`; `root_for`
-  #     returns the same root on both branches, and append-only makes any
-  #     (size -> root) pair immutable, so a cached historical root is still correct
-  #     and an uncached current root is merely recomputed. Only *which* sizes get
-  #     cached changes, and no assertion over responses can see that. Killing it
-  #     would need instrumentation counting merkle computations -- observable work
-  #     rather than a result -- which is a performance harness dressed as a
-  #     correctness one. It is accepted for that reason, not because nobody looked.
+  # THIS NUMBER WENT UP, 1 -> 8, AND THAT NEEDS SAYING PLAINLY. It is not a
+  # relaxation: the scope tripled (74 -> 213) when handlers/context.rs entered
+  # it, and that file's 139 mutants had never been under an oracle. The first
+  # run over the new scope found 28 survivors. TWENTY OF THE 28 WERE KILLED with
+  # additive tests in http_integration.rs; these 8 are what is left, each with
+  # an argument rather than a shrug. The comparable figure is 28, not 1.
   #
-  # The other survivor of the first valid baseline was KILLED rather than budgeted:
-  #   handlers/log.rs:117:19  `!= -> ==` in requester_can_retrieve -- the tenant gate
-  #     on the §8.2 ctx_id proof surface. Now covered by
-  #     log_proof_ctx_id_is_served_to_the_owning_tenant and
-  #     log_proof_ctx_id_is_withheld_from_a_foreign_tenant in http_integration.rs,
-  #     which is why this budget reads 1 and not 2.
-  MUTANTS_SURVIVOR_BUDGET: "1"
+  # The 8 are EIGHT NAMED MUTANTS, not slack. Four are equivalent mutants -- no
+  # test can observe them because there is nothing to observe -- and four are
+  # blocked on infrastructure this suite does not have:
+  #
+  # EQUIVALENT (the mutation changes nothing observable):
+  #   handlers/log.rs:131:18   `== -> !=` in root_for. Carried unchanged from
+  #     U-502 and NOT re-argued here: it guards only `log.cache_root(...)`,
+  #     `root_for` returns the same root either way, and append-only makes any
+  #     (size -> root) pair immutable. Only WHICH sizes get cached changes.
+  #   handlers/context.rs:1223:16  `delete !` on `if !matches.is_empty()` in
+  #     run_search_with_refill. H-H-w moved the tenant predicate into the search
+  #     SQL (`search_in_tenant`, :1160-1194), so every row reaching this retain
+  #     already belongs to the caller's tenant and skipping the block removes
+  #     nothing. Positive evidence, not inference: the retain's OWN comparison
+  #     `t == tenant` was CAUGHT at the same site. Two mutations at one site with
+  #     opposite verdicts is the signature of a redundant guard.
+  #   handlers/context.rs:81  delete match arm `"public"` in parse_visibility
+  #   handlers/context.rs:82  delete match arm `"restricted"` in parse_visibility
+  #     Measured, not assumed: search returns only PUBLIC rows to every requester
+  #     -- probed with an anonymous caller, an audience member, and the row's own
+  #     producer, all of which see only the public row. So `?visibility=public`
+  #     selects everything already visible and `?visibility=restricted` selects
+  #     nothing, for anyone; neither arm can change a result. The same site's
+  #     `"private"` arm was CAUGHT, which is the tell again -- that is the one
+  #     arm still doing work, since it must yield zero where no filter would
+  #     yield the visible public rows. These two become observable the moment
+  #     search starts serving restricted rows to entitled requesters, and at that
+  #     point they are coverage gaps and this budget must drop to 6.
+  #   handlers/context.rs:627:39  `>` -> `>=` on `rec.expires_at > Utc::now()`.
+  #     The two differ only when a stored expiry equals the clock to the
+  #     nanosecond. `expired_idempotency_key_is_not_matched` already pins the
+  #     behaviour either side of the boundary; the boundary itself is not
+  #     reachable deterministically, and a test that waited for it would be a
+  #     flake generator.
+  #
+  # BLOCKED ON MISSING TEST INFRASTRUCTURE (a real gap, named, not dismissed):
+  #   handlers/context.rs:1542:13  delete match arm `LifecycleEventType::Retracted`
+  #     in the **did:web** dispatch of lifecycle_transition -- a retract would be
+  #     processed as a REPUBLISH. The entire did:web lifecycle branch has zero
+  #     coverage: `signed_event_envelope` can only sign as did:key, so
+  #     `event.actor.starts_with("did:key:")` is true in every lifecycle test in
+  #     the repo. Verified unreachable rather than assumed: a did:web-signed
+  #     retract was written and it fails at `key_resolution_unreachable`, because
+  #     `retract_verified` resolves the actor through a real `WebResolver` and
+  #     playground mode does NOT bypass that. Covering it needs an HTTPS fixture
+  #     serving `agents.test`'s did.json with a trusted cert. FOLLOW-UP: that
+  #     fixture, which would also unblock the did:web half of publish.
+  #   handlers/context.rs:1399:5  `lifecycle_outcome` -> `String::new()`
+  #   handlers/context.rs:1399:5  `lifecycle_outcome` -> `"xyzzy"`
+  #     The function is `e.wire_code()` behind a metrics label, so the only
+  #     observer is a `/metrics` scrape. `/metrics` is deliberately NOT mounted in
+  #     the http_integration harness (404, measured), and metrics_integration.rs
+  #     exists as its own test binary precisely so "the process-global `metrics`
+  #     recorder is isolated from other integration tests" (its own module doc).
+  #     Asserting these here would install a global recorder into a binary built
+  #     without one and put 158 tests behind shared mutable state. The right home
+  #     is metrics_integration.rs, which is outside this unit's path grant.
+  #     FOLLOW-UP: a rejected-transition label assertion there.
+  #
+  # NEW FLOOR: 8. Three of the eight are retired by one HTTPS did:web fixture
+  # plus one metrics assertion; two more are retired if search ever serves
+  # restricted rows. Nothing here is permanent except the three genuine
+  # equivalents (log.rs:131, context.rs:1223, context.rs:627).
+  MUTANTS_SURVIVOR_BUDGET: "8"
+
+  # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
+  # unconditional `timeout != 0` until U-504, on the stated reasoning that "a
+  # timeout is not a kill -- it lets a real survivor hide behind a slow test".
+  # That reasoning is about SLOW TESTS and it still holds. It does not cover a
+  # mutant that provably cannot terminate, and the new scope contains exactly one:
+  #
+  #   handlers/context.rs:1277:12  `delete !` on `if !should_refill { break; }` in
+  #     run_search_with_refill. Inverting it breaks when the loop SHOULD refill and
+  #     loops forever when it should not -- which is every unfiltered search in the
+  #     suite. Non-termination cannot be converted into a fast assertion failure by
+  #     any test: the binary hangs and the verdict is TIMEOUT. Measured directly,
+  #     `-j1 --examine-re 'delete ! in run_search_with_refill'`: :1223:16 MISSED in
+  #     10s, :1277:12 TIMEOUT at the full 300s. A timeout here IS the detection.
+  #
+  # Deliberately NOT relaxed to an unconditional pass: a SECOND timeout is exactly
+  # the case the original reasoning warned about, and it fails this job. Budget is
+  # a ceiling on a named mutant, not a category exemption. It costs the scheduled
+  # run ~5 minutes of wall clock, which is the price of scoring it honestly rather
+  # than folding it into "not missed".
+  MUTANTS_TIMEOUT_BUDGET: "1"
 
 jobs:
   mutants:
@@ -192,7 +266,14 @@ jobs:
           # reporting a number.
           ACDP_SPEC_DIR: ${{ steps.spec.outputs.path }}
           ACDP_REQUIRE_CONFORMANCE: "1"
-        run: cargo mutants -j2 || true
+        # -j1, NOT -j2, and this is measured rather than cautious. On the same
+        # 18-mutant shard: -j6 and -j8 each blew past 10 minutes with every
+        # mutant still in its Build phase, while -j1 finished in 1m55s (~6.4s per
+        # mutant). Parallel jobs get separate build copies and cannot share
+        # incremental artifacts, so N simultaneous rebuilds of core plus every
+        # dependent crate contend for CPU and disk instead of pipelining.
+        # Sequentially the cache stays warm. The full 213-mutant scope is ~23min.
+        run: cargo mutants -j1 || true
 
       # THE RATCHET. Four assertions, each able to fail on its own, and the
       # script ACCUMULATES rather than exiting at the first failure -- an early
@@ -336,11 +417,15 @@ jobs:
           # (4) A TIMEOUT is an unresolved verdict, not a kill. Folding it into
           #     "not missed" is the optimistic reading and lets a real survivor
           #     hide behind a slow test.
-          if [ "$timeout" -ne 0 ]; then
-            echo "::error::$timeout mutant(s) timed out. A timeout is not a kill --" \
-                 "the mutant's fate is unknown. Investigate mutants.out/timeout.txt," \
-                 "or raise minimum_test_timeout in .cargo/mutants.toml; do not let it" \
-                 "stand as an implicit pass."
+          if [ "$timeout" -gt "$MUTANTS_TIMEOUT_BUDGET" ]; then
+            echo "::error::$timeout mutant(s) timed out, budget is" \
+                 "$MUTANTS_TIMEOUT_BUDGET. A timeout is not a kill -- the mutant's" \
+                 "fate is unknown. The budgeted one is a provably non-terminating" \
+                 "mutant named in the env block; a NEW timeout is more likely a test" \
+                 "that got slow, which is exactly how a real survivor hides. Read" \
+                 "mutants.out/timeout.txt and identify which it is. Raising" \
+                 "minimum_test_timeout in .cargo/mutants.toml is the fix for a slow" \
+                 "test; raising this budget needs a named mutant and a written reason."
             rc=1
           fi
 

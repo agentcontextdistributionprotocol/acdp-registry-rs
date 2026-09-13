@@ -5220,6 +5220,181 @@ wrong cause was not.
 This changes nothing about U-514's conclusion, and strengthens its stated reason: a `[changelog].body`
 template cannot be verified short of an actual release for seven of the eight crates, anywhere.
 
+## U-504 — #216: the mutation ratchet extended to `handlers/context.rs` (2026-09-13, lane-2)
+
+Measured with `cargo mutants -j1`, scope from `.cargo/mutants.toml` (`receipt.rs` +
+`handlers/log.rs` + `handlers/context.rs`), `ACDP_REQUIRE_CONFORMANCE=1`.
+
+**Measured twice, at two spec pins, and the result is identical.** `main` moved the conformance
+pin from `d1f06d0d49b73d411a3983d3877321ccaccd38e7` to `16211e64cf54973526a7af71adc8aed8996c3ae1`
+during this unit (U-518's merge), and that diff touches the replayed fixtures — five modified
+(`can-004`, `dk-001`, `dk-002`, `dk-004`, `data-ref-007`) plus a new `err-002`. Since
+`mutants.yml` derives its pin from `ci.yml`, a baseline measured at the old pin would have been
+true of a spec CI no longer uses. So the full 8-shard run was repeated at `af6647d` against the
+new pin: **213 / 131 caught / 8 survivors / 1 timeout / 73 unviable, with the survivor set
+content-identical across both pins.** The caveat is therefore closed rather than carried.
+
+The new pin was obtained with `git -C ../acdp-spec-pinned archive <sha> | tar -x` into scratch —
+a pure READ of the sibling repo, which stayed at `d1f06d0` with a clean tree throughout. Moving
+another repo's checkout is a cross-repo write and is not a lane's call, least of all for a fixture
+other lanes may be running against.
+
+| | U-502 (74-mutant scope) | **U-504 (213-mutant scope)** |
+|---|---|---|
+| mutants in scope | 74 | **213** |
+| viable | 48 | **140** |
+| caught | 47 | **131** |
+| **survivors** | 1 | **8** |
+| timeout | 0 | **1** |
+| unviable | 26 | 73 |
+
+**The comparable figure is 28, not 8.** The first run over the new scope found **28
+survivors**; 20 were killed with additive tests in `http_integration.rs` and these 8 are what
+is left. `caught` moved 111 → 131, exactly +20, which is the independent arithmetic check that
+the kills are real rather than the scope having shifted under them.
+
+### Method: the completeness claim is an equality, not a floor
+
+Run as 8 shards at `-j1`. Every shard's `outcomes.json` carries an `end_time` (a shard without
+one is an incomplete run, not a result — two were discarded on that basis across this unit), the
+**union of the shards' own mutant lists equals the full `cargo mutants --list` set exactly**
+(213 == 213) with **zero overlap**, and `viable == caught + missed + timeout` (140 == 131+8+1).
+A `>=` check cannot detect undercounting, which is precisely how this lane's first baseline was
+wrong.
+
+Slice sharding **nests** for even multiples (`0/4` == `0/8` + `1/8`, verified by set equality),
+so a completed coarse shard stays valid when subdivided — which is what makes a partial run
+resumable.
+
+**`-j1`, measured, not assumed.** On one 18-mutant shard: `-j6` and `-j8` each exceeded 10
+minutes with every mutant still building; `-j1` finished in 1m55s (~6.4s/mutant). Parallel jobs
+cannot share incremental artifacts, so N simultaneous rebuilds of core plus every dependent
+contend instead of pipelining. `mutants.yml` changed from `-j2` to `-j1` on that basis. Full
+scope ≈ 23 min plus 5 min for the one timeout.
+
+### What the oracle found: 20 real gaps, in five clusters
+
+Framing as in U-502, and it is the honest one: **the code is correct, no disclosure ships, these
+were unguarded correct properties.** Every gate below worked; nothing would have noticed if one
+stopped working.
+
+1. **Five tenant gates with no coverage at all** — `/contexts/{id}/body` (`:1018`),
+   `/lineages/{id}` (`:1322` retain skipped, `:1328` retain inverted), `/lineages/{id}/current`
+   (`:1361`), and `retract`/`republish` (`:1511`). The last protects a **write**: with `!=`
+   inverted, a caller scoped to another tenant successfully retracted the context, event
+   recorded. It looked covered — `X-Tenant-Id` appears 26 times in these tests and
+   `retrieve_with_tenant` exercises this exact gate on `/contexts/{id}`, the *envelope* route —
+   but the tenant-header sites and the requests to those three routes did not overlap on one line.
+2. **Seven survivors behind an unasserted webhook payload.** Three handler values reach nothing
+   but the webhook: `context_type_str` (one caller), the validated `x-run-id` (one use), and the
+   retract delivery's reserved-tenant filter. `count_connections_and_reply_ok` counts connections
+   and discards the bytes. **A value with exactly one consumer is untested if that consumer is
+   untested.** Deleting the webhook `Retracted` arm delivered a retraction as
+   `"type":"context_republished"` — telling a consumer the context came back.
+3. **Six survivors in the search refill loop, whose body was dead to the whole repo.**
+   Instrumenting `iterations` and running the entire server suite produced *not one* iteration
+   beyond the first. Reaching it needed `?visibility=private`, which empties every page. The
+   matches cannot discriminate (empty either way) — `next_cursor` can, so the test resumes an
+   unfiltered search from it and counts what remains: 10 of 70 when the cap holds, 60 when the
+   loop gives up after one page, none at all when it runs to exhaustion.
+4. **Two on `Idempotency-Key`, the validation whose comment records it as the fix for #20.** The
+   existing test sends a 257-char key and asserts only `200` — but a key wrongly *honored* also
+   returns 200. Only the `ctx_id` distinguishes "ignored" from "used". The fix for #20 shipped
+   with a test that could not see the behaviour it was named for.
+5. **A did:web/lifecycle finding that is a gap rather than a kill** — see survivor 7 below.
+
+### The 8 accepted survivors, each argued
+
+**Equivalent — the mutation changes nothing observable (4):**
+
+- **`log.rs:131:18` `== -> !=` in `root_for`.** Carried unchanged from U-502, not re-argued.
+  Re-measured here and still MISSED, which matters: an equivalence claim expires when the suite
+  changes, and this one survived 20 new tests.
+- **`context.rs:1223:16` `delete !` on `if !matches.is_empty()`.** H-H-w moved the tenant
+  predicate into the search SQL (`search_in_tenant`), so every row reaching this retain already
+  belongs to the caller's tenant and skipping the block removes nothing. **Positive evidence, not
+  inference:** the retain's own comparison `t == tenant` was CAUGHT at the same site. Inverting
+  drops every row and reddens a count assertion; skipping drops nothing.
+- **`context.rs:81` / `:82`, deleting the `"public"` / `"restricted"` arms of `parse_visibility`.**
+  Measured: search returns only PUBLIC rows to *every* requester — probed with an anonymous
+  caller, an audience member, and the row's own producer, all of which saw only the public row.
+  So `?visibility=public` selects everything already visible and `?visibility=restricted` selects
+  nothing, for anyone. The same site's `"private"` arm was **CAUGHT** — the one arm still doing
+  work, since it must yield zero where no filter yields the visible public rows. **These become
+  coverage gaps the moment search serves restricted rows to entitled requesters, and the budget
+  must then drop to 6.**
+- **`context.rs:627:39` `>` -> `>=` on `rec.expires_at > Utc::now()`.** Differs only when a stored
+  expiry equals the clock to the nanosecond. `expired_idempotency_key_is_not_matched` pins the
+  behaviour either side; the boundary itself is not reachable deterministically and a test that
+  waited for it would be a flake generator.
+
+**Blocked on test infrastructure this suite does not have (4):**
+
+- **`context.rs:1542:13`, deleting the `Retracted` arm of the did:web dispatch** — a retract
+  processed as a **republish**. The entire did:web lifecycle branch has zero coverage:
+  `signed_event_envelope` can only sign as did:key, so `actor.starts_with("did:key:")` is true in
+  every lifecycle test in the repo. **Verified unreachable rather than assumed** — a did:web-signed
+  retract was written and fails at `key_resolution_unreachable`, because `retract_verified`
+  resolves the actor through a real `WebResolver` and playground mode does not bypass it.
+  *Follow-up: an HTTPS fixture serving `agents.test`'s did.json, which also unblocks did:web publish.*
+- **`context.rs:1399:5` -> `""` and -> `"xyzzy"` on `lifecycle_outcome`.** The function is
+  `e.wire_code()` behind a metrics label, so its only observer is a `/metrics` scrape. `/metrics`
+  is deliberately not mounted in the `http_integration` harness (404, measured), and
+  `metrics_integration.rs` is a separate test binary precisely so "the process-global `metrics`
+  recorder is isolated from other integration tests" (its own module doc). Asserting it there
+  would install a global recorder into a binary built without one and put 158 tests behind shared
+  mutable state. The right home is `metrics_integration.rs`, outside this unit's grant.
+  *Follow-up: a rejected-transition label assertion there.*
+
+**New floor: 8.** Three of the eight are retired by one HTTPS did:web fixture plus one metrics
+assertion; two more go if search ever serves restricted rows. Only the three genuine equivalents
+(`log.rs:131`, `context.rs:1223`, `context.rs:627`) are permanent.
+
+### The one timeout is budgeted, not folded into "not missed"
+
+`context.rs:1277:12` `delete !` on `if !should_refill { break; }` loops forever whenever the loop
+should *not* refill — every unfiltered search. Non-termination cannot be converted into a fast
+assertion failure, so the verdict is TIMEOUT and a timeout here **is** the detection. The ratchet's
+previous `timeout != 0` rule was reasoned about *slow tests*, which is a different thing; it is now
+a named ceiling of 1, and a second timeout still fails the job. Measured directly: `:1223:16`
+MISSED in 10s, `:1277:12` TIMEOUT at the full 300s.
+
+I had reasoned the new refill test would *catch* `:1277` — under the mutation `should_refill` is
+true on the first pass, so it breaks immediately and the assertion fires. That reasoning was wrong:
+the other tests still hang, and a hanging binary times out whatever one failing test says. Hence
+the measurement.
+
+### Lesson: a survivor is a fact; "a survivor means a missing test" is an inference
+
+Eight of the 28 were not gaps. The other branch is that the mutation changes nothing observable,
+and **defence-in-depth manufactures that branch on purpose** — so the redundant-guard case is
+commonest in exactly the most-hardened code, which is where a tenant-isolation audit points an
+oracle first.
+
+The cheap discriminator: **two mutations at one site with opposite verdicts is positive evidence of
+equivalence.** `t == tenant` CAUGHT beside `delete !` SURVIVED; `"private"` CAUGHT beside `"public"`
+and `"restricted"` SURVIVED. Both times the caught sibling proved the site was reachable and the
+survivor unobservable. **For any survivor that deletes a fast-path or short-circuit guard, check for
+upstream enforcement before writing the test.**
+
+I got this wrong first and corrected it on the board: `:1223` was reported as an uncovered tenant
+gate before `search_filters_by_tenant` — a *green* test that should have reddened — turned out to be
+the evidence rather than the noise.
+
+### AC-8: the spec-pin coupling now has a guard
+
+`mutants.yml` derives its acdp-spec pin by grepping `ci.yml`'s 40-hex `ref:`. Nothing in `ci.yml`
+says another workflow parses it, and `mutants.yml` is schedule-only, so a PR restructuring that step
+could not turn red — the breakage would surface on the next Monday cron, detached from its cause.
+CHARTER Rule 48: a doc artifact no command can check is a defect while it is still correct.
+`conformance_gate.rs` now asserts four invariants as a pure function over both files' text (forced:
+`ci.yml` is outside this grant, so falsifying by editing it was never possible), each falsified by a
+valid-YAML restructuring — and the falsification test itself falsified by disabling each check.
+
+**One invariant changed shape on contact.** As proposed it was "no hardcoded 40-hex ref anywhere in
+`mutants.yml`". Measured: `mutants.yml` legitimately carries four 40-hex **action** pins, because
+pinning actions by SHA is correct. Narrowed to a literal on a `ref:` line, with a test asserting
+action pins are not flagged. A guard that fails against the correct file is a guard that gets deleted.
 ## U-518 — when the compiler names the site and not the cause
 
 `axum::handler::Handler` has two halves: the extractors must implement `FromRequestParts`/
