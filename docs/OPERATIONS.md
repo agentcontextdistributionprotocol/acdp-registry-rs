@@ -55,6 +55,32 @@ plain HTTP behind it — cert rotation without restarts, standard ops. The examp
 `port = 8443` is a hint that HTTPS is expected at the edge; the binary serves
 plain HTTP on any port.
 
+### Inbound TLS was broken before 0.1.4, and the smoke tests could not see it
+
+Setting `registry.tls.enabled = true` used to abort the process at startup with
+**exit code 101**: the dependency graph enables two rustls crypto providers
+(`aws-lc-rs` via `axum-server`'s `tls-rustls`, `ring` via `reqwest`'s
+`rustls-tls`), neither of them selected by a feature this workspace controls,
+and nothing installed one explicitly. rustls refuses to guess.
+
+The symptom was worse than a failed start. `main` logs `listening` with the bind
+address **before** entering the TLS branch, so an operator saw a normal
+startup line and then a dead process with the port refusing connections. If you
+ever saw that and concluded the config was wrong, it was not — `tls.enabled` was
+simply unusable.
+
+Fixed by installing `ring` explicitly, before the `listening` log.
+
+**Why no test caught it, which is the part worth keeping.**
+`docker/config.docker.toml` sets `tls.enabled = false`, so the container smoke
+tests exercise the plaintext path only and would not have caught this — nor will
+they catch a regression. Nor could an ordinary in-process test: the failure was
+in the *shipped binary's* dependency set, not in library code a test links
+against, so a test build could import a crypto provider the real binary did not
+have. The guard is `crates/acdp-registry-server/tests/tls_startup.rs`, which
+**spawns the real binary** and requires it to serve HTTPS — its red state was
+measured on the unfixed tree (exit 101) before the test was written.
+
 Note the asymmetry: cross-registry resolution and webhook delivery are
 **outbound** and require HTTPS (the `acdp` `SsrfPolicy` refuses HTTP and
 private/internal authorities). That's independent of how you serve inbound

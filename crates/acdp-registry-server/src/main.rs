@@ -71,10 +71,47 @@ use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::{RegistryConfig, StorageBackend, REGISTRY_ADVERTISABLE_PROFILES};
 use acdp_registry_webhook::WebhookEmitter;
 
+/// Install the process-wide rustls `CryptoProvider`, before anything can
+/// claim to be serving.
+///
+/// **Why this must exist at all.** This binary's dependency graph enables
+/// *two* rustls providers through edges we do not choose per-build:
+/// `axum-server`'s `tls-rustls` feature turns on `aws-lc-rs`, and `reqwest`'s
+/// `rustls-tls` turns on `ring` via `hyper-rustls`. Both are unconditional,
+/// so rustls cannot pick one and
+/// `get_default_or_install_from_crate_features()` panics. With
+/// `registry.tls.enabled = true` the binary exited **rc=101** inside that
+/// lookup.
+///
+/// **Why it is HERE, and not next to the TLS branch.** The panic used to fire
+/// after `main` had already logged `listening` with the bind address, so an
+/// operator saw a success line and then a dead process with the port
+/// refusing connections. "It says it is listening and nothing answers" is a
+/// materially worse failure report than "it would not start", so the
+/// provider is installed before that log rather than merely before
+/// `bind_rustls`. **Moving this call below the `listening` log would restore
+/// half the defect while keeping every test green** -- the tests assert the
+/// process survives, not the order in which it spoke.
+///
+/// Runs unconditionally, not under `if cfg.registry.tls.enabled`: `reqwest`
+/// reaches rustls too (DID resolution, webhooks), so a plaintext-bound
+/// registry still needs a provider for its OUTBOUND TLS.
+fn install_crypto_provider() -> anyhow::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "a rustls CryptoProvider was already installed for this process -- \
+                 install_crypto_provider() must run exactly once, before any TLS work"
+            )
+        })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let _ = dotenvy::dotenv();
+    install_crypto_provider()?;
 
     let cfg = RegistryConfig::load(None).map_err(|e| anyhow::anyhow!("config: {e}"))?;
     // #271: an EMPTY `ACDP_REGISTRY_*` override is ignored rather than applied,

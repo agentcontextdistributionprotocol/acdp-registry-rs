@@ -23,6 +23,23 @@ belongs in the per-crate changelogs.
 
 ## 0.1.4
 
+**Fix: `registry.tls.enabled = true` now works. It aborted the process at startup before this
+release.**
+
+| | before 0.1.4 | 0.1.4 |
+|---|---|---|
+| `tls.enabled = false` (the recommended topology) | serves plain HTTP | **unchanged** |
+| `tls.enabled = true` with a valid cert/key | logs `listening`, then **exits 101**; port refuses connections | serves HTTPS |
+| `tls.enabled = true` with a missing cert/key | clean error, exit 1 | **unchanged** |
+
+No configuration changes. If you had `tls.enabled = true` and concluded your certificate paths were
+wrong, they may well have been fine — the binary enabled two rustls crypto providers and installed
+neither, so rustls refused to choose. It now installs `ring` explicitly, **before** the `listening`
+log, so a failure can no longer follow a success line.
+
+**Who needs to act:** nobody. This only removes a failure mode. Operators terminating TLS upstream —
+the recommended topology — were never affected.
+
 **Wire change: `POST /contexts/{ctx_id}/retract` and `/republish` now reject an unaccepted
 `Content-Type` with 415.**
 
