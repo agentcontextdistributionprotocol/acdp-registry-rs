@@ -3382,3 +3382,68 @@ known-positive check caught it** — the guard's first act was to correct its au
 
 **Status:** applied. 40 → 41 exchanges, 21 → 22 replayable. **`required-but-unexercised` does not
 move: it stays 6** — `cur-001`/`cur-002` are not profile-required. No wire change.
+
+## Unit U-507 — reconciling `ASSUMPTIONS.md`'s open entries (lane-3, 2026-09-13)
+
+### 1. The scope figure was the first deliverable, because three incompatible ones existed — CONFIRMED (Opus)
+
+`grep -c UNCONFIRMED` = **50** counts prose (a `**Correction:**` narrating a *past* status; a line
+cross-referencing a flip). An `^`-anchored `**Status:**` pattern = **28** misses five other live
+shapes: mid-prose-line statuses, a parenthetical between key and colon, a token **wrapped onto the
+next line**, and — 13 times — a **bullet or heading label with no `Status` word at all**. A careful
+hand count = **35**, scoped to "deferred items" and predating eight later entries.
+
+Measured: **37 items carrying 46 open declarations.** The hand count and this parser agree *exactly*
+at 37 declarations before `:2537` — two methods built from opposite directions reaching the same
+partition, which is the strongest available evidence for a census of this kind.
+
+**The tool is shipped, at `docs/assumptions-status-census.py`**, because a number whose predicate
+lives in a gitignored scratch file is not reproducible by a reviewer. It asserts its own partition is
+total (`open + resolved + unrecognised == all`), so an unseen sixth shape fails the run rather than
+silently lowering the count.
+
+### 2. The grant's mechanism fit 6 of 41, and the fix preserved the auditable property — CONFIRMED (leader, on this lane's recommendation)
+
+The unit was granted in-place rewrites of the status **token** only. Measured against the real file
+that covers **6 of 41** remaining declarations: **22** carry their reason on the same line, where a
+token-only flip yields a self-contradicting line, and **13** are label-form with no token to rewrite.
+Batch 1 shipped one instance of the failure — `CONFIRMED (awaiting a repo admin to action the
+branch-protection change)` — and it was **flagged in the file rather than fixed by self-widening the
+grant**. Escalated with a recommendation; granted as recommended: rewrite a complete status *line*,
+token plus reason clause, nothing else. Deletions still equal status lines rewritten, so the
+reviewer's mechanical check did not weaken — only its denominator changed.
+
+Root cause, as the leader recorded it: the grant was built around the one shape its undercounting
+pattern could see, so the wrong count and the wrong spec were **one error surfacing twice**.
+
+### 3. AC1's equality earned its keep — CONFIRMED (Opus)
+
+    open items at unit start                 37
+    fully resolved                           24
+    deliberately still open (AC4/AC5)        13
+    open declarations           46  ->  16   (30 flipped to a resolved token)
+    status lines rewritten / deletions       51  (verified after the final merge)
+
+The equality **caught two declarations this unit had walked past** — `:928`, a *second* declaration
+inside an item whose first was already resolved, and the `CtxId` latent. A floor (`>= 20 resolved`)
+would have passed with both still open. That is the whole argument for requiring an equality.
+
+### 4. Three entries had already closed themselves, and three specified how to tell — CONFIRMED (Opus)
+
+Closed by other work landing, with nobody going back to flip them: the shared playground validator's
+placement (**#192/#193**), CI never exercising the shipped stack (**#270**), and `/metrics`'
+cache posture (**#218**). The best-designed entries in the file **named their own closure signal** —
+`/metrics`' said *"deleting that line is how the fix announces itself"*, and A2's said it must not be
+called closed until a named test was deliberately deleted. Every one of those signals had already
+fired. **Worth copying: an entry that specifies how its own resolution will be detectable.**
+
+### 5. What this unit declined to do
+
+- **Did not close anything by inertia.** `:928` and `:2372` stay open because "nobody objected for
+  three days" is not evidence — and one of them forbids that reasoning in its own text.
+- **Did not resolve what belongs to others.** Four entries are the human's or the leader's; each
+  gained **Settled by** and **Owner** and kept its open token. Owners were *split* rather than
+  lumped, because this file has used "escalated" for both.
+- **Did not repair out-of-grant defects.** `crates/acdp-registry-core/src/handlers/context.rs:1262-1277`
+  is stale — it cites a deleted test as machine-checking a residue and still calls landed work a
+  requirement. Reported per U-505's precedent, not fixed.
