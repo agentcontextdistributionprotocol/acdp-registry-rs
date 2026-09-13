@@ -2979,3 +2979,68 @@ Recorded because I got it wrong first: `:1223` was reported to the board as an u
 before `search_filters_by_tenant` — a **green** test that should have reddened — turned out to be the
 evidence rather than the noise. Noticing that a passing test is the signal is the hard direction, and
 the retraction is the reason the other four equivalence claims were measured rather than argued.
+---
+
+## Decision: hold acdp at 0.13.1 — 0.13.2's regression has no correct downstream fix (U-518)
+
+**Symptom.** #285 (`deps/acdp-0.13.2`, Cargo.toml + Cargo.lock only) fails seven checks with:
+
+```
+error[E0277]: the trait bound `fn(...) -> ... {retrieve::<...>}: Handler<_, _>` is not satisfied
+  --> crates/acdp-registry-core/src/lib.rs:79:42
+  note: required by a bound in `axum::routing::get`
+```
+
+**Cause — established, not inferred.** Two hypotheses were tested and both were wrong before the
+real one was found, which is worth recording because the error names a route line and no cause:
+
+1. *`FullContext` lost `Serialize`.* **False** — `acdp-types`' `src/` is byte-identical between
+   0.13.1 and 0.13.2, and `assert_ir::<Json<FullContext>>()` compiles.
+2. *`RegistryError` lost `IntoResponse`.* **False** — `assert_ir::<Result<Json<FullContext>,
+   RegistryError>>()` compiles. The return type was never the problem.
+
+The real cause is the **other** half of axum's `Handler` bound: the handler's *future* must be
+`Send`. `acdp-client` 0.13.2's issue-#264 refactor extracted a shared `discover_revocations`
+(`revocation.rs:453`) taking
+
+```rust
+keep: &dyn Fn(&KeyRevocation) -> bool,
+on_drop: &dyn Fn(&KeyRevocation, &CtxId, DropSite),
+```
+
+with no `Sync` bound. `&dyn Fn(..)` is `Send` only if the `dyn Fn` is `Sync`; both are held across
+awaits, so the future is `!Send`, and that propagates through the public
+`find_revocations` / `find_registry_attested_revocations` → `verified::verify_retrieved` →
+`cross_registry::resolve` → our `retrieve` (`context.rs:913`). `acdp-client` 0.13.1's
+`revocation.rs` contains **zero** `dyn Fn`; the refactor introduced them.
+
+**Proven by construction rather than by reading:** `+ Sync` added to those two parameters in a local
+copy of 0.13.2, wired in via `[patch.crates-io]`, makes `acdp-registry-core` compile clean —
+including an explicit `fn is_send<T: Send>(_: T)` assertion on `retrieve`'s future.
+
+**Decision: do not adopt 0.13.2. Stay on 0.13.1. Filed upstream as acdp-rs#279** with the diagnosis,
+the verified one-line fix, and a suggested regression guard.
+
+**Why there is no downstream fix.** The `!Send` is baked into upstream's public future types. The
+three options and why each is wrong here:
+
+- *Restructure `retrieve` to run resolution off-task* (dedicated single-thread runtime + channel) —
+  a real architecture change to accommodate a bug that a one-line upstream patch fixes.
+- *Carry a `[patch.crates-io]` fork* — forks a signature-verification dependency for a routine
+  version bump. Kept in reserve if 0.13.2 ever becomes necessary before a fix lands; it is not
+  necessary, because —
+- *Nothing in 0.13.2 is needed here.* Its headline change types the `unsupported_media_type` wire
+  code as `AcdpError::UnsupportedMediaType`. This repo already emits that code as a string
+  (`crates/acdp-registry-core/src/extract.rs:143`, from #247) and never matches the typed variant,
+  so holding costs no behaviour. The spec-pin half of 0.13.2's changelog is tracked separately in
+  #272 and does not depend on the crate bump.
+
+**No diagnostic guard was added, deliberately.** The obvious one — a `Send` assertion per handler —
+means hand-listing eight signatures that drift as handlers change and that silently fail to cover a
+ninth. A hand-maintained table cannot catch an omission. The reproduction recipe is recorded in
+`docs/ENGINEERING-LOG.md` instead, which is drift-free and gets the next reader to the cause in
+minutes. The guard that would actually work belongs upstream, in `acdp-client`'s own suite, and is
+proposed in acdp-rs#279 — the breakage is invisible to `acdp-client`'s build and surfaces only in a
+downstream axum consumer.
+
+**Status:** #285 should be closed unmerged; the bump bot will re-propose once upstream ships the fix.
