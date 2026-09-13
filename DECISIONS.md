@@ -2418,3 +2418,141 @@ The deferral above is closed by the evidence it named, not by a later opinion. P
 `self-test the image-tag guard` and `assert image tags` both green, `build + push` skipped as a
 pull request requires. Recorded here because the next reader should not have to re-derive which
 run answered it.
+
+## 18. U-502 — the mutation oracle for #216 (lane-2, 2026-09-13)
+
+Seven `UNCONFIRMED` entries from `plans/u-502-mutation-oracle.md`, ranked by blast radius.
+
+**Tiering.** No genuine one-way door: a config file, a new scheduled workflow, doc comments,
+additive tests, and an issue comment. No schema change, no migration, no public HTTP contract
+change, nothing irreversible. So **all seven are Opus-tier and none needs the human.** One
+(#3) is recorded as the highest-consequence entry anyway, because its *absence* invalidated a
+published number.
+
+**Method deviation, declared:** `/reconcile` asks for a fresh subagent per entry; this session
+does not spawn agents, so the analyses ran in-context. Every entry below is settled against
+evidence produced this run — a `file:line`, a measurement, or a named mutation — never reasoning
+alone.
+
+### 1. Config at `.cargo/mutants.toml`, not root — CONFIRMED (Opus)
+
+Verified by mechanism rather than preference: `cargo mutants --help` documents
+`.cargo/mutants.toml` as the default read path, and a bare `cargo mutants --list` in this repo
+returns exactly the 74-mutant scope with no `--config` argument. Since `test_workspace` and
+`copy_vcs` are both load-bearing — omit either and the verdicts are noise — a config that cannot
+be forgotten is a correctness property. Rejected: a root file plus a required flag, which makes
+"ran it without the flag" a one-typo route to a wrong answer that looks right.
+
+### 2. Ratchet scope is two files; `handlers/context.rs` excluded — CONFIRMED (Opus)
+
+Leader ruling, and the measurements confirm it rather than merely permitting it: `context.rs` is
+**134** mutants here against the **132** recorded in entry 17 one day earlier, and the workspace
+is **1398** against **1383**. A budget keyed to a file another unit is rewriting would go red for
+reasons unrelated to the property it guards, and a red check nobody can explain gets disabled.
+The other 134 are tracked separately rather than lost.
+
+### 3. `copy_vcs = true` — CONFIRMED (Opus), and this is the entry that earned its place
+
+Not a preference; its absence produced a **false baseline that was published and retracted**.
+Without it, `conformance_gate.rs`'s `no_tracked_file_contains_a_conflict_marker` panics on
+`git ls-files` in the `$TMPDIR` build copy, `cargo test` stops at the first failing binary, and
+**41 of 48 "caught" verdicts were scored by that panic** rather than by any mutation. Confirmed
+by reading which test failed in all 74 logs, then by re-running: survivors went 0 → 2 once the
+harness was honest. Cost here is a 4 KB worktree pointer.
+
+Rejected: making the hygiene test skip outside a git repo — it would add another self-skipping
+test, which is the exact hazard this unit flagged elsewhere; and excluding `conformance_gate`
+from the test command, which discards real coverage to hide a harness fault.
+
+### 4. The survivor budget — **CHANGED** (Opus): 2 became 1, because the survivor was killed
+
+Recorded as changed rather than confirmed, because the decision itself moved. The entry assumed
+budget **2** with `log.rs:117:19` *budgeted* on the grounds that its killing test lay outside the
+claim. The claim was granted, so it is **killed, not budgeted**: two tests in
+`http_integration.rs`, one per direction, landed in the same commit as the ratchet. Budget is
+**1**, and that 1 is entry 5's equivalent mutant.
+
+Two tests rather than one for a method reason worth keeping: inverting `if stored != tenant`
+breaks **both** directions, so a single test asserting both would stop at whichever assertion ran
+first and never evaluate the other.
+
+**And the finding is stated accurately, which matters more than its severity.** The code is
+CORRECT — `!=` is the right operator and no cross-tenant disclosure ships. The oracle found an
+*unguarded correct property*: nothing executed the branch, so nothing would have noticed if it
+stopped being correct. "Mutation testing found a cross-tenant disclosure" would be false.
+
+### 5. `root_for`'s cache mutant is accepted as equivalent — CONFIRMED (Opus)
+
+`handlers/log.rs:131:18`, `== -> !=`, guards **only** `log.cache_root(...)`. `root_for` returns
+the same `root` on both branches and append-only makes any `(size → root)` pair immutable, so a
+cached historical root is still correct and an uncached current root is merely recomputed. Only
+*which* sizes get cached changes. No assertion over a response can observe it; killing it needs
+instrumentation counting merkle computations — observable work rather than a result — which is a
+performance harness dressed as a correctness one. Accepted **with that reason recorded in the
+repo**, so a future reader does not see an accepted survivor and assume nobody looked.
+
+### 6. AC8's 50% concentration threshold — CONFIRMED (Opus)
+
+Measured on both real runs rather than chosen: the broken run's sole killer accounts for
+**41 of 48 = 85%**, the corrected run's largest for **8 of 46 = 17%**. A 50% line sits in an
+order-of-magnitude gap, so it is not tuned to the data.
+
+Rejected as insufficient: relying on a green unmutated baseline. `cargo-mutants` runs its baseline
+**package-scoped even under `test_workspace`** (`baseline.log` says
+`--package=acdp-registry-core`; the mutant logs say `--workspace`), so it never builds the binary
+that was failing — a green baseline is compatible with every verdict being noise. That is a
+property of the tool, not of this repo, and it is stated in the workflow comment so the check is
+not later deleted as redundant.
+
+### 7. The three-command CI-equivalent wrapper — CONFIRMED as declined (Opus), deferral noted
+
+`cargo-mutants` runs one test command per mutant where CI runs three. Adding the playground suite
+would take the marginal cost from ~6.2s to ~22s per mutant (entry 17) to recover **one** test:
+`playground_compiled_in_but_runtime_disabled_keeps_admin_route`. Declined deliberately, with the
+single unreachable test named rather than a vague class waved at. **Deferred, not rejected in
+principle** — it becomes the right trade if the scope ever grows to include feature-gated code.
+
+### 8. Correcting this unit's own unpublished log entry in place — CONFIRMED (Opus), **and the licence has now expired**
+
+The `docs/ENGINEERING-LOG.md` entry carrying the retracted 48/0 number was rewritten in place
+rather than corrected underneath. Confirmed: it existed only on `lanes/lane-2`, had never been in
+`main`, and no other session had read it — a draft fixed before publication, not history
+rewritten. The append-only rule protects other lanes' content and published entries; it is not a
+reason to publish a number already retracted and then publish its correction beneath.
+
+**The condition that justified it no longer holds.** That entry is now committed and pushed, so
+the next correction to it must be an append, exactly as the file's own precedent does
+("corrected here rather than in place"). Recorded explicitly because this is precisely the kind of
+narrow ruling that gets over-extended: "lane-2 edited ENGINEERING-LOG in place once" is not a
+precedent, and the three-part condition — own entry, never in `main`, unread by anyone else — is
+the whole of it.
+
+**Summary: 7 confirmed, 1 changed, 0 deferred, 0 needing the human** — eight entries because the
+budget decision is recorded separately from the equivalent-mutant reasoning it now rests on. All
+settled by Opus against evidence produced this run. No code follow-up is outstanding before
+shipping.
+
+### 9. `mutants.yml` derives the spec pin rather than duplicating it — CONFIRMED (Opus)
+
+Appended to entry 18 after the reconcile pass, because the fact that forced it arrived afterwards:
+bot PR #272 bumps the spec pin at `ci.yml:411` (`d1f06d0d` → `108ff76`), and `bump-spec.yml:24`
+passes the bumper **one** filename — `ci.yml`, singular. A hardcoded copy in `mutants.yml` would
+therefore never be bumped, and the per-PR conformance job and the scheduled mutation job would pin
+different spec versions permanently, with nothing reporting the divergence.
+
+So the ref is now derived: a `pin` step reads the 40-hex `ref:` out of `ci.yml` and passes it via
+`steps.pin.outputs.ref`. The property the pin exists for is unchanged — a spec-repo push still
+cannot move this repo's result without a commit here, just in one place instead of two.
+
+**Falsified against five fixtures, and it caught a real defect in itself.** The first version
+counted `grep -cE 'checkout-spec@'`, which matches **two** lines in `ci.yml` — the real `uses:` and
+a comment at `:407` discussing it — so it failed on the actual file and would have reddened the
+scheduled job on its first run. Anchoring the pattern on `uses:` fixed it. Fixtures: the real
+`ci.yml` → `rc=0` yielding exactly `d1f06d0d…`; two 40-hex refs → `rc=1`; zero refs → `rc=1`; a ref
+placed before the `checkout-spec` usage → `rc=1`; `checkout-spec@` present only in a comment →
+`rc=1`.
+
+Rejected: a second bumper call in `bump-spec.yml` (more moving parts, and `ci.yml:404-410` records
+that the bumper refuses to bump a file carrying two pin anchors at all — a file it silently declines
+is worse than one it was never pointed at); and duplicate-and-document, whose only honest mitigation
+is a check that fails on disagreement, which is more work than deriving.

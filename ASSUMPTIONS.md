@@ -2654,6 +2654,95 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   spending a separate board message on something already written where the leader reads it.
   See `DECISIONS.md`, U-503 decision 1.
 
+## U-502 — the mutation oracle for #216 (lane-2, 2026-09-13)
+
+Plan: `plans/u-502-mutation-oracle.md`. Seven entries. Base `origin/main` = `ec9233d`,
+merged in (never rebased).
+
+### 1. The config lives at `.cargo/mutants.toml`, not `mutants.toml` at the repo root
+**Status: CONFIRMED (2026-09-13)**
+**Assumed.** That a config the tool reads *automatically* is safer than one behind a flag.
+**Chose.** `.cargo/mutants.toml`. `cargo-mutants` reads it with no argument; a root file needs
+`--config` on every invocation. `test_workspace` and `copy_vcs` are both load-bearing — omit
+either and the verdicts are noise — so a config that cannot be forgotten is a correctness
+property, not a preference.
+**Alternatives.** Root `mutants.toml` + a documented flag (rejected: "ran it without the flag"
+becomes a one-typo route to a wrong answer that looks right).
+**Blast radius.** Low; a file move.
+
+### 2. The ratchet scope is two files, and `handlers/context.rs` is excluded
+**Status: CONFIRMED (2026-09-13)**
+**Assumed.** That a budget keyed to a file another unit is actively editing is worse than no
+budget, because it goes red for reasons unrelated to the property it guards, and a red check
+nobody can explain gets disabled.
+**Chose.** `receipt.rs` (9) + `handlers/log.rs` (65) = 74, measured at `5c401db`. Excludes
+`handlers/context.rs` (134 here; `DECISIONS.md` #17 measured 132 one day earlier — the drift is
+the argument). Leader ruling, recorded rather than re-decided.
+**Alternatives.** Entry 17's 206-mutant set including `context.rs` (rejected above); the whole
+workspace, 1398 mutants ≈ 2.4h (rejected: #216 names per-PR blocking as a non-goal).
+**Blast radius.** Low, and reversible by editing two globs.
+
+### 3. `copy_vcs = true`, because without it every verdict is suspect
+**Status: CONFIRMED (2026-09-13)**
+**Assumed.** That copying `.git` has no cost worth weighing against verdict validity.
+**Chose.** `copy_vcs = true`. Without it `conformance_gate.rs`'s
+`no_tracked_file_contains_a_conflict_marker` panics on `git ls-files` in the `$TMPDIR` copy;
+`cargo test` stops at the first failing binary; and 41 of 48 "caught" verdicts were scored by
+that panic. Here `.git` is a 4 KB worktree pointer, so the copy is free.
+**Alternatives.** Making the hygiene test skip outside a repo (rejected: it adds another
+self-skipping test, which is the hazard this same unit flagged as Rule 134); excluding
+`conformance_gate` from the test command (rejected: discards real coverage).
+**Blast radius.** Low, but the *absence* of it was high — it invalidated a published number.
+
+### 4. The survivor budget is 2, and one of the two is budgeted rather than accepted
+**Status: CHANGED (2026-09-13)** — budget is 1, not 2: the claim on `http_integration.rs` was
+granted and survivor 1 was KILLED rather than budgeted. See `DECISIONS.md` #18 entry 4.
+**Assumed.** That recording a real gap as a budgeted survivor with a filed follow-up is more
+honest than either suppressing it or blocking the unit on a file this lane cannot edit.
+**Chose.** Budget 2. `log.rs:117:19` (`!=`→`==` in `requester_can_retrieve`) is a REAL unasserted
+security branch — the killing test belongs in `http_integration.rs`, outside the claim, and is
+claim-requested. `log.rs:131:18` (`==`→`!=` in `root_for`) is an equivalent mutant: it guards only
+`log.cache_root(...)` and no response changes.
+**Alternatives.** Budget 0 by writing the test anyway (rejected: outside the path grant);
+classifying #1 as "accepted" (rejected: it is a live disclosure branch, not an acceptable one).
+**Blast radius.** Low. Ratchets to 1 when the test lands.
+
+### 5. The AC8 concentration threshold is 50% of caught mutants
+**Status: CONFIRMED (2026-09-13)**
+**Assumed.** That a harness-wide failure concentrates on one sole-killer test and a genuine suite
+does not.
+**Chose.** Fail when one test is the sole failing test for more than half the caught mutants.
+Measured on both real runs: broken 41/48 = 85%, healthy 8/46 = 17%. The threshold sits in an
+order-of-magnitude gap, so it is not tuned to the data.
+**Alternatives.** A workspace-scoped unmutated baseline (rejected as insufficient: `cargo-mutants`
+runs its baseline PACKAGE-scoped, and the failure exists only in the build copy, so a green
+baseline in either tree is compatible with every verdict being noise).
+**Blast radius.** Low; a scheduled job's threshold.
+
+### 6. The three-command CI-equivalent wrapper is declined, not overlooked
+**Status: CONFIRMED (2026-09-13)**
+**Assumed.** That tripling per-mutant cost (`DECISIONS.md` #17: ~6.2s → ~22s) to recover one test
+is the wrong trade.
+**Chose.** Run the default-feature workspace command plus `ACDP_SPEC_DIR`, and name the single
+unreachable test: `playground_compiled_in_but_runtime_disabled_keeps_admin_route`.
+**Alternatives.** A `--test-tool` wrapper running CI's three commands (deferred, not rejected in
+principle — it becomes worth it if the scope grows to feature-gated code).
+**Blast radius.** Low, and stated where the number is rather than in a footnote.
+
+### 7. This unit's own unpublished engineering-log entry was corrected in place
+**Status: CONFIRMED (2026-09-13)** — and note the licence has EXPIRED: the entry is now pushed,
+so any further correction to it must be an append. See `DECISIONS.md` #18 entry 8.
+**Assumed.** That the append-only rule protects *other* lanes' content and *published* entries,
+and is not a reason to publish a retracted number and then publish its correction underneath.
+**Chose.** Rewrote the U-502 entry in place. It existed only on `lanes/lane-2`, was never in
+`main`, and no other session had read it — a draft fixed before publication, not history
+rewritten. The retraction trail is in git (`fb5983b` → `52c0111` → the merge commit) and in the
+entry, which now records the harness bug as its main finding.
+**Alternatives.** Append a correction beneath the wrong entry (rejected for an unpublished draft;
+it is the right choice for anything already in `main`, and the file's own precedent — "corrected
+here rather than in place" — is about exactly that case).
+**Blast radius.** Low, but it is a judgement about a shared-file rule, so it is recorded rather
+than assumed.
 ## U-509 — #266: making "the documented quickstart boots" a CI property (2026-09-13, lane-1)
 
 - **Correction to my own issue #266, stated before building on it.** #266 said `docker.yml`
@@ -2737,3 +2826,25 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   check name is harder to read, though they do share a job here since both are seconds long.
 - **Blast radius if wrong:** one file moves. No behaviour depends on which file the steps live in.
 - **Status:** UNCONFIRMED — cheap to reverse; recorded so the choice is visible rather than assumed.
+
+### 9. `mutants.yml` derives the spec pin from `ci.yml` instead of restating it
+**Status: CONFIRMED (2026-09-13)** — decided and settled in the same pass, because the evidence
+that forced it was a bot PR already in flight rather than a judgement call.
+**Assumed.** That a second hardcoded copy of the spec pin would silently diverge forever.
+**Chose.** A `pin` step that greps the 40-hex `ref:` out of `.github/workflows/ci.yml` and feeds
+it to `checkout-spec` via `steps.pin.outputs.ref`.
+**Why it is not DRY tidiness.** `bump-spec.yml:24` passes the bumper exactly ONE filename
+(`file: .github/workflows/ci.yml`, singular), so a copy here would never be bumped: `ci.yml` would
+move to the new spec and the scheduled mutation job would stay behind, with the per-PR conformance
+job and this job measuring different spec versions and nothing reporting it. PR #272 (the bot
+adopting `108ff76`) is exactly that, in flight. A comment saying "keep these in sync" cannot fix
+it — the actor is a bot whose input is one filename. A machine-read signal needs a machine-read fix.
+**The pinned property is preserved.** `ci.yml:400-402` wants "a spec-repo push cannot change this
+repo's CI result without a commit here"; a commit here is still required, in one place instead of two.
+**Alternatives.** A second bumper call in `bump-spec.yml` (unclaimed; rejected as more moving parts,
+and `ci.yml:404-410` records that the bumper refuses to act on a file with two pin anchors, so a
+file it silently declines to bump is worse than one never pointed at). Duplicate-and-document
+(rejected: the mitigation would have to be a check that FAILS on disagreement, at which point
+deriving is less work).
+**Blast radius.** Low, and the extraction fails loudly: it asserts exactly one 40-hex `ref:`, exactly
+one `checkout-spec@` `uses:` line, and that the ref follows it.
