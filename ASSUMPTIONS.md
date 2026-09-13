@@ -1544,7 +1544,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   on `main` today (media type stamped by the outermost `if_not_present` layer, no envelope).
   The cost is that a client parsing error envelopes uniformly still gets no `error.code` on a
   timeout. Reversible in one commit once a §5 code exists.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (U-507, 2026-09-13) — the constraint is unchanged: `AcdpError` still has no timeout variant and `acdp_wire_code` no timeout arm, so 413-only remains correct.
 
 ## H-A / P1 — the 408 `x-request-id` is correct by construction but not pinned by a test
 
@@ -2426,7 +2426,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   reddens **only** the unit guard, because caps is the field the predicate actually reads. That
   directional result is what shows the end-to-end test measures caps rather than config, and it is
   why the config half needs its own assertion to be protected at all.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (U-507, 2026-09-13) — still accurate: the helper exists, no enforcing `debug_assert` was added, and the divergent site remains.
 
 ## H-A2-w — `total_estimate` returns for tenant-scoped callers
 
@@ -2810,8 +2810,8 @@ than assumed.
   every PR waiting forever.
 - **Blast radius if wrong:** the gate advises instead of blocking until one API call is made. Loud,
   not silent: the limitation is in the workflow header, the log entry, the PR body and `done`.
-- **Status:** UNCONFIRMED — the leader decides whether to make `lint` required, or to route it to
-  the human as a repo-settings change.
+- **Status:** PARTIAL (U-507, 2026-09-13) — the *technique* is now proven by U-516: a checkout-only gate
+  runs inside `ci.yml`'s `fmt` job (published `rustfmt`, a required context) and blocks merges with no settings change. `lint` itself is still a separate workflow publishing a non-required `lint` context, so the original ask is undischarged.
 
 ## U-508 — a separate lint.yml rather than jobs inside ci.yml
 
@@ -2931,8 +2931,8 @@ one `checkout-spec@` `uses:` line, and that the ref follows it.
   protection, and a required context that stops reporting leaves every PR waiting forever).
 - **Blast radius if wrong:** a reader sees "clippy" fail on a build error. Mitigated by step names
   (`build (postgres)` etc.) making the failing step obvious, and by the comment in the job.
-- **Status:** UNCONFIRMED — cheap to move if the leader prefers the honest name and accepts
-  non-blocking.
+- **Status:** CONFIRMED (U-507, 2026-09-13) — corroborated by independent adoption: U-516 placed its
+  own gate inside an already-required job for the same reason, so putting the build steps in `clippy` was the right shape, not merely the available one.
 
 ## U-510 — reconcile outcome for the two entries above (append-only, so their original wording stands)
 
@@ -2992,8 +2992,8 @@ still open, and this is the outcome:
   (rejected: loses the lint coverage W3-U10 added for #200, trading one gap for another).
 - **Blast radius if wrong:** ~8s per PR persists until the settings decision. Trivially reversible —
   moving the steps to their own job is one commit, and becomes correct the moment the contexts change.
-- **Status:** UNCONFIRMED — the leader or the human may prefer to make the settings change and take
-  the parallel form.
+- **Status:** UNCONFIRMED (re-examined U-507, 2026-09-13) — **U-516 does NOT discharge this one.** Its
+  move works because a checkout-only check needs no parallelism; these builds do, and parallelism needs a separate job, hence a new check name, hence a `required_status_checks.contexts` change. **Settled by:** that settings change. **Owner:** the human.
 
 ## U-504 — #216: the mutation ratchet extended to `handlers/context.rs` (2026-09-13, lane-2)
 
@@ -3296,3 +3296,60 @@ Append-only still governs every non-status line, so no `Assumed:` / `Chose:` / `
     history — a cross-repo *read*, which is permitted, but a unit's worth of work scoped to
     `DECISIONS.md`. **Who owns it:** not U-507, whose grant is this file. Left as an upper bound
     with the reason attached rather than silently promoted to exact.
+
+### Batch 4 — two verified against the tree, and the three AC6 entries U-516 touches
+
+**`## H-A / P2 — 408 is not given an RFC-ACDP-0007 §5 envelope` → CONFIRMED.** The constraint the
+decision rested on is unchanged, checked rather than assumed: `AcdpError` has **0** variants
+mentioning `Timeout`, and `acdp_wire_code` (`crates/acdp-registry-types/src/error.rs:138`) still has
+no timeout arm. The one `timeout` string in that file (`:528`, `"did:web timeout"`) is a did:web
+resolution message, not a §5 wire code — a grep for `timeout` alone would have read as a hit. So
+scoping P2 to 413 was right and remains right; emitting `internal_error` for a client-side timeout
+would still attribute a client condition to a server fault. **Residual, unchanged:** a client parsing
+envelopes uniformly still gets no `error.code` on a 408. **Settled by:** registering a
+`request_timeout` code in the shared §5 registry. **Owner:** whoever holds `acdp-registry-types` and
+the spec — not this unit.
+
+**`## The caps/config invariant is made unrepresentable for new callers` → CONFIRMED.** Still
+accurate in every part that matters: `with_anonymous_public_reads` exists
+(`crates/acdp-registry-server/tests/common/mod.rs:390`), the guard
+`the_helper_sets_both_knobs_not_just_one` is present in `caps_visibility.rs`, the divergent site
+`config_shipped_disclosure_default` is still there (`http_integration.rs:1579`, used at `:1676`), and
+**no enforcing `debug_assert` was added** — so the constructive-not-enforcing shape the entry
+describes is exactly what ships. **One number I deliberately did not contradict:** the entry says 75
+existing construction sites; a pattern for direct field assignment finds 39 lines today. The entry
+does not state its counting method, so 39 and 75 may be answers to different questions. Recorded as
+unverified rather than as a discrepancy — refuting a number requires matching how it was counted.
+
+#### AC6 — what U-516 discharged, and what it did not
+
+U-516's actual shape, measured rather than taken from its description:
+
+    ci.yml      job=fmt    published='rustfmt'  required=TRUE   step if=${{ !cancelled() }}
+    docker.yml  job=build  published='build'    required=FALSE  step if=${{ !cancelled() }}
+
+The gate runs in **two** places, and the `ci.yml` one sits in a job whose published name is already a
+required context — so it blocks merges **with no branch-protection change**. Both sites carry
+`!cancelled()`, which closes the skip-chain defect where an upstream failure silently skipped the gate.
+
+- **`## U-508 — "PR-blocking" means runs-and-can-fail, not listed-in-branch-protection` → PARTIAL.**
+  The *technique* is now proven in production, which is more than the entry could claim when written.
+  What is **not** discharged is the entry's own ask: `lint.yml` is still a separate workflow whose only
+  job publishes the non-required context `lint`, and `required_status_checks.contexts` is still
+  `["rustfmt","clippy","tests","conformance (spec fixtures)"]`. So `lint` still cannot block a merge —
+  but there is now a demonstrated second route (move its steps into an already-required job) that needs
+  no settings change at all. PARTIAL rather than CONFIRMED because the route is proven and untaken.
+
+- **`## U-510 — build steps inside the required clippy job` → CONFIRMED.** Corroborated by
+  independent adoption: U-516 reached for the same technique for the same reason. That turns the
+  original choice from "the available option" into "the shape this repo converges on", which is
+  stronger evidence than the entry could produce for itself.
+
+- **`## U-513 — the builds stay in the required clippy job rather than moving to a parallel job` →
+  stays UNCONFIRMED, deliberately.** This is the AC6 case that goes the *other* way, and it matters
+  that the reasoning is written rather than the status copied: U-516's move works precisely because a
+  checkout-only check has no parallelism to lose. These build steps do. Parallelism requires a
+  separate job, a separate job publishes a new check name, and a new check name is not in an
+  enumerated `contexts` list — so the blocker is untouched by U-516. **Settled by:** the
+  branch-protection change. **Owner:** the human. Flipping this one on U-516's evidence would have
+  been the exact error AC6 exists to prevent.
