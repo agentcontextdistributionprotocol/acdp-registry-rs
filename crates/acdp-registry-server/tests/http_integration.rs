@@ -10514,3 +10514,93 @@ async fn search_refill_scans_exactly_the_page_cap_when_the_filter_empties_every_
          after one page; 0 means it ran past the cap to exhaustion: {rest}"
     );
 }
+
+/// Publish with a raw `Idempotency-Key` byte string, bypassing `&str` header
+/// construction so a TAB can be sent.
+async fn publish_with_raw_idem_key(
+    app: &axum::Router,
+    req: &acdp::types::publish::PublishRequest,
+    key: &[u8],
+) -> (StatusCode, Value) {
+    let body = serde_json::to_vec(req).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .header(
+                    "Idempotency-Key",
+                    axum::http::HeaderValue::from_bytes(key).expect("header value"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    (status, v)
+}
+
+/// An out-of-range or non-printable `Idempotency-Key` must be IGNORED, and
+/// "ignored" has to be asserted as ignored.
+///
+/// Kills both survivors on `context.rs:433`. `idempotency_key_length_bounds`
+/// (:2123) already sends a 257-char key, but only asserts the publish returns
+/// `200` — and an over-long key that was wrongly HONORED also returns 200. The
+/// status code cannot distinguish "treated as absent" from "treated as a key";
+/// only the `ctx_id` can, because a honored key replays the first one.
+///
+/// The tab case is the one worth explaining. `HeaderValue::to_str()` succeeds
+/// only for visible ASCII **and tab**, so almost every non-printable byte is
+/// rejected one layer earlier by `.to_str().ok()` and never reaches this
+/// filter. TAB is the single value that gets through and is still an
+/// `is_ascii_control()`, which makes it the only witness that can tell
+/// `is_ascii() && !is_ascii_control()` from `is_ascii() || !is_ascii_control()`.
+#[tokio::test]
+async fn an_out_of_range_or_non_printable_idempotency_key_is_ignored_not_honored() {
+    let h = harness(true).await;
+    let app = &h.router;
+    let req = producer(62)
+        .publish_request()
+        .title("u504-idem")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+
+    // Control: a VALID key really does replay, so the inequalities below mean
+    // "the key was ignored" and not "this endpoint never replays anything".
+    let valid = b"u504-valid-key";
+    let (s1, a1) = publish_with_raw_idem_key(app, &req, valid).await;
+    let (s2, a2) = publish_with_raw_idem_key(app, &req, valid).await;
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(
+        a1["ctx_id"], a2["ctx_id"],
+        "a valid key must replay — without this the assertions below prove \
+         nothing: {a1} vs {a2}"
+    );
+
+    // 257 chars: out of range, so treated as absent -> two DISTINCT publishes.
+    let long = vec![b'x'; 257];
+    let (s1, b1) = publish_with_raw_idem_key(app, &req, &long).await;
+    let (s2, b2) = publish_with_raw_idem_key(app, &req, &long).await;
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_ne!(
+        b1["ctx_id"], b2["ctx_id"],
+        "a 257-char key is out of range and must be IGNORED; replaying the \
+         same ctx_id means it was honored: {b1} vs {b2}"
+    );
+
+    // A tab is an ASCII control character, so the key is non-printable and
+    // must likewise be ignored.
+    let tabbed = b"u504\tkey";
+    let (s1, c1) = publish_with_raw_idem_key(app, &req, tabbed).await;
+    let (s2, c2) = publish_with_raw_idem_key(app, &req, tabbed).await;
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_ne!(
+        c1["ctx_id"], c2["ctx_id"],
+        "a key containing a control character must be IGNORED: {c1} vs {c2}"
+    );
+}
