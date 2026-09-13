@@ -2825,7 +2825,7 @@ than assumed.
   combined job — rejected, `shellcheck` and `actionlint` failing for unrelated reasons under one
   check name is harder to read, though they do share a job here since both are seconds long.
 - **Blast radius if wrong:** one file moves. No behaviour depends on which file the steps live in.
-- **Status:** UNCONFIRMED — cheap to reverse; recorded so the choice is visible rather than assumed.
+- **Status:** CONFIRMED (U-507, 2026-09-13) — the stated reason still holds exactly: the linters need no Rust toolchain and no cargo cache, so they share nothing with `ci.yml`'s jobs. The *cost* of the separate file (a non-required context) is tracked as its own entry above and is not a defect in this choice.
 
 ## U-511 — #271: an empty env override is treated as absent (2026-09-13, lane-1)
 
@@ -2910,7 +2910,7 @@ one `checkout-spec@` `uses:` line, and that the ref follows it.
   the U-508 `lint` problem again).
 - **Blast radius if wrong:** a codegen defect that only 1.88 exhibits would still pass CI. Narrow,
   and it would be caught by the stable build for any source-level cause.
-- **Status:** UNCONFIRMED — the leader may prefer the complete closure.
+- **Status:** PARTIAL (U-507, 2026-09-13) — verified unchanged: both msrv steps are still `cargo check --locked` (`ci.yml`, job `msrv`). The scope choice is defensible and the residual is real and unclosed — U-510 established that `cargo check` neither codegens nor links, so this job does **not** prove the workspace *builds* on 1.88, only that 1.88 accepts the surface. **Settled by:** converting both steps to `cargo build` if MSRV buildability is wanted. **Owner:** the leader. Not claimed as complete.
 
 ## U-510 — build steps inside the required `clippy` job rather than a new, honestly-named job
 
@@ -2971,8 +2971,8 @@ still open, and this is the outcome:
   original error with a newer number, which is precisely what the assign forbids.
 - **Blast radius if wrong:** a reader takes "sometimes the critical path" as settled when it is based
   on 5 runs. Mitigated by stating n in the table itself.
-- **Status:** UNCONFIRMED — more runs will sharpen the frequency; the categorical claim will not
-  change unless clippy's distribution moves.
+- **Status:** CONFIRMED (U-507, 2026-09-13) — **the prediction was right on both halves, measured at n=13.**
+  Eight further CI runs (read 23:08:31Z) give clippy-minus-tests margins of `-92, -104, -70, -23, +4, -7, -9, -2`s. Combined with the original five (`+12, -18, -27, +26, -4`): **clippy led 3 of 13 runs**, so the frequency sharpened from 2-of-5 (40%) to 3-of-13 (23%) exactly as this entry said it would; and the categorical claim did not change, because clippy still leads sometimes and the widest per-run margin (+26s) remains far below the spreads (clippy 76-193s, tests 146-297s). The new set's single "lead" is **+4s**, which is noise, not headroom — quoting it as a margin would repeat U-510's original error with a fresher number.
 
 ## U-513 — the builds stay in the required `clippy` job rather than moving to a parallel job
 
@@ -3464,3 +3464,37 @@ each ask precise, not to answer it. Each status line was rewritten to carry a **
   `unsupported_algorithm`, which matches only on the substring "unsupported" and is about signature
   algorithms. It is not a media-type code, and a looser grep would have reported the gap as already
   closed.
+
+### Batch 6 — the three entries this lane authored, resolved on fresh measurement
+
+These are U-508's, U-510's and U-513's own assumptions. Resolving one's own entries is where the
+temptation to confirm-by-familiarity is strongest, so each was re-measured rather than recalled.
+
+**`## U-513 — n=5 supports a categorical latency claim but no numeric one` → CONFIRMED, at n=13.**
+This entry made a falsifiable prediction — *"more runs will sharpen the frequency; the categorical
+claim will not change unless clippy's distribution moves"* — and it can now be checked instead of
+believed. Eight further CI runs, read 2026-09-13T23:08:31Z, give clippy-minus-tests margins of
+`-92, -104, -70, -23, +4, -7, -9, -2`s. With the original five (`+12, -18, -27, +26, -4`):
+
+    clippy led        3 of 13 runs        (original 2 of 5 = 40%; new 1 of 8 = 12%; combined 23%)
+    clippy range      76-193s             tests range   146-297s
+    widest margin     +26s                widest spread 151s
+
+Both halves held: the frequency sharpened (40% → 23%) and the categorical claim is unchanged, because
+clippy still sometimes leads and no margin is quotable. **The new set's one lead is `+4s`** — that is
+noise, and quoting it as headroom would reproduce U-510's original defect with a fresher number, which
+is the specific trap U-513 existed to fix.
+
+**`## U-508 — a separate lint.yml rather than jobs inside ci.yml` → CONFIRMED.** The stated reason is
+unchanged and still correct: the linters need no Rust toolchain and no cargo cache, so they share
+nothing with `ci.yml`'s jobs — the choice was about *sharing*, not about blocking. U-516 does not
+refute it; it only shows a required job is available if blocking is wanted. The cost of this choice (a
+non-required `lint` context) is tracked as its own entry and is not a defect in this decision.
+
+**`## U-510 — the msrv job's cargo check steps stay check rather than becoming builds` → PARTIAL, not
+CONFIRMED.** Verified unchanged: both steps are still `cargo check --locked` in `ci.yml`'s `msrv` job.
+The scope argument is defensible — MSRV asks whether 1.88 *accepts* the surface. But the residual is
+real and this unit declines to paper over it: **U-510 itself established that `cargo check` neither
+codegens nor links**, so this job does not prove the workspace *builds* on 1.88. Confirming it outright
+would use my own unit's finding to justify ignoring my own unit's gap. **Settled by:** converting both
+steps to `cargo build`. **Owner:** the leader.
