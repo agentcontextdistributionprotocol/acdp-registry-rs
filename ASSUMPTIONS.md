@@ -2660,7 +2660,7 @@ Plan: `plans/u-502-mutation-oracle.md`. Seven entries. Base `origin/main` = `ec9
 merged in (never rebased).
 
 ### 1. The config lives at `.cargo/mutants.toml`, not `mutants.toml` at the repo root
-**Status: UNCONFIRMED**
+**Status: CONFIRMED (2026-09-13)**
 **Assumed.** That a config the tool reads *automatically* is safer than one behind a flag.
 **Chose.** `.cargo/mutants.toml`. `cargo-mutants` reads it with no argument; a root file needs
 `--config` on every invocation. `test_workspace` and `copy_vcs` are both load-bearing — omit
@@ -2671,7 +2671,7 @@ becomes a one-typo route to a wrong answer that looks right).
 **Blast radius.** Low; a file move.
 
 ### 2. The ratchet scope is two files, and `handlers/context.rs` is excluded
-**Status: UNCONFIRMED**
+**Status: CONFIRMED (2026-09-13)**
 **Assumed.** That a budget keyed to a file another unit is actively editing is worse than no
 budget, because it goes red for reasons unrelated to the property it guards, and a red check
 nobody can explain gets disabled.
@@ -2683,7 +2683,7 @@ workspace, 1398 mutants ≈ 2.4h (rejected: #216 names per-PR blocking as a non-
 **Blast radius.** Low, and reversible by editing two globs.
 
 ### 3. `copy_vcs = true`, because without it every verdict is suspect
-**Status: UNCONFIRMED**
+**Status: CONFIRMED (2026-09-13)**
 **Assumed.** That copying `.git` has no cost worth weighing against verdict validity.
 **Chose.** `copy_vcs = true`. Without it `conformance_gate.rs`'s
 `no_tracked_file_contains_a_conflict_marker` panics on `git ls-files` in the `$TMPDIR` copy;
@@ -2695,7 +2695,8 @@ self-skipping test, which is the hazard this same unit flagged as Rule 134); exc
 **Blast radius.** Low, but the *absence* of it was high — it invalidated a published number.
 
 ### 4. The survivor budget is 2, and one of the two is budgeted rather than accepted
-**Status: UNCONFIRMED**
+**Status: CHANGED (2026-09-13)** — budget is 1, not 2: the claim on `http_integration.rs` was
+granted and survivor 1 was KILLED rather than budgeted. See `DECISIONS.md` #18 entry 4.
 **Assumed.** That recording a real gap as a budgeted survivor with a filed follow-up is more
 honest than either suppressing it or blocking the unit on a file this lane cannot edit.
 **Chose.** Budget 2. `log.rs:117:19` (`!=`→`==` in `requester_can_retrieve`) is a REAL unasserted
@@ -2707,7 +2708,7 @@ classifying #1 as "accepted" (rejected: it is a live disclosure branch, not an a
 **Blast radius.** Low. Ratchets to 1 when the test lands.
 
 ### 5. The AC8 concentration threshold is 50% of caught mutants
-**Status: UNCONFIRMED**
+**Status: CONFIRMED (2026-09-13)**
 **Assumed.** That a harness-wide failure concentrates on one sole-killer test and a genuine suite
 does not.
 **Chose.** Fail when one test is the sole failing test for more than half the caught mutants.
@@ -2719,7 +2720,7 @@ baseline in either tree is compatible with every verdict being noise).
 **Blast radius.** Low; a scheduled job's threshold.
 
 ### 6. The three-command CI-equivalent wrapper is declined, not overlooked
-**Status: UNCONFIRMED**
+**Status: CONFIRMED (2026-09-13)**
 **Assumed.** That tripling per-mutant cost (`DECISIONS.md` #17: ~6.2s → ~22s) to recover one test
 is the wrong trade.
 **Chose.** Run the default-feature workspace command plus `ACDP_SPEC_DIR`, and name the single
@@ -2729,7 +2730,8 @@ principle — it becomes worth it if the scope grows to feature-gated code).
 **Blast radius.** Low, and stated where the number is rather than in a footnote.
 
 ### 7. This unit's own unpublished engineering-log entry was corrected in place
-**Status: UNCONFIRMED**
+**Status: CONFIRMED (2026-09-13)** — and note the licence has EXPIRED: the entry is now pushed,
+so any further correction to it must be an append. See `DECISIONS.md` #18 entry 8.
 **Assumed.** That the append-only rule protects *other* lanes' content and *published* entries,
 and is not a reason to publish a retracted number and then publish its correction underneath.
 **Chose.** Rewrote the U-502 entry in place. It existed only on `lanes/lane-2`, was never in
