@@ -201,6 +201,55 @@ jobs:
           docker rm -f registry pg
           docker network rm acdp-smoke
 
+      # ── #266: the DOCUMENTED recipe, not a reimplementation of it ──────────
+      #
+      # The smoke test above hand-rolls `docker run` and mounts
+      # `docker/config.docker.toml` directly, so it never opens
+      # `docker/docker-compose.yml`. But `cd docker && docker compose up --build`
+      # is what README.md's "Production (Postgres + Docker)" section tells
+      # operators to run, and the compose file carries its own environment block
+      # -- including `ACDP_REGISTRY_AUTH__JWT_SECRET`.
+      #
+      # That distinction is the whole reason these steps exist. W3-U5 happened
+      # because the compose file shipped `ACDP_REGISTRY_AUTH__JWT_SECRET=changeme`;
+      # `validate_config` rejects that placeholder by name
+      # (`crates/acdp-registry-server/src/main.rs:166`), so the quickstart exited
+      # rc=1 before serving a request. The defect lived in the one file CI never
+      # read, which is why a user hit it before CI did. Fixed in `abfebf7` with
+      # nothing guarding it since.
+      #
+      # `compose.ci.yml` points the service at the image built above instead of
+      # rebuilding the release workspace a second time. It overrides ONLY the
+      # build/image keys -- the environment block, the config mount, the postgres
+      # wiring and `depends_on` are all the recipe's own, because those are what
+      # is under test.
+      - name: the documented quickstart boots
+        run: bash docker/assert-quickstart-boots.sh --check
+
+      # The shipped recipe runs `auth.enabled = false`, so the step above
+      # exercises neither `validate_config`'s auth-gated branch (main.rs:108)
+      # nor the HS256 empty-secret refusal beside it. Boot it again the way the
+      # compose file's own header documents overriding the secret.
+      #
+      # The secret is generated HERE rather than inside the script so that the
+      # literal check from #266 -- `grep -n "jwt_secret\|JWT_SECRET"
+      # .github/workflows/docker.yml` -- lands on real configuration a reader can
+      # follow, not only on the prose above it. That grep is what a future reader
+      # will re-run to ask whether this gap ever got closed.
+      - name: the documented quickstart boots with auth enabled
+        run: |
+          set -euo pipefail
+          ACDP_REGISTRY_JWT_SECRET="$(openssl rand -base64 32)" \
+            bash docker/assert-quickstart-boots.sh --check-auth-on
+
+      # The falsification, wired in rather than asserted once in a PR body --
+      # same convention as `self-test the image-tag guard` above. Both cases
+      # assert the stack REFUSES: one replays the literal W3-U5 `changeme`
+      # placeholder, the other turns auth on with no secret. A boot check that
+      # has never failed is not yet a check.
+      - name: self-test the quickstart boot guard
+        run: bash docker/assert-quickstart-boots.sh --self-test
+
       # PRs stop at the smoke test above; only pushes and tags publish.
       - name: build + push
         if: github.event_name != 'pull_request'

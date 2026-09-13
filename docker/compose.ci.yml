@@ -1,0 +1,22 @@
+# CI-only overlay for `docker/docker-compose.yml`.
+#
+# Purpose: let CI boot the DOCUMENTED recipe without paying for a second full
+# release build. The `docker` workflow already builds the image once (as
+# `acdp-registry:smoke`, loaded into the local daemon); this overlay points the
+# `registry` service at that image and removes the service's `build:` block so
+# compose uses it as-is.
+#
+# `!reset` (Compose spec, docker compose v2.24+) is required rather than simply
+# adding `image:`. With a `build:` block still present, compose BUILDS and tags
+# the result — which is exactly the second full build this overlay exists to
+# avoid. `!reset` deletes the key from the merged model instead of overriding it.
+#
+# What this overlay deliberately does NOT touch: the `environment:` block, the
+# `config.docker.toml` volume mount, `depends_on`, and the postgres service. Those
+# are the parts of the recipe under test. The W3-U5 defect (a `changeme`
+# placeholder for `ACDP_REGISTRY_AUTH__JWT_SECRET`) lived in the compose file's
+# environment block, so an overlay that replaced it would test nothing.
+services:
+  registry:
+    image: acdp-registry:smoke
+    build: !reset null

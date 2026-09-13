@@ -2653,3 +2653,46 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   visible by being argued in the PR body and carried in the lane's `done` report, not by
   spending a separate board message on something already written where the leader reads it.
   See `DECISIONS.md`, U-503 decision 1.
+
+## U-509 — #266: making "the documented quickstart boots" a CI property (2026-09-13, lane-1)
+
+- **Correction to my own issue #266, stated before building on it.** #266 said `docker.yml`
+  "never boots the stack the quickstart ships". The literal half was right — no `jwt_secret` /
+  `JWT_SECRET` appeared anywhere in the workflow — but the wording overstated it. CI *did* boot a
+  registry against the shipped `docker/config.docker.toml`. What it never did was read
+  `docker/docker-compose.yml`, because the smoke test hand-rolls `docker run`. That distinction is
+  the whole finding rather than a quibble: W3-U5's defect was a `changeme` placeholder **in the
+  compose file's environment block** (fixed in `abfebf7`), so it lived in precisely the file CI
+  never opened. Verified at `f658fd5`, not carried over from the earlier audit at `2199422`.
+- **Status:** CONFIRMED, with the issue's wording corrected here rather than quietly relied on.
+
+- **Assumption:** an overlay that pins the prebuilt image still exercises the recipe.
+- **Evidence:** `compose.ci.yml` overrides only `image:` and `build:`. `docker compose config`
+  shows the `environment:` block, the `config.docker.toml` mount, `depends_on` and the postgres
+  service all resolving from the recipe unchanged. Those are the parts under test; the W3-U5 defect
+  lived in the environment block, so an overlay that replaced it would have tested nothing.
+- **Status:** CONFIRMED by reading the resolved model, not by assuming merge semantics.
+
+- **Assumption (WRONG, caught by a negative control — recorded because the failure mode is the
+  point):** that exporting `ACDP_REGISTRY_AUTH__ENABLED=true` before `docker compose up` would
+  enable auth in the container.
+- **What is actually true:** compose forwards **only** the variables named in a service's own
+  `environment:` block. `ACDP_REGISTRY_AUTH__ENABLED` is not one of them, so it never reached the
+  container. The first draft of `--check-auth-on` therefore booted the auth-**off** stack and
+  reported success — a decorative check that could not have failed. It was caught only because
+  negative control (2) refused to go red, and the control was right. A check that passes is not
+  evidence; a control that fails to fail is.
+- **Status:** CONFIRMED by `docker compose config`, which shows the variable absent from the
+  resolved environment. Fixed with a CI-only overlay (`compose.ci-auth-on.yml`) whose effect is
+  proven by control (2) now firing.
+
+- **UNCONFIRMED — a gap in the shipped recipe, reported rather than fixed here.** The compose
+  file's header tells operators to "set a real secret before enabling auth", but the recipe
+  provides **no environment path to enable auth** — `ACDP_REGISTRY_AUTH__ENABLED` is not forwarded.
+  An operator must edit `config.docker.toml`, which runs straight into the precedence caveat the
+  same header documents for `jwt_secret`. The obvious fix — adding
+  `ACDP_REGISTRY_AUTH__ENABLED: ${VAR:-false}` to the environment block — is **rejected as a
+  security regression**: compose renders an unset variable as set-to-empty rather than absent, and
+  env beats TOML, so an operator who set `auth.enabled = true` in the file would have it silently
+  forced back to `false`. Turning someone's auth off to make a CI step convenient is not a trade
+  worth making. Left to a unit that can design the passthrough safely.
