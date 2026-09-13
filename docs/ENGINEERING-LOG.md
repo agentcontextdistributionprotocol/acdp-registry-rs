@@ -4317,3 +4317,71 @@ hold entries from several releases. Use the commands.
   `docker/RAILWAY.md`, `docs/OPERATIONS.md` and `docs/AUTHENTICATION.md` still
   carry the false gating claim and are **not** this unit's to change; they are
   reported to their owners with quotes rather than edited.
+
+### Added
+
+<!-- U-502 #216 mutation oracle (lane-2) -->
+
+- **A mutation oracle, and the number it ratchets against** (`#216`). The
+  conformance file has never been able to prove that a test it vouches for
+  *asserts* anything. Two mechanisms guard those claims and both are PRESENCE
+  oracles: the substring guards over `include_str!`
+  (`covered_direct_families_have_present_test_functions`,
+  `partial_direct_test_functions_are_present`) and the compile-checked
+  `DIRECT_FNS` table added by `#249`. A test that exists, compiles, runs and
+  asserts nothing satisfies every one of them. Breaking the code and watching
+  the test go red is the only thing that does not, and that is now wired.
+
+  **THE BASELINE, measured at `410bb74` with `cargo-mutants 27.1.0`:**
+
+  | outcome | count |
+  |---|---|
+  | mutants in scope | **74** |
+  | **caught** | **48** |
+  | **survivors (missed)** | **0** |
+  | timeout | 0 |
+  | unviable (does not compile) | 26 |
+
+  6m17s wall-clock at `-j4`. **The survivor budget is therefore 0** — the
+  strongest form the ratchet can take, and the one that makes any new survivor a
+  red scheduled job rather than a number nobody re-reads.
+
+  **Read the denominator honestly: 48, not 74.** The 26 unviable mutants are not
+  coverage. They are mutations that do not compile — every one is
+  `replace <fn> -> <T> with Ok(Default::default())` (or similar) where `T` has no
+  `Default`: the five axum handlers `log_entries`/`log_proof`/`log_checkpoint`/
+  `inclusion_proof_response`/`consistency_proof_response` account for 20 of them.
+  There is nothing there for a test to catch, so they are excluded from the claim
+  rather than counted toward it. The real statement is **48 viable mutants, 48
+  caught**.
+
+  **Why a 0 here is a real 0 and not a broken harness.** `cargo-mutants` runs its
+  unmutated baseline PACKAGE-scoped even under `test_workspace = true` (measured;
+  see `.cargo/mutants.toml`), so a pre-existing failure elsewhere in the workspace
+  would mark every mutant CAUGHT for the wrong reason and produce exactly this
+  result. Checked rather than assumed: `cargo test --locked --workspace` at the
+  same sha is **632 passed, 0 failed, 0 failed suites**. Separately, the MISSED
+  path is reachable and not structurally dead — an unscoped control run reported
+  **13 survivors** in `acdp-registry-store/src/parity.rs`.
+
+  **WHAT THIS NUMBER DOES NOT COVER, stated where the number is rather than in a
+  footnote.** The scope is two files, chosen to be ones no other unit is editing:
+  `acdp-registry-core/src/receipt.rs` (9) and `src/handlers/log.rs` (65). It is
+  **not** the workspace, which is **1398** mutants at this sha — roughly 2.4h at
+  the ~6.2s/mutant marginal cost in `DECISIONS.md` #17. It deliberately excludes
+  `src/handlers/context.rs` (**134** at this sha), which is held by another unit
+  this wave: a budget keyed to a file being rewritten underneath it goes red for
+  reasons unrelated to what it guards, and a red check nobody can explain gets
+  disabled. That the exclusion was right is visible in the drift alone — #17
+  measured `context.rs` at 132 and the workspace at 1383 one day earlier.
+
+  One further gap, named rather than generalised: `cargo-mutants` runs one test
+  command per mutant, while CI runs three. The scoped command reaches **69 of the
+  70** conformance tests; the single exception is
+  `playground_compiled_in_but_runtime_disabled_keeps_admin_route`, which needs the
+  non-default `playground` feature. A three-command wrapper would triple every
+  mutant's cost (#17: ~6.2s → ~22s) to recover one test, so it was declined
+  deliberately rather than overlooked.
+
+  **`#216` stays open.** Its item 1 is fault injection over `src/` generally; this
+  is a bounded 74-mutant ratchet. PARTIAL BY DESIGN.
