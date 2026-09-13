@@ -1,5 +1,12 @@
 
 
+## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.1.3...acdp-registry-types/v0.1.4) - 2026-09-13
+
+### Fixed
+
+- *(config)* treat an empty env override as absent, not as an override ([#271](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/271)) ([#275](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/275))
+
+
 ## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.1.2...acdp-registry-types/v0.1.3) - 2026-09-13
 
 ### Other
