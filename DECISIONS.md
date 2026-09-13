@@ -3290,3 +3290,50 @@ dropping one fixture yields 37, which passes `>= 30` and fails the equality.
 
 **Status:** applied. 30 → 38 exchanges, 11 → 19 replayable fixtures, required-but-unexercised 12 → 8.
 No wire change, so nothing in `docs/UPGRADING.md`.
+
+## U-528 — the harness could not check a signature, and the tests could not tell
+
+**The replayer now pins the fixture producer's key, and the U-527 predicate is deleted, not narrowed.**
+`config()` sets `playground.enabled = true`, which skips DID verification, so every replayed signature
+reached the store unexamined — `pub-001` publishes a signature of 64 literal `A`s and was **accepted
+with a 200** against its expected 400 `invalid_signature`.
+
+**Turning the playground off was the obvious fix and is the wrong one.** It would require a live
+`did:web` resolver — DNS and TLS — in-process for every replayed publish. `playground.pinned_keys`
+already performs **real** `acdp::crypto::verify` Ed25519 verification of a `did:web` producer with no
+resolver; it is the mechanism `sig001_*`/`rev001_*` in this file have used all along. U-528 points the
+replayer at it.
+
+**`pinned_only = false`, deliberately** — that is the blast-radius decision. Strict mode would reject
+every other agent with `key_not_authorized`, rewriting the verdict of fixtures that have nothing to do
+with signatures. And `replay_harness()` is kept separate from `harness()` (eight other callers) and
+from `shape_d_config()`, because `idem_playground_branch_honors_supports_idempotency_key_gate` depends
+on `pinned_keys` being **empty** as its precondition, and `replay_shape_d` panics if a seeded publish
+fails to return 200.
+
+**The second fix, which the harness change alone would have hidden.** The publish arm pinned no error
+code, so a publish fixture asserted only *"some 400"*. `pub-011` is the proof: with the key un-pinned
+it receives `schema_violation: content_hash digest must be 64 lowercase hex chars, got:
+<recomputes-correctly-against-this-body>` and **passes anyway**, scored as `invalid_signature`
+coverage. Fixing only the harness leaves that intact. Codes are now pinned for publishes too.
+
+**Pinning the codes exposed five wrong-reason passes, four of them mine.** `did-ssrf-001..004` — which
+U-527 lit up — return `schema_violation` (their bodies omit the required `version` member) and never
+reach DID resolution at all. And `pub-002` moved *because of this unit*: unpinned it returned
+`hash_mismatch` matching its fixture, but the pinned path verifies the signature before the hash gate,
+and its body fails both.
+
+**Recorded in `CODE_DIVERGENCES`, not skipped and not excused.** Each entry names the code this
+registry actually returns and why; the replayer asserts that code, so any of them changing in either
+direction fails the build. Skipping them would have removed the coverage; ignoring them would have
+kept the wrong-reason pass. `code_divergences_are_real_live_and_still_divergent` additionally fails if
+an entry's fixture stops replaying or if its recorded code becomes the expected one — **an unexercised
+excuse reads exactly like a live one.**
+
+**`FIXTURE_PRODUCER_PUBLIC_KEY_B64` is checked against the spec.** A rotated keypair would verify every
+signature fixture against the wrong key and **still go green**, because those fixtures expect a
+rejection — a wrong key produces green exactly where a right key does.
+`fixture_producer_key_still_matches_the_spec` closes that.
+
+**Status:** applied. 38 → 40 exchanges, 19 → 21 replayable, required-but-unexercised **8 → 6**
+(`pub-001`, `pub-011`). No wire change.

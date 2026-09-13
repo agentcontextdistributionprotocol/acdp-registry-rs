@@ -733,6 +733,69 @@ fn shape_d_config() -> RegistryConfig {
     cfg
 }
 
+/// The generic replayer's own harness: [`config()`] plus a **pinned key** for
+/// the producer DID the `pub-*` fixtures sign as.
+///
+/// This is U-528's whole point. `config()` sets `playground.enabled = true`,
+/// which skips DID verification, so every signature reached the store
+/// unexamined -- `pub-001` publishes a signature of 64 literal `A`s and was
+/// ACCEPTED with a 200 against its expected 400 `invalid_signature`.
+///
+/// The fix is not to turn the playground off: that would demand a live
+/// `did:web` resolver (DNS + TLS) in-process for every replayed publish.
+/// `playground.pinned_keys` already gives **real** `acdp::crypto::verify`
+/// Ed25519 verification of a `did:web` producer without a resolver -- the
+/// mechanism `sig001_*`/`rev001_*` in this file have used all along. U-528
+/// simply points the replayer at it.
+///
+/// Deliberately `pinned_only = false`, and that is the blast-radius
+/// decision: strict mode would reject every *other* agent with
+/// `key_not_authorized`, rewriting the verdict of fixtures that have nothing
+/// to do with signatures. Unpinned agents keep the exact path they had
+/// before, so the only fixtures whose behaviour can move are those
+/// publishing as this one DID.
+///
+/// Kept separate from [`harness()`] on purpose: `harness()` has eight other
+/// callers, and `config()` itself is load-bearing elsewhere --
+/// `idem_playground_branch_honors_supports_idempotency_key_gate` depends on
+/// `pinned_keys` being EMPTY as its precondition. Shape D builds on
+/// `shape_d_config()` and is likewise untouched, which matters because
+/// `replay_shape_d` panics if a seeded publish fails to return 200.
+async fn replay_harness() -> axum::Router {
+    let mut cfg = config();
+    cfg.playground.pinned_keys = vec![PinnedAgentKey {
+        agent_did: FIXTURE_PRODUCER_DID.into(),
+        public_key_b64: FIXTURE_PRODUCER_PUBLIC_KEY_B64.into(),
+        algorithm: "ed25519".into(),
+        valid_from: None,
+        valid_until: None,
+    }];
+    cfg.playground.pinned_only = false;
+    common::build_harness_with_webhook(
+        cfg,
+        caps(),
+        AUTHORITY,
+        common::StoreMode::Memory,
+        None,
+        None,
+    )
+    .await
+    .router
+}
+
+/// The producer DID the `pub-*`, `sig-*` and `rev-*` fixtures share.
+const FIXTURE_PRODUCER_DID: &str = "did:web:agents.example.com:test-producer";
+
+/// That producer's Ed25519 public key, as published by the spec itself in
+/// `sig-001-ed25519-golden.json`'s `test_keypair.public_key_base64`.
+///
+/// Pinned as a constant rather than read from the fixture at run time so the
+/// replay harness is identical with and without `ACDP_SPEC_DIR`, and so a
+/// spec bump that changed the keypair fails loudly in
+/// `fixture_producer_key_still_matches_the_spec` below instead of silently
+/// turning every signature check into a pass-by-accident.
+const FIXTURE_PRODUCER_PUBLIC_KEY_B64: &str = "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=";
+
 async fn harness() -> axum::Router {
     common::build_harness_with_webhook(
         config(),
@@ -2615,6 +2678,70 @@ fn extract(fx: &Value) -> Extracted {
 // a seed publish that does NOT return 200 is a hard bug in the harness's
 // own request construction, so `replay_shape_d` panics on it rather than
 // skipping or recording it as a fixture mismatch.
+/// Publish fixtures whose expected RFC-ACDP-0007 §5 code this registry does
+/// **not** produce, paired with the code it produces instead.
+///
+/// Every entry here is a wrong-reason pass that U-528 converted into an
+/// asserted fact. Before this table the publish arm pinned no code at all, so
+/// each of these replayed **green** while receiving an error unrelated to the
+/// one the fixture exists to check. The table does not excuse them — the
+/// replayer asserts the fixture produces the code named here, so if any of
+/// them changes (in either direction) the build fails and a human decides.
+///
+/// `(fixture id, code this registry actually returns, why)`
+const CODE_DIVERGENCES: &[(&str, &str, &str)] = &[
+    // U-527 made these four replay and they passed on "some 400". They never
+    // reach DID resolution at all: the fixture bodies omit the required
+    // `version` member, so deserialization rejects first. The SSRF behaviour
+    // they describe IS enforced and IS covered — by
+    // `did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets`,
+    // which drives the resolver directly rather than through a publish.
+    (
+        "did-ssrf-001",
+        "schema_violation",
+        "fixture body omits the required `version` member, so deserialization rejects \
+         before DID resolution runs; the SSRF seam has direct coverage instead",
+    ),
+    (
+        "did-ssrf-002",
+        "schema_violation",
+        "same omission as did-ssrf-001",
+    ),
+    (
+        "did-ssrf-003",
+        "schema_violation",
+        "same omission as did-ssrf-001",
+    ),
+    (
+        "did-ssrf-004",
+        "schema_violation",
+        "same omission as did-ssrf-001",
+    ),
+    // Caused BY U-528, and the reason this table exists rather than a quiet
+    // harness tweak. `pub-002` supplies both a bad `content_hash` and a bad
+    // signature. Unpinned it returned `hash_mismatch`, matching the fixture.
+    // With the producer key pinned, `enforce_pinned_signature` runs before
+    // the hash gate, so the signature fails first. RFC validation ordering is
+    // impl-defined, so neither order is non-conformant — but the change is
+    // real, it was caused by this unit, and it is recorded rather than
+    // absorbed.
+    (
+        "pub-002",
+        "invalid_signature",
+        "the pinned-key path verifies the signature before the hash gate, and this \
+         fixture's body fails both; RFC validation ordering is impl-defined (U-528)",
+    ),
+];
+
+/// The code `CODE_DIVERGENCES` records for `fixture_id`, if any.
+fn divergent_code(fixture_id: Option<&str>) -> Option<&'static str> {
+    let id = fixture_id?;
+    CODE_DIVERGENCES
+        .iter()
+        .find(|(fid, _, _)| *fid == id)
+        .map(|(_, actual, _)| *actual)
+}
+
 fn extract_shapes(fx: &Value) -> Extracted {
     // Shape A: top-level `request` + `expected`.
     if let (Some(req), Some(exp)) = (fx.get("request"), fx.get("expected")) {
@@ -2764,7 +2891,12 @@ fn extract_shapes(fx: &Value) -> Extracted {
             input.get("endpoint").and_then(Value::as_str),
             fx.get("expected"),
         ) {
-            return extract_input_endpoint(input, endpoint, exp);
+            return extract_input_endpoint(
+                input,
+                endpoint,
+                exp,
+                fx.get("id").and_then(Value::as_str),
+            );
         }
     }
     Extracted::Skip("non-HTTP fixture (vectors / schema / informative)")
@@ -2779,7 +2911,12 @@ fn extract_shapes(fx: &Value) -> Extracted {
 /// body the spec deliberately left in prose. A wrong reason string sends the
 /// next reader to the wrong question, which is exactly how these sat unread
 /// long enough to become issue #291.
-fn extract_input_endpoint(input: &Value, endpoint: &str, exp: &Value) -> Extracted {
+fn extract_input_endpoint(
+    input: &Value,
+    endpoint: &str,
+    exp: &Value,
+    fixture_id: Option<&str>,
+) -> Extracted {
     let Some((method, path)) = endpoint.split_once(' ') else {
         return Extracted::Skip("fixture endpoint is not in `METHOD /path` form");
     };
@@ -2804,32 +2941,11 @@ fn extract_input_endpoint(input: &Value, endpoint: &str, exp: &Value) -> Extract
         };
     }
 
-    // This harness cannot reach a signature-verification outcome AT ALL:
-    // `config()` sets `playground.enabled = true`, which by its own comment
-    // "bypasses DID verification". Replaying a fixture whose expected
-    // outcome IS the signature check therefore produces a verdict about the
-    // harness, not about the server -- measured: `pub-001` replays to 200
-    // (publish accepted) against an expected 400 `invalid_signature`, with
-    // a signature of 64 literal `A`s.
-    //
-    // Skipping these is NOT working the failure around. It is the same
-    // thing every other arm here does -- classify a fixture this harness
-    // cannot express, with the real reason. Turning the harness into one
-    // that CAN verify signatures is U-528, and both `pub-001` and `pub-011`
-    // stay in `UNEXERCISED_FIXTURES` pointing at it.
-    //
-    // `pub-011` matters especially: it expects the same `invalid_signature`
-    // and WOULD have replayed green here, because its `content_hash` is the
-    // literal placeholder `"sha256:<recomputes-correctly-against-this-body>"`
-    // and the publish arm below pins no error code -- so it would have been
-    // scored as signature coverage while actually receiving a schema
-    // rejection. Admitting it would have added a FAKE green, which is worse
-    // than the honest gap it replaces.
-    if want_error_code(exp).as_deref() == Some("invalid_signature") {
-        return Extracted::Skip(
-            "signature-dependent outcome; this harness bypasses DID verification (U-528)",
-        );
-    }
+    // U-527 skipped `invalid_signature` fixtures here, because the replay
+    // harness could not reach a signature-verification outcome at all.
+    // **U-528 deleted that predicate rather than narrowing it**: the replay
+    // harness now pins the fixtures' producer key, so the signature check
+    // really runs. Nothing is excused in its place.
 
     let is_publish = method == "POST" && path.starts_with("/contexts");
     if is_publish && status != 400 {
@@ -2844,15 +2960,19 @@ fn extract_input_endpoint(input: &Value, endpoint: &str, exp: &Value) -> Extract
         headers: Default::default(),
         body: body.cloned(),
         want_status: status,
-        // Matches Shape A's publish arm: validation ordering is
-        // impl-defined, so the first-failing code is not pinned for
-        // publishes. Consequence, stated so it is not rediscovered: a
-        // publish fixture replayed this way asserts only "some 400".
-        want_error_code: if is_publish {
-            None
-        } else {
-            want_error_code(exp)
-        },
+        // U-527 left this `None` for publishes, on the grounds that
+        // validation ordering is impl-defined -- with the consequence,
+        // stated at the time, that "a publish fixture replayed this way
+        // asserts only some 400". **U-528 pins it.** Unpinned, a publish
+        // fixture cannot tell the rejection it names from any other
+        // rejection, which is precisely how `pub-011` was able to look
+        // like signature coverage while receiving a schema error. Where
+        // this registry genuinely produces a different code, the fixture
+        // is named in `CODE_DIVERGENCES` with the code it DOES produce,
+        // so the divergence is asserted rather than tolerated.
+        want_error_code: divergent_code(fixture_id)
+            .map(str::to_string)
+            .or_else(|| want_error_code(exp)),
         want_json: exp.get("json_contains").cloned(),
     }])
 }
@@ -2958,7 +3078,7 @@ fn resolve_fixture_dir(dir: &str) -> Option<PathBuf> {
 /// `extract()` was silently declining 12 parseable fixtures and the floor
 /// reported healthy throughout. An equality makes coverage moving in
 /// EITHER direction fail the build and forces a human to say which.
-const REPLAYED_EXCHANGES_AT_PIN: usize = 38;
+const REPLAYED_EXCHANGES_AT_PIN: usize = 40;
 
 fn family_of(name: &str) -> String {
     // Prefix up to the digit group: `data-ref-ssrf-001-...` -> `data-ref-ssrf`.
@@ -3095,7 +3215,7 @@ async fn replays_spec_fixtures_when_present() {
         .as_ref()
         .map(|v| v.iter().map(String::as_str).collect());
 
-    let app = harness().await;
+    let app = replay_harness().await;
     let mut replayed = 0usize;
     let mut failures: Vec<String> = Vec::new();
     // Per-family / per-reason tallies so coverage is transparent — never
@@ -9219,23 +9339,16 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
     // parses their `input.endpoint` spelling, so the replayer now drives
     // them for real. What is left here is left for a NAMED reason each.
     //
-    // `pub-001` and `pub-011` both expect `invalid_signature`, and this
-    // harness runs with `playground.enabled = true`, which bypasses DID
-    // verification -- it cannot reach a signature-verification outcome at
-    // all. `pub-001` measurably replays to 200 (publish ACCEPTED) against
-    // an expected 400. They are **U-528's**, and `pub-011` is the sharper
-    // of the two: it would have replayed GREEN here, because its
-    // `content_hash` is the literal placeholder
-    // `"sha256:<recomputes-correctly-against-this-body>"` and the publish
-    // arm pins no error code, so a schema rejection would have been scored
-    // as signature coverage. Admitting it would have been a fake green.
-    ("pub-001", Unexercised::RequiredByProfile),
+    // `pub-001` and `pub-011` left in U-528: `replay_harness()` pins the
+    // producer key, so both now reach a REAL Ed25519 verification and fail
+    // it, and the publish arm pins the expected code so "some 400" is no
+    // longer enough to pass. What remains below is unreplayable for
+    // structural reasons, not for want of a harness.
     ("pub-003", Unexercised::RequiredByProfile),
     ("pub-006", Unexercised::RequiredByProfile),
     ("pub-007", Unexercised::RequiredByProfile),
     ("pub-009", Unexercised::RequiredByProfile),
     ("pub-010", Unexercised::RequiredByProfile),
-    ("pub-011", Unexercised::RequiredByProfile),
     // `ret` likewise claims `Replayed` on ret-001 alone.
     ("ret-002", Unexercised::RequiredByProfile),
     // Conditional: required because of what this registry advertises.
@@ -9262,7 +9375,7 @@ const TOTAL_FIXTURES_AT_PIN: usize = 144;
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
 /// cannot drift from what actually replays.
-const REPLAYABLE_FIXTURES_AT_PIN: usize = 19;
+const REPLAYABLE_FIXTURES_AT_PIN: usize = 21;
 
 const PARTIAL_DIRECT: &[(&str, &[&str])] = &[
     (
@@ -13399,8 +13512,9 @@ async fn fixture_accounting_totals_are_exact() {
         .iter()
         .filter(|(_, g)| *g == Unexercised::ConditionalOnCapability)
         .count();
-    // 12 before U-527; `pub-002`/`012`/`013`/`014` now replay.
-    assert_eq!(required, 8, "expected exactly 8 required-but-unexercised");
+    // 12 before U-527 (`pub-002`/`012`/`013`/`014` began replaying), 8 before
+    // U-528 (`pub-001`/`pub-011` now reach a real signature check).
+    assert_eq!(required, 6, "expected exactly 6 required-but-unexercised");
     assert_eq!(
         conditional, 3,
         "expected exactly 3 conditional-but-unexercised"
@@ -13411,6 +13525,91 @@ async fn fixture_accounting_totals_are_exact() {
         "the two grades must partition the list — a third grade was added without \
          updating this assertion"
     );
+}
+
+/// The pinned producer key must still be the one the spec publishes.
+///
+/// [`FIXTURE_PRODUCER_PUBLIC_KEY_B64`] is a constant so the replay harness is
+/// identical with and without `ACDP_SPEC_DIR`. That convenience has a failure
+/// mode: if a spec bump rotated the keypair, the constant would pin a key that
+/// verifies nothing, **every signature fixture would fail for the wrong
+/// reason**, and `pub-001`/`pub-011` would still look "covered" because they
+/// expect a failure anyway. A wrong key produces green exactly where a right
+/// key does — so it is checked against the spec rather than trusted.
+#[tokio::test(flavor = "multi_thread")]
+async fn fixture_producer_key_still_matches_the_spec() {
+    let Some(fixtures) = spec_fixtures() else {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no fixtures resolved"
+        );
+        return;
+    };
+    let fx = read_json(&fixtures.join("sig-001-ed25519-golden.json"));
+    let spec_key = fx["test_keypair"]["public_key_base64"]
+        .as_str()
+        .expect("sig-001 carries test_keypair.public_key_base64");
+    assert_eq!(
+        spec_key, FIXTURE_PRODUCER_PUBLIC_KEY_B64,
+        "the spec's test-producer Ed25519 key changed. `replay_harness()` pins the \
+         constant, so every signature fixture would now be verified against the WRONG \
+         key -- and would still go green, because those fixtures expect a rejection. \
+         Update the constant."
+    );
+}
+
+/// `CODE_DIVERGENCES` must stay a record of real, live divergences.
+///
+/// A table of known-wrong behaviour decays in two directions, and both end
+/// with it lying. An entry whose fixture stopped replaying is never checked
+/// again; an entry whose recorded code has since become the *expected* one is
+/// silently asserting conformance as if it were a gap. Either way the table
+/// would keep reporting a divergence that no longer exists, which is worse
+/// than not having recorded it — an unexercised excuse reads as a live one.
+#[tokio::test(flavor = "multi_thread")]
+async fn code_divergences_are_real_live_and_still_divergent() {
+    let Some(fixtures) = spec_fixtures() else {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no fixtures resolved"
+        );
+        return;
+    };
+    let Some(stems) = fixture_stems_and_ids() else {
+        return;
+    };
+
+    for (id, actual, why) in CODE_DIVERGENCES {
+        assert!(
+            !why.trim().is_empty(),
+            "{id}: a divergence entry must carry a reason"
+        );
+        let Some((stem, _)) = stems.iter().find(|(_, fid)| fid == id) else {
+            panic!("CODE_DIVERGENCES names {id}, which is not a fixture at this pin");
+        };
+        let fx = read_json(&fixtures.join(format!("{stem}.json")));
+
+        // Still replayed? An entry for a fixture the replayer no longer
+        // drives is never exercised, so it cannot be trusted.
+        assert!(
+            matches!(extract(&fx), Extracted::Run(_) | Extracted::RunStateful(_)),
+            "CODE_DIVERGENCES names {id}, but the replayer no longer drives it — the \
+             entry is now unverifiable and must be removed or the fixture re-enabled"
+        );
+
+        // Still a divergence? If the fixture's own expected code now equals
+        // the code we record, the gap closed and the entry is a lie.
+        let expected = fx
+            .get("expected")
+            .and_then(want_error_code)
+            .unwrap_or_default();
+        assert_ne!(
+            expected.as_str(),
+            *actual,
+            "CODE_DIVERGENCES records {id} as diverging to {actual:?}, but that is now \
+             the code the fixture EXPECTS — the divergence closed and the entry must go"
+        );
+    }
 }
 
 /// No fixture that declares an HTTP endpoint may be told it is "non-HTTP".
