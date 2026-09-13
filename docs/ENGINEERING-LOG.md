@@ -5815,3 +5815,51 @@ The uncomfortable part is the useful part: "+8 fixtures replaying" was true last
 was not coverage**. A count of things that execute is not a count of things that check. When reporting
 newly-covered items, the honest figure is how many now assert the thing they were written to assert —
 and you only learn that by pinning the specific outcome and seeing what breaks.
+
+## Four instances, one shape, three units
+
+The same defect has now been found four times: `pub-011`, `did-ssrf-001..004`, `pub-008`, and
+`cur-001` caught in advance. Every one had an identical structure — **the fixture names a specific
+error, the replayer pinned only the status, the registry returned a different 400 for an unrelated
+reason, and the fixture was scored as coverage of a rule it never reached.**
+
+What makes it worth a log entry is that the instances were *not* found by looking for the class. Each
+surfaced while doing something else, and the search that would have found all four at once —
+`grep 'want_error_code: None'` — was one command and was never run until the fourth. After the second
+instance the class was named, after the third it had a table, and the sweep still only happened
+because a reviewer asked for it explicitly.
+
+**When you find the same defect twice, stop fixing instances and enumerate the class.** The cost is
+usually one grep; the cost of not doing it is that the fourth instance is found by someone reading a
+green test and wondering.
+
+`pub-008` is the one that should sting: it predates all of this work. Every unit that touched the
+replayer ran it, saw it green, and moved on.
+
+## Inverting an invariant is a decision, and must read as one
+
+The sweep's fix required reversing an existing assertion — `want_error_code.is_none()`, documented as
+*"Shape A's publish branch never pins an error code (validation ordering is impl-defined), this must
+still hold"*. Someone wrote "this must still hold" on the exact property that was hiding the bug.
+
+The reasoning behind it was **correct**: RFC validation ordering genuinely is implementation-defined,
+so demanding a specific first-failing code genuinely can be wrong. The error was in what that licenses.
+*"We cannot assert THIS particular thing"* was silently widened into *"we assert nothing"*, and
+nothing is what let an unrelated rejection pass as coverage. The middle option — assert the code we
+DO return, and record why it differs from the fixture — is strictly stronger than silence and was
+available the whole time.
+
+So the assertion was inverted rather than deleted, and the comment now says it was inverted, by which
+unit, and why the original reasoning was sound but insufficient. **An invariant that turns out to be
+wrong should leave a scar, not a clean surface** — the next reader needs to know the property was
+considered and reversed, not that it never existed.
+
+## A guard's first act was to correct its author
+
+The new sweep guard asserts a known-positive bound: *N replayed fixtures name an error code*, so that
+an empty scan cannot read as a clean sweep. I wrote 14 from my own reading. The real number is 15, and
+the assertion failed on its first run.
+
+That is the bound check working exactly as intended, on the person who wrote it, thirty seconds after
+writing it — and it is an argument for putting the number in as an equality even when you are
+confident. A `>=` would have accepted 14 silently forever.

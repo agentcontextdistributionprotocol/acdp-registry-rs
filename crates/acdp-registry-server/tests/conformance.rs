@@ -2634,6 +2634,25 @@ fn unseeded_precondition_reason(fx: &Value) -> Option<&'static str> {
 /// Gate order: profile gate → precondition gate → shape dispatch → template
 /// gate (which needs a constructed `Exchange.path`, so it runs last). The
 /// most specific, most informative reason wins.
+/// True when a *constructed* request path still contains a spec placeholder.
+///
+/// The spec writes placeholders in **two** notations and this gate originally
+/// knew only one. `{ctx_id}` is the documented brace form; `cur-001` writes
+/// `cursor=<previously-issued-cursor>` with **angle** brackets, and a gate
+/// looking only for braces waves it straight through. The consequence is not
+/// a crash — it is a *pass*: the literal text `<previously-issued-cursor>`
+/// is a perfectly good malformed cursor, so the registry returns the 400 the
+/// fixture expects and the fixture is scored green having tested nothing
+/// about expired cursors. That is the Rule 176 shape, so the gate covers
+/// both notations.
+///
+/// RFC 3986 permits none of `{`, `}`, `<`, `>` unescaped in a path, and
+/// `pct_encode_path_segment` escapes them anyway, so no well-formed
+/// substituted path can trip this.
+fn path_has_placeholder(path: &str) -> bool {
+    path.contains('{') || path.contains('}') || path.contains('<') || path.contains('>')
+}
+
 fn extract(fx: &Value) -> Extracted {
     if targets_unadvertised_profile(fx) {
         return Extracted::Skip("fixture targets a profile this harness does not advertise");
@@ -2651,11 +2670,10 @@ fn extract(fx: &Value) -> Extracted {
     // `pct_encode_path_segment` escapes them anyway, so this can't
     // false-positive on well-formed substituted input.
     if let Extracted::Run(exchanges) = &extracted {
-        if exchanges
-            .iter()
-            .any(|e| e.path.contains('{') || e.path.contains('}'))
-        {
-            return Extracted::Skip("request path carries an unsubstituted {template} placeholder");
+        if exchanges.iter().any(|e| path_has_placeholder(&e.path)) {
+            return Extracted::Skip(
+                "request path carries an unsubstituted {...} or <...> placeholder",
+            );
         }
     }
     extracted
@@ -2717,6 +2735,21 @@ const CODE_DIVERGENCES: &[(&str, &str, &str)] = &[
         "schema_violation",
         "same omission as did-ssrf-001",
     ),
+    // Found by U-531's sweep of the remaining replayable fixtures, after
+    // U-528 pinned codes for Shape E but left Shape A's publish arm `None`.
+    // `pub-008` exists to prove a non-`did:web` `agent_id` is rejected. It
+    // never reaches that rule: its `signature.value` is 96 base64 chars where
+    // ed25519 requires 88, so signature-shape validation rejects it first. It
+    // executed, asserted a 400, received a 400, and checked nothing about
+    // `agent_id` -- the same defect as the `did-ssrf` four, in a fixture that
+    // had been replaying green since long before either.
+    (
+        "pub-008",
+        "invalid_signature",
+        "fixture's signature.value is 96 base64 chars where ed25519 requires 88, so \
+         signature-shape validation rejects before the non-did:web agent_id rule is \
+         reached (U-531 sweep)",
+    ),
     // Caused BY U-528, and the reason this table exists rather than a quiet
     // harness tweak. `pub-002` supplies both a bad `content_hash` and a bad
     // signature. Unpinned it returned `hash_mismatch`, matching the fixture.
@@ -2774,9 +2807,15 @@ fn extract_shapes(fx: &Value) -> Extracted {
                     headers: headers_of(req),
                     body: req.get("body").cloned(),
                     want_status: status,
-                    // Don't pin the exact first-failing error code for
-                    // publishes — validation ordering is impl-defined.
-                    want_error_code: None,
+                    // U-531 sweep: this was `None`, on the same
+                    // "validation ordering is impl-defined" reasoning
+                    // U-527 used for Shape E -- and with the same
+                    // consequence, that a publish fixture could only
+                    // assert "some 400". Pinned now; `pub-008` was
+                    // passing for the wrong reason behind it.
+                    want_error_code: divergent_code(fx.get("id").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .or_else(|| want_error_code(exp)),
                     want_json: exp.get("json_contains").cloned(),
                 }]);
             }
@@ -2933,7 +2972,16 @@ fn extract_input_endpoint(
         return Extracted::Skip("fixture declares an HTTP endpoint but no expected HTTP status");
     };
     let body = input.get("body");
-    if !matches!(body, Some(Value::Object(_)) | Some(Value::Array(_))) {
+    let body_is_concrete = matches!(body, Some(Value::Object(_)) | Some(Value::Array(_)));
+    // A GET/HEAD needs no body to be a complete request; anything else does.
+    // U-527 required a concrete body for EVERY method, which excluded
+    // `cur-002` -- a fully concrete search request -- purely to avoid
+    // admitting `cur-001`, whose angle-bracket placeholder the template gate
+    // could not see. Now that `path_has_placeholder` covers both notations,
+    // `cur-001` is caught on its own merits and the blanket exclusion is no
+    // longer load-bearing.
+    let needs_body = !matches!(method.as_str(), "GET" | "HEAD");
+    if needs_body && !body_is_concrete {
         return if input.get("body_summary").is_some() {
             Extracted::Skip("fixture describes its request body in prose, not as JSON")
         } else {
@@ -2958,7 +3006,11 @@ fn extract_input_endpoint(
         method,
         path: path.to_string(),
         headers: Default::default(),
-        body: body.cloned(),
+        body: if body_is_concrete {
+            body.cloned()
+        } else {
+            None
+        },
         want_status: status,
         // U-527 left this `None` for publishes, on the grounds that
         // validation ordering is impl-defined -- with the consequence,
@@ -3078,7 +3130,7 @@ fn resolve_fixture_dir(dir: &str) -> Option<PathBuf> {
 /// `extract()` was silently declining 12 parseable fixtures and the floor
 /// reported healthy throughout. An equality makes coverage moving in
 /// EITHER direction fail the build and forces a human to say which.
-const REPLAYED_EXCHANGES_AT_PIN: usize = 40;
+const REPLAYED_EXCHANGES_AT_PIN: usize = 41;
 
 fn family_of(name: &str) -> String {
     // Prefix up to the digit group: `data-ref-ssrf-001-...` -> `data-ref-ssrf`.
@@ -3431,10 +3483,23 @@ async fn four_pre_existing_exchanges_still_use_original_shapes() {
             fx["expected"]["status"].as_u64().unwrap() as u16,
             "{id}: want_status"
         );
-        assert!(
-            ex.want_error_code.is_none(),
-            "{id}: Shape A's publish branch never pins an error code (validation ordering is \
-             impl-defined) -- this must still hold"
+        // **This assertion was inverted by U-531, deliberately.** It used to
+        // require `want_error_code.is_none()` -- "Shape A's publish branch
+        // never pins an error code (validation ordering is impl-defined),
+        // this must still hold". That invariant is exactly what let `pub-008`
+        // replay green for years while testing nothing it was written to
+        // test, so the sweep reversed it rather than preserving it. The
+        // ordering argument was never wrong; it just does not justify
+        // asserting NOTHING. Where this registry genuinely orders validation
+        // differently from a fixture, `CODE_DIVERGENCES` records the code it
+        // does return, which is a stronger statement than silence.
+        let expected_code = divergent_code(Some(id))
+            .map(str::to_string)
+            .or_else(|| want_error_code(&fx["expected"]));
+        assert_eq!(
+            ex.want_error_code, expected_code,
+            "{id}: Shape A's publish branch must pin the fixture's expected code, or the \
+             code CODE_DIVERGENCES records this registry actually returns"
         );
     }
 
@@ -8419,22 +8484,58 @@ fn extract_skips_fixtures_outside_advertised_profiles() {
 /// `ret-001` and shrink `replayed` from 4 to 3.
 #[test]
 fn extract_skips_unsubstituted_path_templates() {
-    let unsubstituted = json!({
+    // **Both notations, varied — not one spelling and a count.** The spec
+    // writes placeholders two ways and the gate knew only braces, so an
+    // angle-bracket corpus walked straight through it: `cur-001`'s
+    // `cursor=<previously-issued-cursor>` would replay as a literal string,
+    // draw the 400 the fixture expects, and be scored green having tested
+    // nothing about expired cursors. A test that asserted "N fixtures are
+    // gated" would have passed throughout that, which is exactly how the
+    // gate reached U-531 half-blind. Each spelling is therefore exercised
+    // as its own case.
+    for (label, path) in [
+        ("brace", "/contexts/{ctx_id}/retract"),
+        ("angle", "/contexts/<previously-issued-cursor>/retract"),
+        ("brace, query position", "/contexts/search?cursor={cursor}"),
+        (
+            "angle, query position",
+            "/contexts/search?cursor=<previously-issued-cursor>",
+        ),
+        ("mixed", "/contexts/{ctx_id}/x?cursor=<c>"),
+    ] {
+        let unsubstituted = json!({
+            "request": { "method": "POST", "path": path, "body": {"foo": "bar"} },
+            "expected": {"status": 400}
+        });
+        match extract(&unsubstituted) {
+            Extracted::Skip(reason) => assert_eq!(
+                reason, "request path carries an unsubstituted {...} or <...> placeholder",
+                "{label}: {path}"
+            ),
+            Extracted::Run(x) => {
+                panic!("{label}: expected template-gate skip for {path}, got Run({x:?})")
+            }
+            Extracted::RunStateful(_) => {
+                panic!("{label}: expected template-gate skip for {path}, got RunStateful")
+            }
+        }
+    }
+
+    // The complement, so the gate is not merely "reject everything": a fully
+    // substituted path carrying neither notation must still RUN.
+    let substituted = json!({
         "request": {
             "method": "POST",
-            "path": "/contexts/{ctx_id}/retract",
+            "path": "/contexts/acdp%3A%2F%2Fr.example%2Fx/retract",
             "body": {"foo": "bar"}
         },
         "expected": {"status": 400}
     });
-    match extract(&unsubstituted) {
-        Extracted::Skip(reason) => assert_eq!(
-            reason,
-            "request path carries an unsubstituted {template} placeholder"
-        ),
-        Extracted::Run(x) => panic!("expected template-gate skip, got Run({x:?})"),
-        Extracted::RunStateful(_) => panic!("expected template-gate skip, got RunStateful"),
-    }
+    assert!(
+        matches!(extract(&substituted), Extracted::Run(_)),
+        "a placeholder-free path must still replay -- a gate that rejects everything \
+         would satisfy every assertion above while destroying the corpus"
+    );
 
     // ret-001 regression: declared endpoint carries braces, but the
     // substituted ctx_id produces a brace-free path — must run.
@@ -9375,7 +9476,7 @@ const TOTAL_FIXTURES_AT_PIN: usize = 144;
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
 /// cannot drift from what actually replays.
-const REPLAYABLE_FIXTURES_AT_PIN: usize = 21;
+const REPLAYABLE_FIXTURES_AT_PIN: usize = 22;
 
 const PARTIAL_DIRECT: &[(&str, &[&str])] = &[
     (
@@ -13610,6 +13711,80 @@ async fn code_divergences_are_real_live_and_still_divergent() {
              the code the fixture EXPECTS — the divergence closed and the entry must go"
         );
     }
+}
+
+/// **No replayed fixture may assert a mere CLASS of failure when it names a
+/// specific one.** This is U-531's sweep, kept as a standing guard.
+///
+/// The defect it closes has now been found three times, in three different
+/// arms, by three different units: `pub-011` (U-528), `did-ssrf-001..004`
+/// (U-528, on fixtures U-527 had just added), and `pub-008` (U-531's sweep --
+/// green since long before either). Every instance had the same shape. The
+/// fixture names an error code, the replayer pinned only the *status*, the
+/// registry returned some other 400 for an unrelated reason, and the fixture
+/// was scored as coverage of a rule it never reached.
+///
+/// **A green replay carrying a plausible code is worse than a missing one**,
+/// because it consumes the attention that would have found the gap. So the
+/// rule is structural rather than per-fixture: if a fixture supplies an
+/// `error_code`, the exchange built from it MUST pin a code -- the fixture's
+/// own, or the one `CODE_DIVERGENCES` records this registry actually returns.
+/// Neither the replayer nor a future shape may opt out by leaving it `None`.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_replayed_fixture_pins_a_code_when_it_names_one() {
+    let Some(fixtures) = spec_fixtures() else {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no fixtures resolved"
+        );
+        return;
+    };
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&fixtures)
+        .unwrap_or_else(|e| panic!("read {fixtures:?}: {e}"))
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .collect();
+    paths.sort();
+
+    let mut named_a_code = 0usize;
+    let mut unpinned: Vec<String> = Vec::new();
+    for path in paths {
+        let fx = read_json(&path);
+        let Extracted::Run(exchanges) = extract(&fx) else {
+            continue;
+        };
+        // Only fixtures that NAME a code are in scope. One that expects a
+        // bare status is asserting exactly what it says.
+        let Some(code) = fx.get("expected").and_then(want_error_code) else {
+            continue;
+        };
+        named_a_code += 1;
+        for ex in exchanges {
+            if ex.want_error_code.is_none() {
+                unpinned.push(format!(
+                    "{}: fixture names {code:?} but the exchange pins no code, so any \
+                     status-{}-with-a-different-reason passes it",
+                    path.file_name().unwrap().to_string_lossy(),
+                    ex.want_status
+                ));
+            }
+        }
+    }
+
+    // Known-positive bound: a scan that matched nothing would report a clean
+    // sweep. At pin `16211e6`, 15 replayed fixtures name a code.
+    assert_eq!(
+        named_a_code, 15,
+        "expected 14 replayed fixtures naming an error code at the pin, found \
+         {named_a_code} -- the scan is broken or the corpus moved, and either way an \
+         empty result would have meant nothing"
+    );
+    assert!(
+        unpinned.is_empty(),
+        "replayed fixtures assert only a status class despite naming a code:\n  - {}",
+        unpinned.join("\n  - ")
+    );
 }
 
 /// No fixture that declares an HTTP endpoint may be told it is "non-HTTP".
