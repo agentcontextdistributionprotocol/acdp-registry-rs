@@ -1069,11 +1069,7 @@ const EXPECTED_BY_SPEC: &[(Who, bool, &[Row])] = &[
     // ── A listed contributor: authenticated, and that is ALL it buys. §4.5
     //    says `contributors` is attribution, never authorization — so this
     //    perspective sees exactly what any authenticated stranger sees.
-    (
-        Who::Contributor,
-        true,
-        &[Row::Public, Row::PublicRetracted],
-    ),
+    (Who::Contributor, true, &[Row::Public, Row::PublicRetracted]),
     (
         Who::Contributor,
         false,
@@ -1376,8 +1372,14 @@ where
         (public.as_str(), "public"),
         (private_with_audience.as_str(), "private_with_audience"),
         (private_owner_only.as_str(), "private_owner_only"),
-        (restricted_with_audience.as_str(), "restricted_with_audience"),
-        (private_with_contributor.as_str(), "private_with_contributor"),
+        (
+            restricted_with_audience.as_str(),
+            "restricted_with_audience",
+        ),
+        (
+            private_with_contributor.as_str(),
+            "private_with_contributor",
+        ),
         (public_retracted.as_str(), "public_retracted"),
         (foreign_tenant_public.as_str(), "foreign_tenant_public"),
     ];
