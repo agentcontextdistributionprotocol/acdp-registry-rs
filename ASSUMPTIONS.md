@@ -2743,6 +2743,48 @@ it is the right choice for anything already in `main`, and the file's own preced
 here rather than in place" — is about exactly that case).
 **Blast radius.** Low, but it is a judgement about a shared-file rule, so it is recorded rather
 than assumed.
+## U-509 — #266: making "the documented quickstart boots" a CI property (2026-09-13, lane-1)
+
+- **Correction to my own issue #266, stated before building on it.** #266 said `docker.yml`
+  "never boots the stack the quickstart ships". The literal half was right — no `jwt_secret` /
+  `JWT_SECRET` appeared anywhere in the workflow — but the wording overstated it. CI *did* boot a
+  registry against the shipped `docker/config.docker.toml`. What it never did was read
+  `docker/docker-compose.yml`, because the smoke test hand-rolls `docker run`. That distinction is
+  the whole finding rather than a quibble: W3-U5's defect was a `changeme` placeholder **in the
+  compose file's environment block** (fixed in `abfebf7`), so it lived in precisely the file CI
+  never opened. Verified at `f658fd5`, not carried over from the earlier audit at `2199422`.
+- **Status:** CONFIRMED, with the issue's wording corrected here rather than quietly relied on.
+
+- **Assumption:** an overlay that pins the prebuilt image still exercises the recipe.
+- **Evidence:** `compose.ci.yml` overrides only `image:` and `build:`. `docker compose config`
+  shows the `environment:` block, the `config.docker.toml` mount, `depends_on` and the postgres
+  service all resolving from the recipe unchanged. Those are the parts under test; the W3-U5 defect
+  lived in the environment block, so an overlay that replaced it would have tested nothing.
+- **Status:** CONFIRMED by reading the resolved model, not by assuming merge semantics.
+
+- **Assumption (WRONG, caught by a negative control — recorded because the failure mode is the
+  point):** that exporting `ACDP_REGISTRY_AUTH__ENABLED=true` before `docker compose up` would
+  enable auth in the container.
+- **What is actually true:** compose forwards **only** the variables named in a service's own
+  `environment:` block. `ACDP_REGISTRY_AUTH__ENABLED` is not one of them, so it never reached the
+  container. The first draft of `--check-auth-on` therefore booted the auth-**off** stack and
+  reported success — a decorative check that could not have failed. It was caught only because
+  negative control (2) refused to go red, and the control was right. A check that passes is not
+  evidence; a control that fails to fail is.
+- **Status:** CONFIRMED by `docker compose config`, which shows the variable absent from the
+  resolved environment. Fixed with a CI-only overlay (`compose.ci-auth-on.yml`) whose effect is
+  proven by control (2) now firing.
+
+- **UNCONFIRMED — a gap in the shipped recipe, reported rather than fixed here.** The compose
+  file's header tells operators to "set a real secret before enabling auth", but the recipe
+  provides **no environment path to enable auth** — `ACDP_REGISTRY_AUTH__ENABLED` is not forwarded.
+  An operator must edit `config.docker.toml`, which runs straight into the precedence caveat the
+  same header documents for `jwt_secret`. The obvious fix — adding
+  `ACDP_REGISTRY_AUTH__ENABLED: ${VAR:-false}` to the environment block — is **rejected as a
+  security regression**: compose renders an unset variable as set-to-empty rather than absent, and
+  env beats TOML, so an operator who set `auth.enabled = true` in the file would have it silently
+  forced back to `false`. Turning someone's auth off to make a CI step convenient is not a trade
+  worth making. Left to a unit that can design the passthrough safely.
 ## U-508 — "PR-blocking" means runs-and-can-fail, not listed-in-branch-protection
 
 - **Plan:** `plans/u-508-lint-shell-and-workflows.md` (Open question 1)
@@ -2784,3 +2826,25 @@ than assumed.
   check name is harder to read, though they do share a job here since both are seconds long.
 - **Blast radius if wrong:** one file moves. No behaviour depends on which file the steps live in.
 - **Status:** UNCONFIRMED — cheap to reverse; recorded so the choice is visible rather than assumed.
+
+### 9. `mutants.yml` derives the spec pin from `ci.yml` instead of restating it
+**Status: CONFIRMED (2026-09-13)** — decided and settled in the same pass, because the evidence
+that forced it was a bot PR already in flight rather than a judgement call.
+**Assumed.** That a second hardcoded copy of the spec pin would silently diverge forever.
+**Chose.** A `pin` step that greps the 40-hex `ref:` out of `.github/workflows/ci.yml` and feeds
+it to `checkout-spec` via `steps.pin.outputs.ref`.
+**Why it is not DRY tidiness.** `bump-spec.yml:24` passes the bumper exactly ONE filename
+(`file: .github/workflows/ci.yml`, singular), so a copy here would never be bumped: `ci.yml` would
+move to the new spec and the scheduled mutation job would stay behind, with the per-PR conformance
+job and this job measuring different spec versions and nothing reporting it. PR #272 (the bot
+adopting `108ff76`) is exactly that, in flight. A comment saying "keep these in sync" cannot fix
+it — the actor is a bot whose input is one filename. A machine-read signal needs a machine-read fix.
+**The pinned property is preserved.** `ci.yml:400-402` wants "a spec-repo push cannot change this
+repo's CI result without a commit here"; a commit here is still required, in one place instead of two.
+**Alternatives.** A second bumper call in `bump-spec.yml` (unclaimed; rejected as more moving parts,
+and `ci.yml:404-410` records that the bumper refuses to act on a file with two pin anchors, so a
+file it silently declines to bump is worse than one never pointed at). Duplicate-and-document
+(rejected: the mitigation would have to be a check that FAILS on disagreement, at which point
+deriving is less work).
+**Blast radius.** Low, and the extraction fails loudly: it asserts exactly one 40-hex `ref:`, exactly
+one `checkout-spec@` `uses:` line, and that the ref follows it.

@@ -4827,3 +4827,63 @@ and watching `git check-ignore` call the cross-repo file IGNORED again.
   `DECISIONS.md` #18 records that the licence for doing so expired the moment it was
   pushed. It is pushed. So this is an append — which is the rule being applied to
   its author rather than merely written down by them.
+## U-509 — #266: the documented quickstart is now a CI property
+
+`.github/workflows/docker.yml` already booted a registry and hit `/healthz`. It did so by
+hand-rolling `docker run` with `docker/config.docker.toml` mounted, so it never opened
+`docker/docker-compose.yml` — and `cd docker && docker compose up --build` is what README.md's
+"Production (Postgres + Docker)" section tells operators to run.
+
+That distinction is the finding. W3-U5 existed because the quickstart did not boot: the compose
+file shipped `ACDP_REGISTRY_AUTH__JWT_SECRET=changeme`, which `validate_config` rejects by name
+(`crates/acdp-registry-server/src/main.rs:166`), so the stack exited rc=1 before serving a
+request. **The defect lived in the one file CI never read**, which is why a user hit it before CI
+did. It was fixed in `abfebf7` with nothing guarding it since.
+
+### What landed
+
+Three steps in `docker.yml`, driving `docker/assert-quickstart-boots.sh`:
+
+- `--check` — boots the recipe through `docker compose`, asserts `/healthz` and `storage:true`
+  (a stack that silently fell back to SQLite would still answer `/healthz`).
+- `--check-auth-on` — boots it with auth enabled and a real secret, reaching `validate_config`'s
+  auth-gated branch (`main.rs:129-142`) that the shipped `auth.enabled = false` never executes.
+- `--self-test` — two negative controls, wired into CI rather than asserted in a PR body, matching
+  the convention `assert-image-tags.sh --self-test` already set.
+
+`compose.ci.yml` points the service at the image the job already built, so this costs no second
+release build. It overrides **only** `image:`/`build:`; the environment block, config mount,
+`depends_on` and postgres service are the recipe's own, verified by reading `docker compose config`.
+
+### The negative control caught a decorative check — mine
+
+The first draft of `--check-auth-on` exported `ACDP_REGISTRY_AUTH__ENABLED=true` before
+`docker compose up`. **Compose forwards only the variables named in a service's own `environment:`
+block**, and that one is not among them, so it never reached the container. The step booted the
+auth-**off** stack and reported success. It could not have failed.
+
+Nothing about the passing check revealed this. What revealed it was negative control (2) — auth on
+with an empty secret *must* be refused — declining to go red. The control was right and the check
+was wrong. This is the same shape as U-501's hash-bind (a security property fully implemented,
+fully green, completely unguarded) and U-505's grep undercount, three units running: **the check
+that passes is not evidence; the control that fails to fail is.**
+
+Fixed with a CI-only overlay (`compose.ci-auth-on.yml`). Its effect is proven by control (2) now
+firing, not by inspection.
+
+### Falsified against the real historical defect
+
+Not a synthetic break. `${ACDP_REGISTRY_JWT_SECRET:-}` in the shipped compose file was changed back
+to `${ACDP_REGISTRY_JWT_SECRET:-changeme}` — W3-U5's literal defect — and `--check` exited 1 with
+"the documented quickstart (docker compose up) did not come up healthy". Reverting restored green,
+and `git diff --quiet docker/docker-compose.yml` confirms the file shipped byte-identical.
+
+### The recipe gap this exposed, reported not papered over
+
+The compose header tells operators to "set a real secret before enabling auth" but gives no env
+path to enable auth. The obvious fix — a `${VAR:-false}` passthrough — is a **security regression**:
+compose renders an unset variable as set-to-empty rather than absent, and env beats TOML, so an
+operator who set `auth.enabled = true` in the file would have it silently forced back to `false`.
+That is the same precedence trap the header already documents for `jwt_secret`. Logged as
+`UNCONFIRMED` in `ASSUMPTIONS.md` for a unit that can design the passthrough safely, rather than
+taken here to make a CI step convenient.

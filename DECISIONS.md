@@ -2531,3 +2531,28 @@ the whole of it.
 budget decision is recorded separately from the equivalent-mutant reasoning it now rests on. All
 settled by Opus against evidence produced this run. No code follow-up is outstanding before
 shipping.
+
+### 9. `mutants.yml` derives the spec pin rather than duplicating it — CONFIRMED (Opus)
+
+Appended to entry 18 after the reconcile pass, because the fact that forced it arrived afterwards:
+bot PR #272 bumps the spec pin at `ci.yml:411` (`d1f06d0d` → `108ff76`), and `bump-spec.yml:24`
+passes the bumper **one** filename — `ci.yml`, singular. A hardcoded copy in `mutants.yml` would
+therefore never be bumped, and the per-PR conformance job and the scheduled mutation job would pin
+different spec versions permanently, with nothing reporting the divergence.
+
+So the ref is now derived: a `pin` step reads the 40-hex `ref:` out of `ci.yml` and passes it via
+`steps.pin.outputs.ref`. The property the pin exists for is unchanged — a spec-repo push still
+cannot move this repo's result without a commit here, just in one place instead of two.
+
+**Falsified against five fixtures, and it caught a real defect in itself.** The first version
+counted `grep -cE 'checkout-spec@'`, which matches **two** lines in `ci.yml` — the real `uses:` and
+a comment at `:407` discussing it — so it failed on the actual file and would have reddened the
+scheduled job on its first run. Anchoring the pattern on `uses:` fixed it. Fixtures: the real
+`ci.yml` → `rc=0` yielding exactly `d1f06d0d…`; two 40-hex refs → `rc=1`; zero refs → `rc=1`; a ref
+placed before the `checkout-spec` usage → `rc=1`; `checkout-spec@` present only in a comment →
+`rc=1`.
+
+Rejected: a second bumper call in `bump-spec.yml` (more moving parts, and `ci.yml:404-410` records
+that the bumper refuses to bump a file carrying two pin anchors at all — a file it silently declines
+is worse than one it was never pointed at); and duplicate-and-document, whose only honest mitigation
+is a check that fails on disagreement, which is more work than deriving.
