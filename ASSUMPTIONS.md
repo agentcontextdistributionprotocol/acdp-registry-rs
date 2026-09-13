@@ -925,7 +925,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   report rather than taken silently. **If the leader wants AC3's literal reading, the change
   is small and localized** — the warning branch becomes an `Err` — but it should arrive as a
   config key (`playground.refuse_on_no_live_pin`) rather than a default, because refusing is
-  plainly wrong for the lax case. **Status: UNCONFIRMED.**
+  plainly wrong for the lax case. **Status: UNCONFIRMED (re-checked U-507 2026-09-13 — and deliberately NOT closed by silence). The flag was raised in the done report as the entry says, and no `playground.refuse_on_no_live_pin` key exists anywhere in the tree, so the shipped behaviour is unchanged. Settled by: the leader either requesting AC3's literal reading or declining it. Owner: the leader.**
 - **Resolved from this file's own W2-U1 entry above:** that entry left placement of the
   shared validator (`acdp-registry-types` vs `acdp-registry-core`) deliberately undecided for
   whoever took #192/#193. Taken here: **`acdp-registry-core`**, because the rules being
@@ -1604,7 +1604,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** an operator's `challenge_per_agent` alert loses volume to
   `challenge_global`. Disclosed in the CHANGELOG under `### Changed` and in an operator note in
   `docs/HTTP-API.md` next to the metric table, both stating the direction of the shift.
-- **Status:** UNCONFIRMED — the label rename is a deliberate, documented break of an existing
+- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13; unfalsifiable from this repo). **Settled by:** an operator confirming nothing alerts on the old series. **Owner:** operators. The label rename is a deliberate, documented break of an existing
   series; whether any deployment actually alerts on `challenge_per_agent` is not knowable here.
 
 
@@ -1639,7 +1639,7 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   to assert `window_start` and `count` directly.
 - **Blast radius if wrong:** a publish limiter that under- or over-charges. Bounded by the guards
   above, each falsified individually.
-- **Status:** UNCONFIRMED — the concurrency bound and the #242 gap are deliberate, documented
+- **Status:** CONFIRMED as deliberate trades (U-507, 2026-09-13) — the entry classifies them itself and both still hold: the concurrency bound and the #242 gap are deliberate, documented
   trades, not settled questions.
 
 ## `search_in_tenant`'s default treats the backend as untenanted rather than refusing
@@ -2063,9 +2063,8 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 
 - **Blast radius if wrong:** a client that depended on `total_estimate` under a tenant header now
   sees the key absent. That is the intended behaviour change and it is in the engineering log.
-- **Status:** UNCONFIRMED — A2 ships PARTIAL by design. The cursor oracle remains open and is
-  asserted by `search_cursor_oracle_remains_open_for_tenant_scoped_caller`; A2 must not be
-  described as closed until the store-side predicate lands and that test is deliberately deleted.
+- **Status:** RESOLVED (U-507, 2026-09-13) — **A2 is closed, and this entry specified exactly how to tell.**
+  It said A2 "must not be described as closed until the store-side predicate lands and that test is deliberately deleted". Both happened in the same commit: `f8a866d` (#259, *"scan inside the tenant so the cursor cannot anchor on a foreign row"*) landed the tenant-aware store search and deleted `search_cursor_oracle_remains_open_for_tenant_scoped_caller`. Established with `git log -S` on the test name, not by reading a changelog.
   **The `limit=1` claim in this section is superseded** by the correction under P9: a foreign
   anchor also escapes at ANY limit once the refill loop exhausts `SEARCH_REFILL_MAX_PAGES`,
   because `cursor` is assigned before that break. This fixture is too small to reach that exit.
@@ -2181,7 +2180,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   escapes at `limit=1` too. The honest statement is "at `limit>=2`, and at any `limit` once the
   refill budget is exhausted" — not "never at `limit=1`". Generalising "every time" from one
   six-row fixture was the error.
-- **Status:** UNCONFIRMED — A2 remains PARTIAL. `docs/HTTP-API.md` and the call-site comment now
+- **Status:** RESOLVED (U-507, 2026-09-13) — A2 is no longer PARTIAL; closed by `f8a866d` (#259), see the A2 resolution above. `docs/HTTP-API.md` and the call-site comment now
   state the corrected version.
 
 - **Assumption (latent, accepted knowingly):** dropping the `CtxId::parse` guard is safe.
@@ -2194,7 +2193,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   per record, which is the cost this phase exists to remove.
 - **What would make it reachable:** a migration or import path that writes `contexts` rows
   without minting through `CtxId`. Anything of that kind must revisit this.
-- **Status:** UNCONFIRMED — recorded so it is a known latent rather than a rediscovery.
+- **Status:** CONFIRMED (U-507, 2026-09-13) — verified unreachable today, and the trigger above is kept for whoever changes that. No path writes `contexts` rows outside the publish flow: the pg and sqlite migrations that appear to insert into `contexts` insert into **`contexts_fts`**, the FTS shadow table (`002_fts5.sql:15,33`, `013_fts5_porter.sql:44`), and no import or bulk-insert path exists. Recorded so it stays a known latent rather than a rediscovery.
 
 - **Record that would otherwise not ship: how P9's planned acceptance criteria were actually
   met.** `plans/` is gitignored (the literal `plans/` entry in `.gitignore`; not cited by line,
@@ -2369,7 +2368,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   another lane documented this same wave, so it is a decision for the leader and not a side effect
   of a wiring unit. Documenting (b) without implementing it would have left the docs describing code
   that does not exist — the failure this unit's second half exists to remove.
-- **Status:** UNCONFIRMED — the behaviour is deliberate and the docs match the code as shipped, but
+- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13 — deliberately NOT closed by inertia, which this entry explicitly forbids). **Settled by:** an explicit ruling. **Owner:** the leader. The behaviour is deliberate and the docs match the code as shipped, but
   the *decision* is open and should be closed explicitly rather than by inertia.
 ## H-A P10 (A10) — the route-classification guard names what it cannot parse
 
@@ -2461,7 +2460,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   not part of this change. lane-3 left them deliberately for the same reason and said so at
   handover. Deleting them here would ship an unfalsified behaviour change inside a diff whose
   stated purpose is a one-field wire addition.
-- **Status:** UNCONFIRMED — a separate unit if anyone wants it, with its own evidence.
+- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13) — a separate unit if anyone wants it, with its own evidence. **Settled by:** scheduling that unit. **Owner:** the leader.
 
 ## H-U — the store parameter is renamed for what the predicate consumes
 
@@ -2531,7 +2530,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   publish — a second network round-trip, a second SSRF surface, and a cache that can disagree
   with the SDK's. Not attempted; the seam is designed in
   `plans/cross-repo/acdp-rs-publish-charge-seam.md` and filed upstream.
-- **Status:** UNCONFIRMED — this is a judgement about cost, not a measured fact. It is the one
+- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13; unmeasurable by construction, so evidence cannot close it). **Settled by:** a reviewer accepting or rejecting the trade. **Owner:** the reviewer. This is a judgement about cost, not a measured fact. It is the one
   claim in this unit a reviewer should push back on if they disagree about the trade.
 
 ## U-505 — index of deferred work surfaced from this file and DECISIONS.md (2026-09-13, lane-1)
@@ -2775,7 +2774,7 @@ than assumed.
   resolved environment. Fixed with a CI-only overlay (`compose.ci-auth-on.yml`) whose effect is
   proven by control (2) now firing.
 
-- **UNCONFIRMED — a gap in the shipped recipe, reported rather than fixed here.** The compose
+- **SUPERSEDED (U-507, 2026-09-13) — the recipe now DOES provide an environment path: `docker/docker-compose.yml:90` forwards `ACDP_REGISTRY_AUTH__ENABLED`. True when written:** The compose
   file's header tells operators to "set a real secret before enabling auth", but the recipe
   provides **no environment path to enable auth** — `ACDP_REGISTRY_AUTH__ENABLED` is not forwarded.
   An operator must edit `config.docker.toml`, which runs straight into the precedence caveat the
@@ -2864,7 +2863,7 @@ than assumed.
   whitespace is never valid JSON; that divergence is documented at its site.
 - **Status:** CONFIRMED by falsification — reverting the helper to `trim()` reddens exactly one test.
 
-- **UNCONFIRMED — an upgrade-ordering hazard, stated rather than assumed away.** The recipe now
+- **CONFIRMED (U-507, 2026-09-13) — the hazard is real and is now documented where an upgrader will meet it (`docs/UPGRADING.md:110-124`), which is what this entry asked for: an upgrade-ordering hazard, stated rather than assumed away.** The recipe now
   passes `ACDP_REGISTRY_AUTH__ENABLED: ${...:-}`, which renders as an empty string. A registry
   binary from *before* this change rejects an empty boolean with a hard error, so pulling the new
   `docker-compose.yml` against an older image breaks the boot. Called out in README's Configuration
@@ -3549,3 +3548,53 @@ distinction is precise.**
   **owner:** operators); `private` carries no validators (**verified the fix has not landed: no `ETag`
   anywhere in `acdp-registry-core`**); and `/log/checkpoint`'s inherited `private` (`if_not_present` at
   `lib.rs:121`, and `handlers/log.rs` sets no cache header of its own).
+
+### Batches 8-9 — the last eleven items, and the two the equality caught
+
+**`## H-A / P8 — A2: tenant-scoped search omits total_estimate` → RESOLVED, and this entry told us
+how to check.** It said A2 *"must not be described as closed until the store-side predicate lands and
+that test is deliberately deleted."* Both happened in **one commit**: `f8a866d` (#259, *"scan inside
+the tenant so the cursor cannot anchor on a foreign row"*) landed the tenant-aware store search **and**
+deleted `search_cursor_oracle_remains_open_for_tenant_scoped_caller`. Established with
+`git log -S` on the test name rather than from a changelog. The `RETRACTION` entry's matching "A2
+remains PARTIAL" line is resolved with it.
+
+- **A stale comment this unit cannot fix, reported per U-505's precedent.**
+  `crates/acdp-registry-core/src/handlers/context.rs:1262-1277` still says
+  `search_cursor_oracle_remains_open_for_tenant_scoped_caller` *"asserts the residue so that is
+  machine-checked rather than remembered"* — that test no longer exists — and still describes
+  *"pushing the tenant predicate into the store's search SQL"* as what closing it **requires**, which
+  `f8a866d` did. `crates/**` is outside U-507's grant, so this is reported, not repaired.
+
+**`docker-compose.yml`'s two paired entries, which resolve in opposite directions.** `:2778` said the
+recipe offers **no** environment path to enable auth; `:2867` said the recipe **now passes**
+`ACDP_REGISTRY_AUTH__ENABLED`. Both cannot be current, and the second is: **`docker/docker-compose.yml:90`**
+forwards it. So `:2778` is SUPERSEDED and `:2867` is CONFIRMED — the hazard it raises is real and is
+now documented where an upgrader meets it (`docs/UPGRADING.md:110-124`).
+
+- **Method note, because this nearly became a false finding against another lane's work.** A grep of
+  `docker-compose.yml` returned nothing and read as "not forwarded" — the file is
+  `docker/docker-compose.yml`, not at the repo root. The pattern was right and the path was wrong.
+
+**`### The caps/config RETRACTION`'s latent → CONFIRMED unreachable, with its trigger kept.** The
+assumption was that dropping the `CtxId::parse` guard is safe, reachable only via *"a migration or
+import path that writes `contexts` rows without minting through `CtxId`"*. No such path exists: there
+is no import or bulk-insert path, and the migrations that appear to insert into `contexts` insert into
+**`contexts_fts`**, the FTS shadow table (`002_fts5.sql:15,33`, `013_fts5_porter.sql:44`). A grep for
+`INSERT INTO contexts` matches `contexts_fts` as a **prefix** — that near-miss is why this was read
+rather than counted.
+
+**Four left open on their own terms, each with an owner:** the `challenge_per_agent` label rename
+(unfalsifiable here — **operators**); `/contexts/search`'s untenanted default and `total_estimate`'s
+return, both wanting an explicit ruling rather than closure by inertia, which one of them forbids in
+its own text (**the leader**); and U-501's cost judgement, which is unmeasurable by construction so
+evidence cannot close it (**the reviewer**). `H-A / P5`'s concurrency bound and #242 gap are
+**CONFIRMED as deliberate trades**, since the entry classifies them that way itself and both still hold.
+
+**The two the equality caught.** AC1's balance is not decoration: it surfaced two declarations this
+unit had walked past — `:928` (the all-expired refusal, a **second** declaration inside an item whose
+first one was already resolved) and the `CtxId` latent above. A floor (`>= 20 resolved`) would have
+passed with both still open. `:928` stays **UNCONFIRMED deliberately**: the flag was raised in the done
+report as the entry requires, no `playground.refuse_on_no_live_pin` key exists in the tree, and closing
+it because nobody objected for three days is exactly the inertia another entry in this file forbids.
+**Owner:** the leader.
