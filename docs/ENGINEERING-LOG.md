@@ -31,6 +31,83 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-508 (lane-3) — shellcheck + actionlint, and what the gate cannot do -->
+
+### Added
+
+- **`shellcheck` and `actionlint` now run on every pull request**, in
+  `.github/workflows/lint.yml`. Neither had ever run in this repo, which mattered from the moment
+  U-503 added its first shell script — 222 lines in the container publish path. The cost of the
+  gap is on the record: that script's first draft silently dropped the last token of its input
+  (`while read` returns false on a line with no trailing newline) and therefore *passed the release
+  run it was written to reject*. It was caught by falsifying against real incident data, which is
+  not a mechanism that repeats itself reliably. `shellcheck` catches that class mechanically.
+
+- **A separate workflow rather than jobs in `ci.yml`, for a reason that is not tidiness.** The
+  linters need no Rust toolchain and no cargo cache, so they share nothing with that file's matrix;
+  `ci.yml` is ~500 lines that several people edit concurrently; and a distinct check name means a
+  shell finding is reported as `lint` rather than arriving disguised as `rustfmt`. That last point
+  is the same mislabelling argument U-503 used to justify keeping the release rebuild — a check, like
+  an image, should not carry a name that misdescribes its contents.
+
+- **Both linters are pinned, and neither is fetched blindly.** `shellcheck` comes from the
+  `taiki-e/install-action` SHA already trusted in `ci.yml`, at **0.11.0**, rather than from the
+  runner image, which ships **0.9.0** — a linter whose version floats with the image can redden a
+  commit that touched nothing, and can pass locally while failing in CI. `install-action` has no
+  `actionlint` manifest (checked: 103 manifests, `actionlint` is not among them), so `actionlint`
+  is fetched from its own release, pinned by version **and** verified against the checksum
+  published with that release. A job whose entire purpose is raising the floor on shell quality
+  does not get to pipe an unverified remote script into a shell.
+
+- **The job asserts both binaries exist before linting anything.** `actionlint` shells out to
+  `shellcheck` for `run:` blocks; with `shellcheck` missing it would lint workflow syntax, say
+  nothing at all about the embedded shell, and still exit 0. That is a gate quietly covering less
+  than it claims, and it is invisible from the outside — so presence is asserted and both versions
+  are printed.
+
+### Fixed
+
+- **Four findings, three fixed properly and one suppressed narrowly.** `ci.yml:357` and
+  `docker.yml:170` each had `for i in $(seq 1 30)` with `i` never used (SC2034); they are "repeat N
+  times" loops, so `for _ in` makes the warning go away by the code being correct. `ci.yml`'s
+  coverage summary made four separate `>>` appends to `$GITHUB_STEP_SUMMARY` (SC2129), now one
+  grouped append. The one suppression is SC2020 on `tr ', \t' '\n\n\n\n'` in
+  `docker/assert-image-tags.sh`: that maps three separator *characters* each to a newline, which is
+  what `tr` is for, while SC2020 warns against expecting `tr` to replace *words*. Equalising the
+  set lengths does not silence it, and the alternatives are worse — unquoted parameter expansion
+  trades SC2020 for SC2086 plus glob exposure needing `set -f`, and `sed` diverges between BSD and
+  GNU on `\n` in the replacement. Rewriting tested code in the publish path to quiet a *note* is
+  the wrong trade. One directive, one code, with the reason written out, at function scope because
+  a `#` between backslash-continued lines is part of the command rather than a comment.
+
+- **`--self-test` in `docker.yml` stays, and is not redundant with `shellcheck`.** They prove
+  different things: `shellcheck` proves the script is well-formed shell, the self-test proves its
+  logic still rejects the real pre-fix tag sets from runs 34734871991 and 34725795501. Neither
+  implies the other, and the proof is the incident itself — the last-token bug was *perfectly
+  well-formed shell* that a linter would have passed while the guard silently accepted the release
+  it existed to reject.
+
+### Changed
+
+- **What this gate does not do, recorded here because a reader will otherwise assume it.** Branch
+  protection on `main` enumerates its required contexts — `rustfmt`, `clippy`, `tests`,
+  `conformance (spec fixtures)` — and `lint` is **not** among them. A red `lint` makes a pull
+  request visibly red; it does **not** prevent a merge. `docker`/`build` and `coverage` are already
+  non-blocking in exactly this way, so this is the repo's existing pattern rather than something
+  introduced here. Making it blocking is a protected-branch settings change, not a change to any
+  file in the tree; the exact call is in `lint.yml`'s header, including the warning that
+  `contexts` is replaced wholesale, so omitting an existing entry silently un-requires it.
+
+- **A trap named while it is cheap:** those four job names are an external contract with branch
+  protection. Renaming one without updating protection in the same change removes a required
+  context, and every subsequent PR waits forever on a check that will never report.
+
+- **`actionlint`'s own workflow checks found nothing.** Worth stating plainly, because the unit was
+  scoped expecting latent bugs of the `v*`-tag-that-never-matched kind this repo has already hit
+  once: there are none. All three workflow findings were `shellcheck` on embedded `run:` blocks.
+  The value delivered here is the standing gate, not this batch of four fixes, and three style nits
+  should not be dressed up as a vindication of the search.
+
 <!-- unit U-503 (lane-3) — the `sha-` tag had two writers; BACKLOG C-D1 / C-D2 -->
 
 ### Fixed

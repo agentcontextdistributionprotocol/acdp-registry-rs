@@ -1,0 +1,140 @@
+name: lint
+
+# Shell and workflow linting. Separate from ci.yml on purpose: these linters need
+# no Rust toolchain and no cargo cache, so they share nothing with that file's
+# matrix, ci.yml is ~500 lines that several people edit at once, and a distinct
+# check name means a shell finding is reported as `lint` rather than arriving
+# disguised as `rustfmt`.
+#
+# WHAT THIS CHECK DOES NOT DO — do not assume otherwise. Branch protection on
+# `main` enumerates its required contexts (`rustfmt`, `clippy`, `tests`,
+# `conformance (spec fixtures)`). `lint` is not among them, so a red `lint` makes
+# the PR visibly red but does NOT prevent a merge. Making it blocking is a
+# protected-branch settings change, not a change to this file:
+#
+#   gh api -X PATCH repos/{owner}/{repo}/branches/main/protection/required_status_checks \
+#     -f 'contexts[]=rustfmt' -f 'contexts[]=clippy' -f 'contexts[]=tests' \
+#     -f 'contexts[]=conformance (spec fixtures)' -f 'contexts[]=lint'
+#
+# (`contexts` is replaced wholesale, so every existing context must be repeated
+# or it is dropped — which would silently un-require the four checks that
+# actually gate this repo today.)
+#
+# Do NOT rename this job, or any job in ci.yml, without updating branch
+# protection in the same change: a required context that stops reporting leaves
+# every PR waiting forever on a check that will never arrive.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned rather than taken from the runner image, which ships shellcheck
+      # 0.9.0. A linter whose version floats with the image is a gate that can
+      # go red on a commit that touched nothing, and can pass locally while
+      # failing here. install-action is already used and SHA-pinned in ci.yml.
+      - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        with:
+          tool: shellcheck@0.11.0
+
+      # install-action has no actionlint manifest (103 tools, actionlint is not
+      # one), so install it from its own release — pinned to a version AND
+      # verified against the checksum published with that release. Not
+      # `curl | bash`: this job exists to raise the floor on shell quality, so it
+      # does not get to pipe an unverified remote script into a shell.
+      - name: install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location -o actionlint.tgz "$url"
+          echo "${ACTIONLINT_SHA256}  actionlint.tgz" | sha256sum --check -
+          tar -xzf actionlint.tgz actionlint
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 actionlint "$HOME/.local/bin/actionlint"
+          rm -f actionlint.tgz actionlint
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Both binaries must be present and their versions visible. actionlint
+      # shells out to shellcheck for `run:` blocks; if shellcheck were missing it
+      # would lint workflow syntax, say nothing about the shell, and still exit
+      # 0 — a gate quietly covering less than it claims. Asserting presence is
+      # what stops that being invisible.
+      - name: linter versions
+        run: |
+          set -euo pipefail
+          command -v shellcheck
+          command -v actionlint
+          shellcheck --version | sed -n '/^version:/p'
+          actionlint --version | head -n 1
+
+      # Enumerate the shell scripts two independent ways and lint the UNION:
+      # a `*.sh` glob misses an extensionless script, and a shebang scan misses a
+      # `.sh` file that has no shebang. Print the union and its count, because a
+      # gate that reports "passed" without saying what it covered is how a
+      # scanner silently covering nothing looks from the outside.
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          git ls-files '*.sh' | sort > by-ext.txt
+          git ls-files -z | while IFS= read -r -d '' f; do
+            if [ -f "$f" ] && head -n 1 -- "$f" | grep -qE '^#!.*(bash|[^a-z]sh|dash|ksh|zsh)'; then
+              printf '%s\n' "$f"
+            fi
+          done | sort > by-shebang.txt
+          sort -u by-ext.txt by-shebang.txt > scripts.txt
+
+          count=$(grep -c . scripts.txt || true)
+          echo "shell scripts found: ${count}"
+          sed 's/^/  /' scripts.txt
+          if [ "${count}" -eq 0 ]; then
+            echo "::error::no shell scripts found. This repo has had at least one since U-503, so the enumeration is broken, not the tree."
+            exit 1
+          fi
+
+          # Informational, deliberately NOT fatal: a file in one list and not the
+          # other is still linted, because the union is what gets checked. It is
+          # worth printing so a reviewer notices an extensionless script or a
+          # `.sh` with no shebang, but failing on it would be a false alarm.
+          if ! diff by-ext.txt by-shebang.txt > /dev/null; then
+            echo "note: the two enumeration methods differ (both are still linted):"
+            diff by-ext.txt by-shebang.txt || true
+          fi
+
+          # No -e/--exclude and no .shellcheckrc: suppressions belong at their
+          # site, with a reason, so they are reviewable in the diff that adds them.
+          xargs -r -a scripts.txt shellcheck --format=gcc
+
+      # actionlint covers workflow syntax, expression typing, and — via
+      # shellcheck above — every `run:` block, including this file's own.
+      #
+      # `!cancelled()` so this still runs when the shellcheck step failed. Steps
+      # default to `if: success()`, which meant a single shell nit hid every
+      # workflow finding: a contributor fixed the nit, pushed, and only then
+      # discovered the second class of problem. One push should report both.
+      # Found by watching this gate go red — the shellcheck failure skipped this
+      # step and the falsification proved only half of what it claimed to.
+      - name: actionlint
+        if: '!cancelled()'
+        run: |
+          set -euo pipefail
+          echo "workflow files: $(git ls-files '.github/workflows/*' | wc -l | tr -d ' ')"
+          git ls-files '.github/workflows/*' | sed 's/^/  /'
+          actionlint -color

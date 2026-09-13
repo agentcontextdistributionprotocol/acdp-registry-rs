@@ -2696,3 +2696,44 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   env beats TOML, so an operator who set `auth.enabled = true` in the file would have it silently
   forced back to `false`. Turning someone's auth off to make a CI step convenient is not a trade
   worth making. Left to a unit that can design the passthrough safely.
+## U-508 — "PR-blocking" means runs-and-can-fail, not listed-in-branch-protection
+
+- **Plan:** `plans/u-508-lint-shell-and-workflows.md` (Open question 1)
+- **Assumed:** that the assign's "wire both as PR-blocking checks" means the linters run on
+  `pull_request` and can fail the check, rather than that the new `lint` context must be added to
+  `required_status_checks`.
+- **Chose:** deliver the former in full, and escalate the latter rather than perform it.
+  `gh api repos/…/branches/main/protection` shows `required_status_checks.contexts` is enumerated —
+  `["rustfmt","clippy","tests","conformance (spec fixtures)"]`, `strict: true`. So `lint` will run
+  and can go red, but will **not** prevent a merge. `docker`/`build` and `coverage` are already
+  non-blocking in exactly this way, which is why the narrower reading is also the one consistent
+  with how this repo already works.
+- **Why not just add the context:** it is not a path, so it falls outside a path grant entirely; it
+  changes merge behaviour for **every** contributor, which is outward-facing rather than local; and
+  a peer cannot authorize it on the human's behalf. The exact call is recorded in `lint.yml`'s
+  header and in `done`, including that `contexts` is replaced wholesale so omitting an existing
+  entry silently un-requires it.
+- **Alternatives:** adding the linters as steps inside an already-required job (e.g. `rustfmt`) —
+  **rejected**, it would report a shell failure under a check named `rustfmt`, which is the same
+  mislabelling defect U-503 refused when it declined to retag a `main`-labelled image as a release;
+  renaming a job to cover more ground — **rejected and dangerous**, the four job names are an
+  external contract with branch protection, and a required context that stops reporting leaves
+  every PR waiting forever.
+- **Blast radius if wrong:** the gate advises instead of blocking until one API call is made. Loud,
+  not silent: the limitation is in the workflow header, the log entry, the PR body and `done`.
+- **Status:** UNCONFIRMED — the leader decides whether to make `lint` required, or to route it to
+  the human as a repo-settings change.
+
+## U-508 — a separate lint.yml rather than jobs inside ci.yml
+
+- **Plan:** `plans/u-508-lint-shell-and-workflows.md` (Open question 2)
+- **Assumed:** a new workflow file is better here than extending `ci.yml`.
+- **Chose:** new file. The linters need no Rust toolchain and no cargo cache, so they share nothing
+  with `ci.yml`'s matrix; `ci.yml` is ~500 lines and lane-1/lane-2 are both in adjacent CI surface
+  this wave, so a separate file is the lower-conflict choice; and a distinct check name makes a
+  shell finding legible rather than disguised as `rustfmt`.
+- **Alternatives:** jobs in `ci.yml` — rejected for the conflict surface and the naming; one
+  combined job — rejected, `shellcheck` and `actionlint` failing for unrelated reasons under one
+  check name is harder to read, though they do share a job here since both are seconds long.
+- **Blast radius if wrong:** one file moves. No behaviour depends on which file the steps live in.
+- **Status:** UNCONFIRMED — cheap to reverse; recorded so the choice is visible rather than assumed.
