@@ -12,8 +12,8 @@ workspace = true
 
 [dependencies]
 acdp                = { workspace = true }
-acdp-registry-store = { path = "../acdp-registry-store", version = "0.1.2" }
-acdp-registry-types = { path = "../acdp-registry-types", version = "0.1.2", default-features = false }
+acdp-registry-store = { path = "../acdp-registry-store", version = "0.1.3" }
+acdp-registry-types = { path = "../acdp-registry-types", version = "0.1.3", default-features = false }
 async-trait = { workspace = true }
 chrono      = { workspace = true }
 serde       = { workspace = true }
@@ -28,4 +28,4 @@ uuid        = { workspace = true }
 tempfile = "3"
 # `features = ["test-support"]` pulls in the shared cross-backend parity
 # assertions that tests/parity.rs runs against this backend.
-acdp-registry-store = { path = "../acdp-registry-store", version = "0.1.2", features = ["test-support"] }
+acdp-registry-store = { path = "../acdp-registry-store", version = "0.1.3", features = ["test-support"] }
