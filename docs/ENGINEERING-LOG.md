@@ -31,6 +31,79 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-503 (lane-3) — the `sha-` tag had two writers; BACKLOG C-D1 / C-D2 -->
+
+### Fixed
+
+- **`sha-<short>` was a mutable tag, and the release that exposed it moved one 19m44s after it
+  was published.** `.github/workflows/docker.yml` publishes on a push to `main` *and* on an
+  `acdp-registry-server/v*` tag, and release-plz tags the commit it merges
+  (`release-plz.toml`'s `git_tag_name`), so a release gives one commit two publishing runs.
+  `type=sha` sat in the shared `tags:` rules, ungated, so both runs computed and pushed
+  `sha-<short>`. Measured on v0.1.3 (`f8b6d9e`): run 34734028111 published `sha-f8b6d9e` ->
+  `sha256:b9315cc84f08` at 02:52:16Z, and run 34734871991 re-pointed it to
+  `sha256:cf2f85068eb6` at 03:12:00Z. GHCR confirms the move by *state* rather than by
+  inference — `b9315cc8` now carries only `[latest, main]`, having lost the `sha-` tag it was
+  published with. A `sha-`-prefixed tag reads as content-addressed and was not: anyone who
+  pinned it inside that window is running different bytes than they pinned.
+  `concurrency: docker-${{ github.ref }}` does not help, because the two runs are different
+  refs — the file already says so about a related case.
+
+- **The fix is one gate, not a new mechanism.** `type=sha` now carries
+  `enable={{is_default_branch}}` — the same gate the `latest` rule already used — so the three
+  main-line tags (`main`, `latest`, `sha-<short>`) share one gate and one writer: the
+  default-branch push. The release run publishes only its version tags and has nothing left with
+  which to re-point a `sha-` tag. **This is a single-writer guarantee, not registry-level
+  immutability.** GHCR tags stay mutable, and re-running a `main` build by hand will rebuild that
+  commit and move its `sha-` tag. Closing *that* needs a pre-push existence check whose
+  fail-closed behaviour would block a legitimate re-run after an infrastructure flake; it was
+  priced and deliberately not taken, and the docs are worded so they stay true without it.
+
+- **The same commit is still built twice, and that is correct — this is the half of the reported
+  defect that was declined, with reasons.** The two digests for one commit are not flakiness and
+  not a reproducibility failure; they differ *deterministically*. Read off both runs' `buildx`
+  command lines: metadata-action stamps `org.opencontainers.image.version` as `main` on the
+  main-push build and as `0.1.3` on the release build, `image.created` differs, and buildx
+  attaches `--attest type=provenance,mode=max,builder-id=…/runs/<run-id>`. Labels and provenance
+  live in the config blob, so the manifests cannot agree. The obvious way to collapse the builds
+  — promoting the main digest with `buildx imagetools create` — would therefore publish a
+  release image whose own OCI `version` label reads `main` and whose provenance names the main
+  run. That trades a cosmetic problem for a mislabelling one, so the release rebuild earns its
+  keep: it is what stamps release identity into the release artifact.
+
+### Added
+
+- **A guard that rejects the exact bytes of the incident, rather than a lint that would have
+  passed on them.** `docker/assert-image-tags.sh` asserts the invariant as an **iff** — a
+  `sha-` tag is present if and only if this is a push to the default branch — and `docker.yml`
+  runs it after `metadata-action` and *before* `build + push`, so a bad tag set blocks
+  publication instead of being discovered in the registry afterwards. The iff form is the point:
+  a pull request is not the default branch, so if the gate is ever deleted, the PR that deletes
+  it computes a `sha-` tag and the guard fails **there**, before merge, rather than staying
+  silent until the next release. The reverse direction catches a gate that over-fires and
+  quietly stops publishing a documented tag.
+
+- **The guard's falsification is wired in rather than claimed.** `--self-test` runs on every
+  workflow event over a ten-case table; five cases assert that the guard *rejects*, and two of
+  those replay the real pre-fix tag sets from runs 34734871991 and 34725795501. Writing it this
+  way paid for itself immediately: the first draft silently dropped the last tag in its input
+  (`while read` returns false on a final line with no trailing newline), so it *passed* the
+  release run it was written to reject — and two other cases passed anyway for the wrong reason,
+  so no single green case would have localised it. This is also the repository's first shell
+  script, into a tree with no `shellcheck`; the self-test step is what stands in for the absent
+  linter.
+
+### Changed
+
+- **`docker/RAILWAY.md` now tells an operator which tag to deploy and why two digests for one
+  source is expected.** The tag list said `sha-<7-hex>  # every push`, which was never true of
+  pull requests and is now not true of release tags either. The deploy recipe led with
+  `:latest` while the file's own warning three paragraphs earlier said `:latest` moves on every
+  merge; it now leads with a version tag and keeps that warning intact. Added the fact an
+  operator would otherwise have to discover from the registry: a release tag and `:latest` are
+  different digests of identical source, by design, and
+  `org.opencontainers.image.revision` is what confirms two tags came from one commit.
+
 <!-- unit H-U (lane-1) — the store parameter is named for what the predicate consumes -->
 
 ### Changed
