@@ -5775,3 +5775,43 @@ part: the repo had *written down* that a `>=` floor "passes the very scanner tha
 items", pinned its fixture total as an equality on that reasoning, and left the exchange count a
 floor. **Knowing the rule did not propagate it to the neighbouring constant.** Worth a sweep when a
 lesson is recorded: find the other guards of the same shape, not just the one that prompted it.
+
+## Fixing the harness is half of curing a wrong-reason pass
+
+`pub-011` expects 400 `invalid_signature`. It was unreachable because the conformance harness bypassed
+DID verification — so the obvious cure was to make the harness verify signatures. That cure alone
+would have left the defect standing, and the fixture would have looked cured.
+
+Its `content_hash` is the literal placeholder `sha256:<recomputes-correctly-against-this-body>`, and
+the replayer pinned **no error code** for publishes, on the reasonable-sounding grounds that validation
+ordering is impl-defined. Measured with the harness fixed but the code still unpinned: `pub-011`
+**passes**, receiving `schema_violation: content_hash digest must be 64 lowercase hex chars`. A
+fixture whose entire purpose is signature verification, scored green by a schema error.
+
+**A wrong-reason pass has two independent causes — the check that cannot run, and the assertion too
+weak to notice.** Removing either one alone leaves a green test. They have to be counted separately,
+because fixing the dramatic one feels like completion: the harness change is the hard, interesting
+work, and it is exactly the moment you stop looking.
+
+The general form: whenever a test asserts a *class* of outcome (any 4xx, an error occurred, it threw)
+rather than the specific outcome it names, restoring the capability it was missing does not make it
+discriminating. Ask what else could produce the same class.
+
+## Pinning the codes said four of my own fixtures had never been right
+
+Pinning the expected error code turned up five publish fixtures passing for the wrong reason. Four
+were `did-ssrf-001..004` — fixtures **I had lit up in the previous unit** and reported as a coverage
+win. They return `schema_violation` because their bodies omit a required member, so they never reach
+the DID resolution they exist to exercise. The fifth, `pub-002`, was changed *by this unit*: pinning
+the producer key makes signature verification run before the hash gate, so it now fails on the
+signature rather than the hash its fixture names.
+
+Both went into a `CODE_DIVERGENCES` table that records the code actually returned, with a reason, and
+**asserts it**. The three available responses were: skip them (loses the coverage), leave them
+unpinned (keeps the wrong-reason pass), or pin the truth and name the gap. Only the third leaves a
+reader able to tell what is covered from what merely runs.
+
+The uncomfortable part is the useful part: "+8 fixtures replaying" was true last unit and **half of it
+was not coverage**. A count of things that execute is not a count of things that check. When reporting
+newly-covered items, the honest figure is how many now assert the thing they were written to assert —
+and you only learn that by pinning the specific outcome and seeing what breaks.
