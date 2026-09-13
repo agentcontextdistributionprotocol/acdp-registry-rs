@@ -103,6 +103,31 @@ jobs:
             *) echo "::error::metadata-action produced version '$v' for ${{ github.ref }}; the type=semver match= rule did not fire"; exit 1 ;;
           esac
 
+      # #276: release notes are generated from commit SUBJECTS, which cannot
+      # carry "upgrade these two things together or the stack will not boot".
+      # docs/UPGRADING.md is the named place operator-visible changes travel, and
+      # this is what stops that being a convention with nothing behind it: the
+      # version this image will carry must have a section there, even if that
+      # section says nothing changed.
+      #
+      # Here rather than in ci.yml because this workflow builds the operator-facing
+      # artifact -- same audience, same moment -- and because it runs on
+      # pull_request, so the release PR (where the version bump actually happens)
+      # is gated before it merges.
+      # This copy REPORTS; it does not block. `build` is not in main's
+      # required_status_checks.contexts, so a failure here leaves the merge
+      # button green. The blocking copy is in ci.yml's `fmt` job, whose check
+      # name `rustfmt` IS required -- see the rationale there (U-516). This copy
+      # is kept because docker.yml also runs on the `acdp-registry-server/v*` tag
+      # push, which ci.yml never sees.
+      - name: self-test the upgrade-notes gate
+        if: ${{ !cancelled() }}
+        run: bash docker/assert-upgrade-notes.sh --self-test
+
+      - name: assert the version has operator upgrade notes
+        if: ${{ !cancelled() }}
+        run: bash docker/assert-upgrade-notes.sh --check
+
       # The guard's own falsification, re-run on every event instead of being
       # asserted once in a PR body. Several of its cases assert that the guard
       # REJECTS, two of them replaying the real tag sets from the runs named in
