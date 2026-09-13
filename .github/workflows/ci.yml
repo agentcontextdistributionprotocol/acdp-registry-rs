@@ -48,6 +48,42 @@ jobs:
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --all-targets -- -D warnings
+
+      # #265: the clippy steps in this job type-check and lint their feature
+      # configurations; they do NOT codegen or link them. Verified directly
+      # rather than inferred: with target/debug/acdp-registry removed, a GREEN
+      # `cargo clippy --all-targets` for a configuration leaves no binary at all,
+      # while `cargo build` for the same configuration produces one (61M). So a
+      # clippy step cannot surface a link error for its configuration, because it
+      # never links it.
+      #
+      # Which configurations were actually unlinked, before these steps existed:
+      # `storage-pg,playground`, `storage-memory,playground`, no-backend, and
+      # `playground` alone were linked by NOTHING. `storage-pg` -- the
+      # configuration that ships -- had its binary linked only by docker.yml's
+      # image build (STORAGE_FEATURE=storage-pg), i.e. by a different workflow,
+      # incidentally; its test step here passes `--test pg_integration`, and this
+      # crate is bin-only, so that links a test binary and not the server. The
+      # remaining configurations are linked by `cargo test` steps whose features
+      # happen to match -- coverage any edit to those steps could remove in
+      # silence, which is the same fragility the #221 note below describes.
+      #
+      # These are ADDITIONS, not replacements. clippy is stronger on lints,
+      # build is stronger on codegen and linking; neither subsumes the other.
+      # Measured: build is 2-10s per configuration and is usually CHEAPER than
+      # the clippy step beside it, and this job is not on the critical path
+      # (tests ~2m36s vs clippy ~39s), so PR latency does not move.
+      #
+      # Each build step must keep its feature list byte-identical to the clippy
+      # step above it. Do not rename this job: `clippy` is one of the four
+      # contexts in branch protection's required_status_checks, and a required
+      # context that stops reporting leaves every PR waiting on a check that
+      # never arrives.
+      - name: build (postgres)
+        run: |
+          cargo build --locked -p acdp-registry-server \
+            --no-default-features --features storage-pg \
+            --all-targets
       - name: clippy (playground)
         run: |
           cargo clippy --locked -p acdp-registry-server \
@@ -148,21 +184,41 @@ jobs:
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-pg,playground \
             --all-targets -- -D warnings
+      - name: build (postgres + playground)
+        run: |
+          cargo build --locked -p acdp-registry-server \
+            --no-default-features --features storage-pg,playground \
+            --all-targets
       - name: clippy (memory + playground)
         run: |
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features storage-memory,playground \
             --all-targets -- -D warnings
+      - name: build (memory + playground)
+        run: |
+          cargo build --locked -p acdp-registry-server \
+            --no-default-features --features storage-memory,playground \
+            --all-targets
       - name: clippy (no storage backend)
         run: |
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features \
             --all-targets -- -D warnings
+      - name: build (no storage backend)
+        run: |
+          cargo build --locked -p acdp-registry-server \
+            --no-default-features \
+            --all-targets
       - name: clippy (playground, no storage backend)
         run: |
           cargo clippy --locked -p acdp-registry-server \
             --no-default-features --features playground \
             --all-targets -- -D warnings
+      - name: build (playground, no storage backend)
+        run: |
+          cargo build --locked -p acdp-registry-server \
+            --no-default-features --features playground \
+            --all-targets
 
       # Closes #221. `acdp-registry-types` has its own default = ["axum"]
       # feature pair, and its no-default build is a supported consumer
