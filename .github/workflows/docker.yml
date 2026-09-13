@@ -120,13 +120,13 @@ jobs:
       # name `rustfmt` IS required -- see the rationale there (U-516). This copy
       # is kept because docker.yml also runs on the `acdp-registry-server/v*` tag
       # push, which ci.yml never sees.
-      - name: assert the version has operator upgrade notes
-        if: ${{ !cancelled() }}
-        run: bash docker/assert-upgrade-notes.sh --check
-
       - name: self-test the upgrade-notes gate
         if: ${{ !cancelled() }}
         run: bash docker/assert-upgrade-notes.sh --self-test
+
+      - name: assert the version has operator upgrade notes
+        if: ${{ !cancelled() }}
+        run: bash docker/assert-upgrade-notes.sh --check
 
       # The guard's own falsification, re-run on every event instead of being
       # asserted once in a PR body. Several of its cases assert that the guard

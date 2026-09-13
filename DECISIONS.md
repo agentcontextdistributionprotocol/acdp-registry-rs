@@ -2839,3 +2839,46 @@ so they cannot drift in substance.
 
 **Status:** applied. The false "blocks" claim is corrected in `docker/assert-upgrade-notes.sh`'s
 header, in `CHANGELOG.md`, and here.
+
+### Addendum (U-516, AC8): a gate with no `if:` can silently not run
+
+Added mid-unit after lane-3 named the mechanism unprompted. A step with no explicit `if:` defaults to
+`if: success()`, so **any** earlier failing step skips it — and a skipped step reads like a passed one.
+In `docker.yml` three steps that can fail precede the gate (`checkout`, `setup-buildx-action`,
+`metadata-action`), plus `assert semver tag`, which is `if: startsWith(github.ref, 'refs/tags/')`, on
+the tag path. So the accurate description of the pre-U-516 state is not "reports but does not block";
+it is **"can silently not report, and still not block."**
+
+The first version of this unit reproduced the same defect in its new home: the gate was placed after
+`cargo fmt`, where a formatting error would have skipped it. Position alone was not the fix.
+
+Two defences, covering different failure modes:
+
+- **position** — immediately after `checkout`, so nothing that can currently fail precedes it;
+- **`if: ${{ !cancelled() }}`** — so that remains true when someone later inserts a step above it,
+  which position alone cannot guarantee. `!cancelled()` rather than `always()` because a cancelled
+  run should stop rather than press on.
+
+The same `if:` is applied to the `docker.yml` copy. That copy still cannot block, but it can now no
+longer fail to *report* on the tag-push path.
+
+**Control, run 34769860335, job `rustfmt` (103757349450).** A deliberate `exit 1` before the gate, and
+a copy of the gate with no `if:` beside the real one — two outcomes in one run:
+
+```
+3  failure  deliberate failure before the gate
+4  skipped  CONTROL - gate without if, must be SKIPPED
+5  failure  assert the version has operator upgrade notes   <- ran, and reported
+6  success  self-test the upgrade-notes gate
+```
+
+Same run, same preceding failure, opposite outcomes: that isolates the `if:` as the cause instead of
+assuming it.
+
+Also taken from lane-3: the self-test now runs **before** the assert in both workflows, matching
+U-503's ordering, so a vacuously-passing guard is caught before its verdict is trusted.
+
+**What was checked and is NOT a defect:** on the tag path, `assert semver tag` failing also skips
+`build + push` at `docker.yml`'s step 16, which likewise requires `success()`. So a skipped gate there
+never let a publish escape — the job goes red and nothing is pushed. What was lost was log legibility.
+The exposure case is the `pull_request` one above.

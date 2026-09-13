@@ -62,16 +62,21 @@ jobs:
       # Consequence accepted: a missing section and a formatting error now both
       # report on the same run, instead of the first hiding the second.
       #
+      # The self-test runs BEFORE the assert, matching U-503's ordering: a guard
+      # that passes vacuously must be caught before its verdict is trusted. The
+      # assert saying "has a section" is only meaningful once the controls have
+      # shown the check can still reject one.
+      #
       # Keep the `docker.yml` copy: it additionally triggers on the
       # `acdp-registry-server/v*` tag push, which ci.yml never sees. This one
       # blocks the pull request; that one covers the tag.
-      - name: assert the version has operator upgrade notes
-        if: ${{ !cancelled() }}
-        run: bash docker/assert-upgrade-notes.sh --check
-
       - name: self-test the upgrade-notes gate
         if: ${{ !cancelled() }}
         run: bash docker/assert-upgrade-notes.sh --self-test
+
+      - name: assert the version has operator upgrade notes
+        if: ${{ !cancelled() }}
+        run: bash docker/assert-upgrade-notes.sh --check
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
