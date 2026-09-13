@@ -77,6 +77,22 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
     let cfg = RegistryConfig::load(None).map_err(|e| anyhow::anyhow!("config: {e}"))?;
+    // #271: an EMPTY `ACDP_REGISTRY_*` override is ignored rather than applied,
+    // because `docker compose` renders an unset variable as set-to-empty and env
+    // beats the TOML file -- so every `${VAR:-}` passthrough silently replaced an
+    // operator's configured value with "". Warn here rather than dropping it
+    // quietly: for most types the old behaviour was a refusal to boot, but for a
+    // `String` key it really did override, so anyone who leaned on that gets the
+    // variable named instead of a silent change of meaning.
+    for key in RegistryConfig::empty_env_overrides_ignored() {
+        tracing::warn!(
+            env_var = %key,
+            "ignoring an EMPTY config override; the value from the config file (or \
+             the built-in default) is used instead. Unset the variable to silence \
+             this, or give it a value to override. Before #271 an empty value here \
+             either overrode with \"\" or refused to boot, depending on the field's type."
+        );
+    }
     // FEAT-09: surface every fixable misconfiguration BEFORE running
     // migrations or binding the socket. Discovering a bad jwt_secret on
     // first `/auth/token` request is much worse than discovering it now.
