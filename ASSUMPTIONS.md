@@ -367,7 +367,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   nothing in this diff breaks — the ratchet still gains real teeth in the required `tests`
   job via the two unconditional tests; only the `Replayed`-mechanism half stays
   advisory-only, the same gap that exists today for the whole ratchet.
-- **Status:** CONFIRMED (awaiting a repo admin to action the branch-protection change).
+- **Status:** CONFIRMED (2026-09-01) — actioned by a repo admin and recorded in the "Executed" bullet below; independently re-verified 2026-09-13 (U-507).
 - **Executed (2026-09-01):** a repo admin actioned the recorded recommendation.
   Re-verified via the same read-only call,
   `gh api repos/agentcontextdistributionprotocol/acdp-registry-rs/branches/main/protection`
@@ -1124,7 +1124,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   human ruling on whether the Railway recipe should enable auth). Editing them now would
   conflict with that patch and pre-empt the ruling. Verified this commit leaves it applying
   cleanly.
-- **Status: UNCONFIRMED — blocked on the R3 ruling, not on evidence.** The evidence is
+- **Status: SUPERSEDED — the standalone factual fix landed, independently of R3 (U-507, 2026-09-13).** The evidence is
   settled; only the remedy is open. **If R3 is declined, these two lines still need a
   standalone factual fix** — they do not become true by the recipe staying auth-off.
 
@@ -1188,7 +1188,7 @@ tests exist to prevent it.
 
 ## W3-U10 — CI builds every valid feature configuration (#200)
 
-### UNCONFIRMED: the four new steps run `clippy`, not `cargo build`
+### SUPERSEDED (U-510 / #265, 2026-09-13): the four new steps ran `clippy`, not `cargo build` — build steps now run beside them
 Issue #200 and the unit assignment both say "`--all-targets` builds; no test run needed."
 The four steps added to the `clippy` job run `cargo clippy … -- -D warnings` instead.
 Reasoning: all four *existing* feature steps are clippy, the job is measured at 24–43s so
@@ -2562,7 +2562,7 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   follow-up, and `acdp-ci/DELIVERY-STANDARD.md`'s status lines) were **not** verified to the same
   standard, because doing so means reading another repo's git history rather than its working tree.
   They are neither confirmed done nor confirmed live.
-- **Status:** UNCONFIRMED — the `ASSUMPTIONS.md` count of 35 is exact and bound-checked; the
+- **Status:** PARTIAL (U-507, 2026-09-13) — the `ASSUMPTIONS.md` count of 35 is CONFIRMED exact by independent re-derivation; the
   `DECISIONS.md` count of 42 is an upper bound on distinct items, not an exact count.
 ## U-503 — a shell script is the right home for a CI tag guard
 
@@ -3157,3 +3157,46 @@ assumed, and the residual is intact:
   `crates/acdp-registry-server/tests/conformance.rs`, which is **not** in U-507's grant — so it is a
   unit for whoever holds that file, not a thing this unit may fix. Upstream spec issue **#57** still
   governs whether a fixture will ever supply it.
+
+### Batch 3 — the widened grant applied, and the contradiction batch 1 shipped is now repaired
+
+The grant was widened at 17:37Z from "the status token" to "a complete status line — token plus its
+reason clause", after measurement showed the token-only form fit 6 of 41 remaining declarations.
+Append-only still governs every non-status line, so no `Assumed:` / `Chose:` / `Why:` / `Update:` /
+`Correction:` text is touched anywhere in this unit.
+
+- **`- **Status:** CONFIRMED (awaiting a repo admin to action the branch-protection change)` —
+  repaired.** Batch 1 could only rewrite the token, which left a true status welded to a false
+  clause. The line now records what actually happened: actioned 2026-09-01, recorded in the entry's
+  own `Executed` bullet, re-verified independently 2026-09-13. This was flagged in the file rather
+  than fixed by widening my own grant, which is why it survived to be repaired properly.
+
+- **`### UNCONFIRMED: the four new steps run clippy, not cargo build` → `SUPERSEDED`.** Evidence
+  recorded in batch 2 above; the heading is now flippable under the one-line treatment. Enumerated
+  rather than counted by string match, because the two differ here: the `clippy` job holds **17
+  steps**, of which **9** are named `clippy (…)` and **5** are named `build (…)`. The file contains
+  6 occurrences of the string `build (`, so a string count answers a different question than a step
+  count and cannot settle this one.
+
+- **`**Status: UNCONFIRMED — blocked on the R3 ruling, not on evidence.**` → `SUPERSEDED`.** Only
+  the bolded status span was rewritten; the sentence it shares a physical line with ("The evidence
+  is …") continues onto the next line and is untouched. The entry's own fallback clause is what
+  fired: *"If R3 is declined, these two lines still need a standalone factual fix"* — the standalone
+  fix landed, so the item closed without the ruling. `grep -ci 'never validated'` on
+  `docker/RAILWAY.md` is **0**, and the `ACDP_REGISTRY_AUTH__JWT_SECRET` row now states the opposite
+  of what the entry reports as false there.
+
+- **`## U-505 — index of deferred work` → `PARTIAL`, because only one of its two halves is closable
+  here.** The status asserted two things and they have different fates:
+  - *"the `ASSUMPTIONS.md` count of 35 is exact and bound-checked"* — **CONFIRMED**, by independent
+    re-derivation rather than by agreement. U-507's parser and U-505's hand enumeration reach the
+    same partition: 26 status-line declarations (U-505: 25 `UNCONFIRMED` + 1 `OPEN`) and 11
+    label-form (U-505: 9 bullet-is-status + 1 `###`-heading + 1 in-entry update), for 37
+    declarations before `:2537`. Two methods, built from opposite directions, same number.
+  - *"the `DECISIONS.md` count of 42 is an upper bound"* — **still open, and correctly so.** The
+    entry states the bound it could not close: items whose resolution lives in a sibling repo's
+    history (the spec-repo dispatch matrix, `acdp-ci/DELIVERY-STANDARD.md`) were not verified to the
+    same standard. **What would settle it:** classifying those 42 against the sibling repos'
+    history — a cross-repo *read*, which is permitted, but a unit's worth of work scoped to
+    `DECISIONS.md`. **Who owns it:** not U-507, whose grant is this file. Left as an upper bound
+    with the reason attached rather than silently promoted to exact.
