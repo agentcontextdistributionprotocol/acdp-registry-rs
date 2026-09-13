@@ -23,41 +23,62 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+
+      # ── Why a docs gate lives in the rustfmt job (U-516) ──
+      #
+      # This assertion also runs in `docker.yml`, next to the artifact it
+      # describes. That copy REPORTS and cannot block: `docker.yml` publishes the
+      # check named `build`, and main's required_status_checks.contexts is exactly
+      # ["rustfmt","clippy","tests","conformance (spec fixtures)"] -- `build` is
+      # not a member, so a release PR missing its UPGRADING.md section gets a red
+      # `build` and a green merge button. No lane and no lanes leader has
+      # authority over repo settings, so the fix is to run the same assertion in a
+      # job whose check name is ALREADY required, not to ask for a fifth context.
+      #
+      # `rustfmt` is that job because the gate needs a checkout and nothing else --
+      # no feature-set toolchain, no services, no buildx, no registry login --
+      # which is this job's entire dependency set too. It is also the fastest
+      # required job (~6s), so a missing section reddens in seconds rather than
+      # after the ~3min `tests` job, and a bug in this step is diagnosable here
+      # instead of being read as a real test failure.
+      #
+      # ── Why it is FIRST, and why it still carries an `if:` (U-516 AC8) ──
+      #
+      # A step with no `if:` defaults to `if: success()`, so ANY earlier failing
+      # step skips it silently. That is how the docker.yml copy could fail to run
+      # at all -- `setup-buildx-action` and `metadata-action` precede it there --
+      # leaving "the gate never ran" indistinguishable from "the gate passed".
+      # Simply moving it here would have reproduced that: placed after `cargo fmt`,
+      # a formatting error would skip the docs gate.
+      #
+      # Both defences are deliberate, and they cover different things:
+      #   - position (immediately after checkout) means nothing that can fail
+      #     currently precedes it;
+      #   - `if: ${{ !cancelled() }}` means that stays true when someone later
+      #     inserts a step above it, which position alone cannot guarantee.
+      # `!cancelled()` rather than `always()`: a cancelled run should stop, and
+      # `always()` would also fire after a manual cancellation.
+      #
+      # Consequence accepted: a missing section and a formatting error now both
+      # report on the same run, instead of the first hiding the second.
+      #
+      # Keep the `docker.yml` copy: it additionally triggers on the
+      # `acdp-registry-server/v*` tag push, which ci.yml never sees. This one
+      # blocks the pull request; that one covers the tag.
+      - name: assert the version has operator upgrade notes
+        if: ${{ !cancelled() }}
+        run: bash docker/assert-upgrade-notes.sh --check
+
+      - name: self-test the upgrade-notes gate
+        if: ${{ !cancelled() }}
+        run: bash docker/assert-upgrade-notes.sh --self-test
+
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
           components: rustfmt
       - name: cargo fmt
         run: cargo fmt --all -- --check
-
-      # ── Why a docs gate lives in the rustfmt job (U-516) ──
-      #
-      # This assertion also runs in `docker.yml`, next to the artifact it
-      # describes. That copy REPORTS and cannot block: `docker.yml` publishes the
-      # check named `build`, and main's required_status_checks.contexts is
-      # exactly ["rustfmt","clippy","tests","conformance (spec fixtures)"] --
-      # `build` is not a member, so a release PR missing its UPGRADING.md section
-      # gets a red `build` and a green merge button. Neither the lanes leader nor
-      # any lane has authority over repo settings, so the fix is to run the same
-      # assertion inside a job whose check name is ALREADY required, rather than
-      # to ask for a fifth context.
-      #
-      # `rustfmt` is that job because the gate needs a checkout and nothing else
-      # -- no toolchain feature set, no services, no registry login -- which is
-      # this job's entire dependency set too. It is also the fastest required job
-      # (~6s), so a missing section reddens in seconds rather than after the
-      # ~3min `tests` job, and a bug in this step is diagnosable here instead of
-      # being conflated with a real test failure.
-      #
-      # Keep the `docker.yml` copy: `docker.yml` additionally triggers on the
-      # `acdp-registry-server/v*` tag push, which `ci.yml` never sees, so the two
-      # copies cover different windows. This one blocks the PR; that one covers
-      # the tag.
-      - name: assert the version has operator upgrade notes
-        run: bash docker/assert-upgrade-notes.sh --check
-
-      - name: self-test the upgrade-notes gate
-        run: bash docker/assert-upgrade-notes.sh --self-test
 
   clippy:
     name: clippy
