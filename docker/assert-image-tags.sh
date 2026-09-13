@@ -118,8 +118,8 @@ check_tags() {
     fi
 
     if [ "$is_default_push" = true ]; then
-        echo "ok: ${ref} publishes $(printf '%s' "$sha_tags" | tr '\n' ' ')as its" \
-             "single writer" >&2
+        echo "ok: ${ref} publishes" \
+             "$(printf '%s' "$sha_tags" | tr '\n' ' ')" "as its single writer" >&2
     else
         echo "ok: ${event} ${ref} computes no ${SHA_TAG_PREFIX}* tag, so it cannot" \
              "re-point one" >&2

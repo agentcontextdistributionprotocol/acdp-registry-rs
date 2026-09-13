@@ -2521,3 +2521,54 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   steps; if the convention is unwelcome the logic moves to a Rust test in one commit, and the
   self-test table moves with it unchanged.
 - **Status:** UNCONFIRMED
+
+## U-503 — metadata-action honours `{{is_default_branch}}` in `enable=` for `type=sha`
+
+- **Plan:** `plans/u-503-immutable-sha-tag.md` (Phase 2)
+- **Assumed:** that `docker/metadata-action@dc80280` evaluates the `{{is_default_branch}}`
+  handlebars expression in the `enable=` option of a `type=sha` rule, not only in the
+  `type=raw` rule where this file already uses it (`docker.yml`, the `latest` rule).
+- **Chose:** the handlebars form anyway, rather than the GitHub expression that carries no such
+  question. Reason: `enable=${{ !startsWith(github.ref, 'refs/tags/') }}` evaluates **true for
+  pull requests**, so `sha-` would still be computed in-PR and the invariant would have to
+  weaken from an iff to "no `sha-` on tag pushes" — which is exactly the one-directional form
+  that cannot fire on the PR that breaks it. Keeping the in-PR firing property is worth more
+  than avoiding this question.
+- **Why it is safe to leave unresolved:** it fails closed and fast. If the handlebars is not
+  honoured, this PR's own `docker` run computes a `sha-` tag on a pull request and the new
+  `assert image tags` step fails the job — at the assert step, about a minute in, before the
+  20-minute build. There is no path where a wrong guess here publishes anything.
+- **Named fallback:** `enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}`
+  — a plain GitHub expression with identical semantics that preserves the in-PR property.
+- **Alternatives:** reading the action's README and believing it (rejected — the run output is
+  the only evidence that counts here, and it is free); pinning a newer action version (not
+  needed, and a version bump is a separate change).
+- **Blast radius if wrong:** one failed CI step and a two-token edit. Nothing publishes.
+- **Status:** UNCONFIRMED — resolve from this PR's `docker` run output, specifically whether
+  the computed `tag-names` contain a `sha-` entry on a pull request.
+
+## U-503 — the double build is KEPT; only the mutable tag is fixed
+
+- **Plan:** `plans/u-503-immutable-sha-tag.md` (Open question 2)
+- **Assumed:** that "the same commit gets built twice at all", which the unit brief named as
+  part of the defect, is in fact correct behaviour and should survive this unit.
+- **Chose:** to fix only the mutable tag, and to argue this in the PR body rather than quietly
+  omitting half of what was asked. The evidence is in the two runs' `buildx` command lines:
+  metadata-action stamps `org.opencontainers.image.version=main` on the main build and `=0.1.3`
+  on the release build, `image.created` differs, and buildx attaches
+  `--attest type=provenance,mode=max,builder-id=…/runs/<run-id>`. Labels and provenance live in
+  the config blob, so the two digests differ **deterministically, by construction** — this is
+  not flakiness. Therefore promoting the main digest to `:0.1.3` with
+  `buildx imagetools create`, the obvious way to collapse the builds, would publish a release
+  image whose own OCI `version` label reads `main` and whose provenance names the main run. That
+  is a mislabelling regression traded for a cosmetic one, so the rebuild earns its keep: it is
+  what stamps release identity into the release artifact.
+- **Alternatives:** collapse to a retag (rejected, above); make the builds bit-reproducible
+  (unreachable for the same reason, and the brief explicitly says reproducibility is not the
+  acceptance bar); publish only from the tag path and drop the main-push publish (rejected — it
+  would remove `:latest`/`:main`, which `docker/RAILWAY.md` documents and operators deploy).
+- **Blast radius if wrong:** the leader overrules the call and the double build is collapsed in
+  a follow-up unit. Nothing in this change forecloses that — the gate and the guard stay correct
+  either way, since a single publishing path trivially satisfies the one-writer invariant.
+- **Status:** UNCONFIRMED — the leader named this as part of the defect and is entitled to
+  overrule the reasoning on evidence.
