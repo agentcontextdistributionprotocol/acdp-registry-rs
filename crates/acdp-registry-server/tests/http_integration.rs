@@ -10396,3 +10396,121 @@ async fn publish_with_run_id(
     let v = body_to_json(resp).await;
     (status, v)
 }
+
+// ---------------------------------------------------------------------------
+// U-504: the search refill loop (REG-P2-8).
+//
+// Six survivors live in this loop's control flow, and a probe explains why:
+// instrumenting `iterations` and running the ENTIRE server suite produced not
+// one iteration beyond the first. The loop body past its first pass was dead to
+// every test in the repo, so nothing could distinguish a cap of 6 from a cap of
+// 7, or from no cap at all.
+//
+// Reaching it needs a post-filter that actually drops rows. `?visibility=` is
+// the one that still can: search returns only PUBLIC rows to every requester
+// (measured — anonymous, audience member and the producer itself all see only
+// the public row), so `?visibility=private` drops the entire page and leaves
+// `accumulated` at zero while further pages remain.
+// ---------------------------------------------------------------------------
+
+/// Search as `agent`, returning the parsed body.
+async fn search_as(app: &axum::Router, query: &str, bearer: Option<&str>) -> Value {
+    let mut builder = Request::builder().uri(format!("/contexts/search?{query}"));
+    if let Some(b) = bearer {
+        builder = builder.header("authorization", format!("Bearer {b}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    body_to_json(resp).await
+}
+
+/// The refill loop must scan exactly `SEARCH_REFILL_MAX_PAGES` inner pages —
+/// no more, no fewer — when the post-filter empties every page.
+///
+/// Kills all six surviving mutations in `run_search_with_refill`'s loop
+/// control. The trick is that the *matches* cannot discriminate: with
+/// `?visibility=private` the answer is an empty list however many pages were
+/// scanned. What differs is HOW FAR the scan got, and the returned
+/// `next_cursor` carries exactly that. Resuming an unfiltered search from it
+/// and counting what remains turns "pages scanned" into an observable number:
+///
+/// | mutation | pages scanned | how it dies |
+/// |---|---|---|
+/// | (correct) | 6 | — 10 rows left after the cursor |
+/// | `:1274` `<` -> `<=` | 7 | scan exhausted, so there is NO cursor to resume |
+/// | `:1274` `<` -> `==` | 1 | 60 rows left |
+/// | `:1274` `<` -> `>`  | 1 | 60 rows left |
+/// | `:1272` `<` -> `>`  | 1 | 60 rows left |
+/// | `:1270` `\|\|` -> `&&` | 1 (no tenant, so `post_filtered` is false) | 60 rows left |
+/// | `:1147` `+=` -> `*=` | 7 (`iterations` pinned at 0, cap never trips) | scan exhausted, no cursor |
+///
+/// The two that run past the cap reach the end of the 70 rows, so they fail on
+/// the ABSENT cursor rather than on a row count — which is why that `.expect`
+/// carries a message about the cap rather than a bare unwrap.
+///
+/// The publish rate limiter is switched off (`publish_rate_per_minute = 0`)
+/// because 70 publishes from one agent otherwise trip it at the 60th and the
+/// test would redden in its fixture rather than at its assertion.
+#[tokio::test]
+async fn search_refill_scans_exactly_the_page_cap_when_the_filter_empties_every_page() {
+    let mut cfg = config(true);
+    cfg.limits.publish_rate_per_minute = 0;
+    let h = harness_from_config(cfg).await;
+    let app = &h.router;
+
+    let p = producer(61);
+    for i in 0..70u32 {
+        let req = p
+            .publish_request()
+            .title(format!("u504refill-{i}"))
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let (s, v) = publish(app, &req, None).await;
+        assert_eq!(s, StatusCode::OK, "publish {i} = {v}");
+    }
+
+    // Control: all 70 rows are visible and searchable in one big page, so the
+    // arithmetic below is about the CURSOR and not about rows going missing.
+    let all = search_as(app, "q=u504refill&limit=100", None).await;
+    assert_eq!(
+        all["matches"].as_array().unwrap().len(),
+        70,
+        "fixture must expose all 70 rows to an unfiltered search: {all}"
+    );
+
+    // `?visibility=private` matches nothing, so every inner page is emptied by
+    // the post-filter and the loop refills until the cap stops it.
+    let narrowed = search_as(app, "q=u504refill&visibility=private&limit=10", None).await;
+    assert_eq!(
+        narrowed["matches"].as_array().unwrap().len(),
+        0,
+        "no row is private, so the filtered page must be empty: {narrowed}"
+    );
+    let cursor = narrowed["next_cursor"]
+        .as_str()
+        .expect("a refill that stopped at the cap must hand back a cursor to resume from")
+        .to_string();
+
+    // How far did the scan actually get? Resume unfiltered and count.
+    let rest = search_as(
+        app,
+        &format!(
+            "q=u504refill&limit=100&cursor={}",
+            pct_encode_path_segment(&cursor)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(
+        rest["matches"].as_array().unwrap().len(),
+        10,
+        "the loop must have scanned exactly 6 inner pages of 10, leaving 10 of \
+         the 70 rows beyond the returned cursor. 60 remaining means it gave up \
+         after one page; 0 means it ran past the cap to exhaustion: {rest}"
+    );
+}
