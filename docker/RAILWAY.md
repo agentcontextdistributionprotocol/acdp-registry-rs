@@ -35,6 +35,31 @@ ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every pus
 > tags stay mutable, and re-running a `main` build by hand will rebuild that
 > commit and move its `sha-` tag to the new digest.
 
+> **If you need an identifier that cannot move, pin the digest — no tag can give
+> you this.** Every published image is addressable as
+> `ghcr.io/agentcontextdistributionprotocol/acdp-registry@sha256:<64-hex>`, and a
+> digest is the content address: it names exactly those bytes and nothing else
+> can ever be published under it.
+>
+> ```bash
+> # Resolve the digest a tag currently points at, then deploy the digest.
+> docker buildx imagetools inspect \
+>   ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex> \
+>   --format '{{.Manifest.Digest}}'
+> ```
+>
+> This is the answer to "I want `sha-` to be immutable" (#267), and it is
+> deliberately **not** solved by a CI check. GHCR exposes no tag-immutability or
+> tag-protection setting, so nothing enforceable at the registry exists to turn
+> on; a pre-push check in this repo's workflow would bind only this workflow,
+> while anyone with package write access could still move a tag by hand. Pinning
+> the digest is not a workaround for a missing feature — it is the mechanism
+> registries actually provide for this, and it costs nothing.
+>
+> What you give up by pinning a digest is automatic patching: a digest never
+> moves, so it never picks up a fix. That is the same trade as any exact pin, and
+> it is the trade you are asking for when you ask for immutability.
+
 > **A release tag and `:latest` are different digests of identical source, and
 > that is by design.** When a release is cut, the merge to `main` and the release
 > tag both build the same commit, and the two images differ *deterministically*:

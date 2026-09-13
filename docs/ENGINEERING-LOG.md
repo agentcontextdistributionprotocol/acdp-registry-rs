@@ -4951,3 +4951,51 @@ The recipe now passes an empty `ACDP_REGISTRY_AUTH__ENABLED`. A binary from befo
 rejects an empty boolean outright, so pulling the new `docker-compose.yml` against an older image
 breaks the boot. Called out in README's Configuration section. Not mitigated in code — the
 alternative is omitting the passthrough, which leaves the gap #271 was filed about.
+
+## U-512 — #267: declining to make `sha-` tags immutable, and documenting what actually is
+
+#267 asked for a pre-push existence check so a hand-run re-run of a `main` build could not repoint
+`sha-<short>`. **Declined, with the argument recorded in `DECISIONS.md` and the residual risk
+accepted explicitly rather than left implied.**
+
+The deciding fact was checked rather than assumed: GHCR's package API exposes no tag-immutability,
+tag-protection or retention setting — the returned keys are `created_at, html_url, id, name, owner,
+package_type, repository, updated_at, url, version_count, visibility`. There is nothing at the
+registry to turn on, so anything shipped here would be a *workflow* check, and the package is
+repo-scoped, so anyone with package write can push over a tag without touching the workflow. Written
+as one sentence with its limit inside — which is how the assign asked for it — the guarantee would
+read: *"this workflow will not repoint a `sha-` tag, though anyone with package write access still
+can."* That is not what #267 asked for, and shipping it under the name "immutability" is the
+overclaim class this board keeps finding.
+
+Meanwhile the immutable identifier already exists and costs nothing: the digest. Verified
+end-to-end rather than asserted —
+
+```
+docker buildx imagetools inspect :sha-33bb3a3 --format '{{.Manifest.Digest}}'
+  -> sha256:002469d2dc7d6f1263a058010976f0ec7e4a2ba52c6db3cdece1e866a9a29df3
+```
+
+— which matches the digest the packages API records for that tag. So the real problem #267 names,
+that the `sha-` prefix *invites* being read as content-addressed, is a documentation problem.
+`docker/RAILWAY.md` now answers it where operators actually choose a tag, including the cost of
+pinning a digest (it never picks up a fix) so the trade is stated rather than sold.
+
+### The counter-argument, kept rather than buried
+
+A CI check **would** stop the realistic accident — a maintainer clicking *Re-run all jobs*. That is
+the honest case for implementing, and it is recorded in `DECISIONS.md` next to the reasons for
+declining rather than omitted to make the decision look cleaner. It does not carry because the harm
+is bounded: the rebuild is from the same commit by construction, so what differs is build metadata,
+`image.created` and the provenance attestation — reproducibility and audit, not behaviour.
+
+### On not manufacturing mechanism
+
+The escape hatch that would have made the fail-closed cost tolerable (a `workflow_dispatch` input
+permitting overwrite) is pullable by anyone who could re-run the job in the first place. It would
+have converted the guarantee into "immutable unless someone chose otherwise" — which is the status
+quo with more moving parts and a more reassuring name. A decision recorded with its reasoning beats
+a mechanism nobody wants.
+
+No workflow change, so U-503's `type=sha` single-writer gate, `flavor: latest=false`, `assert image
+tags` and its `--self-test` are all untouched and still running.

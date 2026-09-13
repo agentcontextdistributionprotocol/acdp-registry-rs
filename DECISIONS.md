@@ -2556,3 +2556,81 @@ Rejected: a second bumper call in `bump-spec.yml` (more moving parts, and `ci.ym
 that the bumper refuses to bump a file carrying two pin anchors at all — a file it silently declines
 is worse than one it was never pointed at); and duplicate-and-document, whose only honest mitigation
 is a check that fails on disagreement, which is more work than deriving.
+
+## U-512 — #267: `sha-` tags will NOT be made immutable by a CI check (2026-09-13, lane-1)
+
+**Decided by:** Opus (lane-1), under the autonomy ladder. Consequential but decidable and reversible
+in a commit; the assign named both outcomes as complete units. **Outcome: won't-do, with the
+residual risk accepted explicitly and a cheaper answer documented.**
+
+### What was asked
+
+Give `sha-<short>` registry-level immutability via a pre-push existence check that fails the job when
+the tag already exists, so a hand-run re-run of a `main` build cannot repoint it.
+
+### Why not
+
+**1. "Registry-level" is not available on this registry, so the name overstates whatever we build.**
+Checked rather than assumed: GHCR's package API for
+`orgs/agentcontextdistributionprotocol/packages/container/acdp-registry` exposes
+`created_at, html_url, id, name, owner, package_type, repository, updated_at, url, version_count,
+visibility` — and nothing for tag immutability, tag protection, or retention. There is no registry
+setting to turn on. Anything we ship is a **workflow** check.
+
+**2. A workflow check binds the workflow, not the tag.** The package is repo-scoped, so anyone who
+can push to the repo (or holds a PAT with `write:packages`) can `docker push` over a `sha-` tag
+directly, never touching this workflow. Stated as one sentence with its limit inside, per the
+assign's own instruction, the guarantee would read: *"this workflow will not repoint a `sha-` tag,
+though anyone with package write access still can."* That is materially weaker than what #267 asks
+for, and shipping it under the name "immutability" is the overclaim class this board keeps catching.
+
+**3. The immutable identifier already exists, costs nothing, and is the mechanism registries
+actually provide.** Every published image is addressable by digest
+(`...acdp-registry@sha256:<64-hex>`). Verified end-to-end: `docker buildx imagetools inspect
+:sha-33bb3a3 --format '{{.Manifest.Digest}}'` returns
+`sha256:002469d2dc7d6f1263a058010976f0ec7e4a2ba52c6db3cdece1e866a9a29df3`, which matches the digest
+the packages API records for that tag. A digest cannot be repointed by anyone, including us. The
+real problem #267 names — that the `sha-` prefix *invites* being read as content-addressed — is a
+documentation problem, and it is now fixed in `docker/RAILWAY.md` where operators choose a tag.
+
+**4. The fail-closed cost lands on the worst day.** The check fires on the re-run after an infra
+flake, which is exactly when the pipeline needs to move, and recovery means deleting a published tag
+by hand. We would be trading "a re-run can move a tag" for "a flake wedges publication until someone
+does registry surgery."
+
+**5. An escape hatch would make the guarantee nominal while keeping the complexity.** The obvious
+mitigation for (4) is a `workflow_dispatch` input permitting overwrite. But anyone who can re-run the
+job can also dispatch it with the input set, so the guarantee degrades to "immutable unless someone
+chose otherwise" — which is what we already have, with more moving parts. It is auditable, which is
+a real but small gain; it does not change who can move a tag.
+
+### The honest counter-argument, and why it does not carry
+
+A CI check **would** prevent the realistic accident: a maintainer clicking *Re-run all jobs* on a
+`main` build. That is the actual failure mode, not a malicious insider. Declining still seems right
+because the harm from that accident is bounded — the rebuilt image is from the same commit by
+construction (the tag encodes it), so what changes is build metadata, `image.created`, and the
+provenance attestation, not which source was built. The exposure is reproducibility and audit, not
+behaviour. And the fix for "someone pinned a mutable identifier" is to pin the immutable one, which
+now costs a documented one-liner.
+
+If that judgement is wrong, it is wrong cheaply: re-opening is a commit.
+
+### Residual risk, ACCEPTED not missed
+
+A hand-run re-run of a `main` build rebuilds that commit and moves its `sha-<short>` tag to a new
+digest. Anyone who pinned `sha-<short>` and expected content-addressing gets a different digest of
+the same source. This is **unchanged** by this unit and is stated in `docker/RAILWAY.md` in the same
+paragraph that describes the single-writer guarantee, so a reader choosing a tag meets the limit and
+the alternative together rather than discovering it later.
+
+### What is NOT reopened
+
+D-W5-11's double-build ruling stands and was not revisited.
+
+### What this unit changed
+
+`docker/RAILWAY.md` only: digest pinning documented as the answer, with the command, the reason a CI
+check is not it, and the cost of pinning a digest (it never picks up a fix). No workflow change, so
+U-503's `type=sha` single-writer gate, `flavor: latest=false`, `assert image tags` and `--self-test`
+are untouched.
