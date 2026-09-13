@@ -2695,3 +2695,45 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   check name is harder to read, though they do share a job here since both are seconds long.
 - **Blast radius if wrong:** one file moves. No behaviour depends on which file the steps live in.
 - **Status:** UNCONFIRMED — cheap to reverse; recorded so the choice is visible rather than assumed.
+
+## U-510 — the msrv job's `cargo check` steps stay `check` rather than becoming builds
+
+- **Plan:** `plans/u-510-build-feature-configurations.md` (Open question 1)
+- **Assumed:** that verifying the 1.88 toolchain *accepts* the language and API surface is the
+  msrv job's purpose, and that linking at MSRV is not required once every configuration is linked
+  at stable.
+- **Chose:** leave both `cargo check` steps as `check`, and say so in the PR, the log and here
+  rather than let a reader assume the gap was closed everywhere. `cargo check` shares the exact
+  defect this unit fixes — it does not codegen or link — so this is a deliberately unclosed
+  remainder, not an oversight.
+- **Reasoning:** codegen divergence between 1.88 and stable *for identical source* is a much
+  narrower risk than a configuration nothing ever links, and both msrv configurations are now
+  linked at stable by this unit's new steps.
+- **Alternatives:** convert to `cargo build` (closes it completely, costs MSRV-toolchain build time
+  for the narrower risk); add a separate MSRV build job (a new non-required check, so non-blocking —
+  the U-508 `lint` problem again).
+- **Blast radius if wrong:** a codegen defect that only 1.88 exhibits would still pass CI. Narrow,
+  and it would be caught by the stable build for any source-level cause.
+- **Status:** UNCONFIRMED — the leader may prefer the complete closure.
+
+## U-510 — build steps inside the required `clippy` job rather than a new, honestly-named job
+
+- **Plan:** `plans/u-510-build-feature-configurations.md` (Open question 2)
+- **Assumed:** that coverage which actually blocks a merge is worth more than a job name that
+  describes itself perfectly.
+- **Chose:** inside the existing `clippy` job. It is one of the four contexts in
+  `required_status_checks`, so the new builds gate merges immediately. A new job would be a check
+  that is not required and therefore cannot prevent a merge — exactly where U-508's `lint` sits,
+  still awaiting a decision. Shipping this unit's coverage in that state would have left the gap
+  effectively open.
+- **The inconsistency with U-508 is apparent, not real, and is argued in the PR rather than
+  glossed:** U-508 refused to put shell linting inside `rustfmt` because that is a *different
+  concern* wearing a Rust-formatting name. Building a feature configuration is the *same* concern
+  this job already serves nine times over. The test is concern identity, not convenience.
+- **Alternatives:** a new `builds` job (honest name, non-blocking — rejected); renaming `clippy` to
+  something broader (**rejected and dangerous** — those four names are a contract with branch
+  protection, and a required context that stops reporting leaves every PR waiting forever).
+- **Blast radius if wrong:** a reader sees "clippy" fail on a build error. Mitigated by step names
+  (`build (postgres)` etc.) making the failing step obvious, and by the comment in the job.
+- **Status:** UNCONFIRMED — cheap to move if the leader prefers the honest name and accepts
+  non-blocking.
