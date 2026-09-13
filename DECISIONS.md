@@ -3382,3 +3382,48 @@ known-positive check caught it** — the guard's first act was to correct its au
 
 **Status:** applied. 40 → 41 exchanges, 21 → 22 replayable. **`required-but-unexercised` does not
 move: it stays 6** — `cur-001`/`cur-002` are not profile-required. No wire change.
+
+---
+
+## U-535 — the §4.5 parity seam anchors on a hand-transcribed spec table
+
+**Decision:** add `EXPECTED_BY_SPEC` to `crates/acdp-registry-store/src/parity.rs` — a literal,
+per-requester table of expected `ctx_id`s transcribed by hand from RFC-ACDP-0008 §4.5 — and compare
+**both** the backend's SQL predicate and the Rust `retrieve_visible` rule against it. Correct the
+harness's doc comments to claim only what is actually compared.
+
+**What was wrong, and it is worse than a weak test.** The harness documented a "three-way seam"
+(SQLite / Postgres / Rust default). Both of its differentials in fact bottomed out in one expression:
+the trait default body *is* `retrieve_visible` (`acdp-registry-store/src/lib.rs`), and the N-call
+reference `visible_by_n_calls` calls `retrieve_visible` too. Three comparisons, one anchor.
+
+The consequence is not merely lost sensitivity. If `retrieve_visible` were wrong, the default would
+agree with the reference perfectly, that leg would stay **green**, and the only implementation able to
+disagree would be the SQL — which was derived independently. **The suite would have named the SQL as
+the broken side.** A shared-centre differential *inverts the blame* onto the one implementation that
+is still correct.
+
+**Measured, not argued.** Breaking `retrieve_visible` (`None => false` → `None => true`) at baseline
+produced, from the old legs: `over-disclosure: []` plus four raw `ctx_id`s listed as
+"SEEN ONLY BY THE N-CALL REFERENCE (under-disclosure)" — i.e. the SQL accused of *under*-disclosing,
+when the SQL was right and the reference was over-disclosing. The new anchor named
+`the Rust retrieve_visible rule` 4 times and the SQL 0 times.
+
+**Why a literal table and not a computation.** Deriving the expectation from anything in this
+workspace reintroduces the defect. The table is written from the spec text, and failures report
+fixture role names rather than nonce-bearing `ctx_id`s.
+
+**Rejected: making the third leg independent by calling the upstream authority.** `can_retrieve`
+(`acdp-server` `src/registry/server.rs`) is `pub(crate)`; no test here can call it. That premise is
+**true** — it was verified against the resolved crate source, not assumed. So the upstream comparison
+is recorded as a standing **manual** check: hand-diffed against `acdp-server` **0.13.1** on
+**2026-09-13**, normalising only `caps.anonymous_public_reads` → `public_arm_open`, and the two match
+arms were **textually identical**. Uncompared, not covered — re-run when the pin moves.
+
+**Also closed:** `private_owner_only` and `restricted_with_audience` occurred exactly twice each
+(published, pushed into the id list) and were never asserted on. Both now carry named absolute
+outsider pins, and both are covered by the table across all six perspectives.
+
+**Status:** applied. Test-only; no wire, schema or behaviour change. `retrieve_visible` was **not**
+modified — changing what a visibility predicate decides is a security change and is out of scope for
+test hardening.
