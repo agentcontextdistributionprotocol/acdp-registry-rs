@@ -436,8 +436,18 @@
 //! all -- they compare in-file consts against each other and against this file's own
 //! embedded source. The required `tests` CI job runs `cargo test --workspace` with no
 //! `ACDP_SPEC_DIR` set, so every spec-gated test above skips there; leaving these two
-//! ungated is what makes them actually block a merge instead of only advising the
-//! separate, non-required `conformance` job.
+//! ungated is what makes them block a merge even when the spec is unreachable.
+//!
+//! **Correction (U-520): the `conformance` job is NOT "non-required".** This line
+//! used to say it was, contradicting the required-checks note further down in this
+//! same doc-block. Measured against the live setting:
+//! `required_status_checks.contexts` is
+//! `["rustfmt","clippy","tests","conformance (spec fixtures)"]`, and `ci.yml`'s
+//! `conformance` job publishes exactly that fourth name. So a spec-gated test here
+//! DOES block a merge -- which is what lets `fixture_accounting_totals_are_exact`
+//! and its two companions be spec-gated and still be gates rather than advice. The
+//! ungated pair above remain valuable for the different reason that they hold when
+//! the spec is unreachable.
 //!
 //! **`COVERED` models two legitimate coverage mechanisms, not one.** The plan driving
 //! this phase originally preferred deriving `COVERED` purely from replayed-exchange
@@ -8991,6 +9001,108 @@ const DEFERRED: &[(&str, &str, u32)] = &[];
 /// name-adjacency to the reason string -- and the reclassification just demonstrated
 /// the cost of coupling these pins to one bucket. Deliberately NOT a fourth partition
 /// member either -- that would touch every set check in the file.
+/// Why a fixture in [`UNEXERCISED_FIXTURES`] is not exercised, and how badly
+/// that matters. The three grades are kept apart deliberately: flattening
+/// "the spec requires this of the profile we advertise" into the same bucket
+/// as "conditional on a capability" destroys the severity difference, and the
+/// severity is the entire reason anyone acts on the tracking issue.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Unexercised {
+    /// Named in `registries/profiles.json` -> `acdp-registry-core` ->
+    /// `required_fixtures`. This registry advertises that profile
+    /// (`config.rs`, served over `/.well-known/acdp.json`), so the obligation
+    /// is unconditional.
+    RequiredByProfile,
+    /// Named in that profile's `conditional_fixtures`: required only when the
+    /// advertised capabilities satisfy the entry's condition.
+    ConditionalOnCapability,
+}
+
+/// **Fixtures no test in this suite ever asks for (U-520).**
+///
+/// Not a coverage claim and not an excuse — the opposite of both. Every id here
+/// is a spec obligation of a profile this registry advertises, with **no test
+/// requesting it**, recorded so the gap is counted and visible instead of
+/// silent. Tracking issue: **#291**. Do not add an entry without one.
+///
+/// ## Why this is a parallel list and not a re-keyed partition
+///
+/// The `COVERED` / `EXCUSED` / `DEFERRED` partition buckets by **family**, and
+/// that granularity is correct for the question it answers — "does this family
+/// have a coverage mechanism at all" — which must be asked per family, because
+/// `anc`/`can`/`idem`/`wit` are covered by direct in-process tests and produce
+/// **zero** replayed exchanges (see the module doc's coverage-ratchet section).
+/// The defect found here is not that the unit is too coarse; it is that a
+/// second question — "is this particular fixture exercised?" — was never asked.
+/// Re-keying the partition to fix it would have destroyed the answer to the
+/// first question.
+///
+/// `DEFERRED` in particular is the wrong vehicle, for four concrete reasons:
+/// it is family-keyed, so putting `pub` here would (1) move `pub` out of
+/// `COVERED` and delete the only guard that its existing tests still exist,
+/// (2) assert `pub` is uncovered while 3 of its fixtures replay — false in the
+/// opposite direction, (3) break `PARTIAL_DIRECT`, whose invariant is
+/// membership in `DEFERRED` union `EXCUSED`, and (4) fail
+/// `known_families_partition_into_covered_excused_or_deferred`'s issue
+/// allow-list outright. `PARTIAL_DIRECT` faced the same shape — *"the partition
+/// above buckets by family, which leaves a gap once a family is only partly
+/// closable"* — and solved it with a structure **alongside** the partition.
+/// This follows that precedent exactly: the family partition is untouched and
+/// `DEFERRED` stays empty.
+///
+/// ## How this list was produced (and why the first two attempts were wrong)
+///
+/// By instrumenting the **request** sites — `find_fixture_by_id`, plus the two
+/// loaders that fetch by filename — and running the whole suite. Two earlier
+/// instruments were discarded after failing a known-positive check:
+/// `find_fixture_by_id` alone missed `wit-004`, which a local closure loads by
+/// filename; and instrumenting `read_json` over-counted enormously, because the
+/// finder **scans every file** looking for an id, so "read" measured scanning
+/// rather than use. The surviving measurement was cross-checked against the
+/// replayer's own per-family tally (pub 3 + ret 1 + vis 26 = 30, matching its
+/// `replayed 30`).
+const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
+    // `pub` claims `CoverageMechanism::Replayed` on 3 replayed fixtures
+    // (pub-004/005/008) while the profile requires 14. These are the other 11.
+    ("pub-001", Unexercised::RequiredByProfile),
+    ("pub-002", Unexercised::RequiredByProfile),
+    ("pub-003", Unexercised::RequiredByProfile),
+    ("pub-006", Unexercised::RequiredByProfile),
+    ("pub-007", Unexercised::RequiredByProfile),
+    ("pub-009", Unexercised::RequiredByProfile),
+    ("pub-010", Unexercised::RequiredByProfile),
+    ("pub-011", Unexercised::RequiredByProfile),
+    ("pub-012", Unexercised::RequiredByProfile),
+    ("pub-013", Unexercised::RequiredByProfile),
+    ("pub-014", Unexercised::RequiredByProfile),
+    // `ret` likewise claims `Replayed` on ret-001 alone.
+    ("ret-002", Unexercised::RequiredByProfile),
+    // Conditional: required because of what this registry advertises.
+    // `err-002` is the one that started U-519/U-520 — it arrived with the
+    // `16211e6` bump, is behavioural (so the generic replayer skips it), and
+    // no direct test asked for it. The gate it describes IS now enforced and
+    // asserted by `publish_enforces_the_err002_media_type_matrix` in
+    // `http_integration.rs`; it is listed here because nothing reads the
+    // FIXTURE, which is a different claim.
+    ("dk-003", Unexercised::ConditionalOnCapability),
+    ("err-002", Unexercised::ConditionalOnCapability),
+    ("idem-007", Unexercised::ConditionalOnCapability),
+];
+
+/// Total fixtures in the pinned spec's `schemas/conformance`, as an **equality**.
+///
+/// This is the ratchet that would have caught `err-002`: the count was 143
+/// before the `16211e6` bump and is 144 after. A `>=` floor passes the very
+/// scanner that is silently missing items, so a 145th fixture must fail the
+/// build and force a human to classify it — which is precisely what did not
+/// happen when `err-002` arrived inside an already-covered family.
+const TOTAL_FIXTURES_AT_PIN: usize = 144;
+
+/// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
+/// test from the same `extract()` the replayer itself dispatches on, so this
+/// cannot drift from what actually replays.
+const REPLAYABLE_FIXTURES_AT_PIN: usize = 11;
+
 const PARTIAL_DIRECT: &[(&str, &[&str])] = &[
     (
         "rcpt",
@@ -12991,4 +13103,216 @@ fn direct_fns_matches_the_coverage_tables_exactly() {
          PARTIAL_DIRECT — coverage was withdrawn from the tables while the \
          compile-time entry kept it looking registered: {stale:?}"
     );
+}
+
+/// `(filename stem, fixture id)` for every fixture at the pinned spec.
+/// `registries/profiles.json` names fixtures by **filename stem**
+/// (`pub-001-happy-path`), while everything else in this file keys on the
+/// fixture's own `id` (`pub-001`), so the two must be joined explicitly rather
+/// than assumed equal.
+fn fixture_stems_and_ids() -> Option<Vec<(String, String)>> {
+    let fixtures = spec_fixtures()?;
+    let entries = std::fs::read_dir(&fixtures).ok()?;
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .collect();
+    paths.sort();
+    Some(
+        paths
+            .into_iter()
+            .map(|path| {
+                let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+                let id = read_json(&path)["id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("fixture {} missing string 'id'", path.display()))
+                    .to_string();
+                (stem, id)
+            })
+            .collect(),
+    )
+}
+
+/// The `acdp-registry-core` profile's `required_fixtures` and the union of its
+/// `conditional_fixtures[].fixtures`, as **fixture ids**.
+fn profile_obligations() -> Option<(Vec<String>, Vec<String>)> {
+    let root = spec_root()?;
+    let profiles = read_json(&root.join("registries/profiles.json"));
+    // `profiles` is an ARRAY of profile objects keyed by an `id` field, not a
+    // map. Assuming the map shape made `profile_obligations` return `None`,
+    // which made the caller take its "spec unavailable" skip branch and report
+    // PASS while asserting nothing -- caught by falsifying the grade check,
+    // not by reading this line.
+    let core = profiles
+        .get("profiles")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("id").and_then(Value::as_str) == Some("acdp-registry-core"))?;
+    let stems = fixture_stems_and_ids()?;
+    let to_ids = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .filter_map(|stem| {
+                        stems
+                            .iter()
+                            .find(|(s, _)| s == stem)
+                            .map(|(_, id)| id.clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let required = to_ids(core.get("required_fixtures")?);
+    let mut conditional: Vec<String> = Vec::new();
+    for entry in core.get("conditional_fixtures")?.as_array()? {
+        if let Some(f) = entry.get("fixtures") {
+            conditional.extend(to_ids(f));
+        }
+    }
+    Some((required, conditional))
+}
+
+/// **The fixture-level ratchet (U-520).** Every count is an EQUALITY, never a
+/// floor: a floor passes the very scanner that is silently missing items, which
+/// is how `err-002` arrived inside an already-covered family and was noticed by
+/// nobody. A 145th fixture, or a 16th unexercised one, fails here and forces a
+/// human to classify it.
+///
+/// Moving a fixture INTO `UNEXERCISED_FIXTURES` requires editing a count, so it
+/// cannot happen quietly. Moving one OUT — i.e. writing a test that finally
+/// exercises it — requires editing the list and the count, and nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn fixture_accounting_totals_are_exact() {
+    let Some(stems) = fixture_stems_and_ids() else {
+        eprintln!("conformance: spec unavailable; skipping fixture_accounting_totals_are_exact");
+        return;
+    };
+
+    assert_eq!(
+        stems.len(),
+        TOTAL_FIXTURES_AT_PIN,
+        "the pinned spec carries {} fixtures, not {TOTAL_FIXTURES_AT_PIN}. A fixture was \
+         added or removed: classify it (exercised, excusable, or UNEXERCISED_FIXTURES) \
+         and update the count. This assertion is the one that `err-002` slipped past when \
+         the only ratchet was per-family.",
+        stems.len()
+    );
+
+    // Derived from the same `extract()` the replayer dispatches on, so it
+    // cannot drift from what actually replays.
+    let fixtures = spec_fixtures().expect("stems resolved implies fixtures resolve");
+    let replayable = stems
+        .iter()
+        .filter(|(stem, _)| {
+            let fx = read_json(&fixtures.join(format!("{stem}.json")));
+            matches!(extract(&fx), Extracted::Run(_) | Extracted::RunStateful(_))
+        })
+        .count();
+    assert_eq!(
+        replayable, REPLAYABLE_FIXTURES_AT_PIN,
+        "{replayable} fixtures are HTTP-replayable, not {REPLAYABLE_FIXTURES_AT_PIN}"
+    );
+
+    let required = UNEXERCISED_FIXTURES
+        .iter()
+        .filter(|(_, g)| *g == Unexercised::RequiredByProfile)
+        .count();
+    let conditional = UNEXERCISED_FIXTURES
+        .iter()
+        .filter(|(_, g)| *g == Unexercised::ConditionalOnCapability)
+        .count();
+    assert_eq!(required, 12, "expected exactly 12 required-but-unexercised");
+    assert_eq!(
+        conditional, 3,
+        "expected exactly 3 conditional-but-unexercised"
+    );
+    assert_eq!(
+        required + conditional,
+        UNEXERCISED_FIXTURES.len(),
+        "the two grades must partition the list — a third grade was added without \
+         updating this assertion"
+    );
+}
+
+/// Every id in [`UNEXERCISED_FIXTURES`] must be a **real fixture** and must
+/// carry the grade the spec's own profile gives it.
+///
+/// Without this the list could quietly rot into prose: an id that no longer
+/// exists, or one graded `RequiredByProfile` that the profile does not in fact
+/// require, would overstate the gap exactly as silence understated it.
+#[tokio::test(flavor = "multi_thread")]
+async fn unexercised_fixtures_are_real_and_graded_by_the_spec() {
+    let (Some(stems), Some((required, conditional))) =
+        (fixture_stems_and_ids(), profile_obligations())
+    else {
+        // A silent skip here once made this test report PASS while asserting
+        // nothing (see `profile_obligations`). Under ACDP_REQUIRE_CONFORMANCE
+        // -- which CI sets -- being unable to resolve the profile is a hard
+        // failure, not a green skip.
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but the acdp-registry-core profile could not \
+             be resolved from registries/profiles.json; this test cannot conclude anything, \
+             so it fails rather than passing"
+        );
+        eprintln!(
+            "conformance: spec unavailable; skipping \
+             unexercised_fixtures_are_real_and_graded_by_the_spec"
+        );
+        return;
+    };
+    let on_disk: Vec<&str> = stems.iter().map(|(_, id)| id.as_str()).collect();
+
+    for (id, grade) in UNEXERCISED_FIXTURES {
+        assert!(
+            on_disk.contains(id),
+            "UNEXERCISED_FIXTURES names \"{id}\", which is not a fixture at the pinned \
+             spec — it was renamed or removed and this list was not updated"
+        );
+        match grade {
+            Unexercised::RequiredByProfile => assert!(
+                required.iter().any(|r| r == id),
+                "\"{id}\" is graded RequiredByProfile but is not in acdp-registry-core's \
+                 required_fixtures"
+            ),
+            Unexercised::ConditionalOnCapability => assert!(
+                conditional.iter().any(|c| c == id),
+                "\"{id}\" is graded ConditionalOnCapability but is not in \
+                 acdp-registry-core's conditional_fixtures"
+            ),
+        }
+    }
+}
+
+/// A fixture cannot be listed as unexercised while the replayer drives it.
+///
+/// This is the direction that would make the list *lie in our favour's
+/// opposite* — overstating the gap — and it is also what keeps the list honest
+/// as coverage improves: the moment a fixture starts replaying, saying it is
+/// unexercised becomes a build failure rather than stale prose.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_unexercised_fixture_is_actually_replayed() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: spec unavailable; skipping no_unexercised_fixture_is_actually_replayed"
+        );
+        return;
+    };
+    let Some(stems) = fixture_stems_and_ids() else {
+        return;
+    };
+    for (id, _) in UNEXERCISED_FIXTURES {
+        let Some((stem, _)) = stems.iter().find(|(_, fid)| fid == id) else {
+            continue;
+        };
+        let fx = read_json(&fixtures.join(format!("{stem}.json")));
+        assert!(
+            matches!(extract(&fx), Extracted::Skip(_)),
+            "\"{id}\" is listed in UNEXERCISED_FIXTURES but the replayer CAN drive it — \
+             either it is now exercised and should leave the list, or the list is wrong"
+        );
+    }
 }

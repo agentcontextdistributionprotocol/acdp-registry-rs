@@ -3102,3 +3102,60 @@ the accept-set reddens the agreement test at `application/acdp+json`.
 **Status:** applied. `/admin/*` has the same ungated shape on three handlers and is deliberately NOT
 fixed here — it is U-522, so that wire change is reviewed on its own terms rather than riding in on a
 publish fix.
+
+---
+
+## Decision: count fixtures, not families — a parallel list, not a re-keyed partition (U-520, PR B)
+
+**The measurement.** At spec pin `16211e6` there are 144 fixtures. **11** are HTTP-replayed, **76** are
+requested by a direct test, and **57 are requested by nothing**. `err-002` — the fixture U-519 found —
+is one of the 57. It was never special; it was the one that happened to get noticed.
+
+Split against `registries/profiles.json` → `acdp-registry-core`, the profile this registry advertises:
+**12 required** (`pub-001/002/003/006/007/009-014`, `ret-002`), **3 conditional** (`dk-003`, `err-002`,
+`idem-007`), 42 neither. `pub` claims `CoverageMechanism::Replayed` on 3 replayed fixtures while the
+profile requires 14; `ret` claims it on `ret-001` alone.
+
+**The diagnosis is "an unasked question", not "a unit that is too coarse", and the distinction picks
+the fix.** The family partition answers *does this family have a coverage mechanism at all*, which
+genuinely must be asked per family: `anc`/`can`/`idem`/`wit` are covered by direct in-process tests and
+produce **zero** replayed exchanges, so a per-fixture replay-derived rule would brand all four
+uncovered — the exact design `:443-451` records as considered and rejected. Re-keying the partition to
+answer the second question would have destroyed the answer to the first.
+
+**`DEFERRED` rejected as the vehicle** — it is family-keyed, so listing `pub` there would (1) move
+`pub` out of `COVERED`, deleting the only guard that its tests still exist, (2) assert `pub` is
+uncovered while 3 of its fixtures replay — false in the opposite direction, (3) break `PARTIAL_DIRECT`,
+whose invariant is membership in `DEFERRED` ∪ `EXCUSED`, and (4) fail the partition test's issue
+allow-list outright.
+
+**Adopted: `UNEXERCISED_FIXTURES`, a fixture-level list ALONGSIDE the family partition**, following
+`PARTIAL_DIRECT`'s precedent — which exists because *"the partition above buckets by family, which
+leaves a gap once a family is only partly closable."* Same shape, one level finer. The partition is
+untouched and `DEFERRED` stays empty. Anchored to **#291**.
+
+**Every count is an equality, never a floor.** `TOTAL_FIXTURES_AT_PIN = 144`,
+`REPLAYABLE_FIXTURES_AT_PIN = 11` (derived in-test from the same `extract()` the replayer dispatches
+on, so it cannot drift), and 15 = 12 + 3. **A floor passes the very scanner that is silently missing
+items** — which is how a fixture arriving inside an already-covered family tripped nothing.
+
+**Falsified individually, each at a distinct assertion:** a simulated 145th fixture reddens the total
+(this is the `err-002` regression, reproduced); a mis-graded entry reddens the grade check; a
+non-existent id reddens the existence check; listing a replayed fixture reddens
+`no_unexercised_fixture_is_actually_replayed`; a wrong replayable count and a wrong required count each
+redden their own assertion.
+
+**One of those falsifications found a defect in this unit's own work.** The grade check initially
+PASSED while mis-graded, because `profiles.json`'s `profiles` is an **array**, not a map: the lookup
+returned `None`, the test took its "spec unavailable" branch, and it reported green while asserting
+nothing. Fixed, and the skip branch now asserts `!require_conformance()` first, so under CI's
+`ACDP_REQUIRE_CONFORMANCE` an unresolvable profile is a hard failure rather than a green skip.
+
+**Also corrected: the module doc called the `conformance` job "non-required",** contradicting its own
+required-checks note further down. Measured: `contexts` is
+`["rustfmt","clippy","tests","conformance (spec fixtures)"]` and `ci.yml`'s `conformance` job publishes
+that fourth name. This matters here because all three new tests are spec-gated, so a non-required
+conformance job would have made this whole ratchet advisory.
+
+**Status:** applied. Covering the 12 required fixtures is deliberately NOT in this unit — it is real
+conformance work, scoped from #291.
