@@ -611,7 +611,7 @@ use acdp::producer::Producer;
 #[cfg(feature = "playground")]
 use acdp::registry::RegistryServer;
 use acdp::types::capabilities::{CapabilitiesDocument, Limits};
-use acdp::types::primitives::{AgentDid, ContentHash, ContextType, CtxId, Visibility};
+use acdp::types::primitives::{AgentDid, ContentHash, ContextType, CtxId, LineageId, Visibility};
 use acdp::types::publish::{PublishRequest, PublishResponse};
 use acdp::types::{DataRef, DataRefType, EmbeddedContent, EmbeddedEncoding};
 use acdp::AnchorEntry;
@@ -6501,7 +6501,38 @@ async fn anc_get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
 /// panic naming both the id and the searched directory — a
 /// silently-skipped conformance test is exactly the failure mode this
 /// repo's whole ratchet exists to prevent.
+/// Fixture ids passed to [`find_fixture_by_id`] since the last
+/// [`reset_requested_fixtures`]. This is the instrument behind
+/// `exercised_fixtures_are_really_requested` -- see `EXERCISED_FIXTURES`.
+static REQUESTED_FIXTURES: std::sync::Mutex<Option<std::collections::BTreeSet<String>>> =
+    std::sync::Mutex::new(None);
+
+/// Begin recording fixture requests, discarding anything recorded before.
+fn reset_requested_fixtures() {
+    *REQUESTED_FIXTURES
+        .lock()
+        .expect("REQUESTED_FIXTURES poisoned") = Some(Default::default());
+}
+
+/// Whether `id` has been requested since the last [`reset_requested_fixtures`].
+fn fixture_was_requested(id: &str) -> bool {
+    REQUESTED_FIXTURES
+        .lock()
+        .expect("REQUESTED_FIXTURES poisoned")
+        .as_ref()
+        .is_some_and(|set| set.contains(id))
+}
+
 fn find_fixture_by_id(fixtures: &Path, id: &str) -> Option<Value> {
+    // Recording is OFF unless a guard has explicitly switched it on, so the
+    // ordinary suite pays one uncontended lock per call and nothing else.
+    if let Some(set) = REQUESTED_FIXTURES
+        .lock()
+        .expect("REQUESTED_FIXTURES poisoned")
+        .as_mut()
+    {
+        set.insert(id.to_string());
+    }
     let entries = std::fs::read_dir(fixtures).unwrap_or_else(|e| panic!("read {fixtures:?}: {e}"));
     let mut paths: Vec<PathBuf> = entries
         .filter_map(Result::ok)
@@ -9445,13 +9476,29 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
     // it, and the publish arm pins the expected code so "some 400" is no
     // longer enough to pass. What remains below is unreplayable for
     // structural reasons, not for want of a harness.
-    ("pub-003", Unexercised::RequiredByProfile),
-    ("pub-006", Unexercised::RequiredByProfile),
+    //
+    // U-533 retired FIVE of the six required rows -- `pub-003`, `pub-006`,
+    // `pub-009`, `pub-010` and `ret-002`. Each is now requested by a named test
+    // registered in `EXERCISED_FIXTURES`, which is compile-bound to that test and
+    // checked at runtime by `exercised_fixtures_are_really_requested`. None of
+    // them became replayable: four are driven by direct tests because their own
+    // bodies cannot reach the rule they describe (`pub-006`/`pub-009` carry
+    // 96-char signatures where ed25519 needs 88 -- the `pub-008` defect;
+    // `pub-010` has no inline body at all), and `pub-003` needs a seeded
+    // predecessor that no seeding path matches. Widening Shape A to drive
+    // `pub-006`/`pub-009` was the obvious repair and would have manufactured two
+    // new wrong-reason passes.
+    //
+    // `pub-007` is the ONE that stays, and deliberately: it requires
+    // **201 + a percent-encoded `Location`** where this registry returns 200 and
+    // sets no `Location` anywhere. That is the first wire change in this wave that
+    // breaks clients behaving correctly, it is escalated to the human as U-526 and
+    // unanswered, and its entire subject IS the response shape -- so unlike
+    // `pub-010` (whose 201 is incidental to its contributors[] subject and is
+    // handled by the `anc-001`/`idem-001` corrected-status precedent), it cannot
+    // be exercised by asserting a corrected status without deleting the point of
+    // the fixture. Do not retire this row to close the gap.
     ("pub-007", Unexercised::RequiredByProfile),
-    ("pub-009", Unexercised::RequiredByProfile),
-    ("pub-010", Unexercised::RequiredByProfile),
-    // `ret` likewise claims `Replayed` on ret-001 alone.
-    ("ret-002", Unexercised::RequiredByProfile),
     // Conditional: required because of what this registry advertises.
     // `err-002` is the one that started U-519/U-520 — it arrived with the
     // `16211e6` bump, is behavioural (so the generic replayer skips it), and
@@ -11538,6 +11585,499 @@ async fn pub010_non_did_web_contributor_is_accepted_and_persisted() {
          would satisfy a status-only assertion while failing the rule the fixture pins. \
          served = {served:?}"
     );
+}
+
+/// **pub-003 (RFC-ACDP-0003 §3.1) — U-533.** A supersession whose declared
+/// `lineage_id` does not match the predecessor's is refused with **400
+/// `superseded_target`** carrying `details.reason = "lineage_mismatch"`.
+///
+/// # Why this was unexercised, and why it is a direct test
+///
+/// `pub-003` is spelled with `input.endpoint` + `input.body` — the form Shape E
+/// reads — and its body is fully concrete, with a correctly-sized 88-char
+/// signature. It is **not** blocked by either defect that stops `pub-006`/`009`.
+/// What stops it is `input.preconditions.existing_context`: the fixture is only
+/// meaningful against a registry that already holds the target, and `extract()`'s
+/// unseeded-precondition gate correctly refuses to replay it against an empty
+/// store. Shape D does the seeding for fixtures spelled with a `setup` key;
+/// `pub-003` uses `preconditions`, so it matches no seeding path.
+///
+/// Widening Shape D's seeder to `input.preconditions` was the alternative. It is
+/// rejected deliberately: that seeder is shared, `REPLAYABLE_FIXTURES_AT_PIN` is
+/// an **equality**, and changing what other fixtures replay to reach one fixture
+/// puts the risk in the wrong place. A direct test seeds exactly what this
+/// fixture needs and nothing else.
+///
+/// # The control is what makes this more than "some 400"
+///
+/// Three different conditions in the store's supersession path all produce
+/// `superseded_target`, with different `reason`s: `not_found` (the caller does not
+/// own the predecessor), `lineage_mismatch`, and `version_mismatch`. A test that
+/// asserted only the status, or only the code, would pass against any of the
+/// three — and the ownership gate runs *first*, so the easiest way to get a green
+/// "400 superseded_target" is to accidentally fail ownership and never reach the
+/// lineage comparison at all. So this asserts `details.reason` specifically, and
+/// the control publishes the same supersession with the **correct** lineage_id
+/// and requires it to succeed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pub003_superseding_with_a_mismatched_lineage_id_is_refused() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping pub-003 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "pub-003") else {
+        return;
+    };
+
+    // ---- The fixture's own literals.
+    assert_eq!(
+        fx["expected"]["http_status"].as_u64(),
+        Some(400),
+        "pub-003 must expect 400: {fx}"
+    );
+    assert_eq!(
+        fx["expected"]["error_code"], "superseded_target",
+        "pub-003 must expect superseded_target: {fx}"
+    );
+    assert_eq!(
+        fx["expected"]["details"]["reason"], "lineage_mismatch",
+        "pub-003's whole subject is the `lineage_mismatch` REASON -- `superseded_target` alone is \
+         also produced by the not_found and version_mismatch arms: {fx}"
+    );
+    // Recorded reason this is seeded by hand rather than replayed.
+    assert!(
+        !fx["input"]["preconditions"]["existing_context"].is_null(),
+        "pub-003 is retired by a direct test because it carries input.preconditions that no \
+         seeding path matches. If that precondition is gone, reconsider replaying it: {fx}"
+    );
+    // And the body's signature is the RIGHT length -- i.e. unlike pub-006/pub-009
+    // this fixture is not additionally blocked by the `pub-008` shape defect.
+    // Stated as an assertion so the two reasons cannot be conflated later.
+    assert_eq!(
+        fx["input"]["body"]["signature"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .len(),
+        88,
+        "pub-003's signature is correctly sized; seeding is its ONLY blocker. If this changes, the \
+         reasoning recorded here no longer holds: {fx}"
+    );
+
+    // ---- Seed the precondition for real: a v1 the same producer owns.
+    let app = did_key_harness(did_key_caps()).await;
+    let producer = Producer::new_did_key(SigningKey::from_bytes(&[113u8; 32]));
+    let v1 = producer
+        .publish_request()
+        .title("u533 pub-003 predecessor")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .acdp_version("0.2.0")
+        .build()
+        .unwrap();
+    let (s1, b1) = post_publish_json(&app, serde_json::to_value(&v1).unwrap()).await;
+    assert_eq!(
+        s1,
+        StatusCode::OK,
+        "pub-003 seeding: the predecessor publish must succeed, or nothing below tests \
+         supersession. body = {b1}"
+    );
+    let prev_ctx = CtxId(b1["ctx_id"].as_str().expect("ctx_id").to_string());
+    let true_lineage = b1["lineage_id"].as_str().expect("lineage_id").to_string();
+
+    // ---- THE CONTROL, first: the same supersession with the CORRECT lineage_id
+    //      must be accepted. Without this, a 400 from the ownership gate (which
+    //      runs BEFORE the lineage comparison) would read as a pass.
+    let ok_v2 = producer
+        .supersede(prev_ctx.clone())
+        .title("u533 pub-003 control: correct lineage")
+        .version(2)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .acdp_version("0.2.0")
+        .expected_lineage_id(LineageId(true_lineage.clone()))
+        .build()
+        .unwrap();
+    let (cs, cb) = post_publish_json(&app, serde_json::to_value(&ok_v2).unwrap()).await;
+    assert_eq!(
+        cs,
+        StatusCode::OK,
+        "control: superseding with the predecessor's REAL lineage_id must be accepted, or the \
+         rejection below cannot be attributed to the lineage mismatch (the ownership and version \
+         gates produce the same `superseded_target` code). body = {cb}"
+    );
+
+    // ---- Now the only change is a wrong declared lineage_id. Take the wrong
+    //      value from the fixture itself rather than inventing one.
+    let fixture_lineage = fx["input"]["body"]["lineage_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("pub-003: input.body.lineage_id missing: {fx}"));
+    assert_ne!(
+        fixture_lineage, true_lineage,
+        "the fixture's lineage_id must differ from the seeded predecessor's, or this mutation \
+         changes nothing"
+    );
+    let bad_v2 = producer
+        .supersede(prev_ctx)
+        .title("u533 pub-003: mismatched lineage")
+        .version(2)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .acdp_version("0.2.0")
+        .expected_lineage_id(LineageId(fixture_lineage.to_string()))
+        .build()
+        .unwrap();
+    let (status, body) = post_publish_json(&app, serde_json::to_value(&bad_v2).unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "pub-003: a supersession declaring a lineage_id that is not the predecessor's must be \
+         refused with 400. body = {body}"
+    );
+    assert_eq!(
+        body["error"]["code"], "superseded_target",
+        "pub-003 body = {body}"
+    );
+    assert_eq!(
+        body["error"]["details"]["reason"], "lineage_mismatch",
+        "pub-003: the REASON must be lineage_mismatch specifically. `not_found` here would mean \
+         the ownership gate fired first and the lineage comparison was never reached; \
+         `version_mismatch` would mean the version gate did. Either would be a green test that \
+         checks nothing about lineage. body = {body}"
+    );
+}
+
+/// **ret-002 (RFC-ACDP-0003) — U-533.** `GET /lineages/{lineage_id}/current`
+/// returns the newest **non-superseded** version, and `expired` counts as
+/// non-superseded.
+///
+/// # Why this was unexercised
+///
+/// `ret-002` carries a `setup` key and `scenarios[]`, so it satisfies Shape D's
+/// predicate — but Shape D's seeder models **contexts**, while this fixture's
+/// setup describes **lineages with a per-version status** (`superseded`,
+/// `expired`, `active`). `parse_shape_d` cannot express that, so the fixture
+/// matched no seeding path and nothing ever requested it.
+///
+/// # Two of its three scenarios are driven; the third is unreachable BY THE
+/// FIXTURE'S OWN ACCOUNT, and that is asserted rather than asserted around
+///
+/// Scenario 1 ("all versions superseded → 404") needs a lineage whose **every**
+/// version is superseded. That cannot be produced through the HTTP surface:
+/// superseding a head makes the superseding version the new, non-superseded head,
+/// so the set can never be emptied this way. **The fixture says so itself** — its
+/// own `note` calls the state "Abnormal state: reachable only via admin
+/// correction or data corruption".
+///
+/// So rather than fabricate it through a store-level insert — which would assert
+/// against a state the public surface cannot reach, and prove nothing about the
+/// endpoint a client actually calls — this test asserts that the fixture still
+/// makes that claim. If a future spec bump drops the "abnormal" note, or the
+/// registry gains an admin path that can produce the state, this assertion
+/// reddens and the scenario becomes genuinely owed.
+///
+/// That is the honest reading of the AC: the fixture is now **requested and
+/// partly driven**, with the undriven third scenario named, attributed to the
+/// spec's own words, and guarded against silently becoming coverable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ret002_lineage_current_returns_the_newest_non_superseded_version() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping ret-002 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "ret-002") else {
+        return;
+    };
+
+    // ---- The fixture's own shape: three scenarios, in the order relied on below.
+    let scenarios = fx["scenarios"]
+        .as_array()
+        .unwrap_or_else(|| panic!("ret-002: scenarios missing: {fx}"));
+    assert_eq!(
+        scenarios.len(),
+        3,
+        "ret-002 is expected to carry exactly 3 scenarios (all-superseded, expired head, active \
+         head). A fourth would be uncovered by this test and must be handled deliberately: {fx}"
+    );
+    assert_eq!(
+        scenarios[0]["expected"]["status"].as_u64(),
+        Some(404),
+        "ret-002 scenario 1 must expect 404: {fx}"
+    );
+    assert_eq!(
+        scenarios[1]["expected"]["registry_state"]["status"], "expired",
+        "ret-002 scenario 2's subject is that an EXPIRED head is still returned: {fx}"
+    );
+    assert_eq!(
+        scenarios[2]["expected"]["registry_state"]["status"], "active",
+        "ret-002 scenario 3's subject is the ordinary active head: {fx}"
+    );
+
+    // ---- Scenario 1: undriven, and the reason is the fixture's own.
+    let abnormal_note = fx["setup"]["lineages"][0]["note"]
+        .as_str()
+        .unwrap_or_else(|| panic!("ret-002: setup.lineages[0].note missing: {fx}"));
+    assert!(
+        abnormal_note.contains("Abnormal state"),
+        "ret-002 scenario 1 is NOT driven here, on the grounds that the fixture itself calls the \
+         all-superseded state abnormal and reachable only via admin correction or data \
+         corruption. That justification lives in the fixture's own note, which now reads \
+         {abnormal_note:?}. If the note no longer says so, this scenario is owed real coverage."
+    );
+
+    let app = did_key_harness(did_key_caps()).await;
+
+    // ---- Scenario 3 first (the ordinary case): v1 superseded by an active v2.
+    let p3 = Producer::new_did_key(SigningKey::from_bytes(&[131u8; 32]));
+    let v1 = p3
+        .publish_request()
+        .title("u533 ret-002 active-head lineage v1")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .acdp_version("0.2.0")
+        .build()
+        .unwrap();
+    let (s, b) = post_publish_json(&app, serde_json::to_value(&v1).unwrap()).await;
+    assert_eq!(s, StatusCode::OK, "ret-002 seed v1: {b}");
+    let lineage3 = b["lineage_id"].as_str().expect("lineage_id").to_string();
+    let v1_ctx = b["ctx_id"].as_str().expect("ctx_id").to_string();
+
+    let v2 = p3
+        .supersede(CtxId(v1_ctx.clone()))
+        .title("u533 ret-002 active-head lineage v2")
+        .version(2)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .acdp_version("0.2.0")
+        .expected_lineage_id(LineageId(lineage3.clone()))
+        .build()
+        .unwrap();
+    let (s, b) = post_publish_json(&app, serde_json::to_value(&v2).unwrap()).await;
+    assert_eq!(s, StatusCode::OK, "ret-002 seed v2: {b}");
+    let v2_ctx = b["ctx_id"].as_str().expect("ctx_id").to_string();
+
+    let (s, got) = anc_get(
+        &app,
+        &format!("/lineages/{}/current", pct_encode_path_segment(&lineage3)),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "ret-002 scenario 3: current must resolve for a lineage with an active head: {got}"
+    );
+    assert_eq!(
+        got["body"]["ctx_id"], v2_ctx,
+        "ret-002 scenario 3: current must be the NEWEST version (v2), not v1. Returning v1 would \
+         also be a 200, so asserting the status alone would not catch it: {got}"
+    );
+    assert_eq!(
+        got["registry_state"]["status"], "active",
+        "ret-002 scenario 3: the active head must report status active: {got}"
+    );
+
+    // ---- Scenario 2: the head is past its expires_at and has no successor.
+    //      `expired` must still be returned by `current` -- it counts as
+    //      non-superseded.
+    let p2 = Producer::new_did_key(SigningKey::from_bytes(&[132u8; 32]));
+    let e1 = p2
+        .publish_request()
+        .title("u533 ret-002 expired-head lineage v1")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .acdp_version("0.2.0")
+        .build()
+        .unwrap();
+    let (s, b) = post_publish_json(&app, serde_json::to_value(&e1).unwrap()).await;
+    assert_eq!(s, StatusCode::OK, "ret-002 expired seed v1: {b}");
+    let lineage2 = b["lineage_id"].as_str().expect("lineage_id").to_string();
+    let e1_ctx = b["ctx_id"].as_str().expect("ctx_id").to_string();
+
+    // The fixture's own expiry instant, so the test uses the spec's value rather
+    // than an invented one.
+    let fixture_expiry = fx["setup"]["lineages"][1]["versions"][1]["expires_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("ret-002: setup expires_at missing: {fx}"));
+    let expiry: chrono::DateTime<chrono::Utc> = fixture_expiry
+        .parse()
+        .unwrap_or_else(|e| panic!("ret-002: expires_at {fixture_expiry:?} unparseable: {e}"));
+    assert!(
+        expiry < chrono::Utc::now(),
+        "ret-002's fixture expiry {fixture_expiry} must be in the PAST for this scenario to be \
+         about an expired head"
+    );
+
+    let e2 = p2
+        .supersede(CtxId(e1_ctx))
+        .title("u533 ret-002 expired-head lineage v2")
+        .version(2)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .acdp_version("0.2.0")
+        .expected_lineage_id(LineageId(lineage2.clone()))
+        .expires_at(expiry)
+        .build()
+        .unwrap();
+    let (s, b) = post_publish_json(&app, serde_json::to_value(&e2).unwrap()).await;
+    assert_eq!(s, StatusCode::OK, "ret-002 expired seed v2: {b}");
+    let e2_ctx = b["ctx_id"].as_str().expect("ctx_id").to_string();
+
+    let (s, got) = anc_get(
+        &app,
+        &format!("/lineages/{}/current", pct_encode_path_segment(&lineage2)),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "ret-002 scenario 2: an EXPIRED head is still the current version -- expired counts as \
+         non-superseded, so this must NOT be a 404: {got}"
+    );
+    assert_eq!(
+        got["body"]["ctx_id"], e2_ctx,
+        "ret-002 scenario 2: current must be the expired v2, not the superseded v1: {got}"
+    );
+    assert_eq!(
+        got["registry_state"]["status"], "expired",
+        "ret-002 scenario 2: the head must report status `expired`, not `active`. If this reads \
+         active, the expiry was not applied and the scenario is testing the ordinary case twice: \
+         {got}"
+    );
+}
+
+/// **Fixtures this suite retired from [`UNEXERCISED_FIXTURES`], and the test that
+/// requests each (U-533).**
+///
+/// # Why this table exists
+///
+/// `fixture_accounting_totals_are_exact`'s own doc comment states the hole:
+/// moving a fixture OUT of `UNEXERCISED_FIXTURES` "requires editing the list and
+/// the count, **and nothing else**". Nothing verified that a removed fixture was
+/// actually exercised by anything. Deleting five rows and changing a `6` to a `1`
+/// went green unaided — a hand-maintained list cannot catch an omission, which is
+/// the same defect shape as the `>=`-floor this file has now fixed twice.
+///
+/// So a retirement must name the test that does the exercising, and that claim is
+/// checked two independent ways:
+///
+/// * **Compile-time**, via `direct_fn!` — the string and the function are the
+///   same token by construction, so deleting, renaming or commenting out the test
+///   is a **compile error** rather than a passing text search. (Same mechanism and
+///   same reasoning as `DIRECT_FNS`.)
+/// * **At runtime**, by `exercised_fixtures_are_really_requested` below, which
+///   calls each registered test and asserts the fixture id actually reached
+///   `find_fixture_by_id`. A test that is registered against the wrong id, or that
+///   stops loading its fixture, fails there.
+///
+/// # What this does NOT catch — both gaps, because a guard whose reach is unstated
+/// gets trusted past it
+///
+/// **1. A retirement that registers nothing.** This table makes a *registered*
+/// claim checkable; it does not force a retirement to be registered. Removing a
+/// row from `UNEXERCISED_FIXTURES` and decrementing the count, without adding a
+/// row here, is still green. [`EXERCISED_FIXTURES_AT_PIN`] narrows that — the
+/// length is an equality, so silently dropping a row from *this* table is loud —
+/// but the two tables are not yet joined by an invariant.
+///
+/// A conservation law (`required_now + retired_so_far == the pre-U-533 total`) was
+/// considered and rejected: a spec bump that legitimately adds a new
+/// required-but-unexercised fixture would redden it for a correct reason, and a
+/// guard that fails on correct input is a guard someone deletes — the same
+/// argument `mutants.yml` makes about keeping `multiple-versions` at `warn`. The
+/// real closure is to *derive* the required-but-unexercised set from
+/// `registries/profiles.json`'s `required_fixtures` (72 entries for
+/// `acdp-registry-core`) minus everything the `COVERED`/`EXCUSED` machinery
+/// accounts for, which is a larger change than this unit should make while
+/// retiring five fixtures. **Named as the follow-up rather than half-built.**
+///
+/// **2. A registered test that asserts nothing useful.** It requests its fixture,
+/// so both checks here pass. No presence or symbol oracle can see that — it needs
+/// the mutation oracle (#216, `.cargo/mutants.toml`), which is exactly why #216
+/// stays open.
+/// `(fixture id, test name, test)` — the test name is `stringify!`d from the same
+/// token as the function item, exactly as `direct_fn!` does, so a failure message
+/// can name the test and the two cannot drift apart.
+macro_rules! exercised_by {
+    ($id:literal, $f:ident) => {
+        ($id, stringify!($f), $f as fn())
+    };
+}
+
+/// Size of [`EXERCISED_FIXTURES`], as an **equality** rather than a floor, so
+/// dropping a registration is loud. Five at U-533: `pub-003`, `pub-006`,
+/// `pub-009`, `pub-010`, `ret-002`.
+const EXERCISED_FIXTURES_AT_PIN: usize = 5;
+
+#[rustfmt::skip]
+const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
+    exercised_by!("pub-003", pub003_superseding_with_a_mismatched_lineage_id_is_refused),
+    exercised_by!("pub-006", pub006_pub009_key_id_did_must_equal_agent_id),
+    exercised_by!("pub-009", pub006_pub009_key_id_did_must_equal_agent_id),
+    exercised_by!("pub-010", pub010_non_did_web_contributor_is_accepted_and_persisted),
+    exercised_by!("ret-002", ret002_lineage_current_returns_the_newest_non_superseded_version),
+];
+
+/// Every fixture this suite claims to have retired must really be requested by
+/// the test registered against it.
+///
+/// This is the machine check that the accounting test's "and nothing else" was
+/// missing. It calls each registered test directly — a plain `#[test]`, not an
+/// async one, because the registered functions build their own Tokio runtime and
+/// nesting one inside another panics.
+#[test]
+fn exercised_fixtures_are_really_requested() {
+    if spec_fixtures().is_none() {
+        eprintln!(
+            "conformance: spec unavailable; skipping exercised_fixtures_are_really_requested"
+        );
+        return;
+    }
+    for (id, test_name, test_fn) in EXERCISED_FIXTURES {
+        reset_requested_fixtures();
+        test_fn();
+        assert!(
+            fixture_was_requested(id),
+            "{id} was retired from UNEXERCISED_FIXTURES, but `{test_name}` — the test registered \
+             for it in EXERCISED_FIXTURES — ran WITHOUT ever asking for {id}. Either the \
+             registration names the wrong test, or the test stopped loading its fixture; in both \
+             cases the retirement is unsupported and the count is wrong."
+        );
+    }
+}
+
+/// Every id in [`EXERCISED_FIXTURES`] must be a real fixture at the pin, and must
+/// **not** also be listed as unexercised.
+#[tokio::test(flavor = "multi_thread")]
+async fn exercised_and_unexercised_fixtures_are_disjoint_and_real() {
+    let Some(stems) = fixture_stems_and_ids() else {
+        eprintln!("conformance: spec unavailable; skipping exercised/unexercised disjointness");
+        return;
+    };
+    assert_eq!(
+        EXERCISED_FIXTURES.len(),
+        EXERCISED_FIXTURES_AT_PIN,
+        "EXERCISED_FIXTURES has {} rows, not {EXERCISED_FIXTURES_AT_PIN}. If a retirement was \
+         added or withdrawn, update this count in the same commit -- it is what makes dropping a \
+         registration loud rather than silent",
+        EXERCISED_FIXTURES.len()
+    );
+    for (id, _, _) in EXERCISED_FIXTURES {
+        assert!(
+            stems.iter().any(|(_, fid)| fid == id),
+            "EXERCISED_FIXTURES names \"{id}\", which is not a fixture at the pinned spec"
+        );
+        assert!(
+            !UNEXERCISED_FIXTURES.iter().any(|(uid, _)| uid == id),
+            "\"{id}\" is in BOTH EXERCISED_FIXTURES and UNEXERCISED_FIXTURES. A fixture cannot be \
+             simultaneously exercised and unexercised; one of the two lists was edited without the \
+             other."
+        );
+    }
 }
 
 const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
@@ -13960,11 +14500,24 @@ async fn fixture_accounting_totals_are_exact() {
         .filter(|(_, g)| *g == Unexercised::ConditionalOnCapability)
         .count();
     // 12 before U-527 (`pub-002`/`012`/`013`/`014` began replaying), 8 before
-    // U-528 (`pub-001`/`pub-011` now reach a real signature check).
-    assert_eq!(required, 6, "expected exactly 6 required-but-unexercised");
+    // U-528 (`pub-001`/`pub-011` now reach a real signature check), 6 before
+    // U-533 retired `pub-003`, `pub-006`, `pub-009`, `pub-010` and `ret-002`.
+    //
+    // The ONE that remains is `pub-007`, blocked on the U-526 wire change
+    // (201 + percent-encoded `Location`) which is escalated to the human. So this
+    // number cannot reach 0 by writing another test -- it needs that decision.
+    assert_eq!(
+        required, 1,
+        "expected exactly 1 required-but-unexercised (`pub-007`, blocked on U-526). An EXACT \
+         equality, not a floor: a floor would read a silently shrinking list as an improvement"
+    );
+    // U-533 checked and did NOT move this -- `dk-003`, `err-002` and `idem-007`
+    // are untouched. Asserted so "did not move" is distinguishable from
+    // "was not checked", which look identical in a diff.
     assert_eq!(
         conditional, 3,
-        "expected exactly 3 conditional-but-unexercised"
+        "expected exactly 3 conditional-but-unexercised (dk-003, err-002, idem-007) -- unchanged \
+         by U-533"
     );
     assert_eq!(
         required + conditional,
