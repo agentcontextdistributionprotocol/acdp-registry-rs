@@ -9937,3 +9937,139 @@ async fn lineage_current_is_withheld_from_a_foreign_tenant() {
         "and the refusal must not distinguish 'foreign' from 'absent': {v}"
     );
 }
+
+/// `post_lifecycle` with an `X-Tenant-Id`. The untenanted helper above cannot
+/// reach the tenant gate at all (`requested_tenant == None` skips it).
+async fn post_lifecycle_with_tenant(
+    app: &axum::Router,
+    ctx_id: &str,
+    endpoint: &str,
+    envelope: &Value,
+    tenant: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/contexts/{}/{endpoint}",
+            pct_encode_path_segment(ctx_id)
+        ))
+        .header("content-type", "application/json");
+    if let Some(t) = tenant {
+        builder = builder.header("X-Tenant-Id", t);
+    }
+    let resp = app
+        .clone()
+        .oneshot(
+            builder
+                .body(Body::from(serde_json::to_vec(envelope).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    (status, v)
+}
+
+/// Publish one public did:key context into `tenant` on the lifecycle harness.
+async fn lifecycle_ctx_in_tenant(h: &Harness, seed: u8, tenant: &str) -> String {
+    let req = did_key_producer(seed)
+        .publish_request()
+        .title("lifecycle-tenant-scope")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    v["ctx_id"].as_str().expect("ctx_id").to_string()
+}
+
+/// The owning tenant can still retract its own context.
+///
+/// First direction of `handlers/context.rs:1511` (`stored_tenant... != tenant`),
+/// step 5 of `lifecycle_transition`. Split from its sibling for the usual
+/// reason: inverting the operator breaks both directions at once.
+#[tokio::test]
+async fn retract_is_accepted_from_the_owning_tenant() {
+    let h = lifecycle_harness(false).await;
+    let ctx_id = lifecycle_ctx_in_tenant(&h, 180, "tenant-lc-a").await;
+
+    let envelope = signed_event_envelope(180, &ctx_id, "retracted", Some("owner retracts"));
+    let (status, v) = post_lifecycle_with_tenant(
+        &h.router,
+        &ctx_id,
+        "retract",
+        &envelope,
+        Some("tenant-lc-a"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owning tenant must still be able to retract its own context; a \
+         gate that refuses the MATCHING tenant is inverted: {v}"
+    );
+    assert_eq!(
+        v["registry_state"]["status"], "retracted",
+        "and the retraction must actually have taken effect, so this asserts \
+         the gate opening rather than merely a 200: {v}"
+    );
+}
+
+/// **The gate with the most consequence in this set: it protects a WRITE.**
+///
+/// Every other tenant gate U-504 found withholds a read. This one decides
+/// whether a caller scoped to one tenant may retract a context belonging to
+/// another. Inverting `!=` at `handlers/context.rs:1511` lets the foreign
+/// caller through to the full §6 pipeline, and because the event itself is
+/// validly signed by the context's real producer, the pipeline then ACCEPTS it
+/// — the retraction succeeds.
+///
+/// So the status code is not the property worth asserting. The property is that
+/// **no state changed**, and this test checks that directly by re-reading the
+/// context afterwards and requiring it to still be `active`. A test that
+/// asserted only the 404 would still pass against an implementation that
+/// refused the response after performing the write.
+#[tokio::test]
+async fn retract_is_refused_for_a_foreign_tenants_context() {
+    let h = lifecycle_harness(false).await;
+    let ctx_id = lifecycle_ctx_in_tenant(&h, 181, "tenant-lc-a").await;
+
+    // Validly signed by the real producer — the request is well-formed and
+    // authorized in every respect EXCEPT the caller's tenant scope, so it
+    // reaches step 5 rather than dying earlier for an unrelated reason.
+    let envelope = signed_event_envelope(181, &ctx_id, "retracted", Some("foreign retract"));
+    let (status, v) = post_lifecycle_with_tenant(
+        &h.router,
+        &ctx_id,
+        "retract",
+        &envelope,
+        Some("tenant-lc-b"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a caller scoped to another tenant must not be able to retract this \
+         context: {v}"
+    );
+    assert_eq!(
+        v["error"]["code"], "not_found",
+        "and the refusal must not distinguish 'foreign' from 'absent': {v}"
+    );
+
+    // The assertion that actually matters: the write did not happen.
+    let (status, after) = get_json_with_tenant(
+        &h.router,
+        &format!("/contexts/{}", pct_encode_path_segment(&ctx_id)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-read after refusal = {after}");
+    assert_eq!(
+        after["registry_state"]["status"], "active",
+        "the context must still be ACTIVE — a refusal that returns 404 after \
+         performing the retraction is not a refusal: {after}"
+    );
+}
