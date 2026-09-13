@@ -48,8 +48,11 @@
 # `${{ steps.meta.outputs.tags }}`, which is the exact value handed to
 # docker/build-push-action — so this asserts on what is actually pushed rather
 # than on a parallel representation of it. No jq dependency, deliberately: this
-# is the first shell script in the repo and CI runs no shellcheck, so it depends
-# on as little as possible.
+# is the first shell script in the repo, so it depends on as little as possible.
+# (It was written when CI ran no shellcheck at all; `.github/workflows/lint.yml`
+# now lints it on every PR, pinned to the shellcheck version this was checked
+# against. The minimal-dependency posture stays — it is still the only script
+# here, and it runs in the container publish path.)
 
 set -euo pipefail
 
