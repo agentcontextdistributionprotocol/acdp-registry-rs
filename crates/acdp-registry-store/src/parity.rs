@@ -728,12 +728,31 @@ where
 /// # Why this exists
 ///
 /// `visible_ctx_ids` has three implementations in this workspace — the Rust
-/// default here, SQLite's SQL predicate, and Postgres's — because the
-/// authoritative rule (`can_retrieve`) is `pub(crate)` in the upstream crate and
-/// cannot be called. Three expressions of one security rule is real drift risk,
-/// and no other phase's tests compare them: the backends' own suites exercise
-/// only their overrides, and the unit tests exercise the default against a
-/// hand-built in-memory fixture.
+/// default here, SQLite's SQL predicate, and Postgres's. The backends' own
+/// suites exercise only their own override, and the unit tests exercise the
+/// default against a hand-built in-memory fixture, so nothing else compares
+/// them to each other.
+///
+/// **What this wrapper does and does not establish.** The default body is
+/// `retrieve_visible` plus a tenant check, and `visible_by_n_calls` calls
+/// `retrieve_visible` too — so this comparison and the N-call differential
+/// share one centre. On its own that made the pair blind to a defect IN
+/// `retrieve_visible`, and worse: because the SQL was derived separately, a
+/// central defect would have surfaced as "the SQL disagrees", pointing at the
+/// wrong implementation. `EXPECTED_BY_SPEC` is the anchor that fixes this; this
+/// wrapper is retained for what it genuinely catches, which is the SQL drifting
+/// away from the Rust rule.
+///
+/// **The upstream authority is NOT compared here — this is a standing MANUAL
+/// check.** The normative rule is `can_retrieve` in `acdp-server`
+/// (`src/registry/server.rs`), and it is `pub(crate)`, so no test in this
+/// workspace can call it. `retrieve_visible` is a local transcription of it.
+/// Hand-diffed against `acdp-server` **0.13.1** on **2026-09-13**, normalising
+/// only the renamed parameter (`caps.anonymous_public_reads` → `public_arm_open`):
+/// the two match arms were **textually identical**. Treat that as uncompared
+/// rather than covered — it is true as of that version and date, and nothing
+/// automated will notice if a future bump changes it. Re-run the diff when the
+/// `acdp-server` pin moves.
 ///
 /// Wrapping a *real* backend and declining to override the one method makes the
 /// default body run against the same rows the override just answered for, so the
@@ -925,6 +944,160 @@ where
     }
     out
 }
+
+/// A fixture row, by name. The spec table below is written against these names
+/// so that transcribing RFC-ACDP-0008 §4.5 never requires knowing a `ctx_id`,
+/// and so a reader can check the table against the RFC without reading any
+/// Rust that computes visibility.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Row {
+    Public,
+    PrivateWithAudience,
+    PrivateOwnerOnly,
+    RestrictedWithAudience,
+    PrivateWithContributor,
+    PublicRetracted,
+    ForeignTenantPublic,
+}
+
+/// The requester perspective a table row is written for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Who {
+    Producer,
+    Audience,
+    Contributor,
+    Outsider,
+    AnonReadsOn,
+    AnonReadsOff,
+}
+
+/// **The independent anchor: RFC-ACDP-0008 §4.5, transcribed by hand.**
+///
+/// # Why this is a literal table and not a computation
+///
+/// Every other check in this file is *relational* — it asserts that two
+/// expressions of the §4.5 rule agree. That family of assertion is blind to any
+/// change that moves both sides together, and until this table existed the two
+/// differentials below were not even independent of each other: the trait
+/// default body IS `retrieve_visible` (`lib.rs`), and `visible_by_n_calls` calls
+/// `retrieve_visible` too. So both legs bottomed out in one expression.
+///
+/// The consequence was worse than missing a defect. If `retrieve_visible` were
+/// wrong, the default would agree with the reference perfectly, that leg would
+/// stay green, and the only implementation able to disagree would be the SQL —
+/// which was derived separately. **The suite would have reported the SQL as the
+/// broken side.** A shared-centre differential inverts the blame; it does not
+/// merely lose sensitivity.
+///
+/// This table is therefore written from the *specification text*, not from any
+/// implementation. Deriving it by calling anything in this workspace would
+/// reintroduce exactly the defect it exists to remove — the convenience of
+/// computing it is the trap.
+///
+/// # Transcribed from (spec repo, read 2026-09-13)
+///
+/// `rfcs/RFC-ACDP-0008-security.md` §4.5, whose rules are:
+///
+///   * `public` — any *authenticated* requester; an anonymous requester only
+///     when the registry advertises `anonymous_public_reads` (§6.3).
+///   * `restricted` — retrieval: `agent_id`, plus every DID in `audience`.
+///   * `private` — retrieval: `agent_id`, plus every DID in `audience`.
+///     (Search is strictly narrower and is NOT this method's rule.)
+///   * `contributors` are **never** authorization — attribution only. A
+///     producer granting a contributor read access must list them in
+///     `audience`.
+///   * §4.5 states no `status` clause, so a **retracted** context stays
+///     retrievable.
+///   * The tenant gate is separate from §4.5: a request scoped to a tenant
+///     sees only that tenant's rows.
+///
+/// The `bool` is `tenant_scoped` — `true` means the call passes
+/// `Some(tenant)`, `false` means `None`.
+const EXPECTED_BY_SPEC: &[(Who, bool, &[Row])] = &[
+    // ── The producer: owns every row, so §4.5 authorizes all of them. The
+    //    only thing that can remove one is the tenant gate.
+    (
+        Who::Producer,
+        true,
+        &[
+            Row::Public,
+            Row::PrivateWithAudience,
+            Row::PrivateOwnerOnly,
+            Row::RestrictedWithAudience,
+            Row::PrivateWithContributor,
+            Row::PublicRetracted,
+        ],
+    ),
+    (
+        Who::Producer,
+        false,
+        &[
+            Row::Public,
+            Row::PrivateWithAudience,
+            Row::PrivateOwnerOnly,
+            Row::RestrictedWithAudience,
+            Row::PrivateWithContributor,
+            Row::PublicRetracted,
+            Row::ForeignTenantPublic,
+        ],
+    ),
+    // ── An audience member: authenticated, so `public` and the retracted
+    //    public row; named in `audience`, so the private and restricted rows
+    //    that name them. NOT the owner-only private row, and NOT the private
+    //    row whose only extra DID is a contributor.
+    (
+        Who::Audience,
+        true,
+        &[
+            Row::Public,
+            Row::PrivateWithAudience,
+            Row::RestrictedWithAudience,
+            Row::PublicRetracted,
+        ],
+    ),
+    (
+        Who::Audience,
+        false,
+        &[
+            Row::Public,
+            Row::PrivateWithAudience,
+            Row::RestrictedWithAudience,
+            Row::PublicRetracted,
+            Row::ForeignTenantPublic,
+        ],
+    ),
+    // ── A listed contributor: authenticated, and that is ALL it buys. §4.5
+    //    says `contributors` is attribution, never authorization — so this
+    //    perspective sees exactly what any authenticated stranger sees.
+    (
+        Who::Contributor,
+        true,
+        &[Row::Public, Row::PublicRetracted],
+    ),
+    (
+        Who::Contributor,
+        false,
+        &[Row::Public, Row::PublicRetracted, Row::ForeignTenantPublic],
+    ),
+    // ── An outsider: authenticated, in no audience, owns nothing.
+    (Who::Outsider, true, &[Row::Public, Row::PublicRetracted]),
+    (
+        Who::Outsider,
+        false,
+        &[Row::Public, Row::PublicRetracted, Row::ForeignTenantPublic],
+    ),
+    // ── Anonymous with `anonymous_public_reads` ON: the public arm opens,
+    //    and nothing else does — `restricted`/`private` require a requester.
+    (Who::AnonReadsOn, true, &[Row::Public, Row::PublicRetracted]),
+    (
+        Who::AnonReadsOn,
+        false,
+        &[Row::Public, Row::PublicRetracted, Row::ForeignTenantPublic],
+    ),
+    // ── Anonymous with the flag OFF: §4.5 authorizes nothing at all.
+    (Who::AnonReadsOff, true, &[]),
+    (Who::AnonReadsOff, false, &[]),
+];
 
 /// **H-I-s — a batched visibility check must answer exactly what N individual
 /// retrieve checks answer.**
@@ -1128,6 +1301,26 @@ where
         .visible_ctx_ids(&ids, Some(&outsider), Some(&tenant), false)
         .await
         .expect("visible_ctx_ids ok");
+    // The two rows this fixture publishes precisely so that an outsider must NOT
+    // see them. Before U-535 both appeared ONLY in `ids_owned` -- published,
+    // passed in, and never named in an assertion. Membership in a computed set is
+    // not a check; these say what the outsider sees, by name.
+    if as_outsider.contains(&private_owner_only) {
+        violations.push(format!(
+            "[{backend}] an OUTSIDER retrieved a PRIVATE owner-only context \
+             ({private_owner_only}). Under RFC-ACDP-0008 §4.5 `private` authorizes \
+             `agent_id` plus any DID in `audience`; this outsider is neither. This is \
+             the core disclosure failure the predicate exists to prevent."
+        ));
+    }
+    if as_outsider.contains(&restricted_with_audience) {
+        violations.push(format!(
+            "[{backend}] an OUTSIDER retrieved a RESTRICTED context \
+             ({restricted_with_audience}) whose `audience` does not name them. §4.5 \
+             authorizes `agent_id` plus every DID in `audience` for `restricted`, and \
+             an outsider is in neither set."
+        ));
+    }
     if !as_outsider.contains(&public_retracted) {
         violations.push(format!(
             "[{backend}] a RETRACTED public context ({public_retracted}) was not retrievable. \
@@ -1157,14 +1350,105 @@ where
         ));
     }
 
-    // (e) THE THREE-WAY SEAM. The §4.5 rule is expressed three times in this
-    // workspace — this backend's SQL predicate, the other backend's, and the Rust
-    // default — because the authoritative `can_retrieve` is `pub(crate)` upstream
-    // and cannot be called. Nothing else compares them: each backend's suite
-    // exercises only its own override, and the unit tests exercise the default
-    // against a hand-built in-memory fixture. `DefaultOnly` wraps THIS store and
+    // (f)+(g) THE INDEPENDENT ANCHOR. Everything above this point is
+    // relational: it asserts that two expressions of §4.5 agree. `EXPECTED_BY_SPEC`
+    // is the one check that does not — it is transcribed from the RFC by hand, so
+    // it survives a change that moves every implementation together, and it names
+    // the side that is wrong instead of inferring it.
+    //
+    // BOTH implementations are compared against it, and that is the whole point.
+    // Comparing only the SQL would leave the inversion in place: a defect in
+    // `retrieve_visible` would still surface as "the SQL disagrees".
+    let row_id = |r: Row| -> String {
+        match r {
+            Row::Public => public.clone(),
+            Row::PrivateWithAudience => private_with_audience.clone(),
+            Row::PrivateOwnerOnly => private_owner_only.clone(),
+            Row::RestrictedWithAudience => restricted_with_audience.clone(),
+            Row::PrivateWithContributor => private_with_contributor.clone(),
+            Row::PublicRetracted => public_retracted.clone(),
+            Row::ForeignTenantPublic => foreign_tenant_public.clone(),
+        }
+    };
+    // Failures report fixture ROLE names. A raw `ctx_id` carries a nonce and
+    // tells the reader nothing about which rule was broken.
+    let named: Vec<(&str, &str)> = vec![
+        (public.as_str(), "public"),
+        (private_with_audience.as_str(), "private_with_audience"),
+        (private_owner_only.as_str(), "private_owner_only"),
+        (restricted_with_audience.as_str(), "restricted_with_audience"),
+        (private_with_contributor.as_str(), "private_with_contributor"),
+        (public_retracted.as_str(), "public_retracted"),
+        (foreign_tenant_public.as_str(), "foreign_tenant_public"),
+    ];
+    let label = |id: &str| -> String {
+        named
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| (*n).to_string())
+            .unwrap_or_else(|| format!("<not a fixture row: {id}>"))
+    };
+
+    let anchor_default = DefaultOnly(Arc::clone(store));
+    for (who, tenant_scoped, expected_rows) in EXPECTED_BY_SPEC {
+        let (requester, anon): (Option<&AgentDid>, bool) = match *who {
+            Who::Producer => (Some(&owner), false),
+            Who::Audience => (Some(&aud), false),
+            Who::Contributor => (Some(&contrib), false),
+            Who::Outsider => (Some(&outsider), false),
+            Who::AnonReadsOn => (None, true),
+            Who::AnonReadsOff => (None, false),
+        };
+        let scope = if *tenant_scoped {
+            Some(tenant.as_str())
+        } else {
+            None
+        };
+        let expected: std::collections::HashSet<String> =
+            expected_rows.iter().map(|r| row_id(*r)).collect();
+
+        let via_sql = store
+            .visible_ctx_ids(&ids, requester, scope, anon)
+            .await
+            .expect("override ok");
+        let via_rust = anchor_default
+            .visible_ctx_ids(&ids, requester, scope, anon)
+            .await
+            .expect("default ok");
+
+        for (leg, got) in [
+            ("this backend's SQL predicate", via_sql),
+            ("the Rust `retrieve_visible` rule", via_rust),
+        ] {
+            if got == expected {
+                continue;
+            }
+            let mut over: Vec<String> = got.difference(&expected).map(|i| label(i)).collect();
+            let mut under: Vec<String> = expected.difference(&got).map(|i| label(i)).collect();
+            over.sort();
+            under.sort();
+            violations.push(format!(
+                "[{backend}] {leg} disagrees with RFC-ACDP-0008 §4.5 as transcribed in \
+                 `EXPECTED_BY_SPEC`, for {who:?} (tenant scope {scope:?}).\n                     \
+                 DISCLOSED BUT NOT AUTHORIZED BY THE SPEC (over-disclosure): {over:?}\n                     \
+                 AUTHORIZED BY THE SPEC BUT WITHHELD (under-disclosure): {under:?}\n                     \
+                 The named leg is the one that is wrong: the expectation is a hand \
+                 transcription of the RFC and consults no implementation."
+            ));
+        }
+    }
+
+    // (e) SQL override vs the Rust rule. `DefaultOnly` wraps THIS store and
     // declines to override the method, so the default body answers for the very
     // rows the override just answered for.
+    //
+    // NOTE what this leg is and is not. It compares two expressions that are NOT
+    // independent of the N-call differential above: the default body is
+    // `retrieve_visible` + tenant, and `visible_by_n_calls` also calls
+    // `retrieve_visible`. So (a) and (e) share a centre, and neither can see a
+    // defect inside it — (f)/(g) above is what covers that. This leg is kept
+    // because it still catches the thing it was written for: one backend's SQL
+    // drifting away from the Rust rule.
     let default_only = DefaultOnly(Arc::clone(store));
     for (who, requester, anon) in [
         ("the producer", Some(&owner), false),
