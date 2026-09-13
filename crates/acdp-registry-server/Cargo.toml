@@ -63,3 +63,42 @@ uuid           = { workspace = true }
 # truncate-and-test database. SQLite tests use disposable tempfiles so
 # they don't need this.
 serial_test    = "3"
+# U-521: nameable only so the did:web TLS fixture can pick a CryptoProvider
+# explicitly. Two providers are enabled in this workspace -- `aws-lc-rs` via
+# `axum-server/tls-rustls` and `ring` via `hyper-rustls` <- `reqwest` <-
+# `acdp-client` -- and nothing in `crates/` calls `install_default`, so rustls
+# refuses to pick one and every TLS handshake fails at process level.
+#
+# **This is a dev-dependency and that is load-bearing, but not for the reason
+# the section heading suggests.** The workspace sets `resolver = "2"`
+# (`../../Cargo.toml:12`), under which dev-dependency features are NOT unified
+# into the normal build. Under `resolver = "1"` these lines WOULD be a production
+# change wearing a test-only label, so if that key ever changes this dependency
+# needs re-deciding, not merely re-testing.
+#
+# MEASURED, not reasoned -- `cargo tree -e features,no-dev` for this package is
+# byte-identical with and without this entry, both inverted-on-rustls (469 lines)
+# and forward (3406 lines). The same probe WITH dev edges does show the
+# difference, so "identical" is a real read and not a blind comparison.
+#
+# `Cargo.lock` does gain two edges (`rustls` under this package, and `log` under
+# `rustls`, whose default `logging` feature pulls it). That is not a
+# contradiction: the lock records the union of the dependency graph and is not
+# feature-resolved per target. The measurement above is what says the shipped
+# binary's resolution is unchanged.
+#
+# The equivalent gap in the PRODUCTION binary (`src/main.rs`'s
+# `bind_rustls` path, which no test enters) is NOT fixed here: it is filed as
+# U-530. This entry fixes the test binary only.
+rustls         = { version = "0.23", features = ["ring"] }
+# U-521 option B: generate the did:web fixture's CA+leaf chain at test runtime
+# instead of committing PEM files. `.gitignore:39-43` forbids TLS material
+# repo-wide (`*.pem`/`*.crt`/`*.key`) with its only negation an empty
+# placeholder, and the repo has zero committed TLS material -- so a committed
+# fixture would have needed a repo-policy exception. Generating it needs none,
+# commits no private key, and removes the expiry problem entirely: nothing that
+# does not exist can lapse.
+#
+# Dev-only and provably outside the shipped feature graph for the same reason as
+# `rustls` above -- `resolver = "2"` -- measured the same way.
+rcgen          = "0.14"
