@@ -107,7 +107,7 @@ fn caps() -> CapabilitiesDocument {
 
 fn config(playground: bool) -> RegistryConfig {
     // Tests expect anonymous reads to surface published public contexts.
-    // The new shipped default for `anonymous_public_reads` is `false`
+    // The new shipped default for `public_arm_open` is `false`
     // (SEC-07 / CLAUDE.md), so opt in explicitly inside the test harness.
     let auth = AuthConfig {
         anonymous_public_reads: true,
@@ -1568,6 +1568,13 @@ async fn admin_list_paginates_past_fully_hidden_pages() {
 /// convenience. The exit-gate test below needs the real shipped default
 /// (`false`, SEC-07) instead — mutate a copy rather than the shared
 /// default, which would perturb every other test in this file.
+///
+/// **This sets the CONFIG flag only and leaves `caps` at `true`** — the one
+/// place in this crate where the two diverge. Harmless here for a specific
+/// reason rather than by luck: its only consumer is `admin_list`, which reads
+/// the flag from neither source. Do not copy this helper for a test that
+/// expects narrowed *visibility* — `RegistryServer` gates that off `caps`, so
+/// use `common::with_anonymous_public_reads`, which sets both.
 #[cfg(feature = "playground")]
 fn config_shipped_disclosure_default(playground: bool) -> RegistryConfig {
     let mut cfg = config(playground);
@@ -1641,15 +1648,31 @@ async fn admin_list_requires_admin_tokens_configured() {
     assert_eq!(v["error"], "admin-only", "body = {v}");
 }
 
-/// REG-11 Phase 3 (#133) exit gate: a valid admin token against the SHIPPED
-/// DEFAULT `anonymous_public_reads = false` (SEC-07) still returns 200 with
-/// rows. This is the criterion the first draft of the plan got wrong —
-/// passing `requester: None` straight through with the real config value
-/// would 500-empty the listing for every admin on a default-configured
-/// registry.
+/// REG-11 Phase 3 (#133) exit gate: a valid admin token still returns 200 with
+/// rows on a registry configured with the shipped defaults. The criterion the
+/// first draft of the plan got wrong — passing `requester: None` straight
+/// through with the real config value would 500-empty the listing for every
+/// admin on a default-configured registry.
+///
+/// **What this pins, and what it does not.** It pins the OUTCOME for an
+/// authenticated-but-unnamed requester. It does **not** exercise
+/// `public_arm_open`, and its previous name
+/// (`..._under_the_shipped_disclosure_default`) claimed that it did:
+/// `admin_list` reads that flag from **neither** `RegistryConfig` **nor** the
+/// `CapabilitiesDocument`. It hardcodes `admin_sees_public_arm = true`, which is
+/// a TRANSLATION rather than a bypass — with `requester = None` the §4.5 public
+/// arm collapses to `?anon` alone, so `true` is the only representable way to
+/// say *authenticated but unnamed*. RFC-ACDP-0008 §6.3 scopes the flag to
+/// *unauthenticated* requests and an admin bearer is authenticated, so the flag
+/// does not reach this path by design.
+///
+/// The config value is still set to the shipped default below, deliberately:
+/// that pins the outcome is **insensitive** to it. Anyone reading the old name
+/// and reaching for `handlers/admin.rs` should stop — honouring the flag there
+/// is the rejected first draft above, and it zero-rows every admin listing.
 #[cfg(feature = "playground")]
 #[tokio::test]
-async fn admin_list_returns_rows_under_the_shipped_disclosure_default() {
+async fn admin_list_returns_public_rows_for_an_unnamed_admin_requester() {
     let mut cfg = config_shipped_disclosure_default(true);
     cfg.auth.admin_tokens = vec!["secret-admin".into()];
     let h = harness_from_config(cfg).await;
@@ -1682,7 +1705,12 @@ async fn admin_list_returns_rows_under_the_shipped_disclosure_default() {
     assert_eq!(
         items.len(),
         1,
-        "admin bearer must still see public rows under anonymous_public_reads=false; body = {v}"
+        "an admin bearer is an authenticated-but-unnamed requester and must still \
+         see public rows. If you reached here by making `admin_list` honour \
+         `public_arm_open`: that is the rejected first draft of #133 and this \
+         empty listing is what it does on every default-configured registry. The flag \
+         is false in this test and this path does not read it, by design — \
+         RFC-ACDP-0008 §6.3 scopes it to UNAUTHENTICATED requests. body = {v}"
     );
     assert_eq!(items[0]["body"]["title"], "admin-under-default-disclosure");
 }
@@ -8650,9 +8678,9 @@ impl acdp::registry::RegistryStore for CountingStore {
         &self,
         params: &acdp::types::search::SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<acdp::types::search::SearchResponse, acdp::error::AcdpError> {
-        self.inner.search(params, requester, anonymous_public_reads)
+        self.inner.search(params, requester, public_arm_open)
     }
     fn idempotency_lookup(
         &self,
@@ -8700,11 +8728,11 @@ impl ExtendedRegistryStore for CountingStore {
         cursor: Option<&str>,
         requester: Option<&AgentDid>,
         tenant: Option<&str>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<acdp_registry_store::Page<acdp::types::body::FullContext>, acdp::error::AcdpError>
     {
         self.inner
-            .list_contexts(limit, cursor, requester, tenant, anonymous_public_reads)
+            .list_contexts(limit, cursor, requester, tenant, public_arm_open)
             .await
     }
     async fn health(&self) -> Result<(), acdp::error::AcdpError> {
@@ -8804,24 +8832,24 @@ impl ExtendedRegistryStore for CountingStore {
         ctx_ids: &[&str],
         requester: Option<&AgentDid>,
         tenant: Option<&str>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<std::collections::HashSet<String>, acdp::error::AcdpError> {
         self.calls
             .visible_ctx_ids
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner
-            .visible_ctx_ids(ctx_ids, requester, tenant, anonymous_public_reads)
+            .visible_ctx_ids(ctx_ids, requester, tenant, public_arm_open)
             .await
     }
     async fn search_in_tenant(
         &self,
         params: &acdp::types::search::SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
         tenant: Option<&str>,
     ) -> Result<acdp::types::search::SearchResponse, acdp::error::AcdpError> {
         self.inner
-            .search_in_tenant(params, requester, anonymous_public_reads, tenant)
+            .search_in_tenant(params, requester, public_arm_open, tenant)
             .await
     }
 }
@@ -9109,7 +9137,7 @@ async fn log_entries_rejects_the_reserved_default_tenant() {
 }
 
 /// A4 / SECURITY: `/log/entries` must gate `leaf` on the SAME
-/// `anonymous_public_reads` the retrieve it mirrors gates on.
+/// `public_arm_open` the retrieve it mirrors gates on.
 ///
 /// `RegistryServer::retrieve` reads that flag off `self.caps` -- the
 /// `CapabilitiesDocument` baked in at `try_new` time -- NOT off
@@ -9125,7 +9153,7 @@ async fn log_entries_rejects_the_reserved_default_tenant() {
 ///
 /// This test therefore overrides the CAPS, which is the only thing that moves
 /// the real predicate. With the flag off, `can_retrieve`'s public arm is
-/// `anonymous_public_reads || requester.is_some()` -- false for an anonymous
+/// `public_arm_open || requester.is_some()` -- false for an anonymous
 /// caller -- so a public context is NOT retrievable and §8.3 requires its
 /// `leaf` to be absent while its position stays disclosed.
 ///

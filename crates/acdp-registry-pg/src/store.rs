@@ -35,7 +35,7 @@ pub struct PgStore {
 const LOG_APPEND_LOCK_KEY: i64 = 0x00AC_D900_0012;
 
 /// RFC-ACDP-0008 §4.5 **retrieval**-style disclosure, Postgres form. `$1` is the
-/// requester DID (SQL NULL when anonymous); `$2` is `anonymous_public_reads`.
+/// requester DID (SQL NULL when anonymous); `$2` is `public_arm_open`.
 /// Postgres resolves the repeated `$1` to one bound value, so a caller binds
 /// exactly two values for this clause and may number its own parameters from
 /// `$3`.
@@ -128,10 +128,10 @@ impl ExtendedRegistryStore for PgStore {
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
         tenant: Option<&str>,
     ) -> Result<SearchResponse, AcdpError> {
-        self.search_inner(params, requester, anonymous_public_reads, tenant)
+        self.search_inner(params, requester, public_arm_open, tenant)
             .await
     }
 
@@ -196,7 +196,7 @@ impl ExtendedRegistryStore for PgStore {
         ctx_ids: &[&str],
         requester: Option<&AgentDid>,
         tenant: Option<&str>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<std::collections::HashSet<String>, AcdpError> {
         if ctx_ids.is_empty() {
             return Ok(std::collections::HashSet::new());
@@ -211,7 +211,7 @@ impl ExtendedRegistryStore for PgStore {
         let mut q = sqlx::query_as::<_, (String,)>(&sql);
         q = q
             .bind(requester_s) // $1
-            .bind(anonymous_public_reads) // $2
+            .bind(public_arm_open) // $2
             .bind(&owned); // $3
         if let Some(t) = tenant {
             q = q.bind(t); // $4
@@ -229,7 +229,7 @@ impl ExtendedRegistryStore for PgStore {
         cursor: Option<&str>,
         requester: Option<&AgentDid>,
         tenant: Option<&str>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<Page<FullContext>, AcdpError> {
         let limit = limit.clamp(1, 200) as i64;
         let anchor = cursor.map(decode_cursor).transpose()?.flatten();
@@ -247,9 +247,9 @@ impl ExtendedRegistryStore for PgStore {
         // requester may not see are never read or decoded, and the page fills
         // to `limit` instead of being trimmed by a post-query retain. $1 is
         // the requester DID (SQL NULL for an anonymous caller); $2 is
-        // `anonymous_public_reads`. Postgres resolves the repeated $1 to one
+        // `public_arm_open`. Postgres resolves the repeated $1 to one
         // bound value. The public arm mirrors `search`'s
-        // `Public => anonymous_public_reads || requester.is_some()` — this
+        // `Public => public_arm_open || requester.is_some()` — this
         // restores a term that was dropped when this predicate was written;
         // `retrieve` and `search` both honor it already.
         q.push_str(LIST_VISIBILITY_PG);
@@ -277,7 +277,7 @@ impl ExtendedRegistryStore for PgStore {
 
         let mut query = sqlx::query(&q);
         query = query.bind(requester_s); // $1 (disclosure: requester)
-        query = query.bind(anonymous_public_reads); // $2 (disclosure: anonymous_public_reads)
+        query = query.bind(public_arm_open); // $2 (disclosure: public_arm_open)
         if let Some(t) = tenant {
             query = query.bind(t);
         }
@@ -1178,13 +1178,13 @@ impl RegistryStore for PgStore {
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<SearchResponse, AcdpError> {
         // Tenant-spanning: the protocol-level contract carries no tenancy.
         // `ExtendedRegistryStore::search_in_tenant` is the narrowed entry
         // point, and both run THIS body -- one query builder, so the tenant
         // and non-tenant paths cannot drift apart.
-        self.block_on(self.search_inner(params, requester, anonymous_public_reads, None))
+        self.block_on(self.search_inner(params, requester, public_arm_open, None))
     }
 }
 
@@ -1197,7 +1197,7 @@ impl PgStore {
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
         tenant: Option<&str>,
     ) -> Result<SearchResponse, AcdpError> {
         let created_after = parse_opt_rfc3339(&params.created_after)?;
@@ -1250,13 +1250,13 @@ impl PgStore {
 
         // DESIGN-01: §4.5 search disclosure, arm-for-arm with the
         // visibility matrix. $req = requester DID (nullable), $anon =
-        // anonymous_public_reads. Both are bound FIRST (so they are $1/$2)
+        // public_arm_open. Both are bound FIRST (so they are $1/$2)
         // and $req is referenced multiple times; Postgres resolves a
         // repeated $N to the one bound value.
         let req_ph = next();
         let anon_ph = next();
         binds.push(Bind::OptStr(requester_s));
-        binds.push(Bind::Bool(anonymous_public_reads));
+        binds.push(Bind::Bool(public_arm_open));
         sql.push_str(&format!(
             " AND ((visibility = 'public' AND (${r}::text IS NOT NULL OR ${a}::bool)) \
              OR (visibility = 'restricted' AND ${r}::text IS NOT NULL \

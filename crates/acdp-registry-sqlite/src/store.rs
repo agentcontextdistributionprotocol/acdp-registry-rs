@@ -165,10 +165,10 @@ impl ExtendedRegistryStore for SqliteStore {
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
         tenant: Option<&str>,
     ) -> Result<SearchResponse, AcdpError> {
-        self.search_inner(params, requester, anonymous_public_reads, tenant)
+        self.search_inner(params, requester, public_arm_open, tenant)
             .await
     }
 
@@ -241,7 +241,7 @@ impl ExtendedRegistryStore for SqliteStore {
         ctx_ids: &[&str],
         requester: Option<&AgentDid>,
         tenant: Option<&str>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<std::collections::HashSet<String>, AcdpError> {
         let mut out = std::collections::HashSet::with_capacity(ctx_ids.len());
         if ctx_ids.is_empty() {
@@ -270,7 +270,7 @@ impl ExtendedRegistryStore for SqliteStore {
             }
             q = q
                 .bind(req)
-                .bind(anonymous_public_reads)
+                .bind(public_arm_open)
                 .bind(req)
                 .bind(req)
                 .bind(req);
@@ -292,7 +292,7 @@ impl ExtendedRegistryStore for SqliteStore {
         cursor: Option<&str>,
         requester: Option<&AgentDid>,
         tenant: Option<&str>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<Page<FullContext>, AcdpError> {
         let limit = limit.clamp(1, 200) as i64;
         let anchor = cursor.map(decode_cursor).transpose()?.flatten();
@@ -328,7 +328,7 @@ impl ExtendedRegistryStore for SqliteStore {
         let req = requester_s.as_deref();
         q = q
             .bind(req)
-            .bind(anonymous_public_reads)
+            .bind(public_arm_open)
             .bind(req)
             .bind(req)
             .bind(req);
@@ -527,13 +527,13 @@ fn log_row_to_record(r: &sqlx::sqlite::SqliteRow) -> Result<LogEntryRecord, Acdp
 
 /// RFC-ACDP-0008 §4.5 retrieval-style disclosure used by the admin/debug
 /// listing (the former in-Rust `visible_to`): `public` surfaces for any
-/// authenticated caller or — when `anonymous_public_reads` — anonymously,
+/// authenticated caller or — when `public_arm_open` — anonymously,
 /// mirroring `search`'s public arm; `restricted`/`private` require the
 /// requester to be the producer (`agent_id`) or a named `audience` member.
 /// Placeholders (in textual order): `?req` (public), `?anon`, then
 /// `?req`,`?req`,`?req` (restricted/private), where `?req` is the requester
 /// DID or SQL NULL for an anonymous caller and `?anon` is
-/// `anonymous_public_reads`. `json_each(body_json,'$.audience')` yields zero
+/// `public_arm_open`. `json_each(body_json,'$.audience')` yields zero
 /// rows when `audience` is absent, so the audience arm short-circuits.
 /// Ids per `visible_ctx_ids` query. SQLite's default host-parameter ceiling is
 /// 999; this leaves generous room for the five disclosure binds and the tenant
@@ -549,7 +549,7 @@ const LIST_VISIBILITY_SQLITE: &str = " AND (\
 /// RFC-ACDP-0008 §4.5 search/discovery disclosure (the former in-Rust
 /// `can_surface_in_search`), arm-for-arm with the visibility matrix:
 /// `public` surfaces for any authenticated caller or — when
-/// `anonymous_public_reads` — anonymously; `restricted` surfaces to the
+/// `public_arm_open` — anonymously; `restricted` surfaces to the
 /// producer or a named `audience` member; `private` surfaces to the
 /// producer ONLY (audience members can retrieve a `ctx_id` they know but
 /// MUST NOT discover it via search). Placeholders (in textual order):
@@ -1329,13 +1329,13 @@ impl RegistryStore for SqliteStore {
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<SearchResponse, AcdpError> {
         // Tenant-spanning: the protocol-level contract carries no tenancy.
         // `ExtendedRegistryStore::search_in_tenant` is the narrowed entry
         // point, and both run THIS body -- one query builder, so the
         // tenant and non-tenant paths cannot drift apart.
-        self.block_on(self.search_inner(params, requester, anonymous_public_reads, None))
+        self.block_on(self.search_inner(params, requester, public_arm_open, None))
     }
 }
 
@@ -1352,7 +1352,7 @@ impl SqliteStore {
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
         tenant: Option<&str>,
     ) -> Result<SearchResponse, AcdpError> {
         // Boundary parse of all RFC 3339 filters.
@@ -1508,7 +1508,7 @@ impl SqliteStore {
         let req = requester_s.as_deref();
         q = q
             .bind(req) // public:     ? IS NOT NULL
-            .bind(anonymous_public_reads) // public:     OR ?
+            .bind(public_arm_open) // public:     OR ?
             .bind(req) // restricted: ? IS NOT NULL
             .bind(req) // restricted: agent_id = ?
             .bind(req) // restricted: audience value = ?

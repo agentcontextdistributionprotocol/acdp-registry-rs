@@ -46,16 +46,16 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
     /// RFC-ACDP-0008 §4.5 retrieval-style predicate `retrieve` and `search`
     /// already enforce: `restricted`/`private` bodies require `requester` to
     /// be the producer or a named audience member. The `public` arm is
-    /// gated by `anonymous_public_reads`, mirroring `RegistryStore::search`'s
+    /// gated by `public_arm_open`, mirroring `RegistryStore::search`'s
     /// third parameter of the same name — when `requester` is `None` and
-    /// `anonymous_public_reads` is `false`, the page is empty; when `true`,
+    /// `public_arm_open` is `false`, the page is empty; when `true`,
     /// public bodies are returned exactly as before. A non-`None` requester's
     /// results are unaffected by this flag either way.
     ///
     /// `GET /admin/contexts` requires an `auth.admin_tokens` bearer; the
     /// admin caller is authenticated but unnamed (`requester = None`). It
     /// reaches the §4.5 **public arm only** because `admin_list` passes
-    /// `anonymous_public_reads = true` unconditionally — the caller's local is
+    /// `public_arm_open = true` unconditionally — the caller's local is
     /// spelled `admin_sees_public_arm`
     /// (`crates/acdp-registry-core/src/handlers/admin.rs:87`), not because a
     /// `None` requester alone implies that arm — the restricted and private
@@ -82,7 +82,7 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
         cursor: Option<&str>,
         requester: Option<&AgentDid>,
         tenant: Option<&str>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<Page<FullContext>, AcdpError>;
 
     /// Storage backend health check. `Ok(())` on success.
@@ -324,7 +324,7 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
         ctx_ids: &[&str],
         requester: Option<&AgentDid>,
         tenant: Option<&str>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
     ) -> Result<std::collections::HashSet<String>, AcdpError> {
         let mut out = std::collections::HashSet::with_capacity(ctx_ids.len());
         for id in ctx_ids {
@@ -336,7 +336,7 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
             let Some(ctx) = self.get(&parsed)? else {
                 continue;
             };
-            if !retrieve_visible(&ctx.body, requester, anonymous_public_reads) {
+            if !retrieve_visible(&ctx.body, requester, public_arm_open) {
                 continue;
             }
             if let Some(want) = tenant {
@@ -431,11 +431,11 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
-        anonymous_public_reads: bool,
+        public_arm_open: bool,
         tenant: Option<&str>,
     ) -> Result<SearchResponse, AcdpError> {
         match tenant {
-            None | Some(RESERVED_TENANT) => self.search(params, requester, anonymous_public_reads),
+            None | Some(RESERVED_TENANT) => self.search(params, requester, public_arm_open),
             Some(_) => Ok(SearchResponse {
                 matches: Vec::new(),
                 total_estimate: Some(0),
@@ -449,7 +449,7 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
 ///
 /// | visibility   | may retrieve                                        |
 /// |--------------|-----------------------------------------------------|
-/// | `public`     | anyone, when `anonymous_public_reads`; else any DID  |
+/// | `public`     | anyone, when `public_arm_open`; else any DID  |
 /// | `restricted` | the producer (`agent_id`) **or** a DID in `audience` |
 /// | `private`    | the producer (`agent_id`) **or** a DID in `audience` |
 ///
@@ -466,13 +466,9 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
 /// backends express the same rule as a predicate rather than calling this, and
 /// the parity suite asserts all three agree on one fixture. If this function
 /// and upstream `can_retrieve` ever disagree, that suite is what says so.
-pub fn retrieve_visible(
-    body: &Body,
-    requester: Option<&AgentDid>,
-    anonymous_public_reads: bool,
-) -> bool {
+pub fn retrieve_visible(body: &Body, requester: Option<&AgentDid>, public_arm_open: bool) -> bool {
     match body.visibility {
-        Visibility::Public => anonymous_public_reads || requester.is_some(),
+        Visibility::Public => public_arm_open || requester.is_some(),
         Visibility::Restricted | Visibility::Private => match requester {
             None => false,
             Some(r) => {
@@ -550,7 +546,7 @@ mod default_search_in_tenant_tests {
             &self,
             _params: &SearchParams,
             _requester: Option<&AgentDid>,
-            _anonymous_public_reads: bool,
+            _public_arm_open: bool,
         ) -> Result<SearchResponse, AcdpError> {
             self.search_calls.fetch_add(1, Ordering::SeqCst);
             Ok(SearchResponse {
@@ -633,7 +629,7 @@ mod default_search_in_tenant_tests {
             _cursor: Option<&str>,
             _requester: Option<&AgentDid>,
             _tenant: Option<&str>,
-            _anonymous_public_reads: bool,
+            _public_arm_open: bool,
         ) -> Result<Page<FullContext>, AcdpError> {
             unimplemented!("not reached by search_in_tenant's default")
         }
@@ -954,7 +950,7 @@ mod default_visible_ctx_ids_tests {
             &self,
             _params: &SearchParams,
             _requester: Option<&AgentDid>,
-            _anonymous_public_reads: bool,
+            _public_arm_open: bool,
         ) -> Result<SearchResponse, AcdpError> {
             unimplemented!("visible_ctx_ids must not reach search — that is the other predicate")
         }
@@ -1024,7 +1020,7 @@ mod default_visible_ctx_ids_tests {
             _cursor: Option<&str>,
             _requester: Option<&AgentDid>,
             _tenant: Option<&str>,
-            _anonymous_public_reads: bool,
+            _public_arm_open: bool,
         ) -> Result<Page<FullContext>, AcdpError> {
             unimplemented!("not reached by visible_ctx_ids' default")
         }
@@ -1131,7 +1127,7 @@ mod default_visible_ctx_ids_tests {
         let v = s.visible_to(None, false).await;
         assert!(
             v.is_empty(),
-            "with no requester and `anonymous_public_reads` off, NOTHING is retrievable — not even \
+            "with no requester and `public_arm_open` off, NOTHING is retrievable — not even \
              public. Visible set was {v:?}"
         );
     }
@@ -1146,7 +1142,7 @@ mod default_visible_ctx_ids_tests {
             .collect();
         assert_eq!(
             v, expected,
-            "with `anonymous_public_reads` on, an anonymous requester sees exactly the public \
+            "with `public_arm_open` on, an anonymous requester sees exactly the public \
              contexts and nothing else"
         );
     }

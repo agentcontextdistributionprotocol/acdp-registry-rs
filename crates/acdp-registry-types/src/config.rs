@@ -1615,4 +1615,47 @@ backend = "sqlite"
             "expected a TENANT_AGENTS_JSON-attributed error, got: {err}"
         );
     }
+
+    /// `anonymous_public_reads` is a CONFIG-FILE KEY, and nothing else in this
+    /// repo pinned it by name.
+    ///
+    /// Every other use sets `cfg.auth.anonymous_public_reads` programmatically,
+    /// which a rename updates in lockstep — so the whole suite stayed green
+    /// while the contract with deployed `registry.toml` files broke. That is not
+    /// hypothetical: the mechanical rename in the unit that added this test
+    /// renamed this field, and the compiler, clippy on six feature
+    /// configurations, and 28 green test suites all had nothing to say about it.
+    ///
+    /// **What a rename would actually do, measured rather than assumed.** The
+    /// hazard was handed to this unit as "`#[serde(default)]` means the old key
+    /// is ignored, not rejected, so the registry boots at `false` while the
+    /// operator believes they set `true`" — a silent disclosure-posture change.
+    /// That is **not** what happens here: `AuthConfig` also carries
+    /// `#[serde(deny_unknown_fields)]`, so a config naming the old key fails to
+    /// parse and the registry **refuses to start**, naming the unknown field.
+    /// Loud, not silent — still a breaking change for every deployed config, but
+    /// a different failure with a different severity.
+    ///
+    /// Both directions are asserted, because each alone is satisfiable by a bug:
+    /// the first would pass if serde matched some other key onto this field, and
+    /// the second is what distinguishes a key that genuinely works from one that
+    /// is quietly tolerated.
+    #[test]
+    fn anonymous_public_reads_is_a_stable_config_key() {
+        let cfg: AuthConfig = toml::from_str("anonymous_public_reads = true")
+            .expect("`anonymous_public_reads` must remain a recognised [auth] key");
+        assert!(
+            cfg.anonymous_public_reads,
+            "the key parsed but did not reach the field: every deployed config \
+             setting it has silently stopped taking effect"
+        );
+
+        let err = toml::from_str::<AuthConfig>("public_arm_open = true")
+            .expect_err("`deny_unknown_fields` must reject a key this struct does not define");
+        assert!(
+            err.to_string().contains("public_arm_open"),
+            "the rejection must NAME the offending key, or an operator upgrading \
+             into a rename gets a parse failure they cannot act on: {err}"
+        );
+    }
 }

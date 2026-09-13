@@ -182,7 +182,7 @@
 //!     handling), mints a per-scenario bearer from `effective_requester_did`
 //!     (no `Authorization` header when it's `null`), and rebuilds the router
 //!     when a scenario's `registry_capabilities_subset` overrides
-//!     `anonymous_public_reads`. As of Phase 9c it ALSO seeds
+//!     `public_arm_open`. As of Phase 9c it ALSO seeds
 //!     `setup.lineages` — two-or-more-version lineages, chained through REAL
 //!     `supersede_body()` publishes in `version`-ascending order (never a
 //!     direct store write) — building a THIRD substitution table,
@@ -835,7 +835,7 @@ struct ShapeDScenario {
     /// `None` ⇒ send no `Authorization` header at all (anonymous).
     effective_requester_did: Option<String>,
     /// `Some(b)` when the scenario's `registry_capabilities_subset`
-    /// overrides `anonymous_public_reads`; forces a router rebuild.
+    /// overrides `public_arm_open`; forces a router rebuild.
     anonymous_public_reads_override: Option<bool>,
     want_status: u16,
     want_error_code: Option<String>,
@@ -1542,7 +1542,7 @@ fn parse_shape_d(fx: &Value) -> Option<ShapeDPlan> {
     // RFC-ACDP-0008 §4.5 -- contributors carries attribution, not
     // retrieval/search authorization: `can_retrieve` and
     // `can_surface_in_search` branch only on visibility / agent_id /
-    // audience / anonymous_public_reads), so no earlier scenario in the
+    // audience / public_arm_open), so no earlier scenario in the
     // same fixture can observe the row having gained a contributor it
     // didn't ask about.
     //
@@ -2068,7 +2068,7 @@ async fn replay_shape_d(name: &str, plan: &ShapeDPlan) -> ShapeDResult {
         if desired_anon != current_anon {
             let mut cfg = shape_d_config();
             cfg.auth.anonymous_public_reads = desired_anon;
-            // `anonymous_public_reads` is authorization-relevant behavior
+            // `public_arm_open` is authorization-relevant behavior
             // (`RegistryServer::search`/`::retrieve` gate off `caps`, not
             // off `RegistryConfig` -- see `SeededHarness::rebuild`'s doc
             // comment / GAP 3), so the `CapabilitiesDocument` passed to
@@ -3547,7 +3547,7 @@ async fn vis002_search_excludes_restricted_and_router_rebuilds_on_capability_tog
     // Concrete evidence a genuine router rebuild is required, not merely
     // available: scenarios 2 and 3 target the identical requester (`null`,
     // anonymous) and the identical query, differing ONLY in
-    // `anonymous_public_reads`, and expect DIFFERENT outcomes (200 vs 403).
+    // `public_arm_open`, and expect DIFFERENT outcomes (200 vs 403).
     assert_eq!(
         plan.scenarios[2].effective_requester_did, plan.scenarios[3].effective_requester_did,
         "scenarios 2 and 3 must target the SAME (anonymous) requester -- the 200-vs-403 split \
@@ -4072,7 +4072,7 @@ async fn derived_from_carve_out_matches_exactly_one_corpus_scenario() {
 }
 
 /// REG-10 Phase 9b: `vis-009` (RFC-ACDP-0005 §2.5.5/RFC-ACDP-0008 §6.3
-/// `anonymous_public_reads` gating search, symmetric with retrieval)
+/// `public_arm_open` gating search, symmetric with retrieval)
 /// through Shape D. 2 seeds (public + restricted), 3 scenarios: anonymous +
 /// flag false (403 `not_authorized`), anonymous + flag true (200, public
 /// only), and — Corrections 3, the trap the plan-as-written would have
@@ -4507,7 +4507,7 @@ async fn shape_d_seeding_maps_one_shared_literal_agent_to_one_minted_did() {
 /// is wired into `replay_shape_d` (for a scenario's
 /// `registry_capabilities_subset` override) but no pinned fixture reaches
 /// it yet. This proves `rebuild` directly, against the one endpoint
-/// `anonymous_public_reads` actually gates (keyword search -- RFC-ACDP-0005
+/// `public_arm_open` actually gates (keyword search -- RFC-ACDP-0005
 /// §2.5.5 / RFC-ACDP-0008 §6.3; direct retrieval by known `ctx_id` is NOT
 /// gated by this flag, only by visibility itself, so a GET-by-`ctx_id`
 /// probe would prove nothing here -- see `vis-009`): (a) it actually
@@ -4518,7 +4518,7 @@ async fn shape_d_seeding_maps_one_shared_literal_agent_to_one_minted_did() {
 /// `Arc<RegistryServer>`/`Arc<AuthService>` rather than tearing down and
 /// re-seeding) -- proven by an AUTHENTICATED search still finding the
 /// pre-rebuild context afterward (authenticated search is never gated by
-/// `anonymous_public_reads`, so this isolates "is the state still there"
+/// `public_arm_open`, so this isolates "is the state still there"
 /// from "does the flag apply to this requester").
 #[tokio::test(flavor = "multi_thread")]
 async fn seeded_harness_rebuild_changes_router_behavior_and_preserves_seeded_state() {
@@ -4587,7 +4587,7 @@ async fn seeded_harness_rebuild_changes_router_behavior_and_preserves_seeded_sta
 
     // (b) State survived: the context seeded BEFORE rebuild is still
     // findable AFTER it, via an AUTHENTICATED search (never gated by
-    // anonymous_public_reads) as its own producer.
+    // public_arm_open) as its own producer.
     let bearer = common::forged_bearer(producer_did, "seeded-harness-rebuild-proof", 300);
     let (authed_status, authed_body) = search(&harness.router, Some(&bearer)).await;
     assert_eq!(
@@ -8381,7 +8381,7 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 /// two further Shape D capabilities are exercised for the first time
 /// against real fixtures rather than only the Phase 8 synthetic proof:
 /// per-scenario router rebuild on `registry_capabilities_subset.
-/// anonymous_public_reads` (`vis-002` scenarios 2/3, `vis-009`), and
+/// public_arm_open` (`vis-002` scenarios 2/3, `vis-009`), and
 /// substitution reaching query strings in both raw and percent-encoded
 /// form (`vis-005` scenario 2's `?derived_from=<ctx_id>`). `vis-007`
 /// remains classified "Shape D: unrecognized scenario/expected key" by the

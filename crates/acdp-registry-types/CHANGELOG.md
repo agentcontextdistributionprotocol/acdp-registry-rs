@@ -1,5 +1,13 @@
 
 
+## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.1.2...acdp-registry-types/v0.1.3) - 2026-09-13
+
+### Other
+
+- *(store)* name the disclosure parameter for what the predicate consumes ([#262](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/262))
+- test(types) + docs(decisions): the hash_mismatch arm, and a cargo-mutants feasibility measurement (H-M, #216) ([#252](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/252))
+
+
 ## [0.1.2](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.1.1...acdp-registry-types/v0.1.2) - 2026-09-11
 
 ### Other
