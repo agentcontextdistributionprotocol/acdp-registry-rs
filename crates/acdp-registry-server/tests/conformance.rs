@@ -347,15 +347,23 @@
 //! `DEFERRED` entry always should have carried precisely (it previously misdescribed
 //! rev-002's before/after semantics as rev-001's own).
 //!
-//! `did-ssrf-*` (RFC-ACDP-0008 §4.8) is likewise not HTTP-replayable by the generic
-//! loop: `targets_unadvertised_profile` passes it (its `applies_to_profiles` includes
-//! `acdp-registry-core`) and it carries no unseeded precondition, but `extract_shapes`
-//! matches none of Shapes A/B/C/D -- its `input.endpoint`/`input.body` shape satisfies
-//! neither Shape A/B (no top-level/per-scenario `request`) nor Shape C (`input.endpoint`
-//! is `POST /contexts`, not `GET /contexts/{ctx_id}`) -- so it falls to the same
-//! `"non-HTTP fixture (vectors / schema / informative)"` fallback as `can`/`sig`,
-//! confirmed for this phase by re-reading `extract_shapes` directly rather than trusting
-//! the prior `DEFERRED` reason's claim on faith (it held up). The seam this repo
+//! `did-ssrf-*` (RFC-ACDP-0008 §4.8) **was** described here as "not HTTP-replayable by
+//! the generic loop", on the reasoning that `extract_shapes` matched none of Shapes
+//! A/B/C/D -- its `input.endpoint`/`input.body` shape satisfied neither Shape A/B (no
+//! top-level/per-scenario `request`) nor Shape C (`input.endpoint` is `POST /contexts`,
+//! not `GET /contexts/{ctx_id}`) -- so it fell to the
+//! `"non-HTTP fixture (vectors / schema / informative)"` fallback alongside `can`/`sig`.
+//!
+//! **That reasoning was right about the dispatch and wrong about the fixture, and U-527
+//! reversed it.** Shape E now parses `input.endpoint`, and `did-ssrf-001`..`004` replay
+//! over real HTTP. The passage is kept rather than deleted because the mistake is the
+//! instructive part: the earlier read was *verified* -- "confirmed for this phase by
+//! re-reading `extract_shapes` directly rather than trusting the prior `DEFERRED`
+//! reason's claim on faith (it held up)" -- and it still produced a false conclusion,
+//! because re-reading the dispatcher only ever confirms what the dispatcher does. It
+//! cannot notice that the fixture is a perfectly ordinary HTTP request the dispatcher
+//! happens not to parse. Checking the code against the code agrees with itself; only
+//! checking the code against the FIXTURE could have caught this. The seam this repo
 //! delegates to already existed before this phase: `acdp::did::WebResolver` applies
 //! `SsrfPolicy::default()` unconditionally (`did-ssrf-001/002/003`), and
 //! `acdp::safe_http` -- the crate `WebResolver` itself is built on -- exposes
@@ -459,7 +467,7 @@
 //! families this plan added. So `COVERED` is `&[(&str, &[CoverageMechanism])]`, and a
 //! family may claim `CoverageMechanism::Replayed`, one or more named
 //! `CoverageMechanism::Direct(&[fn_name, ...])` entries, or both (`vis` claims both: it
-//! clears `MIN_REPLAYED_EXCHANGES` via Shape A/B/C/D AND carries 10 dedicated
+//! contributes to `REPLAYED_EXCHANGES_AT_PIN` via Shape A/B/C/D/E AND carries 10 dedicated
 //! `visNNN_*`/Shape-D-driving test functions for scenarios the generic loop can't reach).
 //!
 //! Both mechanisms are DERIVED, not merely hand-asserted, but by two different oracles:
@@ -724,6 +732,69 @@ fn shape_d_config() -> RegistryConfig {
     cfg.auth.enabled = true;
     cfg
 }
+
+/// The generic replayer's own harness: [`config()`] plus a **pinned key** for
+/// the producer DID the `pub-*` fixtures sign as.
+///
+/// This is U-528's whole point. `config()` sets `playground.enabled = true`,
+/// which skips DID verification, so every signature reached the store
+/// unexamined -- `pub-001` publishes a signature of 64 literal `A`s and was
+/// ACCEPTED with a 200 against its expected 400 `invalid_signature`.
+///
+/// The fix is not to turn the playground off: that would demand a live
+/// `did:web` resolver (DNS + TLS) in-process for every replayed publish.
+/// `playground.pinned_keys` already gives **real** `acdp::crypto::verify`
+/// Ed25519 verification of a `did:web` producer without a resolver -- the
+/// mechanism `sig001_*`/`rev001_*` in this file have used all along. U-528
+/// simply points the replayer at it.
+///
+/// Deliberately `pinned_only = false`, and that is the blast-radius
+/// decision: strict mode would reject every *other* agent with
+/// `key_not_authorized`, rewriting the verdict of fixtures that have nothing
+/// to do with signatures. Unpinned agents keep the exact path they had
+/// before, so the only fixtures whose behaviour can move are those
+/// publishing as this one DID.
+///
+/// Kept separate from [`harness()`] on purpose: `harness()` has eight other
+/// callers, and `config()` itself is load-bearing elsewhere --
+/// `idem_playground_branch_honors_supports_idempotency_key_gate` depends on
+/// `pinned_keys` being EMPTY as its precondition. Shape D builds on
+/// `shape_d_config()` and is likewise untouched, which matters because
+/// `replay_shape_d` panics if a seeded publish fails to return 200.
+async fn replay_harness() -> axum::Router {
+    let mut cfg = config();
+    cfg.playground.pinned_keys = vec![PinnedAgentKey {
+        agent_did: FIXTURE_PRODUCER_DID.into(),
+        public_key_b64: FIXTURE_PRODUCER_PUBLIC_KEY_B64.into(),
+        algorithm: "ed25519".into(),
+        valid_from: None,
+        valid_until: None,
+    }];
+    cfg.playground.pinned_only = false;
+    common::build_harness_with_webhook(
+        cfg,
+        caps(),
+        AUTHORITY,
+        common::StoreMode::Memory,
+        None,
+        None,
+    )
+    .await
+    .router
+}
+
+/// The producer DID the `pub-*`, `sig-*` and `rev-*` fixtures share.
+const FIXTURE_PRODUCER_DID: &str = "did:web:agents.example.com:test-producer";
+
+/// That producer's Ed25519 public key, as published by the spec itself in
+/// `sig-001-ed25519-golden.json`'s `test_keypair.public_key_base64`.
+///
+/// Pinned as a constant rather than read from the fixture at run time so the
+/// replay harness is identical with and without `ACDP_SPEC_DIR`, and so a
+/// spec bump that changed the keypair fails loudly in
+/// `fixture_producer_key_still_matches_the_spec` below instead of silently
+/// turning every signature check into a pass-by-accident.
+const FIXTURE_PRODUCER_PUBLIC_KEY_B64: &str = "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=";
 
 async fn harness() -> axum::Router {
     common::build_harness_with_webhook(
@@ -2563,6 +2634,25 @@ fn unseeded_precondition_reason(fx: &Value) -> Option<&'static str> {
 /// Gate order: profile gate → precondition gate → shape dispatch → template
 /// gate (which needs a constructed `Exchange.path`, so it runs last). The
 /// most specific, most informative reason wins.
+/// True when a *constructed* request path still contains a spec placeholder.
+///
+/// The spec writes placeholders in **two** notations and this gate originally
+/// knew only one. `{ctx_id}` is the documented brace form; `cur-001` writes
+/// `cursor=<previously-issued-cursor>` with **angle** brackets, and a gate
+/// looking only for braces waves it straight through. The consequence is not
+/// a crash — it is a *pass*: the literal text `<previously-issued-cursor>`
+/// is a perfectly good malformed cursor, so the registry returns the 400 the
+/// fixture expects and the fixture is scored green having tested nothing
+/// about expired cursors. That is the Rule 176 shape, so the gate covers
+/// both notations.
+///
+/// RFC 3986 permits none of `{`, `}`, `<`, `>` unescaped in a path, and
+/// `pct_encode_path_segment` escapes them anyway, so no well-formed
+/// substituted path can trip this.
+fn path_has_placeholder(path: &str) -> bool {
+    path.contains('{') || path.contains('}') || path.contains('<') || path.contains('>')
+}
+
 fn extract(fx: &Value) -> Extracted {
     if targets_unadvertised_profile(fx) {
         return Extracted::Skip("fixture targets a profile this harness does not advertise");
@@ -2580,11 +2670,10 @@ fn extract(fx: &Value) -> Extracted {
     // `pct_encode_path_segment` escapes them anyway, so this can't
     // false-positive on well-formed substituted input.
     if let Extracted::Run(exchanges) = &extracted {
-        if exchanges
-            .iter()
-            .any(|e| e.path.contains('{') || e.path.contains('}'))
-        {
-            return Extracted::Skip("request path carries an unsubstituted {template} placeholder");
+        if exchanges.iter().any(|e| path_has_placeholder(&e.path)) {
+            return Extracted::Skip(
+                "request path carries an unsubstituted {...} or <...> placeholder",
+            );
         }
     }
     extracted
@@ -2607,6 +2696,85 @@ fn extract(fx: &Value) -> Extracted {
 // a seed publish that does NOT return 200 is a hard bug in the harness's
 // own request construction, so `replay_shape_d` panics on it rather than
 // skipping or recording it as a fixture mismatch.
+/// Publish fixtures whose expected RFC-ACDP-0007 §5 code this registry does
+/// **not** produce, paired with the code it produces instead.
+///
+/// Every entry here is a wrong-reason pass that U-528 converted into an
+/// asserted fact. Before this table the publish arm pinned no code at all, so
+/// each of these replayed **green** while receiving an error unrelated to the
+/// one the fixture exists to check. The table does not excuse them — the
+/// replayer asserts the fixture produces the code named here, so if any of
+/// them changes (in either direction) the build fails and a human decides.
+///
+/// `(fixture id, code this registry actually returns, why)`
+const CODE_DIVERGENCES: &[(&str, &str, &str)] = &[
+    // U-527 made these four replay and they passed on "some 400". They never
+    // reach DID resolution at all: the fixture bodies omit the required
+    // `version` member, so deserialization rejects first. The SSRF behaviour
+    // they describe IS enforced and IS covered — by
+    // `did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets`,
+    // which drives the resolver directly rather than through a publish.
+    (
+        "did-ssrf-001",
+        "schema_violation",
+        "fixture body omits the required `version` member, so deserialization rejects \
+         before DID resolution runs; the SSRF seam has direct coverage instead",
+    ),
+    (
+        "did-ssrf-002",
+        "schema_violation",
+        "same omission as did-ssrf-001",
+    ),
+    (
+        "did-ssrf-003",
+        "schema_violation",
+        "same omission as did-ssrf-001",
+    ),
+    (
+        "did-ssrf-004",
+        "schema_violation",
+        "same omission as did-ssrf-001",
+    ),
+    // Found by U-531's sweep of the remaining replayable fixtures, after
+    // U-528 pinned codes for Shape E but left Shape A's publish arm `None`.
+    // `pub-008` exists to prove a non-`did:web` `agent_id` is rejected. It
+    // never reaches that rule: its `signature.value` is 96 base64 chars where
+    // ed25519 requires 88, so signature-shape validation rejects it first. It
+    // executed, asserted a 400, received a 400, and checked nothing about
+    // `agent_id` -- the same defect as the `did-ssrf` four, in a fixture that
+    // had been replaying green since long before either.
+    (
+        "pub-008",
+        "invalid_signature",
+        "fixture's signature.value is 96 base64 chars where ed25519 requires 88, so \
+         signature-shape validation rejects before the non-did:web agent_id rule is \
+         reached (U-531 sweep)",
+    ),
+    // Caused BY U-528, and the reason this table exists rather than a quiet
+    // harness tweak. `pub-002` supplies both a bad `content_hash` and a bad
+    // signature. Unpinned it returned `hash_mismatch`, matching the fixture.
+    // With the producer key pinned, `enforce_pinned_signature` runs before
+    // the hash gate, so the signature fails first. RFC validation ordering is
+    // impl-defined, so neither order is non-conformant — but the change is
+    // real, it was caused by this unit, and it is recorded rather than
+    // absorbed.
+    (
+        "pub-002",
+        "invalid_signature",
+        "the pinned-key path verifies the signature before the hash gate, and this \
+         fixture's body fails both; RFC validation ordering is impl-defined (U-528)",
+    ),
+];
+
+/// The code `CODE_DIVERGENCES` records for `fixture_id`, if any.
+fn divergent_code(fixture_id: Option<&str>) -> Option<&'static str> {
+    let id = fixture_id?;
+    CODE_DIVERGENCES
+        .iter()
+        .find(|(fid, _, _)| *fid == id)
+        .map(|(_, actual, _)| *actual)
+}
+
 fn extract_shapes(fx: &Value) -> Extracted {
     // Shape A: top-level `request` + `expected`.
     if let (Some(req), Some(exp)) = (fx.get("request"), fx.get("expected")) {
@@ -2639,9 +2807,15 @@ fn extract_shapes(fx: &Value) -> Extracted {
                     headers: headers_of(req),
                     body: req.get("body").cloned(),
                     want_status: status,
-                    // Don't pin the exact first-failing error code for
-                    // publishes — validation ordering is impl-defined.
-                    want_error_code: None,
+                    // U-531 sweep: this was `None`, on the same
+                    // "validation ordering is impl-defined" reasoning
+                    // U-527 used for Shape E -- and with the same
+                    // consequence, that a publish fixture could only
+                    // assert "some 400". Pinned now; `pub-008` was
+                    // passing for the wrong reason behind it.
+                    want_error_code: divergent_code(fx.get("id").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .or_else(|| want_error_code(exp)),
                     want_json: exp.get("json_contains").cloned(),
                 }]);
             }
@@ -2726,7 +2900,133 @@ fn extract_shapes(fx: &Value) -> Extracted {
             }
         }
     }
+    // Shape E: the general `input.endpoint` + `input.body` form -- U-527.
+    //
+    // Shape C above handles exactly ONE endpoint literal
+    // (`GET /contexts/{ctx_id}`). Everything else spelled with
+    // `input.endpoint` fell straight through to the fallback below, which
+    // reports `"non-HTTP fixture (vectors / schema / informative)"` -- and
+    // that string is FALSE for them: they declare an HTTP method, a path, a
+    // body and an expected status. Measured at pin `16211e6`: **6** of 144
+    // fixtures use the `request.method`+`path` spelling Shape A reads, and
+    // **65** use `input.endpoint`. The replayer understood the minority
+    // spelling, and the majority were filed as "not HTTP" rather than as
+    // "not parsed" -- which is why issue #291's twelve looked like a
+    // coverage gap and were partly a parser gap.
+    //
+    // Scoped deliberately to fixtures carrying a CONCRETE body: only 12 of
+    // the 65 have one, the rest describe the request in prose
+    // (`body_summary: "Concrete payload omitted..."`). Supporting bodyless
+    // GETs would additionally admit `cur-001`, whose endpoint embeds
+    // `<previously-issued-cursor>` -- an ANGLE-bracket placeholder the
+    // template gate in `extract()` does not catch (it looks for `{`/`}`),
+    // so it would replay a literal placeholder in the query string and
+    // still get its expected 400, passing for entirely the wrong reason.
+    // `cur-002` IS fully concrete and would be a genuine win; it is left
+    // for whoever extends the template gate to `<...>` first, because the
+    // two must land together.
+    if let Some(input) = fx.get("input") {
+        if let (Some(endpoint), Some(exp)) = (
+            input.get("endpoint").and_then(Value::as_str),
+            fx.get("expected"),
+        ) {
+            return extract_input_endpoint(
+                input,
+                endpoint,
+                exp,
+                fx.get("id").and_then(Value::as_str),
+            );
+        }
+    }
     Extracted::Skip("non-HTTP fixture (vectors / schema / informative)")
+}
+
+/// Shape E's body: turn one `input.endpoint` fixture into an exchange, or
+/// say *accurately* why it cannot become one.
+///
+/// Every `Skip` reason here is specific. The point of U-527 is not only that
+/// 12 fixtures start replaying -- it is that the other 53 stop being told
+/// they are "non-HTTP" when the truth is that they are HTTP requests whose
+/// body the spec deliberately left in prose. A wrong reason string sends the
+/// next reader to the wrong question, which is exactly how these sat unread
+/// long enough to become issue #291.
+fn extract_input_endpoint(
+    input: &Value,
+    endpoint: &str,
+    exp: &Value,
+    fixture_id: Option<&str>,
+) -> Extracted {
+    let Some((method, path)) = endpoint.split_once(' ') else {
+        return Extracted::Skip("fixture endpoint is not in `METHOD /path` form");
+    };
+    let method = method.to_uppercase();
+    // `ANY` is the spec's wildcard for "this applies to every method"; it
+    // names no single request to send.
+    if !matches!(
+        method.as_str(),
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
+    ) {
+        return Extracted::Skip("fixture endpoint declares no single concrete HTTP method");
+    }
+    let Some(status) = want_status(exp) else {
+        return Extracted::Skip("fixture declares an HTTP endpoint but no expected HTTP status");
+    };
+    let body = input.get("body");
+    let body_is_concrete = matches!(body, Some(Value::Object(_)) | Some(Value::Array(_)));
+    // A GET/HEAD needs no body to be a complete request; anything else does.
+    // U-527 required a concrete body for EVERY method, which excluded
+    // `cur-002` -- a fully concrete search request -- purely to avoid
+    // admitting `cur-001`, whose angle-bracket placeholder the template gate
+    // could not see. Now that `path_has_placeholder` covers both notations,
+    // `cur-001` is caught on its own merits and the blanket exclusion is no
+    // longer load-bearing.
+    let needs_body = !matches!(method.as_str(), "GET" | "HEAD");
+    if needs_body && !body_is_concrete {
+        return if input.get("body_summary").is_some() {
+            Extracted::Skip("fixture describes its request body in prose, not as JSON")
+        } else {
+            Extracted::Skip("fixture declares an HTTP endpoint but carries no request body")
+        };
+    }
+
+    // U-527 skipped `invalid_signature` fixtures here, because the replay
+    // harness could not reach a signature-verification outcome at all.
+    // **U-528 deleted that predicate rather than narrowing it**: the replay
+    // harness now pins the fixtures' producer key, so the signature check
+    // really runs. Nothing is excused in its place.
+
+    let is_publish = method == "POST" && path.starts_with("/contexts");
+    if is_publish && status != 400 {
+        // Identical rule to Shape A's, and for the identical reason: a
+        // positive or authz publish needs signature+hash material a
+        // synthetic fixture body does not carry.
+        return Extracted::Skip("publish positive/authz outcome not deterministically replayable");
+    }
+    Extracted::Run(vec![Exchange {
+        method,
+        path: path.to_string(),
+        headers: Default::default(),
+        body: if body_is_concrete {
+            body.cloned()
+        } else {
+            None
+        },
+        want_status: status,
+        // U-527 left this `None` for publishes, on the grounds that
+        // validation ordering is impl-defined -- with the consequence,
+        // stated at the time, that "a publish fixture replayed this way
+        // asserts only some 400". **U-528 pins it.** Unpinned, a publish
+        // fixture cannot tell the rejection it names from any other
+        // rejection, which is precisely how `pub-011` was able to look
+        // like signature coverage while receiving a schema error. Where
+        // this registry genuinely produces a different code, the fixture
+        // is named in `CODE_DIVERGENCES` with the code it DOES produce,
+        // so the divergence is asserted rather than tolerated.
+        want_error_code: divergent_code(fixture_id)
+            .map(str::to_string)
+            .or_else(|| want_error_code(exp)),
+        want_json: exp.get("json_contains").cloned(),
+    }])
 }
 
 /// True when `ACDP_REQUIRE_CONFORMANCE` is set to any value, including the
@@ -2821,7 +3121,16 @@ fn resolve_fixture_dir(dir: &str) -> Option<PathBuf> {
 /// comment) and it is not otherwise given direct coverage. A gate that
 /// accidentally over-matches must fail loudly, not quietly shrink coverage
 /// to a still-nonzero number. Raise this as coverage grows.
-const MIN_REPLAYED_EXCHANGES: usize = 30;
+/// Exchanges the replayer drives at pin `16211e6`, as an **equality**.
+///
+/// This was `MIN_REPLAYED_EXCHANGES`, a `>=` floor, and a floor cannot
+/// catch the failure it exists for: a shape-dispatch bug that silently
+/// stops matching some fixtures leaves the count *lower*, and a floor is
+/// satisfied by every number above it. U-527 is itself the proof --
+/// `extract()` was silently declining 12 parseable fixtures and the floor
+/// reported healthy throughout. An equality makes coverage moving in
+/// EITHER direction fail the build and forces a human to say which.
+const REPLAYED_EXCHANGES_AT_PIN: usize = 41;
 
 fn family_of(name: &str) -> String {
     // Prefix up to the digit group: `data-ref-ssrf-001-...` -> `data-ref-ssrf`.
@@ -2958,7 +3267,7 @@ async fn replays_spec_fixtures_when_present() {
         .as_ref()
         .map(|v| v.iter().map(String::as_str).collect());
 
-    let app = harness().await;
+    let app = replay_harness().await;
     let mut replayed = 0usize;
     let mut failures: Vec<String> = Vec::new();
     // Per-family / per-reason tallies so coverage is transparent — never
@@ -3084,10 +3393,13 @@ async fn replays_spec_fixtures_when_present() {
     if !failures.is_empty() {
         panic!("conformance failures:\n  - {}", failures.join("\n  - "));
     }
-    assert!(
-        replayed >= MIN_REPLAYED_EXCHANGES,
-        "replayed {replayed} exchange(s), expected at least {MIN_REPLAYED_EXCHANGES} \
-         (a fidelity gate may be over-matching and silently shrinking coverage)"
+    assert_eq!(
+        replayed, REPLAYED_EXCHANGES_AT_PIN,
+        "replayed {replayed} exchange(s), expected exactly {REPLAYED_EXCHANGES_AT_PIN}. \
+         FEWER means a shape-dispatch gate started over-matching and is silently \
+         shrinking coverage; MORE means fixtures became replayable and their entries \
+         in UNEXERCISED_FIXTURES / REPLAYABLE_FIXTURES_AT_PIN have not been updated. \
+         Both are a human decision, which is why this is an equality and not a floor"
     );
 
     // REG-10 Phase 11: the `Replayed` half of the `COVERED` coverage-mechanism proof.
@@ -3171,10 +3483,23 @@ async fn four_pre_existing_exchanges_still_use_original_shapes() {
             fx["expected"]["status"].as_u64().unwrap() as u16,
             "{id}: want_status"
         );
-        assert!(
-            ex.want_error_code.is_none(),
-            "{id}: Shape A's publish branch never pins an error code (validation ordering is \
-             impl-defined) -- this must still hold"
+        // **This assertion was inverted by U-531, deliberately.** It used to
+        // require `want_error_code.is_none()` -- "Shape A's publish branch
+        // never pins an error code (validation ordering is impl-defined),
+        // this must still hold". That invariant is exactly what let `pub-008`
+        // replay green for years while testing nothing it was written to
+        // test, so the sweep reversed it rather than preserving it. The
+        // ordering argument was never wrong; it just does not justify
+        // asserting NOTHING. Where this registry genuinely orders validation
+        // differently from a fixture, `CODE_DIVERGENCES` records the code it
+        // does return, which is a stronger statement than silence.
+        let expected_code = divergent_code(Some(id))
+            .map(str::to_string)
+            .or_else(|| want_error_code(&fx["expected"]));
+        assert_eq!(
+            ex.want_error_code, expected_code,
+            "{id}: Shape A's publish branch must pin the fixture's expected code, or the \
+             code CODE_DIVERGENCES records this registry actually returns"
         );
     }
 
@@ -5378,7 +5703,7 @@ fn wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted() {
 // instead of it -- the replayer's own skip manifest (module doc-block,
 // "Skipped -- requires pre-seeded state") still (correctly) shows
 // `idem-001`..`idem-005` as unreached by `extract_shapes`, because direct
-// coverage bypasses shape-dispatch entirely. `MIN_REPLAYED_EXCHANGES` is
+// coverage bypasses shape-dispatch entirely. `REPLAYED_EXCHANGES_AT_PIN` is
 // UNCHANGED by this phase for the same reason `anc`/`can`/`vis-003`/
 // `vis-007`'s direct tests never moved it: none of these five exchanges
 // pushes through `replayed`.
@@ -8159,22 +8484,58 @@ fn extract_skips_fixtures_outside_advertised_profiles() {
 /// `ret-001` and shrink `replayed` from 4 to 3.
 #[test]
 fn extract_skips_unsubstituted_path_templates() {
-    let unsubstituted = json!({
+    // **Both notations, varied — not one spelling and a count.** The spec
+    // writes placeholders two ways and the gate knew only braces, so an
+    // angle-bracket corpus walked straight through it: `cur-001`'s
+    // `cursor=<previously-issued-cursor>` would replay as a literal string,
+    // draw the 400 the fixture expects, and be scored green having tested
+    // nothing about expired cursors. A test that asserted "N fixtures are
+    // gated" would have passed throughout that, which is exactly how the
+    // gate reached U-531 half-blind. Each spelling is therefore exercised
+    // as its own case.
+    for (label, path) in [
+        ("brace", "/contexts/{ctx_id}/retract"),
+        ("angle", "/contexts/<previously-issued-cursor>/retract"),
+        ("brace, query position", "/contexts/search?cursor={cursor}"),
+        (
+            "angle, query position",
+            "/contexts/search?cursor=<previously-issued-cursor>",
+        ),
+        ("mixed", "/contexts/{ctx_id}/x?cursor=<c>"),
+    ] {
+        let unsubstituted = json!({
+            "request": { "method": "POST", "path": path, "body": {"foo": "bar"} },
+            "expected": {"status": 400}
+        });
+        match extract(&unsubstituted) {
+            Extracted::Skip(reason) => assert_eq!(
+                reason, "request path carries an unsubstituted {...} or <...> placeholder",
+                "{label}: {path}"
+            ),
+            Extracted::Run(x) => {
+                panic!("{label}: expected template-gate skip for {path}, got Run({x:?})")
+            }
+            Extracted::RunStateful(_) => {
+                panic!("{label}: expected template-gate skip for {path}, got RunStateful")
+            }
+        }
+    }
+
+    // The complement, so the gate is not merely "reject everything": a fully
+    // substituted path carrying neither notation must still RUN.
+    let substituted = json!({
         "request": {
             "method": "POST",
-            "path": "/contexts/{ctx_id}/retract",
+            "path": "/contexts/acdp%3A%2F%2Fr.example%2Fx/retract",
             "body": {"foo": "bar"}
         },
         "expected": {"status": 400}
     });
-    match extract(&unsubstituted) {
-        Extracted::Skip(reason) => assert_eq!(
-            reason,
-            "request path carries an unsubstituted {template} placeholder"
-        ),
-        Extracted::Run(x) => panic!("expected template-gate skip, got Run({x:?})"),
-        Extracted::RunStateful(_) => panic!("expected template-gate skip, got RunStateful"),
-    }
+    assert!(
+        matches!(extract(&substituted), Extracted::Run(_)),
+        "a placeholder-free path must still replay -- a gate that rejects everything \
+         would satisfy every assertion above while destroying the corpus"
+    );
 
     // ret-001 regression: declared endpoint carries braces, but the
     // substituted ctx_id produces a brace-free path — must run.
@@ -8749,7 +9110,7 @@ enum CoverageMechanism {
 
 /// Every family with real coverage, and by which mechanism(s). A family may
 /// list more than one entry (`vis` lists both `Replayed` and `Direct`: it
-/// clears `MIN_REPLAYED_EXCHANGES` through the generic replayer AND carries
+/// contributes to `REPLAYED_EXCHANGES_AT_PIN` through the generic replayer AND carries
 /// dedicated per-fixture test functions for scenarios the generic loop
 /// can't reach). Checked two ways -- see the module doc-comment:
 /// `Replayed` entries against `replays_spec_fixtures_when_present`'s `ran`
@@ -9075,17 +9436,20 @@ enum Unexercised {
 const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
     // `pub` claims `CoverageMechanism::Replayed` on 3 replayed fixtures
     // (pub-004/005/008) while the profile requires 14. These are the other 11.
-    ("pub-001", Unexercised::RequiredByProfile),
-    ("pub-002", Unexercised::RequiredByProfile),
+    // U-527 removed `pub-002`, `pub-012`, `pub-013` and `pub-014`: Shape E
+    // parses their `input.endpoint` spelling, so the replayer now drives
+    // them for real. What is left here is left for a NAMED reason each.
+    //
+    // `pub-001` and `pub-011` left in U-528: `replay_harness()` pins the
+    // producer key, so both now reach a REAL Ed25519 verification and fail
+    // it, and the publish arm pins the expected code so "some 400" is no
+    // longer enough to pass. What remains below is unreplayable for
+    // structural reasons, not for want of a harness.
     ("pub-003", Unexercised::RequiredByProfile),
     ("pub-006", Unexercised::RequiredByProfile),
     ("pub-007", Unexercised::RequiredByProfile),
     ("pub-009", Unexercised::RequiredByProfile),
     ("pub-010", Unexercised::RequiredByProfile),
-    ("pub-011", Unexercised::RequiredByProfile),
-    ("pub-012", Unexercised::RequiredByProfile),
-    ("pub-013", Unexercised::RequiredByProfile),
-    ("pub-014", Unexercised::RequiredByProfile),
     // `ret` likewise claims `Replayed` on ret-001 alone.
     ("ret-002", Unexercised::RequiredByProfile),
     // Conditional: required because of what this registry advertises.
@@ -9112,7 +9476,7 @@ const TOTAL_FIXTURES_AT_PIN: usize = 144;
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
 /// cannot drift from what actually replays.
-const REPLAYABLE_FIXTURES_AT_PIN: usize = 11;
+const REPLAYABLE_FIXTURES_AT_PIN: usize = 22;
 
 const PARTIAL_DIRECT: &[(&str, &[&str])] = &[
     (
@@ -11045,22 +11409,28 @@ fn did_web_authority_is_ip_literal(did: &str) -> bool {
 /// its entirety rather than filtering and proceeding (004), and MUST treat
 /// a same-host different-port redirect as a DIFFERENT authority (005).
 ///
-/// **The prior `DEFERRED` reason's claim, verified before building on it
-/// (per this phase's own instructions, and because a previous agent
-/// overturned a wrong ruling here once already):** re-reading
+/// **This test's own rationale was overturned by U-527, and the overturning
+/// is worth more than the rationale was.** It previously read: re-reading
 /// `extract_shapes` directly (not trusting the old prose) confirms all 5
-/// did-ssrf-* fixtures really do fall out at fixture-shape extraction.
-/// `targets_unadvertised_profile` passes them through (`applies_to_
-/// profiles` includes `acdp-registry-core`, which is in `HARNESS_
-/// PROFILES`), and there is no `setup`/`preconditions` key, so
-/// `unseeded_precondition_reason` is `None` too -- but `extract_shapes`
-/// itself matches none of Shapes A/B/C/D: no top-level `request` (Shape A/
-/// B need one), no `setup` (Shape D), and Shape C's own destructuring
-/// requires `input.endpoint` to split into exactly `("GET",
-/// "/contexts/{ctx_id}")`, which `"POST /contexts"` never does. So every
-/// one of these fixtures falls to the same `"non-HTTP fixture (vectors /
-/// schema / informative)"` catch-all `can`/`sig` also land in -- confirmed,
-/// not assumed. The seam claim also held up: `acdp::did::WebResolver`
+/// did-ssrf-* fixtures really do fall out at fixture-shape extraction --
+/// `targets_unadvertised_profile` passes them through, there is no
+/// `setup`/`preconditions` key, but `extract_shapes` matched none of Shapes
+/// A/B/C/D: no top-level `request` (Shape A/B need one), no `setup` (Shape
+/// D), and Shape C's destructuring requires `input.endpoint` to split into
+/// exactly `("GET", "/contexts/{ctx_id}")`, which `"POST /contexts"` never
+/// does. So they fell to the `"non-HTTP fixture"` catch-all -- "confirmed,
+/// not assumed."
+///
+/// Every step of that was accurate, and the conclusion was still wrong.
+/// `did-ssrf-001`..`004` are ordinary HTTP publishes with concrete bodies;
+/// **Shape E (U-527) parses them and they now replay.** Verifying a claim
+/// against the dispatcher can only establish what the dispatcher does --
+/// it cannot distinguish "this fixture is not an HTTP request" from "the
+/// dispatcher does not parse this spelling of one", and those two have
+/// opposite fixes. The direct test below is therefore no longer the only
+/// coverage of this family; it is kept because it asserts the SSRF seam far
+/// more precisely than a replayed status code can, and `did-ssrf-005`
+/// (redirect-to-different-port) still has no replayable shape at all. The seam claim also held up: `acdp::did::WebResolver`
 /// (`acdp-did`, re-exported by the `acdp` facade this crate already
 /// depends on) applies `SsrfPolicy::default()` unconditionally, and
 /// `acdp::safe_http` (the crate `WebResolver` itself is built over, also
@@ -13243,7 +13613,9 @@ async fn fixture_accounting_totals_are_exact() {
         .iter()
         .filter(|(_, g)| *g == Unexercised::ConditionalOnCapability)
         .count();
-    assert_eq!(required, 12, "expected exactly 12 required-but-unexercised");
+    // 12 before U-527 (`pub-002`/`012`/`013`/`014` began replaying), 8 before
+    // U-528 (`pub-001`/`pub-011` now reach a real signature check).
+    assert_eq!(required, 6, "expected exactly 6 required-but-unexercised");
     assert_eq!(
         conditional, 3,
         "expected exactly 3 conditional-but-unexercised"
@@ -13253,6 +13625,242 @@ async fn fixture_accounting_totals_are_exact() {
         UNEXERCISED_FIXTURES.len(),
         "the two grades must partition the list — a third grade was added without \
          updating this assertion"
+    );
+}
+
+/// The pinned producer key must still be the one the spec publishes.
+///
+/// [`FIXTURE_PRODUCER_PUBLIC_KEY_B64`] is a constant so the replay harness is
+/// identical with and without `ACDP_SPEC_DIR`. That convenience has a failure
+/// mode: if a spec bump rotated the keypair, the constant would pin a key that
+/// verifies nothing, **every signature fixture would fail for the wrong
+/// reason**, and `pub-001`/`pub-011` would still look "covered" because they
+/// expect a failure anyway. A wrong key produces green exactly where a right
+/// key does — so it is checked against the spec rather than trusted.
+#[tokio::test(flavor = "multi_thread")]
+async fn fixture_producer_key_still_matches_the_spec() {
+    let Some(fixtures) = spec_fixtures() else {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no fixtures resolved"
+        );
+        return;
+    };
+    let fx = read_json(&fixtures.join("sig-001-ed25519-golden.json"));
+    let spec_key = fx["test_keypair"]["public_key_base64"]
+        .as_str()
+        .expect("sig-001 carries test_keypair.public_key_base64");
+    assert_eq!(
+        spec_key, FIXTURE_PRODUCER_PUBLIC_KEY_B64,
+        "the spec's test-producer Ed25519 key changed. `replay_harness()` pins the \
+         constant, so every signature fixture would now be verified against the WRONG \
+         key -- and would still go green, because those fixtures expect a rejection. \
+         Update the constant."
+    );
+}
+
+/// `CODE_DIVERGENCES` must stay a record of real, live divergences.
+///
+/// A table of known-wrong behaviour decays in two directions, and both end
+/// with it lying. An entry whose fixture stopped replaying is never checked
+/// again; an entry whose recorded code has since become the *expected* one is
+/// silently asserting conformance as if it were a gap. Either way the table
+/// would keep reporting a divergence that no longer exists, which is worse
+/// than not having recorded it — an unexercised excuse reads as a live one.
+#[tokio::test(flavor = "multi_thread")]
+async fn code_divergences_are_real_live_and_still_divergent() {
+    let Some(fixtures) = spec_fixtures() else {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no fixtures resolved"
+        );
+        return;
+    };
+    let Some(stems) = fixture_stems_and_ids() else {
+        return;
+    };
+
+    for (id, actual, why) in CODE_DIVERGENCES {
+        assert!(
+            !why.trim().is_empty(),
+            "{id}: a divergence entry must carry a reason"
+        );
+        let Some((stem, _)) = stems.iter().find(|(_, fid)| fid == id) else {
+            panic!("CODE_DIVERGENCES names {id}, which is not a fixture at this pin");
+        };
+        let fx = read_json(&fixtures.join(format!("{stem}.json")));
+
+        // Still replayed? An entry for a fixture the replayer no longer
+        // drives is never exercised, so it cannot be trusted.
+        assert!(
+            matches!(extract(&fx), Extracted::Run(_) | Extracted::RunStateful(_)),
+            "CODE_DIVERGENCES names {id}, but the replayer no longer drives it — the \
+             entry is now unverifiable and must be removed or the fixture re-enabled"
+        );
+
+        // Still a divergence? If the fixture's own expected code now equals
+        // the code we record, the gap closed and the entry is a lie.
+        let expected = fx
+            .get("expected")
+            .and_then(want_error_code)
+            .unwrap_or_default();
+        assert_ne!(
+            expected.as_str(),
+            *actual,
+            "CODE_DIVERGENCES records {id} as diverging to {actual:?}, but that is now \
+             the code the fixture EXPECTS — the divergence closed and the entry must go"
+        );
+    }
+}
+
+/// **No replayed fixture may assert a mere CLASS of failure when it names a
+/// specific one.** This is U-531's sweep, kept as a standing guard.
+///
+/// The defect it closes has now been found three times, in three different
+/// arms, by three different units: `pub-011` (U-528), `did-ssrf-001..004`
+/// (U-528, on fixtures U-527 had just added), and `pub-008` (U-531's sweep --
+/// green since long before either). Every instance had the same shape. The
+/// fixture names an error code, the replayer pinned only the *status*, the
+/// registry returned some other 400 for an unrelated reason, and the fixture
+/// was scored as coverage of a rule it never reached.
+///
+/// **A green replay carrying a plausible code is worse than a missing one**,
+/// because it consumes the attention that would have found the gap. So the
+/// rule is structural rather than per-fixture: if a fixture supplies an
+/// `error_code`, the exchange built from it MUST pin a code -- the fixture's
+/// own, or the one `CODE_DIVERGENCES` records this registry actually returns.
+/// Neither the replayer nor a future shape may opt out by leaving it `None`.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_replayed_fixture_pins_a_code_when_it_names_one() {
+    let Some(fixtures) = spec_fixtures() else {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no fixtures resolved"
+        );
+        return;
+    };
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&fixtures)
+        .unwrap_or_else(|e| panic!("read {fixtures:?}: {e}"))
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .collect();
+    paths.sort();
+
+    let mut named_a_code = 0usize;
+    let mut unpinned: Vec<String> = Vec::new();
+    for path in paths {
+        let fx = read_json(&path);
+        let Extracted::Run(exchanges) = extract(&fx) else {
+            continue;
+        };
+        // Only fixtures that NAME a code are in scope. One that expects a
+        // bare status is asserting exactly what it says.
+        let Some(code) = fx.get("expected").and_then(want_error_code) else {
+            continue;
+        };
+        named_a_code += 1;
+        for ex in exchanges {
+            if ex.want_error_code.is_none() {
+                unpinned.push(format!(
+                    "{}: fixture names {code:?} but the exchange pins no code, so any \
+                     status-{}-with-a-different-reason passes it",
+                    path.file_name().unwrap().to_string_lossy(),
+                    ex.want_status
+                ));
+            }
+        }
+    }
+
+    // Known-positive bound: a scan that matched nothing would report a clean
+    // sweep. At pin `16211e6`, 15 replayed fixtures name a code.
+    assert_eq!(
+        named_a_code, 15,
+        "expected 14 replayed fixtures naming an error code at the pin, found \
+         {named_a_code} -- the scan is broken or the corpus moved, and either way an \
+         empty result would have meant nothing"
+    );
+    assert!(
+        unpinned.is_empty(),
+        "replayed fixtures assert only a status class despite naming a code:\n  - {}",
+        unpinned.join("\n  - ")
+    );
+}
+
+/// No fixture that declares an HTTP endpoint may be told it is "non-HTTP".
+///
+/// This is U-527's actual subject. The twelve fixtures in issue #291 were not
+/// merely uncovered — six of them were **misfiled**, reported as
+/// `"non-HTTP fixture (vectors / schema / informative)"` while carrying
+/// `endpoint: "POST /contexts"`, a concrete body and an expected status. A
+/// count tells you a fixture is unexercised; a reason string tells you what to
+/// DO about it, and a false one sends the reader to the wrong question. These
+/// sat unread long enough to become an issue.
+///
+/// **Asserted per fixture, deliberately, and not per family.** The family-level
+/// tally cannot decide this: `anc`, `data-ref` and `idem` each contain fixtures
+/// of BOTH kinds, so a family reporting "2 non-HTTP" is consistent both with the
+/// two bodyless ones being meant and with two endpoint-carrying ones being
+/// misfiled. Aggregating here would pass while the defect stood — the same
+/// blindness `TOTAL_FIXTURES_AT_PIN`'s equality exists to close one level up.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_fixture_declaring_an_endpoint_is_classified_non_http() {
+    let Some(fixtures) = spec_fixtures() else {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no fixtures resolved"
+        );
+        eprintln!("conformance: no fixtures resolvable; skipping");
+        return;
+    };
+    const FALSE_REASON: &str = "non-HTTP fixture (vectors / schema / informative)";
+
+    let mut checked = 0usize;
+    let mut misfiled: Vec<String> = Vec::new();
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&fixtures)
+        .unwrap_or_else(|e| panic!("read {fixtures:?}: {e}"))
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        let fx = read_json(&path);
+        // Only fixtures that actually declare an endpoint are in scope; a
+        // canonicalization vector legitimately IS non-HTTP.
+        let declares_endpoint = fx
+            .get("input")
+            .and_then(|i| i.get("endpoint"))
+            .and_then(Value::as_str)
+            .is_some();
+        if !declares_endpoint {
+            continue;
+        }
+        checked += 1;
+        if let Extracted::Skip(reason) = extract(&fx) {
+            if reason == FALSE_REASON {
+                misfiled.push(format!(
+                    "{}: declares input.endpoint but is classified {FALSE_REASON:?}",
+                    path.file_name().unwrap().to_string_lossy()
+                ));
+            }
+        }
+    }
+
+    // The sweep must be shown a positive before its empty result means
+    // anything: at pin `16211e6` exactly 65 fixtures declare an endpoint, and
+    // a scan that silently matched none of them would report a clean pass.
+    assert_eq!(
+        checked, 65,
+        "expected 65 endpoint-declaring fixtures at the pin, scanned {checked} — the \
+         scan itself is broken or the spec moved, and either way its empty result \
+         would have meant nothing"
+    );
+    assert!(
+        misfiled.is_empty(),
+        "fixtures declaring an HTTP endpoint are classified non-HTTP:\n  - {}",
+        misfiled.join("\n  - ")
     );
 }
 

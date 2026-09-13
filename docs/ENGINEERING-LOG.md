@@ -5732,6 +5732,138 @@ assertion fired, not merely that one did.** Where an earlier assertion absorbs t
 one needs a separate falsification chosen to leave the earlier one satisfied — here, making
 `AcdpJson` infer an absent header, which is also the precise "cleanup" the assertion exists to block.
 
+## Verifying code against code agrees with itself
+
+Two places in `conformance.rs` recorded that `did-ssrf-*` was "not HTTP-replayable", and both said so
+*carefully*. One noted it was "confirmed for this phase by re-reading `extract_shapes` directly rather
+than trusting the prior `DEFERRED` reason's claim on faith (it held up)". The other was headed "The
+prior `DEFERRED` reason's claim, **verified before building on it**". Both then walked the dispatcher
+shape by shape and concluded correctly that nothing matched.
+
+Every step was accurate and the conclusion was wrong. `did-ssrf-001`..`004` are ordinary HTTP
+publishes with concrete bodies; they now replay. **Re-reading the dispatcher can only ever establish
+what the dispatcher does.** It cannot distinguish *"this fixture is not an HTTP request"* from *"the
+dispatcher does not parse this spelling of one"* — and those two have opposite fixes. The check was
+diligent, repeated, and pointed at the wrong artifact: to catch this, the code had to be checked
+against the **fixture**, not against itself.
+
+The tell was available and unread: the reason string said "vectors / schema / informative" about a
+file containing `"endpoint": "POST /contexts"`. A classification that contradicts the thing it
+classifies is visible without any tooling, and it survived two deliberate verification passes because
+both passes asked "does the dispatcher reach the fallback?" instead of "is the fallback's claim
+true?".
+
+**How to apply:** when a check concludes that some input is out of scope, verify the *predicate
+against the input*, not the code path that produced it. "I re-read the function" is evidence about the
+function. See also `probe must read what you vary` and `assert the mechanism, not the symptom`.
+
+## A floor is satisfied by every number above it
+
+`MIN_REPLAYED_EXCHANGES: usize = 30` guarded the conformance replayer with `replayed >= 30`, and its
+own comment named the hazard correctly — "a fidelity gate may be over-matching and silently shrinking
+coverage". It could not catch that hazard. Coverage was 30 while `extract()` silently declined 12
+parseable fixtures, and 30 satisfies `>= 30`. The guard was calibrated to exactly the broken state and
+would have gone on passing as coverage decayed anywhere above its floor.
+
+Replaced with `REPLAYED_EXCHANGES_AT_PIN = 38` and `assert_eq!`. Falsified by dropping a single
+fixture: **37 passes the old floor and fails the new equality.** Movement in either direction is now a
+human decision — fewer means a dispatch gate started over-matching, more means fixtures became
+replayable and the coverage tables were not updated.
+
+This is the same lesson `TOTAL_FIXTURES_AT_PIN` already carries one level up, which is the useful
+part: the repo had *written down* that a `>=` floor "passes the very scanner that is silently missing
+items", pinned its fixture total as an equality on that reasoning, and left the exchange count a
+floor. **Knowing the rule did not propagate it to the neighbouring constant.** Worth a sweep when a
+lesson is recorded: find the other guards of the same shape, not just the one that prompted it.
+
+## Fixing the harness is half of curing a wrong-reason pass
+
+`pub-011` expects 400 `invalid_signature`. It was unreachable because the conformance harness bypassed
+DID verification — so the obvious cure was to make the harness verify signatures. That cure alone
+would have left the defect standing, and the fixture would have looked cured.
+
+Its `content_hash` is the literal placeholder `sha256:<recomputes-correctly-against-this-body>`, and
+the replayer pinned **no error code** for publishes, on the reasonable-sounding grounds that validation
+ordering is impl-defined. Measured with the harness fixed but the code still unpinned: `pub-011`
+**passes**, receiving `schema_violation: content_hash digest must be 64 lowercase hex chars`. A
+fixture whose entire purpose is signature verification, scored green by a schema error.
+
+**A wrong-reason pass has two independent causes — the check that cannot run, and the assertion too
+weak to notice.** Removing either one alone leaves a green test. They have to be counted separately,
+because fixing the dramatic one feels like completion: the harness change is the hard, interesting
+work, and it is exactly the moment you stop looking.
+
+The general form: whenever a test asserts a *class* of outcome (any 4xx, an error occurred, it threw)
+rather than the specific outcome it names, restoring the capability it was missing does not make it
+discriminating. Ask what else could produce the same class.
+
+## Pinning the codes said four of my own fixtures had never been right
+
+Pinning the expected error code turned up five publish fixtures passing for the wrong reason. Four
+were `did-ssrf-001..004` — fixtures **I had lit up in the previous unit** and reported as a coverage
+win. They return `schema_violation` because their bodies omit a required member, so they never reach
+the DID resolution they exist to exercise. The fifth, `pub-002`, was changed *by this unit*: pinning
+the producer key makes signature verification run before the hash gate, so it now fails on the
+signature rather than the hash its fixture names.
+
+Both went into a `CODE_DIVERGENCES` table that records the code actually returned, with a reason, and
+**asserts it**. The three available responses were: skip them (loses the coverage), leave them
+unpinned (keeps the wrong-reason pass), or pin the truth and name the gap. Only the third leaves a
+reader able to tell what is covered from what merely runs.
+
+The uncomfortable part is the useful part: "+8 fixtures replaying" was true last unit and **half of it
+was not coverage**. A count of things that execute is not a count of things that check. When reporting
+newly-covered items, the honest figure is how many now assert the thing they were written to assert —
+and you only learn that by pinning the specific outcome and seeing what breaks.
+
+## Four instances, one shape, three units
+
+The same defect has now been found four times: `pub-011`, `did-ssrf-001..004`, `pub-008`, and
+`cur-001` caught in advance. Every one had an identical structure — **the fixture names a specific
+error, the replayer pinned only the status, the registry returned a different 400 for an unrelated
+reason, and the fixture was scored as coverage of a rule it never reached.**
+
+What makes it worth a log entry is that the instances were *not* found by looking for the class. Each
+surfaced while doing something else, and the search that would have found all four at once —
+`grep 'want_error_code: None'` — was one command and was never run until the fourth. After the second
+instance the class was named, after the third it had a table, and the sweep still only happened
+because a reviewer asked for it explicitly.
+
+**When you find the same defect twice, stop fixing instances and enumerate the class.** The cost is
+usually one grep; the cost of not doing it is that the fourth instance is found by someone reading a
+green test and wondering.
+
+`pub-008` is the one that should sting: it predates all of this work. Every unit that touched the
+replayer ran it, saw it green, and moved on.
+
+## Inverting an invariant is a decision, and must read as one
+
+The sweep's fix required reversing an existing assertion — `want_error_code.is_none()`, documented as
+*"Shape A's publish branch never pins an error code (validation ordering is impl-defined), this must
+still hold"*. Someone wrote "this must still hold" on the exact property that was hiding the bug.
+
+The reasoning behind it was **correct**: RFC validation ordering genuinely is implementation-defined,
+so demanding a specific first-failing code genuinely can be wrong. The error was in what that licenses.
+*"We cannot assert THIS particular thing"* was silently widened into *"we assert nothing"*, and
+nothing is what let an unrelated rejection pass as coverage. The middle option — assert the code we
+DO return, and record why it differs from the fixture — is strictly stronger than silence and was
+available the whole time.
+
+So the assertion was inverted rather than deleted, and the comment now says it was inverted, by which
+unit, and why the original reasoning was sound but insufficient. **An invariant that turns out to be
+wrong should leave a scar, not a clean surface** — the next reader needs to know the property was
+considered and reversed, not that it never existed.
+
+## A guard's first act was to correct its author
+
+The new sweep guard asserts a known-positive bound: *N replayed fixtures name an error code*, so that
+an empty scan cannot read as a clean sweep. I wrote 14 from my own reading. The real number is 15, and
+the assertion failed on its first run.
+
+That is the bound check working exactly as intended, on the person who wrote it, thirty seconds after
+writing it — and it is an argument for putting the number in as an equality even when you are
+confident. A `>=` would have accepted 14 silently forever.
+
 ## U-521 — the mutation floor drops 8 -> 5, and the "blocked on infrastructure" class is empty
 
 *2026-09-13, lane-2. Supersedes "**New floor: 8**" in "### The 8 accepted survivors, each argued"
@@ -5766,7 +5898,8 @@ computed from six explicitly named shards, never from a glob.**
 
 ### The three retirements
 
-Both were "BLOCKED ON MISSING TEST INFRASTRUCTURE" in U-504's list. Both blockers are now gone.
+Both SITES were "BLOCKED ON MISSING TEST INFRASTRUCTURE" in U-504's list — three mutants across
+the two of them. Both blockers are now gone.
 
 **1. The did:web `LifecycleEventType::Retracted` arm** (`context.rs`, cited `:1542:13` then, `:1577:13`
 now). The blocker was real and structural: `signed_event_envelope` can only sign as `did:key`, so
