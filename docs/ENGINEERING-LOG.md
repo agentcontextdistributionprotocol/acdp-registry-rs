@@ -4787,3 +4787,43 @@ another repo and has to be linkable.
 The form matters and was tested, not assumed: git does not descend into an excluded **directory**,
 so a bare `plans/` makes `!plans/cross-repo/` unreachable. Verified by reverting to the bare form
 and watching `git check-ignore` call the cross-repo file IGNORED again.
+
+### Added
+
+<!-- U-502 #216 verification -->
+
+- **The mutation ratchet, verified by re-measurement rather than by assertion**
+  (`#216`, U-502). The entry above records the baseline at `52c0111`
+  (74 mutants / 48 viable / **46 caught / 2 survivors**) and states that one
+  survivor was killed. This is the confirmation that it actually was, run at
+  `6da5b7d` after the two tests landed:
+
+  | outcome | at `52c0111` | at `6da5b7d` |
+  |---|---|---|
+  | mutants in scope | 74 | **74** |
+  | caught | 46 | **47** |
+  | **survivors** | 2 | **1** |
+  | timeout | 0 | **0** |
+  | unviable | 26 | **26** |
+
+  8m at `-j6`. `handlers/log.rs:117:19` moved from MISSED to CAUGHT, and the log
+  for that mutant names its killers: exactly
+  `log_proof_ctx_id_is_served_to_the_owning_tenant` and
+  `log_proof_ctx_id_is_withheld_from_a_foreign_tenant` — the two tests written for
+  it, and nothing else. A mutant that changes verdict while the killing tests are
+  named is the whole claim; "we added a test and the number went down" would not
+  have been.
+
+  The one remaining survivor is `handlers/log.rs:131:18`, the `root_for` cache
+  equivalent mutant, accepted with its reasoning in the entry above.
+
+  The **committed** ratchet and harness checks were then run against this report,
+  extracted out of `.github/workflows/mutants.yml` itself so the text checked is
+  the text that runs: ratchet `rc=0` at `scope=74 / budget=1`, harness check `rc=0`
+  with the largest sole killer at 8 of 47 (17%), well under the 50% ceiling.
+
+  **Appended rather than edited into the entry above, deliberately.** That entry was
+  corrected in place while it existed only on an unmerged branch, and
+  `DECISIONS.md` #18 records that the licence for doing so expired the moment it was
+  pushed. It is pushed. So this is an append — which is the rule being applied to
+  its author rather than merely written down by them.
