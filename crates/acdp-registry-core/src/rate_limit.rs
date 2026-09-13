@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const WINDOW: Duration = Duration::from_secs(60);
@@ -180,6 +180,92 @@ impl AgentRateLimiter {
         }
         bucket.count += 1;
         Ok(())
+    }
+}
+
+/// Charges one publish against an agent's budget on **every** exit path once
+/// armed — success, error, `?` early-return, panic, or client cancellation.
+///
+/// This is the fix for #242. The limiter's `peek`/`record` split (A1) left
+/// `record` reachable only from the success path, so a publish that failed
+/// *after* the limiter — bad signature, `DuplicatePublish`, hash mismatch,
+/// store error — cost a full verify plus a store round-trip and was never
+/// charged. A producer whose publishes consistently fail late was unthrottled.
+///
+/// # Why a drop guard rather than error classification
+///
+/// #242 rejected classifying the error at the central `record_publish(e.wire_code())`
+/// wrapper, because that is a denylist over a `#[non_exhaustive]` enum: it
+/// **fails open** as new variants are added, silently ceasing to charge for
+/// failures nobody remembered to classify. This type is the structural inverse.
+/// It classifies nothing. Once armed it charges on every exit, so an error
+/// variant that does not exist yet is charged the day it is introduced, with no
+/// edit here. It is fail-**closed** by construction, which is exactly the
+/// property the denylist could not have.
+///
+/// # Why this is not the other rejected shape
+///
+/// #242 also rejected reserving at `peek` time, because the reservation lives in
+/// an attacker-keyed map entry — the unbounded growth that `peek` not inserting
+/// exists to remove. This guard is only ever armed **after** the caller has
+/// proven possession of `agent_id`'s signing key, so it never inserts on an
+/// unauthenticated path. `peek` is untouched and still never inserts.
+///
+/// # Arming is monotonic
+///
+/// `armed` is a `bool` and `Drop` runs once, so arming twice still charges
+/// exactly once. That is what lets the pre-flight arm (identity proven) and the
+/// success-path arm collapse into one mechanism without double-charging.
+///
+/// # Charging on panic and cancellation is deliberate
+///
+/// Both mean the verify work was really spent, so both are charged. The
+/// alternative — suppressing the charge unless the handler returned normally —
+/// would hand back a free channel to anyone able to induce either.
+pub struct PublishCharge {
+    limiter: Option<Arc<AgentRateLimiter>>,
+    agent_id: String,
+    armed: bool,
+}
+
+impl PublishCharge {
+    /// Create a disarmed charge. Cheap: one `Arc` refcount bump and one
+    /// `String` allocation. Owning both (rather than borrowing `state` and
+    /// `req`) keeps the guard free of borrows held across the handler's
+    /// `.await` points.
+    ///
+    /// A `None` limiter (rate limiting disabled) is carried rather than
+    /// special-cased at the call sites, so the handler's arming logic reads the
+    /// same whether or not a limiter is configured.
+    pub fn new(limiter: Option<Arc<AgentRateLimiter>>, agent_id: &str) -> Self {
+        Self {
+            limiter,
+            agent_id: agent_id.to_string(),
+            armed: false,
+        }
+    }
+
+    /// Commit to charging this publish. Call only where `agent_id` is
+    /// **provably** the signer, or on a path that has already succeeded.
+    pub fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    /// Whether this charge will fire on drop. Test-facing.
+    #[cfg(test)]
+    fn is_armed(&self) -> bool {
+        self.armed
+    }
+}
+
+impl Drop for PublishCharge {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Some(limiter) = &self.limiter {
+            limiter.record(&self.agent_id);
+        }
     }
 }
 
@@ -814,5 +900,103 @@ mod tests {
         assert!(rl.check_global_at(t0).is_err());
         // And a different agent's per-agent budget is likewise untouched.
         assert!(rl.check_at("b", t0).is_ok());
+    }
+
+    // ---- #242: PublishCharge ---------------------------------------------
+    //
+    // The guard's whole value is that it charges on paths the success-path
+    // `record` never reached. Each test below is written so that it FAILS
+    // against the pre-fix behaviour (never charge unless the handler returned
+    // Ok), not merely so that it passes against the fix.
+
+    fn bucket_count(rl: &AgentRateLimiter, agent: &str) -> u32 {
+        rl.buckets.lock().unwrap().get(agent).map_or(0, |b| b.count)
+    }
+
+    #[test]
+    fn an_armed_charge_fires_on_drop() {
+        let rl = Arc::new(AgentRateLimiter::new(10));
+        {
+            let mut charge = PublishCharge::new(Some(rl.clone()), "agent-a");
+            assert!(!charge.is_armed(), "a fresh charge must start disarmed");
+            charge.arm();
+            // Not yet: the charge is committed to, but has not landed.
+            assert_eq!(
+                bucket_count(&rl, "agent-a"),
+                0,
+                "arming must not charge -- the charge belongs on the exit path",
+            );
+        }
+        assert_eq!(
+            bucket_count(&rl, "agent-a"),
+            1,
+            "dropping an armed charge must spend exactly one unit",
+        );
+    }
+
+    #[test]
+    fn an_unarmed_charge_leaves_no_trace() {
+        let rl = Arc::new(AgentRateLimiter::new(10));
+        drop(PublishCharge::new(Some(rl.clone()), "spoofed"));
+        // Mirrors `peek_does_not_create_a_bucket`: the guard must not be a new
+        // way to insert an attacker-keyed entry on an unauthenticated path,
+        // which is the shape #242 rejected. Asserting count 0 would pass
+        // against an implementation that inserted a zeroed bucket, so assert
+        // on the map itself.
+        assert_eq!(
+            rl.buckets.lock().unwrap().len(),
+            0,
+            "a charge that was never armed must not insert",
+        );
+    }
+
+    #[test]
+    fn arming_twice_still_charges_once() {
+        let rl = Arc::new(AgentRateLimiter::new(10));
+        {
+            let mut charge = PublishCharge::new(Some(rl.clone()), "agent-a");
+            // This is the real handler shape: the pre-flight arm (identity
+            // proven before the SDK call) and the success-path arm both run on
+            // a publish that succeeds. If arming were additive, every
+            // successful did:key publish would cost two units and the limit
+            // would silently halve.
+            charge.arm();
+            charge.arm();
+        }
+        assert_eq!(
+            bucket_count(&rl, "agent-a"),
+            1,
+            "arming is monotonic, not additive",
+        );
+    }
+
+    #[test]
+    fn an_armed_charge_fires_when_the_scope_unwinds() {
+        // The property that distinguishes this from the success-path `record`
+        // it replaces: an early exit still charges. `?` in the handler unwinds
+        // the same way a panic does here -- a normal scope exit would not
+        // discriminate between the two implementations at all.
+        let rl = Arc::new(AgentRateLimiter::new(10));
+        let rl2 = rl.clone();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let mut charge = PublishCharge::new(Some(rl2), "agent-a");
+            charge.arm();
+            panic!("late failure");
+        }));
+        assert!(unwound.is_err(), "the test must actually have unwound");
+        assert_eq!(
+            bucket_count(&rl, "agent-a"),
+            1,
+            "an armed charge must survive an abnormal exit: the verify work was spent",
+        );
+    }
+
+    #[test]
+    fn a_charge_without_a_limiter_is_inert() {
+        // Rate limiting disabled (`publish_rate_per_minute` unset) must not
+        // panic or allocate a limiter; the handler arms unconditionally.
+        let mut charge = PublishCharge::new(None, "agent-a");
+        charge.arm();
+        drop(charge);
     }
 }

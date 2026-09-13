@@ -4317,3 +4317,84 @@ hold entries from several releases. Use the commands.
   `docker/RAILWAY.md`, `docs/OPERATIONS.md` and `docs/AUTHENTICATION.md` still
   carry the false gating claim and are **not** this unit's to change; they are
   reported to their owners with quotes rather than edited.
+
+## U-501 — #242: publishes that fail late are now charged on two of four branches
+
+`P5` (`H-A`) split the publish limiter into `peek` (read-only, never inserts) before the
+pipeline and `record` (charges) on the success path. That removed a real vulnerability — an
+unauthenticated caller could spend another agent's budget by naming them, and grow the bucket
+map without bound because the map key was attacker-controlled — and disclosed, as `#242`, the
+gap it left: a publish that fails *after* the limiter costs a full verify plus a store
+round-trip and is never charged.
+
+`#242` recorded two candidate fixes and rejected both. Post-hoc classification of the error at
+the central `record_publish(e.wire_code())` wrapper is a denylist over a `#[non_exhaustive]`
+enum, so it **fails open** as variants are added. Reserving at `peek` time puts the reservation
+in an attacker-keyed map entry, which is the unbounded growth `peek`-not-inserting exists to
+remove. Both rejections still stand and neither was shipped.
+
+### What changed
+
+A `PublishCharge` drop guard (`rate_limit.rs`). Once armed it charges on **every** exit —
+`?`, explicit return, panic, a cancelled request future. It classifies nothing, which is
+precisely the property the rejected denylist could not have: an error variant that does not
+exist yet is charged the day it is introduced, with no edit. Fail-closed by construction.
+Arming is monotonic, so the pre-flight arm and the success-path arm collapse into one
+mechanism without double-charging.
+
+The guard is armed only where the signer is **proven**, so it never inserts on an
+unauthenticated path. `peek` is untouched and `peek_does_not_create_a_bucket` still passes
+unmodified.
+
+### The finding that made this bigger than one branch
+
+`#242` assumed only `enforce_pinned_signature` was a clean charge site — one branch of four —
+and that anything more needed an SDK change. That was not true. `acdp-server`'s own `did:key`
+pipeline (`crates/acdp-server/src/registry/server.rs:492-518`) establishes identity with two
+functions that are already public and already outside the `client` feature gate:
+`compute_content_hash` and `verify_publish_request_signature_offline`. Composing them in the
+handler proves the signer offline, before the SDK call, with no new dependency and no
+cross-repo write.
+
+**Both halves are load-bearing, and the order is not cosmetic.**
+`verify_publish_request_signature_offline` verifies the signature over `content_hash` but never
+binds `content_hash` to the body. Keyed on it alone, a captured `(agent_id, content_hash,
+signature)` triple replayed under a *different* body reads as "identity proven" and spends the
+real agent's budget. Recomputing the hash first kills that. This was not a theoretical worry:
+deleting the hash comparison reddened **nothing** in the entire suite until
+`a_replayed_envelope_over_a_different_body_does_not_spend_the_budget` was written for it.
+
+### The four-way split, stated rather than left to be discovered
+
+| branch | late failure charged? | |
+|---|---|---|
+| `did:key` | **yes** | proven offline in the handler before the SDK call |
+| playground, pinned | **yes** | `enforce_pinned_signature` proved it before the SDK call |
+| playground, unpinned | no — **by design, permanently** | nothing is verified at all, so there is no identity to charge |
+| production `did:web` | no — **remaining gap** | identity is established only inside the resolver-backed SDK call |
+
+The two "no" rows are not the same kind of thing and must not be collapsed. Arming the
+unpinned playground branch would key an insertion on an attacker-supplied `agent_id` — the
+shape `#242` rejected. The `did:web` row is outstanding work: closing it from this side would
+need a second DID-document resolution per publish (network cost, a second SSRF surface, a cache
+that can disagree with the SDK's), all worse than the gap. It needs an SDK seam, designed in
+`plans/cross-repo/acdp-rs-publish-charge-seam.md` and filed upstream against `acdp-rs`.
+
+`late_failures_are_charged_on_exactly_two_of_the_four_publish_branches` pins the split with an
+`assert_eq!` on the count, not a `>=` floor — a floor passes the very regression it exists to
+catch. It reddens in both directions: removing an arm, and adding one to an unauthenticated
+branch.
+
+### Cost, priced rather than hidden
+
+The `did:key` branch now pays one extra JCS canonicalization + SHA-256 and one extra signature
+verification per publish, because the SDK redoes both. That is the price of keeping the fix
+in-repo, and the cross-repo seam above is what removes it — along with the `did:web` gap.
+
+### A test renamed because this change made its name false
+
+`a_publish_that_fails_late_does_not_consume_the_agents_budget` is now
+`a_publish_that_fails_before_the_signer_is_proven_does_not_consume_the_agents_budget`. The
+failure it exercises is a tenant-check rejection, which runs before the branch dispatch — the
+unproven side of the line. Its old name would have read as a direct contradiction of the new
+tests sitting beside it.

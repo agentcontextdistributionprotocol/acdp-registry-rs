@@ -16,6 +16,7 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use crate::extract::AcdpQuery;
+use crate::rate_limit::PublishCharge;
 use crate::state::AppState;
 
 /// Query-string DTO mirroring `acdp::types::search::SearchParams`.
@@ -202,6 +203,62 @@ pub(crate) fn reject_reserved_tenant(tenant: Option<&str>) -> Result<(), Registr
 
 /// Resolve the tenant a **publish** writes into.
 ///
+/// Is `req.agent_id` **provably** the signer of this exact request, using only
+/// offline checks the handler can run itself?
+///
+/// This is the identity oracle behind the #242 charge (see [`PublishCharge`]).
+/// It answers one question — may we spend this agent's publish budget even if
+/// the publish goes on to fail? — and it must be impossible to answer "yes"
+/// without the agent's private key.
+///
+/// # The two checks, and why neither alone is enough
+///
+/// 1. **Recompute `content_hash` over the body.** Binds the hash to *this*
+///    request.
+/// 2. **`verify_publish_request_signature_offline`.** Binds `content_hash` to
+///    `agent_id`'s key, and requires `signature.key_id`'s DID portion to equal
+///    `agent_id`.
+///
+/// Composed, in that order: *this exact body was signed by `agent_id`'s key.*
+///
+/// Step 1 is not optional and the order is not cosmetic. Step 2 verifies a
+/// signature over `content_hash`, but says nothing about whether `content_hash`
+/// describes the body in front of us. Keyed on step 2 alone, a captured
+/// `(agent_id, content_hash, signature)` triple replayed under a *different*
+/// body would read as "identity proven" and would spend the real agent's
+/// budget. Step 1 kills that: the replayed body hashes to something else.
+///
+/// This mirrors the SDK's own did:key pipeline exactly
+/// (`acdp-server/src/registry/server.rs:492`), which runs hash recomputation
+/// (`validator.rs` step 4) before `verify_publish_request_signature_offline` for
+/// the same reason.
+///
+/// # What is deliberately NOT checked
+///
+/// Schema validation. It is not part of the identity proof, and excluding it
+/// makes this oracle *broader*, not laxer: a producer flooding signed-but-
+/// schema-invalid publishes is precisely the noisy producer the limiter exists
+/// to throttle, so charging it is correct.
+///
+/// # This must never reject a request
+///
+/// It returns `bool`, not `Result`, on purpose. A `false` means "do not charge",
+/// never "reject". The request proceeds to the SDK exactly as before and the SDK
+/// produces the authoritative error, so no publish that is accepted today
+/// becomes rejected. Every failure mode here — a non-did:key producer, an
+/// unserialisable request — falls to `false`, which is the safe direction for a
+/// *charge* decision.
+fn publish_identity_proven_offline(req: &PublishRequest) -> bool {
+    let Ok(body_value) = serde_json::to_value(req) else {
+        return false;
+    };
+    match acdp::crypto::hash::compute_content_hash(&body_value) {
+        Ok(recomputed) if recomputed == req.content_hash => {}
+        _ => return false,
+    }
+    acdp::crypto::verify::verify_publish_request_signature_offline(req).is_ok()
+}
+
 /// Publish is producer-authenticated (the signature over `content_hash` proves
 /// `agent_id`), so — unlike a read — the authoritative tenant is the producer's
 /// `[[auth.tenant_agents]]` binding, NOT a spoofable `X-Tenant-Id` header.
@@ -397,8 +454,9 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
     // or name a fresh id each request and grow the bucket map without bound,
     // because the map key was attacker-controlled. `peek` answers the only
     // question this position needs — "is this agent already over budget?" —
-    // without writing anything. The charge moved to the success path, where
-    // the `agent_id` has been verified.
+    // without writing anything. The charge moved off this line entirely, to a
+    // `PublishCharge` guard armed only where `agent_id` has been proven (#242);
+    // see the block at the charge site below for the four-way branch split.
     //
     // CONSEQUENCE, stated rather than left to be discovered: the enforced
     // bound is now `limit + concurrent in-flight publishes for that agent`,
@@ -419,6 +477,13 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
             });
         }
     }
+
+    // #242: the charge for this publish, disarmed. From here on, every exit
+    // path -- `?`, an explicit return, a panic, a dropped request future --
+    // charges the budget IF this guard has been armed, and arming happens only
+    // where `req.agent_id` has been proven. The `peek` above is still read-only
+    // and still never inserts; this guard does not change that.
+    let mut charge = PublishCharge::new(state.rate_limiter.clone(), req.agent_id.as_str());
 
     // Resolve the tenant this publish writes into. Publish is
     // producer-authenticated (the signature over content_hash proves
@@ -460,6 +525,17 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         // the pinned-key gate like any did:web agent, so it was only ever
         // truly cryptographically verified on a registry with `[playground]`
         // absent entirely (e.g. the old dedicated receipts-only registry).
+        // #242: a did:key identity is self-verifying, so the handler can
+        // establish it offline BEFORE handing off to the SDK -- which is what
+        // makes this branch chargeable without an SDK change. Arm here, not
+        // after the call, so every late failure inside it (DuplicatePublish,
+        // a store error, the capabilities gate on `supported_did_methods`) is
+        // already covered. If the identity is NOT proven we leave the guard
+        // disarmed and fall through unchanged: the SDK still produces the
+        // authoritative error, and an unproven `agent_id` is never charged.
+        if publish_identity_proven_offline(&req) {
+            charge.arm();
+        }
         let server2 = server.clone();
         let req_clone = req.clone();
         let idem = idempotency_key.clone();
@@ -502,6 +578,12 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
             // handles idempotency internally (unlike
             // `publish_unverified_for_tests` below), so no manual
             // lookup/record dance is needed here.
+            // #242: `enforce_pinned_signature` has just verified this
+            // request's signature against the operator-pinned public key, so
+            // `agent_id` is proven here by the same mechanism the endpoint
+            // already treats as proof. Arm before the call so a late failure
+            // inside it is charged.
+            charge.arm();
             let server2 = server.clone();
             let req_clone = req.clone();
             let idem = idempotency_key.clone();
@@ -551,9 +633,7 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
                             // The production path's replay lands on the shared
                             // success marker below instead, so all four
                             // branches charge replays identically.
-                            if let Some(limiter) = &state.rate_limiter {
-                                limiter.record(req.agent_id.as_str());
-                            }
+                            charge.arm();
                             crate::metrics::record_publish("idempotent_replay");
                             return Ok(Json(rec.response));
                         } else {
@@ -685,21 +765,39 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
     // `set_tenant_of_ctx` above can fail after the branch join — and a charge
     // for work that did not happen is the mirror of the bug this fixes.
     //
-    // KNOWN REGRESSION, disclosed rather than silently accepted: a publish that
-    // fails LATE (bad signature, hash mismatch, store error) is no longer
-    // charged, though it cost a full verify plus a store round-trip. That
-    // weakens the "one noisy producer can't starve others" rationale this
-    // limiter exists for. It is not fixed here because the available fixes are
-    // both bad: per-branch charge sites are only clean at one of four branches,
-    // and post-hoc error classification is a denylist over a `#[non_exhaustive]`
-    // error enum that fails OPEN as new variants appear. Tracked as #242;
-    // a disclosed gap beats an undischarged commitment.
+    // #242, PARTIALLY CLOSED -- read this before assuming late failures are
+    // charged everywhere. Arming here covers the success path for all four
+    // branches. Two branches additionally arm EARLIER, so their late failures
+    // are charged too:
     //
-    // On the playground branches nothing is verified at all, so the bucket
-    // there is fairness accounting, not a security control.
-    if let Some(limiter) = &state.rate_limiter {
-        limiter.record(req.agent_id.as_str());
-    }
+    //   did:key            -- armed once `publish_identity_proven_offline`
+    //                         says so (hash recomputation + offline signature
+    //                         verification), before the SDK call.
+    //   playground, pinned -- armed once `enforce_pinned_signature` returns
+    //                         `Verified`, before the SDK call.
+    //
+    // The two that do NOT charge late failures, and they are not the same kind
+    // of thing:
+    //
+    //   production (did:web) -- a GENUINE REMAINING GAP. Identity really is
+    //       established, but only inside the resolver-backed SDK call, so the
+    //       handler cannot observe it without a second DID-document resolution
+    //       (network cost, a second SSRF surface, cache divergence). Closing it
+    //       needs a verification/charge seam in the SDK; the design is in
+    //       plans/cross-repo/acdp-rs-publish-charge-seam.md and is filed
+    //       upstream. This is the part of #242 that stays open.
+    //
+    //   playground, unpinned -- NOT A GAP, and must never be "fixed". Nothing
+    //       is verified on that branch at all, so there is no identity to
+    //       charge. Arming there would key an insertion on an attacker-supplied
+    //       `agent_id`, which is exactly the shape #242 rejected and exactly
+    //       what A1 removed. It stays uncharged on failure permanently. The
+    //       bucket there is fairness accounting, not a security control.
+    //
+    // `publish_charges_exactly_two_branches_on_late_failure` in
+    // tests/http_integration.rs pins this four-way split by count, so a
+    // silently dropped or silently added arm fails the suite.
+    charge.arm();
     if response.registry_receipt.is_some() {
         crate::metrics::record_receipt_minted();
     }
