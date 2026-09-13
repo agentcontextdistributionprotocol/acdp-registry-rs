@@ -111,11 +111,35 @@ fn rustls_is_a_normal_dependency() {
 ///
 /// The cert is generated here rather than committed: `.gitignore:39-43`
 /// refuses certificate material, and a checked-in PEM would expire.
+///
+/// **Compiled out under `storage-pg`** rather than skipped at runtime. That
+/// build needs a live database to get past storage init, and CI's `postgres`
+/// job runs only `--test pg_integration`, so this test would never execute
+/// there anyway. A `#[cfg]` leaves no skip branch that could quietly swallow a
+/// real failure; a runtime `return` would.
+#[cfg(not(feature = "storage-pg"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn tls_startup_installs_a_provider_and_serves() {
     use std::io::Write as _;
 
+    // The backend MUST be derived from the compiled feature set, not written
+    // as a literal. A spawned binary inherits the entire config surface, so a
+    // fixture naming a backend the binary was not built with is an undeclared
+    // `#[cfg]`: this test first shipped with `backend = "sqlite"` hard-coded
+    // and failed CI's `--no-default-features --features storage-memory` job,
+    // where the binary exits 1 at storage init long before any TLS work.
+    // The features are mutually exclusive (see `main.rs`'s `compile_error!`),
+    // so exactly one arm applies.
     let dir = tempfile::tempdir().expect("tempdir");
+
+    #[cfg(feature = "storage-sqlite")]
+    let (backend, extra) = (
+        "sqlite",
+        format!("sqlite_path = \"{}\"", dir.path().join("t.db").display()),
+    );
+    #[cfg(feature = "storage-memory")]
+    let (backend, extra) = ("memory", String::new());
+
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .expect("self-signed cert");
     let cert_path = dir.path().join("cert.pem");
@@ -142,20 +166,21 @@ cert_path = "{}"
 key_path = "{}"
 
 [storage]
-backend = "sqlite"
-sqlite_path = "{}"
+backend = "{backend}"
+{extra}
 "#,
         cert_path.display(),
         key_path.display(),
-        dir.path().join("t.db").display(),
     )
     .expect("write config");
     drop(f);
 
+    // Captured, not discarded: in CI the panic message is usually the only
+    // artifact anyone reads, so a failure has to carry the binary's own output.
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_acdp-registry"))
         .env("ACDP_REGISTRY_CONFIG", &cfg_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn the registry binary");
 
@@ -166,11 +191,29 @@ sqlite_path = "{}"
     let mut served = false;
     for _ in 0..50 {
         if let Some(status) = child.try_wait().expect("try_wait") {
+            let out = child.wait_with_output().expect("collect output");
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            // **Branch on the observed code.** The first version of this test
+            // printed the 101 explanation for EVERY early exit, so when it
+            // failed with exit 1 for an unrelated reason the message said
+            // "exit code 101 is the rustls panic this test exists for" and a
+            // reader concluded the fix had failed. A fixed explanation of the
+            // INTENDED failure makes an unintended one look diagnosed.
+            if status.code() == Some(101) {
+                panic!(
+                    "the registry exited during startup with {status}. Exit code 101 IS the \
+                     rustls panic this test exists for: the binary enables two crypto \
+                     providers (aws-lc-rs via axum-server, ring via reqwest) and must \
+                     install one explicitly in `main` before it logs `listening`.\n\
+                     --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+                );
+            }
             panic!(
-                "the registry exited during startup with {status}. Exit code 101 is the \
-                 rustls panic this test exists for: the binary enables two crypto providers \
-                 (aws-lc-rs via axum-server, ring via reqwest) and must install one \
-                 explicitly in `main` before it logs `listening`."
+                "the registry exited during startup with {status}, which is NOT the 101 this \
+                 test exists for — do not read this as the crypto-provider defect. Something \
+                 else stopped startup (config, storage init, port in use).\n\
+                 --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
             );
         }
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
