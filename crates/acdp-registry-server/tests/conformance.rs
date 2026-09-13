@@ -8701,12 +8701,23 @@ const EXCUSED: &[(&str, &str)] = &[
          acdp-registry-core's required_fixtures or conditional_fixtures (log is absent \
          from CORE_INEXCUSABLE_FAMILIES). These fixtures carry no endpoint and no vectors \
          array, so a 'direct pass' would assert something about acdp-crypto's merkle \
-         code, not about this registry. The emission half IS covered and stays pinned: \
+         code, not about this registry. THAT ARGUMENT APPLIES TO THIS ENTRY'S OWN GOLDEN TESTS TOO, and until U-506 \
+         this entry did not notice -- so the emission claim is split into the two halves \
+         it was conflating. (1) The VECTOR half, pinned and real: \
          log-001 and log-003 are recomputed by \
          log001_leaf_root_and_inclusion_golden_recomputed and \
          log003_consistency_proof_golden_recomputed, pinned by PARTIAL_DIRECT and tied to \
          this sentence by \
          classification_reasons_naming_golden_tests_are_pinned_by_partial_direct. \
+         Those two recompute through acdp-crypto and NEVER EXECUTE handlers/log.rs -- \
+         measured, not argued: mutating root_for to String::new() guts the Merkle root \
+         every log endpoint serves, and both of them still pass, along with this whole \
+         suite. (2) The HANDLER half -- what a reader of the old sentence would have \
+         taken the two golden tests to hold -- is held by the ELEVEN tests in \
+         CROSS_BINARY_GUARDS's `log` group, all in http_integration.rs, and that same \
+         mutation turns all eleven red. They sit in another test binary, so they cannot \
+         be a Direct(...) entry and are pinned by text rather than by the compiler; see \
+         CROSS_BINARY_GUARDS for why that is structural and what it costs. \
          Reclassified from DEFERRED (#130) under the maintainer's explicit extension of \
          the Phase 14 lc ruling -- see the block comment above rcpt's entry.",
     ),
@@ -9306,7 +9317,15 @@ fn source_has_present_test_fn(name: &str) -> bool {
 /// Merkle root the log endpoints serve -- leaves all three presence oracles here GREEN
 /// (both text guards and `direct_fns_matches_the_coverage_tables_exactly`), and indeed
 /// the whole 69-test suite green in default mode, while the mutation oracle reports it
-/// CAUGHT by ten tests in `http_integration.rs`.
+/// CAUGHT by **eleven** tests in `http_integration.rs`, now named in
+/// `CROSS_BINARY_GUARDS` and counted by `LOG_HANDLER_GUARD_COUNT`.
+///
+/// **This said "ten", and it had quietly stopped being true.** U-502 added
+/// `log_proof_ctx_id_is_served_to_the_owning_tenant` to that log suite after this
+/// paragraph was written. The number was correct when written and had nothing
+/// holding it -- the same defect class U-506 fixes one level up -- so it now lives
+/// in a const that an assertion reads, and was re-measured by re-running the
+/// mutation rather than by trusting the prior sentence.
 ///
 /// #216 stays open for the scope the oracle does not yet cover, rather than being
 /// patched a fourth time here (it was on #130 until that issue closed; the mutation
