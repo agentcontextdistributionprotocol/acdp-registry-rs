@@ -43,7 +43,24 @@ Cargo.lock.bak
 !docker/tls/.gitkeep
 
 # Plans / scratch (mirrors acdp-rs convention)
-plans/
+#
+# `plans/<feature>.md` stays ignored: those are per-run working documents, and
+# committing them would put in-flight planning churn into the repo's history.
+#
+# `plans/cross-repo/` is DELIBERATELY TRACKED, and the exception is load-bearing
+# rather than cosmetic. `/plan`'s cross-repo handoff writes the design for
+# another repo HERE (writing into a sibling repo needs a human gate; reading one
+# never does) and then files an issue THERE linking back to a GitHub blob URL.
+# While the whole of `plans/` was ignored, that URL pointed at a file that was
+# never committed, so every such link 404'd -- the handoff silently produced a
+# pointer to nothing. acdp-rs#273 was filed that way and had to carry its design
+# inline instead. A cross-repo plan is a contract with another repo, not scratch.
+#
+# NOTE the `plans/*` + negation form: git does not descend into an excluded
+# DIRECTORY, so a bare `plans/` makes `!plans/cross-repo/` unreachable. The
+# directory itself must stay un-excluded for the negation to be reachable at all.
+plans/*
+!plans/cross-repo/
 temp/
 
 

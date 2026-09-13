@@ -2495,3 +2495,161 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   listing — the rejected first draft of #133.
 - **Status:** CONFIRMED under the configuration named, which is the only configuration in which the
   claim means anything.
+
+## U-501 (#242) — charging publishes that fail late
+
+- **Assumption:** schema validation can be excluded from the identity oracle without weakening
+  it.
+- **Reasoning:** `publish_identity_proven_offline` recomputes `content_hash` and verifies the
+  offline signature, but deliberately does not call `validate_publish_request`. Schema validity
+  is not part of an identity proof: if the hash binds the body and the signature binds the hash
+  to `agent_id`'s key, then `agent_id` signed this body whether or not the body is schema-legal.
+  Excluding it makes the oracle *broader* (more publishes chargeable), not laxer in the
+  dangerous direction, and a producer flooding signed-but-schema-invalid publishes is precisely
+  the noisy producer the limiter exists to throttle.
+- **Status:** CONFIRMED by construction. Reversible in one line if it is ever wrong — adding the
+  call can only reduce what is charged, never permit an unproven charge.
+
+- **Assumption:** the oracle cannot cause a request to be rejected that is accepted today.
+- **Evidence:** it returns `bool`, not `Result`, and every failure path inside it returns
+  `false`. A `false` only skips arming; the request proceeds into the SDK unchanged and the SDK
+  produces the authoritative error. The full 142-test `http_integration` suite passes unchanged,
+  including every existing did:key, playground and production-path acceptance test.
+- **Status:** CONFIRMED.
+
+- **Assumption:** charging on panic and on client cancellation is correct, not a bug.
+- **Reasoning:** both mean the verify work was really spent. Suppressing the charge unless the
+  handler returned normally would hand a free channel to anyone able to induce either.
+  `an_armed_charge_fires_when_the_scope_unwinds` pins the panic half.
+- **Status:** CONFIRMED, and deliberate. Recorded because a future reader is more likely to
+  read it as an oversight than as a decision.
+
+- **Assumption:** the production `did:web` branch cannot be charged from inside this repo at an
+  acceptable cost.
+- **Evidence:** `publish_verified_in_tenant` resolves the DID document over the network inside
+  the SDK call. Establishing identity in the handler first would need a second resolution per
+  publish — a second network round-trip, a second SSRF surface, and a cache that can disagree
+  with the SDK's. Not attempted; the seam is designed in
+  `plans/cross-repo/acdp-rs-publish-charge-seam.md` and filed upstream.
+- **Status:** UNCONFIRMED — this is a judgement about cost, not a measured fact. It is the one
+  claim in this unit a reviewer should push back on if they disagree about the trade.
+
+## U-505 — index of deferred work surfaced from this file and DECISIONS.md (2026-09-13, lane-1)
+
+- **Index entry, not a status change.** No entry above was edited. U-505 enumerated the deferred
+  items in this file and in `DECISIONS.md`, verified them against the tree, and filed the still-live
+  ones as issues so they stop existing only as prose. Flipping any `UNCONFIRMED` above to
+  `CONFIRMED` is a separate unit (U-507) — in-place status edits collide with the keep-both-sides
+  resolution rule while other lanes are appending here.
+- **Counts.** `ASSUMPTIONS.md`: **35** deferred items (25 `Status: UNCONFIRMED`, 1 `Status: OPEN`,
+  9 whose bullet *is* the status and carry no `Status` line, plus 1 `###`-heading item and 1
+  recorded only as an in-entry update). `DECISIONS.md`: **42** candidate follow-up blocks, a
+  deliberate superset since prose mentions of a follow-up are indistinguishable from a record of
+  one without reading each.
+- **Filed as issues:** #265 (CI's feature-config steps run `clippy`, not `cargo build`), #266
+  (`docker.yml` never boots the shipped quickstart stack), acdp-website#43 (public webhook docs
+  list 2 of 4 event types).
+- **Verified ALREADY DONE, not re-filed:** `/metrics` cache headers (`lib.rs:265-271`); the EdDSA
+  PEM check and its ordering (`main.rs:111-117`, `:83` before `:677`); `acdp-playground`'s
+  `WebhookType`; the cursor-literal dedup (`acdp-registry-store/src/cursor.rs`); `storage-memory`
+  CI coverage; the `dtolnay/rust-toolchain` pin; `bump-spec.yml`.
+- **Known stale pointer, reported not repaired:** `DECISIONS.md:1021-1022` pins
+  `pg/src/store.rs:1644-1668` and `sqlite/src/store.rs:1740-1764`. Both ranges now hold unrelated
+  code. Not repaired here because `DECISIONS.md` is append-only this wave.
+- **The bound I could not close, stated plainly:** the 42 `DECISIONS.md` candidates were
+  classified by reading, and the ones resolvable from this repo's tree were verified. Items whose
+  resolution lives in a sibling repo's history (the spec-repo dispatch matrix in the `bump-spec`
+  follow-up, and `acdp-ci/DELIVERY-STANDARD.md`'s status lines) were **not** verified to the same
+  standard, because doing so means reading another repo's git history rather than its working tree.
+  They are neither confirmed done nor confirmed live.
+- **Status:** UNCONFIRMED — the `ASSUMPTIONS.md` count of 35 is exact and bound-checked; the
+  `DECISIONS.md` count of 42 is an upper bound on distinct items, not an exact count.
+## U-503 — a shell script is the right home for a CI tag guard
+
+- **Plan:** `plans/u-503-immutable-sha-tag.md` (Phase 1)
+- **Assumed:** that `docker/assert-image-tags.sh` is an acceptable place for this guard even
+  though **the repo contained no `*.sh` files at all** before it, and CI runs no `shellcheck`,
+  `actionlint` or `yamllint` — so nothing lints it.
+- **Chose:** the shell script, for two reasons that are not about convenience. First, the
+  alternative that matches repo convention — a Rust test under `crates/**` reading
+  `docker.yml`, the shape used for the route-documentation guard — is **outside this unit's
+  path grant**, and needing it would be a `claim-request` rather than a judgement call.
+  Second, a script taking the tag set as an argument is a better shape for this particular
+  job: it is falsifiable in milliseconds against the real pre-fix data, with no CI round
+  trip, which is what let Phase 1 demonstrate rejection instead of asserting it.
+- **Mitigation for the absent linter:** `--self-test` is wired into `docker.yml` (Phase 2), so
+  the script is exercised on every workflow run rather than trusted. A guard nobody runs is
+  the failure mode this is guarding against.
+- **Alternatives:** a Rust test under `crates/**` (out of grant, and would need a claim
+  request); an inline `run:` assert in `docker.yml` matching the file's existing
+  `assert semver tag` idiom — rejected because it cannot be executed locally, so the
+  falsification requirement could not have been met; adding `shellcheck` to CI — rejected,
+  `.github/workflows/ci.yml` is out of grant.
+- **Blast radius if wrong:** low and local. The script is 1 file, invoked from 2 workflow
+  steps; if the convention is unwelcome the logic moves to a Rust test in one commit, and the
+  self-test table moves with it unchanged.
+- **Status:** CONFIRMED (2026-09-13), Opus, at reconcile. The deciding point is not taste: the
+  convention-matching alternative was out of path grant, so it was never this lane's to choose.
+  Of the options actually available, this is the only one that could be falsified before merge,
+  and it was — see `DECISIONS.md`, U-503 decision 3.
+
+## U-503 — metadata-action honours `{{is_default_branch}}` in `enable=` for `type=sha`
+
+- **Plan:** `plans/u-503-immutable-sha-tag.md` (Phase 2)
+- **Assumed:** that `docker/metadata-action@dc80280` evaluates the `{{is_default_branch}}`
+  handlebars expression in the `enable=` option of a `type=sha` rule, not only in the
+  `type=raw` rule where this file already uses it (`docker.yml`, the `latest` rule).
+- **Chose:** the handlebars form anyway, rather than the GitHub expression that carries no such
+  question. Reason: `enable=${{ !startsWith(github.ref, 'refs/tags/') }}` evaluates **true for
+  pull requests**, so `sha-` would still be computed in-PR and the invariant would have to
+  weaken from an iff to "no `sha-` on tag pushes" — which is exactly the one-directional form
+  that cannot fire on the PR that breaks it. Keeping the in-PR firing property is worth more
+  than avoiding this question.
+- **Why it is safe to leave unresolved:** it fails closed and fast. If the handlebars is not
+  honoured, this PR's own `docker` run computes a `sha-` tag on a pull request and the new
+  `assert image tags` step fails the job — at the assert step, about a minute in, before the
+  20-minute build. There is no path where a wrong guess here publishes anything.
+- **Named fallback:** `enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}`
+  — a plain GitHub expression with identical semantics that preserves the in-PR property.
+- **Alternatives:** reading the action's README and believing it (rejected — the run output is
+  the only evidence that counts here, and it is free); pinning a newer action version (not
+  needed, and a version bump is a separate change).
+- **Blast radius if wrong:** one failed CI step and a two-token edit. Nothing publishes.
+- **Status:** CONFIRMED (2026-09-13) by run **34763580595** — PR #264's own `docker` run, which
+  is the only thing that could settle it. `DOCKER_METADATA_OUTPUT_TAG_NAMES: pr-264` and
+  `"tag-names":["pr-264"]`: **no `sha-` entry**, where the pre-fix PR run 34725795501 computed
+  `["pr-262","sha-3617f76"]`. So the handlebars *is* evaluated in `enable=` for `type=sha`, the
+  gate fires, and the same gate suppresses the tag on the release path for the same reason.
+  `self-test the image-tag guard` and `assert image tags` both green; `build + push` skipped, as
+  a pull request must. The fallback expression was not needed and was not applied.
+
+## U-503 — the double build is KEPT; only the mutable tag is fixed
+
+- **Plan:** `plans/u-503-immutable-sha-tag.md` (Open question 2)
+- **Assumed:** that "the same commit gets built twice at all", which the unit brief named as
+  part of the defect, is in fact correct behaviour and should survive this unit.
+- **Chose:** to fix only the mutable tag, and to argue this in the PR body rather than quietly
+  omitting half of what was asked. The evidence is in the two runs' `buildx` command lines:
+  metadata-action stamps `org.opencontainers.image.version=main` on the main build and `=0.1.3`
+  on the release build, `image.created` differs, and buildx attaches
+  `--attest type=provenance,mode=max,builder-id=…/runs/<run-id>`. Labels and provenance live in
+  the config blob, so the two digests differ **deterministically, by construction** — this is
+  not flakiness. Therefore promoting the main digest to `:0.1.3` with
+  `buildx imagetools create`, the obvious way to collapse the builds, would publish a release
+  image whose own OCI `version` label reads `main` and whose provenance names the main run. That
+  is a mislabelling regression traded for a cosmetic one, so the rebuild earns its keep: it is
+  what stamps release identity into the release artifact.
+- **Alternatives:** collapse to a retag (rejected, above); make the builds bit-reproducible
+  (unreachable for the same reason, and the brief explicitly says reproducibility is not the
+  acceptance bar); publish only from the tag path and drop the main-push publish (rejected — it
+  would remove `:latest`/`:main`, which `docker/RAILWAY.md` documents and operators deploy).
+- **Blast radius if wrong:** the leader overrules the call and the double build is collapsed in
+  a follow-up unit. Nothing in this change forecloses that — the gate and the guard stay correct
+  either way, since a single publishing path trivially satisfies the one-writer invariant.
+- **Status:** CONFIRMED (2026-09-13), Opus, at reconcile — as the right call, *and* as one that
+  must stay visible rather than be quietly absorbed. Reversible: nothing here forecloses
+  collapsing the builds later, and a single publishing path satisfies the one-writer invariant
+  the guard asserts trivially, so a follow-up unit would find the guard already correct. Kept
+  visible by being argued in the PR body and carried in the lane's `done` report, not by
+  spending a separate board message on something already written where the leader reads it.
+  See `DECISIONS.md`, U-503 decision 1.

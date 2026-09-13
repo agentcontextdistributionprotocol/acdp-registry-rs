@@ -31,6 +31,79 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-503 (lane-3) — the `sha-` tag had two writers; BACKLOG C-D1 / C-D2 -->
+
+### Fixed
+
+- **`sha-<short>` was a mutable tag, and the release that exposed it moved one 19m44s after it
+  was published.** `.github/workflows/docker.yml` publishes on a push to `main` *and* on an
+  `acdp-registry-server/v*` tag, and release-plz tags the commit it merges
+  (`release-plz.toml`'s `git_tag_name`), so a release gives one commit two publishing runs.
+  `type=sha` sat in the shared `tags:` rules, ungated, so both runs computed and pushed
+  `sha-<short>`. Measured on v0.1.3 (`f8b6d9e`): run 34734028111 published `sha-f8b6d9e` ->
+  `sha256:b9315cc84f08` at 02:52:16Z, and run 34734871991 re-pointed it to
+  `sha256:cf2f85068eb6` at 03:12:00Z. GHCR confirms the move by *state* rather than by
+  inference — `b9315cc8` now carries only `[latest, main]`, having lost the `sha-` tag it was
+  published with. A `sha-`-prefixed tag reads as content-addressed and was not: anyone who
+  pinned it inside that window is running different bytes than they pinned.
+  `concurrency: docker-${{ github.ref }}` does not help, because the two runs are different
+  refs — the file already says so about a related case.
+
+- **The fix is one gate, not a new mechanism.** `type=sha` now carries
+  `enable={{is_default_branch}}` — the same gate the `latest` rule already used — so the three
+  main-line tags (`main`, `latest`, `sha-<short>`) share one gate and one writer: the
+  default-branch push. The release run publishes only its version tags and has nothing left with
+  which to re-point a `sha-` tag. **This is a single-writer guarantee, not registry-level
+  immutability.** GHCR tags stay mutable, and re-running a `main` build by hand will rebuild that
+  commit and move its `sha-` tag. Closing *that* needs a pre-push existence check whose
+  fail-closed behaviour would block a legitimate re-run after an infrastructure flake; it was
+  priced and deliberately not taken, and the docs are worded so they stay true without it.
+
+- **The same commit is still built twice, and that is correct — this is the half of the reported
+  defect that was declined, with reasons.** The two digests for one commit are not flakiness and
+  not a reproducibility failure; they differ *deterministically*. Read off both runs' `buildx`
+  command lines: metadata-action stamps `org.opencontainers.image.version` as `main` on the
+  main-push build and as `0.1.3` on the release build, `image.created` differs, and buildx
+  attaches `--attest type=provenance,mode=max,builder-id=…/runs/<run-id>`. Labels and provenance
+  live in the config blob, so the manifests cannot agree. The obvious way to collapse the builds
+  — promoting the main digest with `buildx imagetools create` — would therefore publish a
+  release image whose own OCI `version` label reads `main` and whose provenance names the main
+  run. That trades a cosmetic problem for a mislabelling one, so the release rebuild earns its
+  keep: it is what stamps release identity into the release artifact.
+
+### Added
+
+- **A guard that rejects the exact bytes of the incident, rather than a lint that would have
+  passed on them.** `docker/assert-image-tags.sh` asserts the invariant as an **iff** — a
+  `sha-` tag is present if and only if this is a push to the default branch — and `docker.yml`
+  runs it after `metadata-action` and *before* `build + push`, so a bad tag set blocks
+  publication instead of being discovered in the registry afterwards. The iff form is the point:
+  a pull request is not the default branch, so if the gate is ever deleted, the PR that deletes
+  it computes a `sha-` tag and the guard fails **there**, before merge, rather than staying
+  silent until the next release. The reverse direction catches a gate that over-fires and
+  quietly stops publishing a documented tag.
+
+- **The guard's falsification is wired in rather than claimed.** `--self-test` runs on every
+  workflow event over a ten-case table; five cases assert that the guard *rejects*, and two of
+  those replay the real pre-fix tag sets from runs 34734871991 and 34725795501. Writing it this
+  way paid for itself immediately: the first draft silently dropped the last tag in its input
+  (`while read` returns false on a final line with no trailing newline), so it *passed* the
+  release run it was written to reject — and two other cases passed anyway for the wrong reason,
+  so no single green case would have localised it. This is also the repository's first shell
+  script, into a tree with no `shellcheck`; the self-test step is what stands in for the absent
+  linter.
+
+### Changed
+
+- **`docker/RAILWAY.md` now tells an operator which tag to deploy and why two digests for one
+  source is expected.** The tag list said `sha-<7-hex>  # every push`, which was never true of
+  pull requests and is now not true of release tags either. The deploy recipe led with
+  `:latest` while the file's own warning three paragraphs earlier said `:latest` moves on every
+  merge; it now leads with a version tag and keeps that warning intact. Added the fact an
+  operator would otherwise have to discover from the registry: a release tag and `:latest` are
+  different digests of identical source, by design, and
+  `org.opencontainers.image.revision` is what confirms two tags came from one commit.
+
 <!-- unit H-U (lane-1) — the store parameter is named for what the predicate consumes -->
 
 ### Changed
@@ -4322,66 +4395,294 @@ hold entries from several releases. Use the commands.
 
 <!-- U-502 #216 mutation oracle (lane-2) -->
 
-- **A mutation oracle, and the number it ratchets against** (`#216`). The
-  conformance file has never been able to prove that a test it vouches for
-  *asserts* anything. Two mechanisms guard those claims and both are PRESENCE
-  oracles: the substring guards over `include_str!`
-  (`covered_direct_families_have_present_test_functions`,
+- **A mutation oracle, the number it ratchets against, and the harness bug that
+  made the first number a lie** (`#216`). The conformance file has never been able
+  to prove that a test it vouches for *asserts* anything. Two mechanisms guard
+  those claims and both are PRESENCE oracles: the substring guards over
+  `include_str!` (`covered_direct_families_have_present_test_functions`,
   `partial_direct_test_functions_are_present`) and the compile-checked
   `DIRECT_FNS` table added by `#249`. A test that exists, compiles, runs and
-  asserts nothing satisfies every one of them. Breaking the code and watching
-  the test go red is the only thing that does not, and that is now wired.
+  asserts nothing satisfies every one of them. Breaking the code and watching the
+  test go red is the only thing that does not, and that is now wired.
 
-  **THE BASELINE, measured at `410bb74` with `cargo-mutants 27.1.0`:**
+  **THE BASELINE, at `52c0111`, `cargo-mutants 27.1.0`, 6m at `-j4`:**
 
   | outcome | count |
   |---|---|
   | mutants in scope | **74** |
-  | **caught** | **48** |
-  | **survivors (missed)** | **0** |
+  | viable (the honest denominator) | **48** |
+  | **caught** | **46** |
+  | **survivors (missed)** | **2** |
   | timeout | 0 |
   | unviable (does not compile) | 26 |
 
-  6m17s wall-clock at `-j4`. **The survivor budget is therefore 0** — the
-  strongest form the ratchet can take, and the one that makes any new survivor a
-  red scheduled job rather than a number nobody re-reads.
+  **The committed survivor budget is 2**, in
+  `.github/workflows/mutants.yml`'s `env`, alongside an exact-equality check on
+  the scope size.
 
-  **Read the denominator honestly: 48, not 74.** The 26 unviable mutants are not
-  coverage. They are mutations that do not compile — every one is
+  **Read the denominator honestly: 48, not 74.** The 26 unviable mutants are
+  mutations that do not compile — every one is
   `replace <fn> -> <T> with Ok(Default::default())` (or similar) where `T` has no
-  `Default`: the five axum handlers `log_entries`/`log_proof`/`log_checkpoint`/
-  `inclusion_proof_response`/`consistency_proof_response` account for 20 of them.
-  There is nothing there for a test to catch, so they are excluded from the claim
-  rather than counted toward it. The real statement is **48 viable mutants, 48
-  caught**.
+  `Default`; the five axum handlers `log_entries`/`log_proof`/`log_checkpoint`/
+  `inclusion_proof_response`/`consistency_proof_response` account for 20. There is
+  nothing there for a test to catch, so they are excluded from the claim rather
+  than counted toward it.
 
-  **Why a 0 here is a real 0 and not a broken harness.** `cargo-mutants` runs its
-  unmutated baseline PACKAGE-scoped even under `test_workspace = true` (measured;
-  see `.cargo/mutants.toml`), so a pre-existing failure elsewhere in the workspace
-  would mark every mutant CAUGHT for the wrong reason and produce exactly this
-  result. Checked rather than assumed: `cargo test --locked --workspace` at the
-  same sha is **632 passed, 0 failed, 0 failed suites**. Separately, the MISSED
-  path is reachable and not structurally dead — an unscoped control run reported
-  **13 survivors** in `acdp-registry-store/src/parity.rs`.
+  **A FIRST BASELINE OF "48 CAUGHT, 0 SURVIVORS" WAS MEASURED, BELIEVED, AND WAS
+  WRONG.** It is recorded here because the way it was wrong is the most useful
+  thing this unit produced. `cargo-mutants` tests each mutant in a `$TMPDIR` copy
+  of the tree and does not copy `.git` by default. `conformance_gate.rs`'s
+  `no_tracked_file_contains_a_conflict_marker` shells out to `git ls-files`, which
+  fails there; `cargo test` stops at the first failing test binary; and
+  `conformance_gate` runs *before* `http_integration`. So every mutant whose real
+  killer lived later was scored CAUGHT by that unrelated panic — **41 of the 48**,
+  i.e. every `handlers/log.rs` verdict. Only 7 were genuine, all in `receipt.rs`,
+  and only because core's unit tests happen to run before the poisoned gate. Had
+  that gate run earlier, all 74 would have been false.
+
+  The hazard was *already written down* in `.cargo/mutants.toml` — "a pre-existing
+  failure elsewhere in the workspace would mark mutants CAUGHT for the wrong
+  reason" — **and it was checked**: `cargo test --locked --workspace`, 632 passed,
+  0 failed, quoted as evidence the zero was real. The check was sound and its
+  answer was true. It was about **the tree we were standing in**, and the verdicts
+  come from **the tree the tool builds**. Naming a hazard is not checking it, and
+  checking something is not checking *it*. Fixed by `copy_vcs = true`; `.git` here
+  is a 4 KB worktree pointer, so it costs nothing.
+
+  What exposed it was not doubting the number — a 0 reads as success — but reading
+  the killing test's *name*: `no_tracked_file_contains_a_conflict_marker` cannot
+  possibly be killed by mutating `root_for`.
+
+  **THE HARNESS CONTROL, because a budget with no control is a number on trust.**
+  Under the harness and in the copy tree, `root_for -> String::new()` is CAUGHT by
+  the ten `http_integration` log tests that genuinely exercise it — matching a
+  by-hand mutation of the same line run *outside* the harness. Two independent
+  derivations agreeing. `.github/workflows/mutants.yml` also carries a standing
+  check for the same class: it fails if any single test is the SOLE failing test
+  for more than half the caught mutants. Falsified on the two real runs, not on
+  fixtures — the pre-`copy_vcs` run FAILS it (41 of 48 = 85%), the corrected run
+  passes (largest sole killer 8 of 46 = 17%). `cargo-mutants` cannot do this for
+  us: its unmutated baseline runs PACKAGE-scoped even under `test_workspace`
+  (`baseline.log` says `--package=acdp-registry-core`, the mutant logs say
+  `--workspace`), so it never builds the binary that was failing and a green
+  baseline is compatible with every verdict being noise.
+
+  **THE TWO SURVIVORS, enumerated with a reason each, not totalled.**
+
+  1. `handlers/log.rs:117:19` — `replace != with ==` in `requester_can_retrieve`.
+     **A real unasserted branch, and security-relevant.** Line 117 is
+     `if stored != tenant {`, the tenant gate. Inverted it is wrong both ways: a
+     matching tenant is DENIED, and a **mismatched tenant falls through to
+     `Ok(true)`** — disclosure across the tenant boundary. The function is live
+     (`:269`, `:303`) and gates the §8.2 `ctx_id` proof surface and every `leaf`
+     echo — i.e. `/log/proof?ctx_id=…`, not `/log/entries`, which moved to the
+     batched predicate in H-I-s (`:474` records that). No test reaches it: every
+     `/log/proof` test in `http_integration.rs` fetches via `get_json` with **no
+     `X-Tenant-Id`**, so `requested_tenant` is always `None` and the
+     `if let Some(tenant)` block never executes.
+     `log_entries_leaf_presence_is_tenant_scoped` looks like the guard and is not —
+     it exercises the batched `/log/entries` path, a different predicate.
+     **Budgeted, not accepted:** the killing test belongs in
+     `http_integration.rs`, outside this unit's claim, and is requested rather
+     than written here. The budget ratchets to 1 when it lands.
+  2. `handlers/log.rs:131:18` — `replace == with !=` in `root_for`.
+     **Accepted: an equivalent mutant.** Line 131 is `if tree_size == current {`
+     and it guards *only* `log.cache_root(...)`. `root_for` returns the same
+     `root` on both branches, and append-only makes any `(size → root)` pair
+     immutable, so a cached historical root is still correct and an uncached
+     current root is merely recomputed. Nothing observable changes — only which
+     sizes are cached. No assertion over responses can kill it; doing so would
+     need instrumentation counting merkle computations, which is a performance
+     harness, not a correctness one.
 
   **WHAT THIS NUMBER DOES NOT COVER, stated where the number is rather than in a
   footnote.** The scope is two files, chosen to be ones no other unit is editing:
   `acdp-registry-core/src/receipt.rs` (9) and `src/handlers/log.rs` (65). It is
   **not** the workspace, which is **1398** mutants at this sha — roughly 2.4h at
   the ~6.2s/mutant marginal cost in `DECISIONS.md` #17. It deliberately excludes
-  `src/handlers/context.rs` (**134** at this sha), which is held by another unit
-  this wave: a budget keyed to a file being rewritten underneath it goes red for
-  reasons unrelated to what it guards, and a red check nobody can explain gets
-  disabled. That the exclusion was right is visible in the drift alone — #17
-  measured `context.rs` at 132 and the workspace at 1383 one day earlier.
+  `src/handlers/context.rs` (**134** at this sha), held by another unit this wave:
+  a budget keyed to a file being rewritten underneath it goes red for reasons
+  unrelated to what it guards, and a red check nobody can explain gets disabled.
+  The drift alone shows the exclusion was right — #17 measured `context.rs` at 132
+  and the workspace at 1383 one day earlier.
 
-  One further gap, named rather than generalised: `cargo-mutants` runs one test
-  command per mutant, while CI runs three. The scoped command reaches **69 of the
-  70** conformance tests; the single exception is
+  **And the conformance tests only assert under `ACDP_SPEC_DIR`.** 42 of the 70
+  tests in `conformance.rs` — essentially every `Direct`-registered family test the
+  coverage tables name — return early without it:
+  `let Some(fixtures) = spec_fixtures() else { … return; }`. The suite prints
+  `69 passed` either way (0.09s skipping versus 0.36s doing the work), so the
+  omission is invisible in a green log. The first baseline ran that way, meaning
+  the tests `#216` is *named after* contributed nothing to it. Both the local
+  re-measurement and the scheduled job now set `ACDP_SPEC_DIR` (pinned
+  `d1f06d0d…`, the same ref `ci.yml`'s conformance job uses) and
+  `ACDP_REQUIRE_CONFORMANCE=1`, so a broken spec checkout fails loudly instead of
+  42 tests quietly skipping. Verified by reading the work done rather than the
+  pass line: for the same mutant, the conformance binary takes **0.55s** in
+  require mode against **0.12s** in default, while a control binary of the same
+  test count is 0.04s in both. One conformance test remains out of reach —
   `playground_compiled_in_but_runtime_disabled_keeps_admin_route`, which needs the
   non-default `playground` feature. A three-command wrapper would triple every
-  mutant's cost (#17: ~6.2s → ~22s) to recover one test, so it was declined
+  mutant's cost (#17: ~6.2s → ~22s) to recover one test, so it is declined
   deliberately rather than overlooked.
 
   **`#216` stays open.** Its item 1 is fault injection over `src/` generally; this
   is a bounded 74-mutant ratchet. PARTIAL BY DESIGN.
+## U-501 — #242: publishes that fail late are now charged on two of four branches
+
+`P5` (`H-A`) split the publish limiter into `peek` (read-only, never inserts) before the
+pipeline and `record` (charges) on the success path. That removed a real vulnerability — an
+unauthenticated caller could spend another agent's budget by naming them, and grow the bucket
+map without bound because the map key was attacker-controlled — and disclosed, as `#242`, the
+gap it left: a publish that fails *after* the limiter costs a full verify plus a store
+round-trip and is never charged.
+
+`#242` recorded two candidate fixes and rejected both. Post-hoc classification of the error at
+the central `record_publish(e.wire_code())` wrapper is a denylist over a `#[non_exhaustive]`
+enum, so it **fails open** as variants are added. Reserving at `peek` time puts the reservation
+in an attacker-keyed map entry, which is the unbounded growth `peek`-not-inserting exists to
+remove. Both rejections still stand and neither was shipped.
+
+### What changed
+
+A `PublishCharge` drop guard (`rate_limit.rs`). Once armed it charges on **every** exit —
+`?`, explicit return, panic, a cancelled request future. It classifies nothing, which is
+precisely the property the rejected denylist could not have: an error variant that does not
+exist yet is charged the day it is introduced, with no edit. Fail-closed by construction.
+Arming is monotonic, so the pre-flight arm and the success-path arm collapse into one
+mechanism without double-charging.
+
+The guard is armed only where the signer is **proven**, so it never inserts on an
+unauthenticated path. `peek` is untouched and `peek_does_not_create_a_bucket` still passes
+unmodified.
+
+### The finding that made this bigger than one branch
+
+`#242` assumed only `enforce_pinned_signature` was a clean charge site — one branch of four —
+and that anything more needed an SDK change. That was not true. `acdp-server`'s own `did:key`
+pipeline (`crates/acdp-server/src/registry/server.rs:492-518`) establishes identity with two
+functions that are already public and already outside the `client` feature gate:
+`compute_content_hash` and `verify_publish_request_signature_offline`. Composing them in the
+handler proves the signer offline, before the SDK call, with no new dependency and no
+cross-repo write.
+
+**Both halves are load-bearing, and the order is not cosmetic.**
+`verify_publish_request_signature_offline` verifies the signature over `content_hash` but never
+binds `content_hash` to the body. Keyed on it alone, a captured `(agent_id, content_hash,
+signature)` triple replayed under a *different* body reads as "identity proven" and spends the
+real agent's budget. Recomputing the hash first kills that. This was not a theoretical worry:
+deleting the hash comparison reddened **nothing** in the entire suite until
+`a_replayed_envelope_over_a_different_body_does_not_spend_the_budget` was written for it.
+
+### The four-way split, stated rather than left to be discovered
+
+| branch | late failure charged? | |
+|---|---|---|
+| `did:key` | **yes** | proven offline in the handler before the SDK call |
+| playground, pinned | **yes** | `enforce_pinned_signature` proved it before the SDK call |
+| playground, unpinned | no — **by design, permanently** | nothing is verified at all, so there is no identity to charge |
+| production `did:web` | no — **remaining gap** | identity is established only inside the resolver-backed SDK call |
+
+The two "no" rows are not the same kind of thing and must not be collapsed. Arming the
+unpinned playground branch would key an insertion on an attacker-supplied `agent_id` — the
+shape `#242` rejected. The `did:web` row is outstanding work: closing it from this side would
+need a second DID-document resolution per publish (network cost, a second SSRF surface, a cache
+that can disagree with the SDK's), all worse than the gap. It needs an SDK seam, designed in
+`plans/cross-repo/acdp-rs-publish-charge-seam.md` and filed upstream against `acdp-rs`.
+
+`late_failures_are_charged_on_exactly_two_of_the_four_publish_branches` pins the split with an
+`assert_eq!` on the count, not a `>=` floor — a floor passes the very regression it exists to
+catch. It reddens in both directions: removing an arm, and adding one to an unauthenticated
+branch.
+
+### Cost, priced rather than hidden
+
+The `did:key` branch now pays one extra JCS canonicalization + SHA-256 and one extra signature
+verification per publish, because the SDK redoes both. That is the price of keeping the fix
+in-repo, and the cross-repo seam above is what removes it — along with the `did:web` gap.
+
+### A test renamed because this change made its name false
+
+`a_publish_that_fails_late_does_not_consume_the_agents_budget` is now
+`a_publish_that_fails_before_the_signer_is_proven_does_not_consume_the_agents_budget`. The
+failure it exercises is a tenant-check rejection, which runs before the branch dispatch — the
+unproven side of the line. Its old name would have read as a direct contradiction of the new
+tests sitting beside it.
+
+## U-505 — making the repo's deferred work measurable
+
+The repo's real backlog was one open issue plus an unknown number of follow-ups recorded in
+prose inside two cumulative files that nothing scans. A follow-up nobody measures is
+indistinguishable from one that does not exist — and worse, because the prose records it, so it
+*reads* as tracked.
+
+### The count
+
+| source | deferred items | how bounded |
+|---|---|---|
+| `ASSUMPTIONS.md` (2535 lines) | **35** | exact; scanner bound-checked to 0 unexplained markers |
+| `DECISIONS.md` (2328 lines) | **42 candidate blocks** | superset by construction; prose mentions included deliberately |
+
+`DECISIONS.md` is **2328 lines, not the 6400+** the unit assignment estimated. All eight
+`file:line` citations in the assignment were exact.
+
+### Why the enumeration took three attempts, which is the transferable part
+
+A line-anchored `grep '^- \*\*Status:\*\*'` finds **88** of the 120 status markers in
+`ASSUMPTIONS.md`. The 32 it misses are not exotic:
+
+- markers wrapped mid-paragraph, because `grep` is line-based
+  (`... would have stayed green with the guard deleted outright. **Status: CONFIRMED`);
+- `**Status (updated 2026-09-01):**`, where a parenthetical sits between the key and the colon;
+- entries with **no `Status` line at all**, whose bullet *is* the status
+  (`- **UNCONFIRMED — awaiting human ruling:** ...`) — **9 of these**, structurally invisible to
+  any status-line scan;
+- one item that is an `###` **heading**, not a bullet
+  (`### UNCONFIRMED: the four new steps run clippy, not cargo build`);
+- one recorded only as an update inside another entry
+  (`- **Update, 2026-09-11 — PARTIALLY narrowed, still UNCONFIRMED.**`).
+
+The last two were found **only** by a bound check: assert that every `UNCONFIRMED` token in the
+file falls inside a counted block, then read the ones that do not. That check turned up five
+stragglers, of which three were genuine prose and two were real items the parser had missed. A
+scanner that is not bound-checked reports a confident number that is simply the number of items
+matching its own assumptions.
+
+### An open item is a claim about the past, and half of them had expired
+
+Every item verified against the tree rather than inferred from the record. Of the ones checked,
+**more were already fixed than were still live:**
+
+| recorded as deferred | actual state | evidence |
+|---|---|---|
+| `/metrics` sets no cache headers, dismissal deserves revisiting | **ALREADY DONE** | `lib.rs:265-271` sets `Cache-Control: no-store` via a route layer, with a comment covering exactly the 200-vs-401 concern raised |
+| EdDSA PEM case still fails late; `validate_config` narrowed to `jwt_secret` | **ALREADY DONE** | the EdDSA/PEM check is in `validate_config` (`main.rs:111-117`), and `validate_config` runs at `:83`, before every `store.migrate()` (`:677`, `:725`, `:758`) |
+| `acdp-playground` types webhooks as a closed `Literal` of three, dropping two lifecycle events | **ALREADY DONE** | `acdp_client/models.py` `WebhookType` now lists all four |
+| 14 cursor-error literals duplicated across two store crates | **ALREADY DONE** | consolidated into `acdp-registry-store/src/cursor.rs`; the `DECISIONS.md:1021-1022` line pins are dangling and now point at unrelated code |
+| `storage-memory` uncovered by CI | **ALREADY DONE** | `ci.yml:59`, `:154`, `:324` |
+| `dtolnay/rust-toolchain@master` — the loosest pin in the repo | **ALREADY DONE** | SHA-pinned at `6c977a6c…` in all 8 uses |
+| add `bump-spec.yml` to this repo | **ALREADY DONE** | `.github/workflows/bump-spec.yml` exists |
+
+### Still open, verified live, filed
+
+- **#265** — CI's four feature-configuration steps run `cargo clippy`, not `cargo build`
+  (`ci.yml:146-165`). Clippy does not run codegen or link, so a monomorphization or linker
+  failure passes all four. A disclosed deviation from #200 that nothing ever decided.
+- **#266** — `docker.yml` sets no `jwt_secret` and never boots the stack the quickstart ships.
+  This is the specific hole the W3-U5 defect escaped through, still open.
+- **acdp-website#43** — `webhooks.mdx` documents 2 of the registry's 4 webhook event types;
+  `context_retracted` and `context_republished` are absent from the public docs.
+
+### `plans/` is now partially tracked, and the exception is load-bearing
+
+`.gitignore` ignored all of `plans/`. `/plan`'s cross-repo handoff writes a design for another
+repo *here* (writing into a sibling needs a human gate; reading one never does) and then files an
+issue *there* linking a GitHub blob URL — which 404'd for every such handoff, because the file was
+never committed. acdp-rs#273 was filed that way and had to carry its design inline.
+
+Ruling: **`plans/cross-repo/` is tracked; the rest of `plans/` stays ignored.** Per-feature plans
+are per-run working documents and committing them adds churn; a cross-repo plan is a contract with
+another repo and has to be linkable.
+
+The form matters and was tested, not assumed: git does not descend into an excluded **directory**,
+so a bare `plans/` makes `!plans/cross-repo/` unreachable. Verified by reverting to the bare form
+and watching `git check-ignore` call the cross-repo file IGNORED again.
