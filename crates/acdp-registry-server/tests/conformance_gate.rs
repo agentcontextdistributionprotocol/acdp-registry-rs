@@ -1068,3 +1068,250 @@ fn no_tracked_file_contains_a_conflict_marker() {
         findings.join("\n  ")
     );
 }
+
+// ---------------------------------------------------------------------------
+// U-504 AC-8: the spec pin coupling between the two workflows.
+//
+// `.github/workflows/mutants.yml` does not declare which acdp-spec commit to
+// check out. It DERIVES it, by grepping the 40-hex `ref:` out of
+// `.github/workflows/ci.yml` so the mutation run replays fixtures against the
+// same spec CI pins. That coupling is invisible from either file alone: nothing
+// in `ci.yml` says another workflow parses it, and restructuring `ci.yml`'s spec
+// step in a way that is perfectly valid YAML breaks the derivation silently.
+//
+// **Rule 48, exactly: a doc artifact no command can check is a defect while it
+// is still correct.** The coupling is correct today and nothing verifies it.
+//
+// The verification gap is what makes it worth a test rather than a comment.
+// `mutants.yml` is `schedule:` + `workflow_dispatch` with NO `pull_request`
+// trigger -- deliberately, a 23-minute mutation run has no business gating a
+// PR -- so a PR that restructures `ci.yml` cannot turn this red. The breakage
+// would surface on the following Monday's cron, detached from the change that
+// caused it, in a job whose failure reads as "the ratchet is broken" rather than
+// "someone moved a line in a different file". This test moves the signal back to
+// the PR that causes it.
+//
+// Written as a pure function over both files' TEXT rather than as assertions
+// against the real paths, for two reasons. It is falsifiable -- each invariant
+// is shown to fail against a synthetic restructuring below, which is the whole
+// point -- and `.github/workflows/ci.yml` is outside this unit's path grant, so
+// falsifying by editing the real file was never an option.
+// ---------------------------------------------------------------------------
+
+/// The four invariants `mutants.yml`'s `pin` step depends on. Returns one string
+/// per violation; empty means the derivation is sound.
+fn spec_pin_violations(ci_yml: &str, mutants_yml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // A `uses:` LINE, not a mention. `ci.yml` discusses `checkout-spec@` in
+    // three comments around the step itself; a substring search matches those
+    // and reports 4 usages where there is 1. That is not hypothetical -- it is
+    // the bug this extraction shipped with in U-502 and the reason the real
+    // `pin` step anchors on `uses:` too.
+    let uses_lines: Vec<usize> = ci_yml
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            let t = l.trim_start();
+            t.starts_with("uses:") || t.starts_with("- uses:")
+        })
+        .filter(|(_, l)| l.contains("checkout-spec@"))
+        .map(|(i, _)| i + 1)
+        .collect();
+    if uses_lines.len() != 1 {
+        out.push(format!(
+            "invariant 1: ci.yml has {} `uses: …checkout-spec@` lines {:?}, expected \
+             exactly 1. The pin step refuses to guess which spec checkout the ref \
+             belongs to.",
+            uses_lines.len(),
+            uses_lines
+        ));
+    }
+
+    // Exactly one 40-hex `ref:`. A second one makes "the pin" ambiguous.
+    let is_hex40_ref = |l: &str| -> bool {
+        l.trim_start()
+            .strip_prefix("ref:")
+            .map(|r| {
+                let r = r.trim();
+                r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit())
+            })
+            .unwrap_or(false)
+    };
+    let ref_lines: Vec<usize> = ci_yml
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| is_hex40_ref(l))
+        .map(|(i, _)| i + 1)
+        .collect();
+    if ref_lines.len() != 1 {
+        out.push(format!(
+            "invariant 2: ci.yml has {} 40-hex `ref:` lines {:?}, expected exactly 1. \
+             The spec pin is derived from that line; zero means the derivation finds \
+             nothing, more than one means it picks arbitrarily.",
+            ref_lines.len(),
+            ref_lines
+        ));
+    }
+
+    // The ref must belong to that usage, i.e. sit below it. A `ref:` above the
+    // `uses:` is valid YAML for some OTHER step and would pin the spec checkout
+    // to an unrelated commit.
+    if let (Some(&u), Some(&r)) = (uses_lines.first(), ref_lines.first()) {
+        if r < u {
+            out.push(format!(
+                "invariant 3: ci.yml's 40-hex `ref:` is at line {r}, ABOVE the \
+                 checkout-spec `uses:` at line {u}. A ref above the usage belongs to \
+                 a different step, so the derived pin would be some other action's \
+                 commit."
+            ));
+        }
+    }
+
+    // mutants.yml must DERIVE the pin, never restate it. Note the narrowness:
+    // `uses:` action pins in mutants.yml are legitimately 40-hex SHAs (four of
+    // them) and must not be flagged. Only a literal on a `ref:` line is the
+    // defect -- that is the value which must stay an expression.
+    let pasted: Vec<String> = mutants_yml
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| is_hex40_ref(l))
+        .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+        .collect();
+    if !pasted.is_empty() {
+        out.push(format!(
+            "invariant 4: mutants.yml pins the spec ref literally instead of deriving \
+             it from ci.yml: {pasted:?}. This is the repair that DEFEATS the guard -- \
+             pasting the ref makes the pin step's error go away and silently decouples \
+             the mutation run's spec from CI's. It must stay \
+             `ref: ${{{{ steps.pin.outputs.ref }}}}`."
+        ));
+    }
+
+    out
+}
+
+/// The real files must satisfy all four.
+#[test]
+fn the_mutants_workflow_spec_pin_stays_derivable_from_ci() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let mutants = std::fs::read_to_string(root.join(".github/workflows/mutants.yml"))
+        .expect("read mutants.yml");
+
+    let violations = spec_pin_violations(&ci, &mutants);
+    assert!(
+        violations.is_empty(),
+        "the mutation workflow derives its acdp-spec pin from ci.yml and that \
+         derivation is now broken:\n  {}\n\nmutants.yml is schedule-only, so this \
+         would otherwise have surfaced on the next Monday cron rather than on the \
+         change that caused it.",
+        violations.join("\n  ")
+    );
+}
+
+/// Each invariant must FAIL on its own restructuring — otherwise the test above
+/// is four assertions that have never been shown to do anything.
+///
+/// The inputs are deliberately VALID YAML that a reasonable person would write.
+/// None of these is a typo; each is a plausible edit that happens to break a
+/// coupling its author could not see.
+#[test]
+fn each_spec_pin_invariant_is_individually_falsified() {
+    const GOOD_CI: &str = "\
+jobs:
+  conformance:
+    steps:
+      # checkout-spec@ is mentioned here in a comment on purpose.
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+      - uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
+        with:
+          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
+";
+    const GOOD_MUTANTS: &str = "\
+jobs:
+  mutants:
+    steps:
+      - uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
+        with:
+          ref: ${{ steps.pin.outputs.ref }}
+";
+
+    // Control: the good pair must pass, or every assertion below is vacuous.
+    assert!(
+        spec_pin_violations(GOOD_CI, GOOD_MUTANTS).is_empty(),
+        "the control fixture must be clean: {:?}",
+        spec_pin_violations(GOOD_CI, GOOD_MUTANTS)
+    );
+
+    // (1) A second spec checkout — e.g. a matrix job gaining its own.
+    let two_uses = GOOD_CI.replace(
+        "      - uses: actions/checkout@1111111111111111111111111111111111111111",
+        "      - uses: org/acdp-ci/actions/checkout-spec@3333333333333333333333333333333333333333",
+    );
+    let v = spec_pin_violations(&two_uses, GOOD_MUTANTS);
+    assert!(
+        v.iter().any(|s| s.starts_with("invariant 1")),
+        "two checkout-spec usages must trip invariant 1, got {v:?}"
+    );
+
+    // (2) The pin moved to a variable — the ref line stops being a literal.
+    let no_ref = GOOD_CI.replace(
+        "          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7",
+        "          ref: ${{ env.SPEC_REF }}",
+    );
+    let v = spec_pin_violations(&no_ref, GOOD_MUTANTS);
+    assert!(
+        v.iter().any(|s| s.starts_with("invariant 2")),
+        "no 40-hex ref must trip invariant 2, got {v:?}"
+    );
+
+    // (3) The step reordered so `with:`/`ref:` precedes `uses:` — valid YAML,
+    //     since mapping key order is not significant.
+    const REORDERED_CI: &str = "\
+jobs:
+  conformance:
+    steps:
+      - with:
+          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
+        uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
+";
+    let v = spec_pin_violations(REORDERED_CI, GOOD_MUTANTS);
+    assert!(
+        v.iter().any(|s| s.starts_with("invariant 3")),
+        "a ref above the usage must trip invariant 3, got {v:?}"
+    );
+
+    // (4) The repair that defeats the guard: paste the ref into mutants.yml so
+    //     the pin step stops complaining.
+    let pasted = GOOD_MUTANTS.replace(
+        "          ref: ${{ steps.pin.outputs.ref }}",
+        "          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7",
+    );
+    let v = spec_pin_violations(GOOD_CI, &pasted);
+    assert!(
+        v.iter().any(|s| s.starts_with("invariant 4")),
+        "a literal ref in mutants.yml must trip invariant 4, got {v:?}"
+    );
+
+    // And the narrowness of (4): mutants.yml's own ACTION pins are 40-hex SHAs
+    // and must NOT be flagged. A guard that banned every 40-hex string would
+    // fail against the correct file, which is how a guard gets deleted.
+    let action_pins_only = "\
+    steps:
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          ref: ${{ steps.pin.outputs.ref }}
+";
+    assert!(
+        !spec_pin_violations(GOOD_CI, action_pins_only)
+            .iter()
+            .any(|s| s.starts_with("invariant 4")),
+        "action `uses:` SHAs must not be mistaken for a pasted spec pin"
+    );
+}

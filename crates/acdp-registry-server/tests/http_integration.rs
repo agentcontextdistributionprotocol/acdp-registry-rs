@@ -9684,3 +9684,923 @@ async fn log_proof_ctx_id_is_withheld_from_a_foreign_tenant() {
          the refusal itself confirms the ctx_id exists: {v}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// U-504: the tenant gates on the context READ surface.
+//
+// Found by the mutation oracle (#216), not by review. Extending the ratchet's
+// scope to `handlers/context.rs` produced 28 survivors, and five of them were
+// the same shape U-502 found once in `handlers/log.rs`: a tenant comparison
+// that no test ever executes in both directions.
+//
+// The gap was invisible to a reader because it looks covered. Four test files
+// mention `X-Tenant-Id` 26 times, and `retrieve_with_tenant` (:751) exercises
+// exactly this gate on `GET /contexts/{id}` — the ENVELOPE route. Nothing
+// carried a tenant header to `/contexts/{id}/body`, `/lineages/{id}` or
+// `/lineages/{id}/current`: the tenant-header sites and the requests to those
+// three routes do not overlap on a single line.
+//
+// As in U-502 the framing is deliberate and it is the honest one: **the code is
+// correct, no disclosure ships, these are unguarded correct properties.** Every
+// gate below works today. Nothing would have noticed if one stopped working.
+// ---------------------------------------------------------------------------
+
+/// Publish a two-version lineage into `tenant` and return
+/// `(lineage_id, v1_ctx_id)`.
+///
+/// The v1 body is fetched WITHOUT a tenant header on purpose — that request is
+/// the untenanted path (`requested_tenant == None`), which skips the gate
+/// entirely, so the fixture cannot be broken by the very gate under test.
+async fn tenant_lineage(h: &Harness, seed: u8, tenant: &str) -> (String, String) {
+    let app = &h.router;
+    let p = producer(seed);
+    let v1_req = p
+        .publish_request()
+        .title("tenant-lineage-v1")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(app, &v1_req, Some(tenant)).await;
+    assert_eq!(status, StatusCode::OK, "v1 publish body = {v}");
+    let v1_ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+    let lineage_id = v["lineage_id"].as_str().unwrap().to_string();
+
+    let (status, v1_body_json) = get_json_with_tenant(
+        app,
+        &format!("/contexts/{}/body", pct_encode_path_segment(&v1_ctx_id)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "v1 body fetch = {v1_body_json}");
+    let v1_body: acdp::types::body::Body = serde_json::from_value(v1_body_json).unwrap();
+
+    let v2_req = p
+        .supersede_body(&v1_body)
+        .title("tenant-lineage-v2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(app, &v2_req, Some(tenant)).await;
+    assert_eq!(status, StatusCode::OK, "v2 publish body = {v}");
+
+    (lineage_id, v1_ctx_id)
+}
+
+/// `GET /contexts/{id}/body` must still serve the tenant that owns the row.
+///
+/// First of two directions for `handlers/context.rs:1018` (`if &stored !=
+/// tenant`). Split from its sibling because inverting that operator breaks BOTH
+/// directions at once, and a single test asserting both would stop at whichever
+/// assertion ran first and leave the other never evaluated.
+#[tokio::test]
+async fn context_body_is_served_to_the_owning_tenant() {
+    let h = harness(true).await;
+    let (_lineage, ctx_id) = tenant_lineage(&h, 170, "tenant-body-a").await;
+
+    let (status, v) = get_json_with_tenant(
+        &h.router,
+        &format!("/contexts/{}/body", pct_encode_path_segment(&ctx_id)),
+        Some("tenant-body-a"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owning tenant must still be served the bare body; a gate that \
+         denies the MATCHING tenant is inverted: {v}"
+    );
+    assert_eq!(
+        v["title"], "tenant-lineage-v1",
+        "and it must be the body itself, so this asserts the gate OPENING \
+         rather than merely a 200: {v}"
+    );
+}
+
+/// The direction with teeth: a foreign tenant must not receive the body.
+///
+/// Inverting `!=` at `handlers/context.rs:1018` makes a mismatched tenant fall
+/// through and serve another tenant's producer-signed body. `/contexts/{id}`
+/// (the envelope) is covered by `tenancy_stamp_and_filter_roundtrip`; `/body`
+/// is a separate route with its own copy of the gate and had none.
+#[tokio::test]
+async fn context_body_is_withheld_from_a_foreign_tenant() {
+    let h = harness(true).await;
+    let (_lineage, ctx_id) = tenant_lineage(&h, 171, "tenant-body-a").await;
+
+    let (status, v) = get_json_with_tenant(
+        &h.router,
+        &format!("/contexts/{}/body", pct_encode_path_segment(&ctx_id)),
+        Some("tenant-body-b"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a foreign tenant must not receive another tenant's body: {v}"
+    );
+    assert_eq!(
+        v["error"]["code"], "not_found",
+        "and it must be `not_found`, not a distinguishable forbidden — a \
+         refusal that says 'exists but denied' is itself the disclosure: {v}"
+    );
+}
+
+/// `GET /lineages/{id}` must list the owning tenant's own versions.
+///
+/// This is the test that pins `handlers/context.rs:1328` (`t == &tenant` inside
+/// the `retain`). Inverting that comparison does not weaken the filter — it
+/// takes its exact complement, dropping every row the caller owns. So this
+/// direction fails with an EMPTY list where two versions were expected.
+#[tokio::test]
+async fn lineage_lists_the_owning_tenants_versions() {
+    let h = harness(true).await;
+    let (lineage_id, _ctx) = tenant_lineage(&h, 172, "tenant-lineage-a").await;
+
+    let (status, v) = get_json_with_tenant(
+        &h.router,
+        &format!("/lineages/{}", pct_encode_path_segment(&lineage_id)),
+        Some("tenant-lineage-a"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "lineage fetch = {v}");
+    let arr = v.as_array().expect("lineage returns an array");
+    assert_eq!(
+        arr.len(),
+        2,
+        "the owning tenant must see both of its own versions; a `retain` whose \
+         comparison is inverted keeps exactly the rows the caller does NOT own \
+         and so returns an empty list here: {v}"
+    );
+    let titles: Vec<&str> = arr
+        .iter()
+        .map(|i| i["body"]["title"].as_str().unwrap())
+        .collect();
+    assert!(
+        titles.contains(&"tenant-lineage-v1") && titles.contains(&"tenant-lineage-v2"),
+        "and they must be the caller's OWN versions, named — not merely two of \
+         something: {titles:?}"
+    );
+}
+
+/// A foreign tenant must not see another tenant's lineage versions.
+///
+/// This is the test that pins `handlers/context.rs:1322` (`if !items.is_empty()`).
+/// Deleting that `!` skips the tenant `retain` whenever there IS something to
+/// filter — the precise case that matters — and returns the foreign rows.
+///
+/// **The control matters here and is not decoration.** This route answers
+/// `200 []` rather than `404`, so an empty array is consistent with two very
+/// different worlds: the filter worked, or the fixture never had rows at all. A
+/// test asserting only emptiness would pass against a lineage that was never
+/// published. The untenanted fetch proves the two rows are really there and
+/// really reachable, so the emptiness above it is attributable to the tenant
+/// filter and nothing else.
+#[tokio::test]
+async fn lineage_withholds_another_tenants_versions() {
+    let h = harness(true).await;
+    let (lineage_id, _ctx) = tenant_lineage(&h, 173, "tenant-lineage-a").await;
+    let uri = format!("/lineages/{}", pct_encode_path_segment(&lineage_id));
+
+    let (status, v) = get_json_with_tenant(&h.router, &uri, Some("tenant-lineage-b")).await;
+    assert_eq!(status, StatusCode::OK, "lineage fetch = {v}");
+    assert_eq!(
+        v.as_array().expect("array").len(),
+        0,
+        "a foreign tenant must see none of another tenant's versions: {v}"
+    );
+
+    // The control: the rows exist and are reachable untenanted.
+    let (status, all) = get_json_with_tenant(&h.router, &uri, None).await;
+    assert_eq!(status, StatusCode::OK, "untenanted lineage fetch = {all}");
+    assert_eq!(
+        all.as_array().expect("array").len(),
+        2,
+        "the fixture must really contain two versions, otherwise the emptiness \
+         asserted above proves nothing about the tenant filter: {all}"
+    );
+}
+
+/// `GET /lineages/{id}/current` must serve the owning tenant.
+///
+/// First of two directions for `handlers/context.rs:1361` (`if stored !=
+/// tenant`), split for the same reason as the `/body` pair.
+#[tokio::test]
+async fn lineage_current_is_served_to_the_owning_tenant() {
+    let h = harness(true).await;
+    let (lineage_id, _ctx) = tenant_lineage(&h, 174, "tenant-current-a").await;
+
+    let (status, v) = get_json_with_tenant(
+        &h.router,
+        &format!("/lineages/{}/current", pct_encode_path_segment(&lineage_id)),
+        Some("tenant-current-a"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owning tenant must still get its own current version: {v}"
+    );
+    assert_eq!(
+        v["body"]["title"], "tenant-lineage-v2",
+        "and it must be the head of the lineage, so this asserts the gate \
+         opening on the right row rather than merely a 200: {v}"
+    );
+}
+
+/// A foreign tenant must not learn another tenant's current version.
+///
+/// Inverting `!=` at `handlers/context.rs:1361` serves the head of a lineage
+/// the caller cannot see. The refusal is `not_found` and must stay
+/// indistinguishable from a lineage that does not exist — `lineage_unknown_id`
+/// already pins that shape for a genuinely absent id, and this pins that a
+/// PRESENT but foreign one is answered identically.
+#[tokio::test]
+async fn lineage_current_is_withheld_from_a_foreign_tenant() {
+    let h = harness(true).await;
+    let (lineage_id, _ctx) = tenant_lineage(&h, 175, "tenant-current-a").await;
+
+    let (status, v) = get_json_with_tenant(
+        &h.router,
+        &format!("/lineages/{}/current", pct_encode_path_segment(&lineage_id)),
+        Some("tenant-current-b"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a foreign tenant must not receive another tenant's current version: {v}"
+    );
+    assert_eq!(
+        v["error"]["code"], "not_found",
+        "and the refusal must not distinguish 'foreign' from 'absent': {v}"
+    );
+}
+
+/// `post_lifecycle` with an `X-Tenant-Id`. The untenanted helper above cannot
+/// reach the tenant gate at all (`requested_tenant == None` skips it).
+async fn post_lifecycle_with_tenant(
+    app: &axum::Router,
+    ctx_id: &str,
+    endpoint: &str,
+    envelope: &Value,
+    tenant: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/contexts/{}/{endpoint}",
+            pct_encode_path_segment(ctx_id)
+        ))
+        .header("content-type", "application/json");
+    if let Some(t) = tenant {
+        builder = builder.header("X-Tenant-Id", t);
+    }
+    let resp = app
+        .clone()
+        .oneshot(
+            builder
+                .body(Body::from(serde_json::to_vec(envelope).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    (status, v)
+}
+
+/// Publish one public did:key context into `tenant` on the lifecycle harness.
+async fn lifecycle_ctx_in_tenant(h: &Harness, seed: u8, tenant: &str) -> String {
+    let req = did_key_producer(seed)
+        .publish_request()
+        .title("lifecycle-tenant-scope")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    v["ctx_id"].as_str().expect("ctx_id").to_string()
+}
+
+/// The owning tenant can still retract its own context.
+///
+/// First direction of `handlers/context.rs:1511` (`stored_tenant... != tenant`),
+/// step 5 of `lifecycle_transition`. Split from its sibling for the usual
+/// reason: inverting the operator breaks both directions at once.
+#[tokio::test]
+async fn retract_is_accepted_from_the_owning_tenant() {
+    let h = lifecycle_harness(false).await;
+    let ctx_id = lifecycle_ctx_in_tenant(&h, 180, "tenant-lc-a").await;
+
+    let envelope = signed_event_envelope(180, &ctx_id, "retracted", Some("owner retracts"));
+    let (status, v) = post_lifecycle_with_tenant(
+        &h.router,
+        &ctx_id,
+        "retract",
+        &envelope,
+        Some("tenant-lc-a"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owning tenant must still be able to retract its own context; a \
+         gate that refuses the MATCHING tenant is inverted: {v}"
+    );
+    assert_eq!(
+        v["registry_state"]["status"], "retracted",
+        "and the retraction must actually have taken effect, so this asserts \
+         the gate opening rather than merely a 200: {v}"
+    );
+}
+
+/// **The gate with the most consequence in this set: it protects a WRITE.**
+///
+/// Every other tenant gate U-504 found withholds a read. This one decides
+/// whether a caller scoped to one tenant may retract a context belonging to
+/// another. Inverting `!=` at `handlers/context.rs:1511` lets the foreign
+/// caller through to the full §6 pipeline, and because the event itself is
+/// validly signed by the context's real producer, the pipeline then ACCEPTS it
+/// — the retraction succeeds.
+///
+/// So the status code is not the property worth asserting. The property is that
+/// **no state changed**, and this test checks that directly by re-reading the
+/// context afterwards and requiring it to still be `active`. A test that
+/// asserted only the 404 would still pass against an implementation that
+/// refused the response after performing the write.
+#[tokio::test]
+async fn retract_is_refused_for_a_foreign_tenants_context() {
+    let h = lifecycle_harness(false).await;
+    let ctx_id = lifecycle_ctx_in_tenant(&h, 181, "tenant-lc-a").await;
+
+    // Validly signed by the real producer — the request is well-formed and
+    // authorized in every respect EXCEPT the caller's tenant scope, so it
+    // reaches step 5 rather than dying earlier for an unrelated reason.
+    let envelope = signed_event_envelope(181, &ctx_id, "retracted", Some("foreign retract"));
+    let (status, v) = post_lifecycle_with_tenant(
+        &h.router,
+        &ctx_id,
+        "retract",
+        &envelope,
+        Some("tenant-lc-b"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a caller scoped to another tenant must not be able to retract this \
+         context: {v}"
+    );
+    assert_eq!(
+        v["error"]["code"], "not_found",
+        "and the refusal must not distinguish 'foreign' from 'absent': {v}"
+    );
+
+    // The assertion that actually matters: the write did not happen.
+    let (status, after) = get_json_with_tenant(
+        &h.router,
+        &format!("/contexts/{}", pct_encode_path_segment(&ctx_id)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-read after refusal = {after}");
+    assert_eq!(
+        after["registry_state"]["status"], "active",
+        "the context must still be ACTIVE — a refusal that returns 404 after \
+         performing the retraction is not a refusal: {after}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// U-504: the webhook payload.
+//
+// `count_connections_and_reply_ok` (above) counts CONNECTIONS and discards the
+// bytes, which is exactly right for the anchors test that owns it — that test
+// asks "did anything dial this address". It cannot see payload content, and
+// nothing else in this suite could either, so the whole webhook payload was
+// unasserted at the HTTP-integration level.
+//
+// The mutation ratchet made the cost of that concrete. Seven of U-504's 28
+// survivors live behind this gap, because three handler values reach NOTHING
+// BUT the webhook: `context_type_str` (`context.rs:720`), the validated
+// `x-run-id` (`:736`), and the reserved-tenant filter on the retract delivery
+// (`:1556`). A value with exactly one consumer is untested if that consumer is
+// untested.
+// ---------------------------------------------------------------------------
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Accept webhook deliveries and hand back each one's raw request head and
+/// parsed JSON body.
+///
+/// Reads the full body rather than a fixed 1 KiB buffer: a `ContextPublished`
+/// payload is comfortably larger than the 1024 bytes the counting listener
+/// grabs, so a truncating read would make the JSON unparseable and every
+/// assertion below vacuous.
+fn spawn_webhook_capture(
+    listener: tokio::net::TcpListener,
+) -> tokio::sync::mpsc::UnboundedReceiver<(String, Value)> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let head_end = loop {
+                match socket.read(&mut tmp).await {
+                    Ok(0) => break None,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(p) = find_subslice(&buf, b"\r\n\r\n") {
+                            break Some(p + 4);
+                        }
+                    }
+                    Err(_) => break None,
+                }
+            };
+            let Some(head_end) = head_end else { continue };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+            let clen = head
+                .lines()
+                .filter_map(|l| l.split_once(':'))
+                .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while buf.len() < head_end + clen {
+                match socket.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    Err(_) => break,
+                }
+            }
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+            let body: Value = serde_json::from_slice(&buf[head_end..]).unwrap_or(Value::Null);
+            let _ = tx.send((head, body));
+        }
+    });
+    rx
+}
+
+/// Await one delivery. Bounded, because a webhook that never arrives must fail
+/// this suite rather than hang it.
+async fn next_webhook(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+) -> (String, Value) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for a webhook delivery")
+        .expect("webhook capture channel closed")
+}
+
+/// A harness whose webhook emitter points at a capturing loopback listener.
+///
+/// `allow_test_loopback()` for the same reason the anchors test documents: the
+/// strict default `SsrfPolicy` refuses loopback outright, so leaving it strict
+/// would make the SSRF guard the reason no delivery arrives and every assertion
+/// below would pass against a completely broken emitter.
+async fn webhook_harness(
+    lifecycle: bool,
+) -> (
+    Harness,
+    tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind webhook listener");
+    let addr = listener.local_addr().expect("addr");
+    let rx = spawn_webhook_capture(listener);
+
+    let mut cfg = config(false);
+    cfg.webhook = WebhookConfig {
+        enabled: true,
+        url: format!("http://{addr}/hook"),
+        secret: "u504-webhook-secret".into(),
+        ..WebhookConfig::default()
+    };
+    // did:key in BOTH modes: `producer()` is did:web and this harness has no
+    // did:web resolver fixture, so a did:web publish dies at DNS long before
+    // reaching anything this test is about.
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    let caps = if lifecycle {
+        cfg.lifecycle.enabled = true;
+        caps_030()
+    } else {
+        caps_050()
+    };
+    let emitter = acdp_registry_webhook::WebhookEmitter::spawn_with_policy(
+        cfg.webhook.clone(),
+        acdp::safe_http::SsrfPolicy::allow_test_loopback(),
+    );
+    let h = build_harness_with_webhook(cfg, caps, None, Some(emitter)).await;
+    (h, rx)
+}
+
+/// The published event must carry the context type's WIRE string.
+///
+/// Kills both mutations that replace `context_type_str`'s body wholesale
+/// (`context.rs:877` -> `String::new()` and -> `"xyzzy"`). That function is
+/// `DESIGN-04`'s typed accessor and `context.rs:720` is its only caller, so
+/// until now nothing in this suite executed it for its value.
+///
+/// The assertion still reads a MAPPED value rather than an echo: the wire form
+/// is `data_snapshot` where the Rust variant is `DataSnapshot`, so a
+/// stringly-typed shortcut that echoed the variant name would fail here.
+/// (`key-revocation` would have been the sharper witness, being hyphenated
+/// where every other arm is snake_case, but that type requires
+/// `metadata.revoked_key_fingerprint` and `metadata.compromised_since` per
+/// RFC-ACDP-0014 §4 and would redden this test in its fixture rather than at
+/// its assertion.)
+#[tokio::test]
+async fn webhook_publish_event_carries_the_mapped_context_type() {
+    let (h, mut rx) = webhook_harness(false).await;
+    let req = did_key_producer(190)
+        .publish_request()
+        .title("u504-context-type")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+
+    let (_head, event) = next_webhook(&mut rx).await;
+    assert_eq!(
+        event["context_type"], "data_snapshot",
+        "the delivered event must carry the mapped wire string; an empty or \
+         constant body for `context_type_str` reaches nothing else: {event}"
+    );
+}
+
+/// A valid `x-run-id` is forwarded; an over-long one is treated as ABSENT.
+///
+/// Kills all three survivors on `context.rs:442`
+/// (`!s.is_empty() && s.len() <= 256`):
+///   - `delete !`  — only EMPTY run ids would forward, so the first assertion
+///     fails.
+///   - `&&` -> `||` — a 300-char id satisfies `!is_empty()` and so would be
+///     forwarded, which the second assertion refuses.
+///   - `<=` -> `>`  — a short id fails `len() > 256` and would be dropped,
+///     which the first assertion catches.
+///
+/// Both directions are needed: neither assertion alone distinguishes all three.
+#[tokio::test]
+async fn webhook_publish_event_forwards_a_valid_run_id_and_drops_an_oversized_one() {
+    let (h, mut rx) = webhook_harness(false).await;
+
+    let req = did_key_producer(191)
+        .publish_request()
+        .title("u504-run-id-ok")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_run_id(&h.router, &req, Some("run-u504-abc")).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    let (_head, event) = next_webhook(&mut rx).await;
+    assert_eq!(
+        event["run_id"], "run-u504-abc",
+        "a valid x-run-id must reach the event: {event}"
+    );
+
+    // 300 chars — printable, non-empty, and over the 256 bound.
+    let long = "r".repeat(300);
+    let req2 = did_key_producer(192)
+        .publish_request()
+        .title("u504-run-id-long")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_run_id(&h.router, &req2, Some(&long)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an over-long run id is treated as absent, NOT rejected: {v}"
+    );
+    let (_head, event2) = next_webhook(&mut rx).await;
+    assert!(
+        event2["run_id"].is_null(),
+        "a 300-char x-run-id is out of range and must be dropped rather than \
+         forwarded: {event2}"
+    );
+}
+
+/// A retraction must be delivered as a RETRACTION.
+///
+/// Kills `context.rs:1563` (delete the `LifecycleEventType::Retracted` arm of
+/// the webhook match), which would emit the retract as the fall-through
+/// republished variant — a consumer would be told the context came BACK.
+#[tokio::test]
+async fn webhook_retraction_is_emitted_as_a_retraction() {
+    let (h, mut rx) = webhook_harness(true).await;
+    let ctx_id = lifecycle_ctx_in_tenant(&h, 193, "tenant-wh-a").await;
+    let _ = next_webhook(&mut rx).await; // the publish delivery
+
+    let envelope = signed_event_envelope(193, &ctx_id, "retracted", Some("u504"));
+    let (status, v) = post_lifecycle_with_tenant(
+        &h.router,
+        &ctx_id,
+        "retract",
+        &envelope,
+        Some("tenant-wh-a"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+
+    let (_head, event) = next_webhook(&mut rx).await;
+    assert_eq!(
+        event["type"], "context_retracted",
+        "a retraction must be delivered as `context_retracted`; the deleted \
+         match arm falls through to the republished variant and would tell a \
+         consumer the context came back: {event}"
+    );
+}
+
+/// The retract delivery carries the owning tenant, and omits the reserved one.
+///
+/// Kills `context.rs:1556` (`stored_tenant.filter(|t| t != "default")` ->
+/// `==`). Inverting it swaps both behaviours at once: a real tenant's delivery
+/// would lose its `X-Tenant-Id`, and an untenanted row would start asserting
+/// the reserved name `default` as though it were a tenant. Both halves are
+/// asserted, because the filter's job is precisely to distinguish them.
+#[tokio::test]
+async fn webhook_retraction_carries_the_tenant_but_never_the_reserved_default() {
+    let (h, mut rx) = webhook_harness(true).await;
+
+    // A tenanted context: the delivery must name the tenant.
+    let ctx_a = lifecycle_ctx_in_tenant(&h, 194, "tenant-wh-b").await;
+    let _ = next_webhook(&mut rx).await;
+    let env_a = signed_event_envelope(194, &ctx_a, "retracted", Some("u504"));
+    let (status, v) =
+        post_lifecycle_with_tenant(&h.router, &ctx_a, "retract", &env_a, Some("tenant-wh-b")).await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+    let (head, _e) = next_webhook(&mut rx).await;
+    assert!(
+        head.to_lowercase().contains("x-tenant-id: tenant-wh-b"),
+        "the retract delivery for a tenanted row must carry its tenant \
+         header; request head was:\n{head}"
+    );
+
+    // An UNTENANTED context: the row stores the reserved `default`, which must
+    // never travel as an asserted tenant.
+    let req = did_key_producer(195)
+        .publish_request()
+        .title("u504-untenanted")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    let ctx_b = v["ctx_id"].as_str().unwrap().to_string();
+    let _ = next_webhook(&mut rx).await;
+
+    let env_b = signed_event_envelope(195, &ctx_b, "retracted", Some("u504"));
+    let (status, v) = post_lifecycle(&h.router, &ctx_b, "retract", &env_b).await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+    let (head_b, _e) = next_webhook(&mut rx).await;
+    assert!(
+        !head_b.to_lowercase().contains("x-tenant-id:"),
+        "the reserved `default` tenant must NOT be forwarded as an asserted \
+         tenant header; request head was:\n{head_b}"
+    );
+}
+
+/// `publish` with an `x-run-id` header (FEAT-04's orchestrator correlation id).
+async fn publish_with_run_id(
+    app: &axum::Router,
+    req: &acdp::types::publish::PublishRequest,
+    run_id: Option<&str>,
+) -> (StatusCode, Value) {
+    let body = serde_json::to_vec(req).unwrap();
+    let mut builder = Request::builder().method("POST").uri("/contexts");
+    if let Some(r) = run_id {
+        builder = builder.header("x-run-id", r);
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    (status, v)
+}
+
+// ---------------------------------------------------------------------------
+// U-504: the search refill loop (REG-P2-8).
+//
+// Six survivors live in this loop's control flow, and a probe explains why:
+// instrumenting `iterations` and running the ENTIRE server suite produced not
+// one iteration beyond the first. The loop body past its first pass was dead to
+// every test in the repo, so nothing could distinguish a cap of 6 from a cap of
+// 7, or from no cap at all.
+//
+// Reaching it needs a post-filter that actually drops rows. `?visibility=` is
+// the one that still can: search returns only PUBLIC rows to every requester
+// (measured — anonymous, audience member and the producer itself all see only
+// the public row), so `?visibility=private` drops the entire page and leaves
+// `accumulated` at zero while further pages remain.
+// ---------------------------------------------------------------------------
+
+/// Search as `agent`, returning the parsed body.
+async fn search_as(app: &axum::Router, query: &str, bearer: Option<&str>) -> Value {
+    let mut builder = Request::builder().uri(format!("/contexts/search?{query}"));
+    if let Some(b) = bearer {
+        builder = builder.header("authorization", format!("Bearer {b}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    body_to_json(resp).await
+}
+
+/// The refill loop must scan exactly `SEARCH_REFILL_MAX_PAGES` inner pages —
+/// no more, no fewer — when the post-filter empties every page.
+///
+/// Kills all six surviving mutations in `run_search_with_refill`'s loop
+/// control. The trick is that the *matches* cannot discriminate: with
+/// `?visibility=private` the answer is an empty list however many pages were
+/// scanned. What differs is HOW FAR the scan got, and the returned
+/// `next_cursor` carries exactly that. Resuming an unfiltered search from it
+/// and counting what remains turns "pages scanned" into an observable number:
+///
+/// | mutation | pages scanned | how it dies |
+/// |---|---|---|
+/// | (correct) | 6 | — 10 rows left after the cursor |
+/// | `:1274` `<` -> `<=` | 7 | scan exhausted, so there is NO cursor to resume |
+/// | `:1274` `<` -> `==` | 1 | 60 rows left |
+/// | `:1274` `<` -> `>`  | 1 | 60 rows left |
+/// | `:1272` `<` -> `>`  | 1 | 60 rows left |
+/// | `:1270` `\|\|` -> `&&` | 1 (no tenant, so `post_filtered` is false) | 60 rows left |
+/// | `:1147` `+=` -> `*=` | 7 (`iterations` pinned at 0, cap never trips) | scan exhausted, no cursor |
+///
+/// The two that run past the cap reach the end of the 70 rows, so they fail on
+/// the ABSENT cursor rather than on a row count — which is why that `.expect`
+/// carries a message about the cap rather than a bare unwrap.
+///
+/// The publish rate limiter is switched off (`publish_rate_per_minute = 0`)
+/// because 70 publishes from one agent otherwise trip it at the 60th and the
+/// test would redden in its fixture rather than at its assertion.
+#[tokio::test]
+async fn search_refill_scans_exactly_the_page_cap_when_the_filter_empties_every_page() {
+    let mut cfg = config(true);
+    cfg.limits.publish_rate_per_minute = 0;
+    let h = harness_from_config(cfg).await;
+    let app = &h.router;
+
+    let p = producer(61);
+    for i in 0..70u32 {
+        let req = p
+            .publish_request()
+            .title(format!("u504refill-{i}"))
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let (s, v) = publish(app, &req, None).await;
+        assert_eq!(s, StatusCode::OK, "publish {i} = {v}");
+    }
+
+    // Control: all 70 rows are visible and searchable in one big page, so the
+    // arithmetic below is about the CURSOR and not about rows going missing.
+    let all = search_as(app, "q=u504refill&limit=100", None).await;
+    assert_eq!(
+        all["matches"].as_array().unwrap().len(),
+        70,
+        "fixture must expose all 70 rows to an unfiltered search: {all}"
+    );
+
+    // `?visibility=private` matches nothing, so every inner page is emptied by
+    // the post-filter and the loop refills until the cap stops it.
+    let narrowed = search_as(app, "q=u504refill&visibility=private&limit=10", None).await;
+    assert_eq!(
+        narrowed["matches"].as_array().unwrap().len(),
+        0,
+        "no row is private, so the filtered page must be empty: {narrowed}"
+    );
+    let cursor = narrowed["next_cursor"]
+        .as_str()
+        .expect("a refill that stopped at the cap must hand back a cursor to resume from")
+        .to_string();
+
+    // How far did the scan actually get? Resume unfiltered and count.
+    let rest = search_as(
+        app,
+        &format!(
+            "q=u504refill&limit=100&cursor={}",
+            pct_encode_path_segment(&cursor)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(
+        rest["matches"].as_array().unwrap().len(),
+        10,
+        "the loop must have scanned exactly 6 inner pages of 10, leaving 10 of \
+         the 70 rows beyond the returned cursor. 60 remaining means it gave up \
+         after one page; 0 means it ran past the cap to exhaustion: {rest}"
+    );
+}
+
+/// Publish with a raw `Idempotency-Key` byte string, bypassing `&str` header
+/// construction so a TAB can be sent.
+async fn publish_with_raw_idem_key(
+    app: &axum::Router,
+    req: &acdp::types::publish::PublishRequest,
+    key: &[u8],
+) -> (StatusCode, Value) {
+    let body = serde_json::to_vec(req).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .header(
+                    "Idempotency-Key",
+                    axum::http::HeaderValue::from_bytes(key).expect("header value"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    (status, v)
+}
+
+/// An out-of-range or non-printable `Idempotency-Key` must be IGNORED, and
+/// "ignored" has to be asserted as ignored.
+///
+/// Kills both survivors on `context.rs:433`. `idempotency_key_length_bounds`
+/// (:2123) already sends a 257-char key, but only asserts the publish returns
+/// `200` — and an over-long key that was wrongly HONORED also returns 200. The
+/// status code cannot distinguish "treated as absent" from "treated as a key";
+/// only the `ctx_id` can, because a honored key replays the first one.
+///
+/// The tab case is the one worth explaining. `HeaderValue::to_str()` succeeds
+/// only for visible ASCII **and tab**, so almost every non-printable byte is
+/// rejected one layer earlier by `.to_str().ok()` and never reaches this
+/// filter. TAB is the single value that gets through and is still an
+/// `is_ascii_control()`, which makes it the only witness that can tell
+/// `is_ascii() && !is_ascii_control()` from `is_ascii() || !is_ascii_control()`.
+#[tokio::test]
+async fn an_out_of_range_or_non_printable_idempotency_key_is_ignored_not_honored() {
+    let h = harness(true).await;
+    let app = &h.router;
+    let req = producer(62)
+        .publish_request()
+        .title("u504-idem")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+
+    // Control: a VALID key really does replay, so the inequalities below mean
+    // "the key was ignored" and not "this endpoint never replays anything".
+    let valid = b"u504-valid-key";
+    let (s1, a1) = publish_with_raw_idem_key(app, &req, valid).await;
+    let (s2, a2) = publish_with_raw_idem_key(app, &req, valid).await;
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(
+        a1["ctx_id"], a2["ctx_id"],
+        "a valid key must replay — without this the assertions below prove \
+         nothing: {a1} vs {a2}"
+    );
+
+    // 257 chars: out of range, so treated as absent -> two DISTINCT publishes.
+    let long = vec![b'x'; 257];
+    let (s1, b1) = publish_with_raw_idem_key(app, &req, &long).await;
+    let (s2, b2) = publish_with_raw_idem_key(app, &req, &long).await;
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_ne!(
+        b1["ctx_id"], b2["ctx_id"],
+        "a 257-char key is out of range and must be IGNORED; replaying the \
+         same ctx_id means it was honored: {b1} vs {b2}"
+    );
+
+    // A tab is an ASCII control character, so the key is non-printable and
+    // must likewise be ignored.
+    let tabbed = b"u504\tkey";
+    let (s1, c1) = publish_with_raw_idem_key(app, &req, tabbed).await;
+    let (s2, c2) = publish_with_raw_idem_key(app, &req, tabbed).await;
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_ne!(
+        c1["ctx_id"], c2["ctx_id"],
+        "a key containing a control character must be IGNORED: {c1} vs {c2}"
+    );
+}
