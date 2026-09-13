@@ -3337,3 +3337,48 @@ rejection — a wrong key produces green exactly where a right key does.
 
 **Status:** applied. 38 → 40 exchanges, 19 → 21 replayable, required-but-unexercised **8 → 6**
 (`pub-001`, `pub-011`). No wire change.
+
+## U-531 — the gate knew one notation, and the sweep found a fourth wrong-reason pass
+
+**The template gate now covers both placeholder notations.** It tested `path.contains('{')` and
+`'}'` only. The spec also writes placeholders with **angle** brackets — `cur-001`'s endpoint carries
+`cursor=<previously-issued-cursor>` — and a brace-only gate waves those straight through. The
+consequence is not a crash but a **pass**: the literal text is a perfectly good malformed cursor, so
+the registry returns the 400 the fixture expects and the fixture is scored green having tested nothing
+about expired cursors.
+
+**Its test now varies the spelling** — five placeholder paths across both notations and both path and
+query position, plus a placeholder-free complement so the gate cannot satisfy everything by rejecting
+everything. A count-based assertion ("N fixtures are gated") would have passed throughout the entire
+blind period, which is how the gate arrived here half-blind.
+
+**`cur-002` admitted, `cur-001` excluded on its own merits.** U-527 required a concrete body for every
+method, which excluded `cur-002` (a fully concrete search request) purely to avoid admitting
+`cur-001`. With the gate fixed, that blanket exclusion is no longer load-bearing, so Shape E accepts a
+bodyless `GET`/`HEAD`. `cur-002` replays **and is checked** — it returns its expected `invalid_cursor`.
+`cur-001` is skipped by the gate with a written reason.
+
+**The sweep found a fourth instance, older than any of them.** With `CODE_DIVERGENCES` in place the
+question was one grep: exactly one `want_error_code: None` remained, in **Shape A's publish arm**, and
+`pub-008` was passing behind it. That fixture exists to prove a non-`did:web` `agent_id` is rejected;
+its `signature.value` is 96 base64 chars where ed25519 requires 88, so signature-shape validation
+rejects it first and the `agent_id` rule is never reached. It had been replaying green since long
+before U-527.
+
+**A pre-existing assertion was deliberately inverted.**
+`four_pre_existing_exchanges_still_use_original_shapes` asserted
+`want_error_code.is_none()` — *"Shape A's publish branch never pins an error code, this must still
+hold"*. That invariant is what let `pub-008` hide. The ordering argument behind it was never wrong; it
+simply does not justify asserting **nothing**. Where this registry genuinely orders validation
+differently, `CODE_DIVERGENCES` records the code it does return, which is a stronger statement than
+silence.
+
+**The negative result is now asserted, not re-derivable.**
+`every_replayed_fixture_pins_a_code_when_it_names_one` makes the rule structural: if a fixture supplies
+an `error_code`, the exchange built from it must pin a code — its own, or a recorded divergence. No
+future shape can opt out by leaving it `None`. 15 replayed fixtures name a code at the pin, and the
+bound is asserted so an empty scan cannot read as clean. **My first guess at that bound was 14 and the
+known-positive check caught it** — the guard's first act was to correct its author.
+
+**Status:** applied. 40 → 41 exchanges, 21 → 22 replayable. **`required-but-unexercised` does not
+move: it stays 6** — `cur-001`/`cur-002` are not profile-required. No wire change.
