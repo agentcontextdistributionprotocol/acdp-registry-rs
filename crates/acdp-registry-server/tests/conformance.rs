@@ -347,15 +347,23 @@
 //! `DEFERRED` entry always should have carried precisely (it previously misdescribed
 //! rev-002's before/after semantics as rev-001's own).
 //!
-//! `did-ssrf-*` (RFC-ACDP-0008 §4.8) is likewise not HTTP-replayable by the generic
-//! loop: `targets_unadvertised_profile` passes it (its `applies_to_profiles` includes
-//! `acdp-registry-core`) and it carries no unseeded precondition, but `extract_shapes`
-//! matches none of Shapes A/B/C/D -- its `input.endpoint`/`input.body` shape satisfies
-//! neither Shape A/B (no top-level/per-scenario `request`) nor Shape C (`input.endpoint`
-//! is `POST /contexts`, not `GET /contexts/{ctx_id}`) -- so it falls to the same
-//! `"non-HTTP fixture (vectors / schema / informative)"` fallback as `can`/`sig`,
-//! confirmed for this phase by re-reading `extract_shapes` directly rather than trusting
-//! the prior `DEFERRED` reason's claim on faith (it held up). The seam this repo
+//! `did-ssrf-*` (RFC-ACDP-0008 §4.8) **was** described here as "not HTTP-replayable by
+//! the generic loop", on the reasoning that `extract_shapes` matched none of Shapes
+//! A/B/C/D -- its `input.endpoint`/`input.body` shape satisfied neither Shape A/B (no
+//! top-level/per-scenario `request`) nor Shape C (`input.endpoint` is `POST /contexts`,
+//! not `GET /contexts/{ctx_id}`) -- so it fell to the
+//! `"non-HTTP fixture (vectors / schema / informative)"` fallback alongside `can`/`sig`.
+//!
+//! **That reasoning was right about the dispatch and wrong about the fixture, and U-527
+//! reversed it.** Shape E now parses `input.endpoint`, and `did-ssrf-001`..`004` replay
+//! over real HTTP. The passage is kept rather than deleted because the mistake is the
+//! instructive part: the earlier read was *verified* -- "confirmed for this phase by
+//! re-reading `extract_shapes` directly rather than trusting the prior `DEFERRED`
+//! reason's claim on faith (it held up)" -- and it still produced a false conclusion,
+//! because re-reading the dispatcher only ever confirms what the dispatcher does. It
+//! cannot notice that the fixture is a perfectly ordinary HTTP request the dispatcher
+//! happens not to parse. Checking the code against the code agrees with itself; only
+//! checking the code against the FIXTURE could have caught this. The seam this repo
 //! delegates to already existed before this phase: `acdp::did::WebResolver` applies
 //! `SsrfPolicy::default()` unconditionally (`did-ssrf-001/002/003`), and
 //! `acdp::safe_http` -- the crate `WebResolver` itself is built on -- exposes
@@ -459,7 +467,7 @@
 //! families this plan added. So `COVERED` is `&[(&str, &[CoverageMechanism])]`, and a
 //! family may claim `CoverageMechanism::Replayed`, one or more named
 //! `CoverageMechanism::Direct(&[fn_name, ...])` entries, or both (`vis` claims both: it
-//! clears `MIN_REPLAYED_EXCHANGES` via Shape A/B/C/D AND carries 10 dedicated
+//! contributes to `REPLAYED_EXCHANGES_AT_PIN` via Shape A/B/C/D/E AND carries 10 dedicated
 //! `visNNN_*`/Shape-D-driving test functions for scenarios the generic loop can't reach).
 //!
 //! Both mechanisms are DERIVED, not merely hand-asserted, but by two different oracles:
@@ -2726,7 +2734,127 @@ fn extract_shapes(fx: &Value) -> Extracted {
             }
         }
     }
+    // Shape E: the general `input.endpoint` + `input.body` form -- U-527.
+    //
+    // Shape C above handles exactly ONE endpoint literal
+    // (`GET /contexts/{ctx_id}`). Everything else spelled with
+    // `input.endpoint` fell straight through to the fallback below, which
+    // reports `"non-HTTP fixture (vectors / schema / informative)"` -- and
+    // that string is FALSE for them: they declare an HTTP method, a path, a
+    // body and an expected status. Measured at pin `16211e6`: **6** of 144
+    // fixtures use the `request.method`+`path` spelling Shape A reads, and
+    // **65** use `input.endpoint`. The replayer understood the minority
+    // spelling, and the majority were filed as "not HTTP" rather than as
+    // "not parsed" -- which is why issue #291's twelve looked like a
+    // coverage gap and were partly a parser gap.
+    //
+    // Scoped deliberately to fixtures carrying a CONCRETE body: only 12 of
+    // the 65 have one, the rest describe the request in prose
+    // (`body_summary: "Concrete payload omitted..."`). Supporting bodyless
+    // GETs would additionally admit `cur-001`, whose endpoint embeds
+    // `<previously-issued-cursor>` -- an ANGLE-bracket placeholder the
+    // template gate in `extract()` does not catch (it looks for `{`/`}`),
+    // so it would replay a literal placeholder in the query string and
+    // still get its expected 400, passing for entirely the wrong reason.
+    // `cur-002` IS fully concrete and would be a genuine win; it is left
+    // for whoever extends the template gate to `<...>` first, because the
+    // two must land together.
+    if let Some(input) = fx.get("input") {
+        if let (Some(endpoint), Some(exp)) = (
+            input.get("endpoint").and_then(Value::as_str),
+            fx.get("expected"),
+        ) {
+            return extract_input_endpoint(input, endpoint, exp);
+        }
+    }
     Extracted::Skip("non-HTTP fixture (vectors / schema / informative)")
+}
+
+/// Shape E's body: turn one `input.endpoint` fixture into an exchange, or
+/// say *accurately* why it cannot become one.
+///
+/// Every `Skip` reason here is specific. The point of U-527 is not only that
+/// 12 fixtures start replaying -- it is that the other 53 stop being told
+/// they are "non-HTTP" when the truth is that they are HTTP requests whose
+/// body the spec deliberately left in prose. A wrong reason string sends the
+/// next reader to the wrong question, which is exactly how these sat unread
+/// long enough to become issue #291.
+fn extract_input_endpoint(input: &Value, endpoint: &str, exp: &Value) -> Extracted {
+    let Some((method, path)) = endpoint.split_once(' ') else {
+        return Extracted::Skip("fixture endpoint is not in `METHOD /path` form");
+    };
+    let method = method.to_uppercase();
+    // `ANY` is the spec's wildcard for "this applies to every method"; it
+    // names no single request to send.
+    if !matches!(
+        method.as_str(),
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
+    ) {
+        return Extracted::Skip("fixture endpoint declares no single concrete HTTP method");
+    }
+    let Some(status) = want_status(exp) else {
+        return Extracted::Skip("fixture declares an HTTP endpoint but no expected HTTP status");
+    };
+    let body = input.get("body");
+    if !matches!(body, Some(Value::Object(_)) | Some(Value::Array(_))) {
+        return if input.get("body_summary").is_some() {
+            Extracted::Skip("fixture describes its request body in prose, not as JSON")
+        } else {
+            Extracted::Skip("fixture declares an HTTP endpoint but carries no request body")
+        };
+    }
+
+    // This harness cannot reach a signature-verification outcome AT ALL:
+    // `config()` sets `playground.enabled = true`, which by its own comment
+    // "bypasses DID verification". Replaying a fixture whose expected
+    // outcome IS the signature check therefore produces a verdict about the
+    // harness, not about the server -- measured: `pub-001` replays to 200
+    // (publish accepted) against an expected 400 `invalid_signature`, with
+    // a signature of 64 literal `A`s.
+    //
+    // Skipping these is NOT working the failure around. It is the same
+    // thing every other arm here does -- classify a fixture this harness
+    // cannot express, with the real reason. Turning the harness into one
+    // that CAN verify signatures is U-528, and both `pub-001` and `pub-011`
+    // stay in `UNEXERCISED_FIXTURES` pointing at it.
+    //
+    // `pub-011` matters especially: it expects the same `invalid_signature`
+    // and WOULD have replayed green here, because its `content_hash` is the
+    // literal placeholder `"sha256:<recomputes-correctly-against-this-body>"`
+    // and the publish arm below pins no error code -- so it would have been
+    // scored as signature coverage while actually receiving a schema
+    // rejection. Admitting it would have added a FAKE green, which is worse
+    // than the honest gap it replaces.
+    if want_error_code(exp).as_deref() == Some("invalid_signature") {
+        return Extracted::Skip(
+            "signature-dependent outcome; this harness bypasses DID verification (U-528)",
+        );
+    }
+
+    let is_publish = method == "POST" && path.starts_with("/contexts");
+    if is_publish && status != 400 {
+        // Identical rule to Shape A's, and for the identical reason: a
+        // positive or authz publish needs signature+hash material a
+        // synthetic fixture body does not carry.
+        return Extracted::Skip("publish positive/authz outcome not deterministically replayable");
+    }
+    Extracted::Run(vec![Exchange {
+        method,
+        path: path.to_string(),
+        headers: Default::default(),
+        body: body.cloned(),
+        want_status: status,
+        // Matches Shape A's publish arm: validation ordering is
+        // impl-defined, so the first-failing code is not pinned for
+        // publishes. Consequence, stated so it is not rediscovered: a
+        // publish fixture replayed this way asserts only "some 400".
+        want_error_code: if is_publish {
+            None
+        } else {
+            want_error_code(exp)
+        },
+        want_json: exp.get("json_contains").cloned(),
+    }])
 }
 
 /// True when `ACDP_REQUIRE_CONFORMANCE` is set to any value, including the
@@ -2821,7 +2949,16 @@ fn resolve_fixture_dir(dir: &str) -> Option<PathBuf> {
 /// comment) and it is not otherwise given direct coverage. A gate that
 /// accidentally over-matches must fail loudly, not quietly shrink coverage
 /// to a still-nonzero number. Raise this as coverage grows.
-const MIN_REPLAYED_EXCHANGES: usize = 30;
+/// Exchanges the replayer drives at pin `16211e6`, as an **equality**.
+///
+/// This was `MIN_REPLAYED_EXCHANGES`, a `>=` floor, and a floor cannot
+/// catch the failure it exists for: a shape-dispatch bug that silently
+/// stops matching some fixtures leaves the count *lower*, and a floor is
+/// satisfied by every number above it. U-527 is itself the proof --
+/// `extract()` was silently declining 12 parseable fixtures and the floor
+/// reported healthy throughout. An equality makes coverage moving in
+/// EITHER direction fail the build and forces a human to say which.
+const REPLAYED_EXCHANGES_AT_PIN: usize = 38;
 
 fn family_of(name: &str) -> String {
     // Prefix up to the digit group: `data-ref-ssrf-001-...` -> `data-ref-ssrf`.
@@ -3084,10 +3221,13 @@ async fn replays_spec_fixtures_when_present() {
     if !failures.is_empty() {
         panic!("conformance failures:\n  - {}", failures.join("\n  - "));
     }
-    assert!(
-        replayed >= MIN_REPLAYED_EXCHANGES,
-        "replayed {replayed} exchange(s), expected at least {MIN_REPLAYED_EXCHANGES} \
-         (a fidelity gate may be over-matching and silently shrinking coverage)"
+    assert_eq!(
+        replayed, REPLAYED_EXCHANGES_AT_PIN,
+        "replayed {replayed} exchange(s), expected exactly {REPLAYED_EXCHANGES_AT_PIN}. \
+         FEWER means a shape-dispatch gate started over-matching and is silently \
+         shrinking coverage; MORE means fixtures became replayable and their entries \
+         in UNEXERCISED_FIXTURES / REPLAYABLE_FIXTURES_AT_PIN have not been updated. \
+         Both are a human decision, which is why this is an equality and not a floor"
     );
 
     // REG-10 Phase 11: the `Replayed` half of the `COVERED` coverage-mechanism proof.
@@ -5378,7 +5518,7 @@ fn wit004_key_mismatch_cosignature_is_rejected_and_wit001_golden_is_accepted() {
 // instead of it -- the replayer's own skip manifest (module doc-block,
 // "Skipped -- requires pre-seeded state") still (correctly) shows
 // `idem-001`..`idem-005` as unreached by `extract_shapes`, because direct
-// coverage bypasses shape-dispatch entirely. `MIN_REPLAYED_EXCHANGES` is
+// coverage bypasses shape-dispatch entirely. `REPLAYED_EXCHANGES_AT_PIN` is
 // UNCHANGED by this phase for the same reason `anc`/`can`/`vis-003`/
 // `vis-007`'s direct tests never moved it: none of these five exchanges
 // pushes through `replayed`.
@@ -8749,7 +8889,7 @@ enum CoverageMechanism {
 
 /// Every family with real coverage, and by which mechanism(s). A family may
 /// list more than one entry (`vis` lists both `Replayed` and `Direct`: it
-/// clears `MIN_REPLAYED_EXCHANGES` through the generic replayer AND carries
+/// contributes to `REPLAYED_EXCHANGES_AT_PIN` through the generic replayer AND carries
 /// dedicated per-fixture test functions for scenarios the generic loop
 /// can't reach). Checked two ways -- see the module doc-comment:
 /// `Replayed` entries against `replays_spec_fixtures_when_present`'s `ran`
@@ -9075,17 +9215,27 @@ enum Unexercised {
 const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
     // `pub` claims `CoverageMechanism::Replayed` on 3 replayed fixtures
     // (pub-004/005/008) while the profile requires 14. These are the other 11.
+    // U-527 removed `pub-002`, `pub-012`, `pub-013` and `pub-014`: Shape E
+    // parses their `input.endpoint` spelling, so the replayer now drives
+    // them for real. What is left here is left for a NAMED reason each.
+    //
+    // `pub-001` and `pub-011` both expect `invalid_signature`, and this
+    // harness runs with `playground.enabled = true`, which bypasses DID
+    // verification -- it cannot reach a signature-verification outcome at
+    // all. `pub-001` measurably replays to 200 (publish ACCEPTED) against
+    // an expected 400. They are **U-528's**, and `pub-011` is the sharper
+    // of the two: it would have replayed GREEN here, because its
+    // `content_hash` is the literal placeholder
+    // `"sha256:<recomputes-correctly-against-this-body>"` and the publish
+    // arm pins no error code, so a schema rejection would have been scored
+    // as signature coverage. Admitting it would have been a fake green.
     ("pub-001", Unexercised::RequiredByProfile),
-    ("pub-002", Unexercised::RequiredByProfile),
     ("pub-003", Unexercised::RequiredByProfile),
     ("pub-006", Unexercised::RequiredByProfile),
     ("pub-007", Unexercised::RequiredByProfile),
     ("pub-009", Unexercised::RequiredByProfile),
     ("pub-010", Unexercised::RequiredByProfile),
     ("pub-011", Unexercised::RequiredByProfile),
-    ("pub-012", Unexercised::RequiredByProfile),
-    ("pub-013", Unexercised::RequiredByProfile),
-    ("pub-014", Unexercised::RequiredByProfile),
     // `ret` likewise claims `Replayed` on ret-001 alone.
     ("ret-002", Unexercised::RequiredByProfile),
     // Conditional: required because of what this registry advertises.
@@ -9112,7 +9262,7 @@ const TOTAL_FIXTURES_AT_PIN: usize = 144;
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
 /// cannot drift from what actually replays.
-const REPLAYABLE_FIXTURES_AT_PIN: usize = 11;
+const REPLAYABLE_FIXTURES_AT_PIN: usize = 19;
 
 const PARTIAL_DIRECT: &[(&str, &[&str])] = &[
     (
@@ -11045,22 +11195,28 @@ fn did_web_authority_is_ip_literal(did: &str) -> bool {
 /// its entirety rather than filtering and proceeding (004), and MUST treat
 /// a same-host different-port redirect as a DIFFERENT authority (005).
 ///
-/// **The prior `DEFERRED` reason's claim, verified before building on it
-/// (per this phase's own instructions, and because a previous agent
-/// overturned a wrong ruling here once already):** re-reading
+/// **This test's own rationale was overturned by U-527, and the overturning
+/// is worth more than the rationale was.** It previously read: re-reading
 /// `extract_shapes` directly (not trusting the old prose) confirms all 5
-/// did-ssrf-* fixtures really do fall out at fixture-shape extraction.
-/// `targets_unadvertised_profile` passes them through (`applies_to_
-/// profiles` includes `acdp-registry-core`, which is in `HARNESS_
-/// PROFILES`), and there is no `setup`/`preconditions` key, so
-/// `unseeded_precondition_reason` is `None` too -- but `extract_shapes`
-/// itself matches none of Shapes A/B/C/D: no top-level `request` (Shape A/
-/// B need one), no `setup` (Shape D), and Shape C's own destructuring
-/// requires `input.endpoint` to split into exactly `("GET",
-/// "/contexts/{ctx_id}")`, which `"POST /contexts"` never does. So every
-/// one of these fixtures falls to the same `"non-HTTP fixture (vectors /
-/// schema / informative)"` catch-all `can`/`sig` also land in -- confirmed,
-/// not assumed. The seam claim also held up: `acdp::did::WebResolver`
+/// did-ssrf-* fixtures really do fall out at fixture-shape extraction --
+/// `targets_unadvertised_profile` passes them through, there is no
+/// `setup`/`preconditions` key, but `extract_shapes` matched none of Shapes
+/// A/B/C/D: no top-level `request` (Shape A/B need one), no `setup` (Shape
+/// D), and Shape C's destructuring requires `input.endpoint` to split into
+/// exactly `("GET", "/contexts/{ctx_id}")`, which `"POST /contexts"` never
+/// does. So they fell to the `"non-HTTP fixture"` catch-all -- "confirmed,
+/// not assumed."
+///
+/// Every step of that was accurate, and the conclusion was still wrong.
+/// `did-ssrf-001`..`004` are ordinary HTTP publishes with concrete bodies;
+/// **Shape E (U-527) parses them and they now replay.** Verifying a claim
+/// against the dispatcher can only establish what the dispatcher does --
+/// it cannot distinguish "this fixture is not an HTTP request" from "the
+/// dispatcher does not parse this spelling of one", and those two have
+/// opposite fixes. The direct test below is therefore no longer the only
+/// coverage of this family; it is kept because it asserts the SSRF seam far
+/// more precisely than a replayed status code can, and `did-ssrf-005`
+/// (redirect-to-different-port) still has no replayable shape at all. The seam claim also held up: `acdp::did::WebResolver`
 /// (`acdp-did`, re-exported by the `acdp` facade this crate already
 /// depends on) applies `SsrfPolicy::default()` unconditionally, and
 /// `acdp::safe_http` (the crate `WebResolver` itself is built over, also
@@ -13243,7 +13399,8 @@ async fn fixture_accounting_totals_are_exact() {
         .iter()
         .filter(|(_, g)| *g == Unexercised::ConditionalOnCapability)
         .count();
-    assert_eq!(required, 12, "expected exactly 12 required-but-unexercised");
+    // 12 before U-527; `pub-002`/`012`/`013`/`014` now replay.
+    assert_eq!(required, 8, "expected exactly 8 required-but-unexercised");
     assert_eq!(
         conditional, 3,
         "expected exactly 3 conditional-but-unexercised"
@@ -13253,6 +13410,83 @@ async fn fixture_accounting_totals_are_exact() {
         UNEXERCISED_FIXTURES.len(),
         "the two grades must partition the list — a third grade was added without \
          updating this assertion"
+    );
+}
+
+/// No fixture that declares an HTTP endpoint may be told it is "non-HTTP".
+///
+/// This is U-527's actual subject. The twelve fixtures in issue #291 were not
+/// merely uncovered — six of them were **misfiled**, reported as
+/// `"non-HTTP fixture (vectors / schema / informative)"` while carrying
+/// `endpoint: "POST /contexts"`, a concrete body and an expected status. A
+/// count tells you a fixture is unexercised; a reason string tells you what to
+/// DO about it, and a false one sends the reader to the wrong question. These
+/// sat unread long enough to become an issue.
+///
+/// **Asserted per fixture, deliberately, and not per family.** The family-level
+/// tally cannot decide this: `anc`, `data-ref` and `idem` each contain fixtures
+/// of BOTH kinds, so a family reporting "2 non-HTTP" is consistent both with the
+/// two bodyless ones being meant and with two endpoint-carrying ones being
+/// misfiled. Aggregating here would pass while the defect stood — the same
+/// blindness `TOTAL_FIXTURES_AT_PIN`'s equality exists to close one level up.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_fixture_declaring_an_endpoint_is_classified_non_http() {
+    let Some(fixtures) = spec_fixtures() else {
+        assert!(
+            !require_conformance(),
+            "ACDP_REQUIRE_CONFORMANCE is set but no fixtures resolved"
+        );
+        eprintln!("conformance: no fixtures resolvable; skipping");
+        return;
+    };
+    const FALSE_REASON: &str = "non-HTTP fixture (vectors / schema / informative)";
+
+    let mut checked = 0usize;
+    let mut misfiled: Vec<String> = Vec::new();
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&fixtures)
+        .unwrap_or_else(|e| panic!("read {fixtures:?}: {e}"))
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        let fx = read_json(&path);
+        // Only fixtures that actually declare an endpoint are in scope; a
+        // canonicalization vector legitimately IS non-HTTP.
+        let declares_endpoint = fx
+            .get("input")
+            .and_then(|i| i.get("endpoint"))
+            .and_then(Value::as_str)
+            .is_some();
+        if !declares_endpoint {
+            continue;
+        }
+        checked += 1;
+        if let Extracted::Skip(reason) = extract(&fx) {
+            if reason == FALSE_REASON {
+                misfiled.push(format!(
+                    "{}: declares input.endpoint but is classified {FALSE_REASON:?}",
+                    path.file_name().unwrap().to_string_lossy()
+                ));
+            }
+        }
+    }
+
+    // The sweep must be shown a positive before its empty result means
+    // anything: at pin `16211e6` exactly 65 fixtures declare an endpoint, and
+    // a scan that silently matched none of them would report a clean pass.
+    assert_eq!(
+        checked, 65,
+        "expected 65 endpoint-declaring fixtures at the pin, scanned {checked} — the \
+         scan itself is broken or the spec moved, and either way its empty result \
+         would have meant nothing"
+    );
+    assert!(
+        misfiled.is_empty(),
+        "fixtures declaring an HTTP endpoint are classified non-HTTP:\n  - {}",
+        misfiled.join("\n  - ")
     );
 }
 

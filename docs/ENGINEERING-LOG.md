@@ -5731,3 +5731,47 @@ A red falsification is therefore not proof that the assertion you aimed at works
 assertion fired, not merely that one did.** Where an earlier assertion absorbs the change, the later
 one needs a separate falsification chosen to leave the earlier one satisfied — here, making
 `AcdpJson` infer an absent header, which is also the precise "cleanup" the assertion exists to block.
+
+## Verifying code against code agrees with itself
+
+Two places in `conformance.rs` recorded that `did-ssrf-*` was "not HTTP-replayable", and both said so
+*carefully*. One noted it was "confirmed for this phase by re-reading `extract_shapes` directly rather
+than trusting the prior `DEFERRED` reason's claim on faith (it held up)". The other was headed "The
+prior `DEFERRED` reason's claim, **verified before building on it**". Both then walked the dispatcher
+shape by shape and concluded correctly that nothing matched.
+
+Every step was accurate and the conclusion was wrong. `did-ssrf-001`..`004` are ordinary HTTP
+publishes with concrete bodies; they now replay. **Re-reading the dispatcher can only ever establish
+what the dispatcher does.** It cannot distinguish *"this fixture is not an HTTP request"* from *"the
+dispatcher does not parse this spelling of one"* — and those two have opposite fixes. The check was
+diligent, repeated, and pointed at the wrong artifact: to catch this, the code had to be checked
+against the **fixture**, not against itself.
+
+The tell was available and unread: the reason string said "vectors / schema / informative" about a
+file containing `"endpoint": "POST /contexts"`. A classification that contradicts the thing it
+classifies is visible without any tooling, and it survived two deliberate verification passes because
+both passes asked "does the dispatcher reach the fallback?" instead of "is the fallback's claim
+true?".
+
+**How to apply:** when a check concludes that some input is out of scope, verify the *predicate
+against the input*, not the code path that produced it. "I re-read the function" is evidence about the
+function. See also `probe must read what you vary` and `assert the mechanism, not the symptom`.
+
+## A floor is satisfied by every number above it
+
+`MIN_REPLAYED_EXCHANGES: usize = 30` guarded the conformance replayer with `replayed >= 30`, and its
+own comment named the hazard correctly — "a fidelity gate may be over-matching and silently shrinking
+coverage". It could not catch that hazard. Coverage was 30 while `extract()` silently declined 12
+parseable fixtures, and 30 satisfies `>= 30`. The guard was calibrated to exactly the broken state and
+would have gone on passing as coverage decayed anywhere above its floor.
+
+Replaced with `REPLAYED_EXCHANGES_AT_PIN = 38` and `assert_eq!`. Falsified by dropping a single
+fixture: **37 passes the old floor and fails the new equality.** Movement in either direction is now a
+human decision — fewer means a dispatch gate started over-matching, more means fixtures became
+replayable and the coverage tables were not updated.
+
+This is the same lesson `TOTAL_FIXTURES_AT_PIN` already carries one level up, which is the useful
+part: the repo had *written down* that a `>=` floor "passes the very scanner that is silently missing
+items", pinned its fixture total as an equality on that reasoning, and left the exchange count a
+floor. **Knowing the rule did not propagate it to the neighbouring constant.** Worth a sweep when a
+lesson is recorded: find the other guards of the same shape, not just the one that prompted it.
