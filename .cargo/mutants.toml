@@ -51,6 +51,44 @@
 test_workspace = true
 
 # ---------------------------------------------------------------------------
+# `copy_vcs` — NOT cosmetic. Without it the whole baseline is a lie.
+# ---------------------------------------------------------------------------
+# cargo-mutants tests each mutant in a COPY of the tree under $TMPDIR, and by
+# default does not copy `.git`. `conformance_gate.rs`'s
+# `no_tracked_file_contains_a_conflict_marker` shells out to `git ls-files`, so in
+# that copy it panics:
+#
+#     `git ls-files` failed in /…/cargo-mutants-…tmp:
+#     fatal: not a git repository (or any of the parent directories): .git
+#
+# That failure has nothing to do with any mutation, and `cargo test` stops at the
+# first failing test binary. conformance_gate runs BEFORE http_integration, so
+# every mutant whose real killer lives later was reported CAUGHT by this panic
+# instead. MEASURED on the first baseline: 48 "caught", of which **41 were caught
+# only by this** — every single handlers/log.rs verdict was noise. Just 7 were
+# genuine, all in receipt.rs, killed by core's own unit tests, which run before
+# the poisoned gate.
+#
+# THE REASON THIS SLIPPED PAST THE OBVIOUS CHECK IS WORTH KEEPING. The hazard was
+# already written down here: "a pre-existing failure elsewhere in the workspace
+# would mark mutants CAUGHT for the wrong reason." It was checked, with
+# `cargo test --locked --workspace` in the worktree, which passed 632/0. The check
+# was sound and the answer was true -- of the WRONG TREE. The failure exists only
+# in cargo-mutants' copy, which is the tree the verdicts actually come from, and
+# the package-scoped baseline never runs conformance_gate so it cannot see it
+# either. Checking the tree you are standing in says nothing about the tree the
+# tool builds.
+#
+# With `.git` copied, `git ls-files` succeeds and that mutant is caught by the ten
+# http_integration log tests that genuinely exercise it.
+#
+# Note for a non-worktree checkout: here `.git` is a 4 KB worktree POINTER file
+# holding an absolute path to the parent repo's gitdir, so copying it is nearly
+# free and resolves because that path still exists. In a plain clone this copies
+# the real `.git` directory instead. Both work; only the cost differs.
+copy_vcs = true
+
+# ---------------------------------------------------------------------------
 # THE RATCHETING SCOPE — 74 mutants, and every exclusion below is deliberate
 # ---------------------------------------------------------------------------
 # Measured at 5c401db: receipt.rs 9 + handlers/log.rs 65 = 74.
