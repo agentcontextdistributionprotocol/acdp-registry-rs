@@ -10073,3 +10073,326 @@ async fn retract_is_refused_for_a_foreign_tenants_context() {
          performing the retraction is not a refusal: {after}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// U-504: the webhook payload.
+//
+// `count_connections_and_reply_ok` (above) counts CONNECTIONS and discards the
+// bytes, which is exactly right for the anchors test that owns it — that test
+// asks "did anything dial this address". It cannot see payload content, and
+// nothing else in this suite could either, so the whole webhook payload was
+// unasserted at the HTTP-integration level.
+//
+// The mutation ratchet made the cost of that concrete. Seven of U-504's 28
+// survivors live behind this gap, because three handler values reach NOTHING
+// BUT the webhook: `context_type_str` (`context.rs:720`), the validated
+// `x-run-id` (`:736`), and the reserved-tenant filter on the retract delivery
+// (`:1556`). A value with exactly one consumer is untested if that consumer is
+// untested.
+// ---------------------------------------------------------------------------
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Accept webhook deliveries and hand back each one's raw request head and
+/// parsed JSON body.
+///
+/// Reads the full body rather than a fixed 1 KiB buffer: a `ContextPublished`
+/// payload is comfortably larger than the 1024 bytes the counting listener
+/// grabs, so a truncating read would make the JSON unparseable and every
+/// assertion below vacuous.
+fn spawn_webhook_capture(
+    listener: tokio::net::TcpListener,
+) -> tokio::sync::mpsc::UnboundedReceiver<(String, Value)> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let head_end = loop {
+                match socket.read(&mut tmp).await {
+                    Ok(0) => break None,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(p) = find_subslice(&buf, b"\r\n\r\n") {
+                            break Some(p + 4);
+                        }
+                    }
+                    Err(_) => break None,
+                }
+            };
+            let Some(head_end) = head_end else { continue };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+            let clen = head
+                .lines()
+                .filter_map(|l| l.split_once(':'))
+                .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while buf.len() < head_end + clen {
+                match socket.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    Err(_) => break,
+                }
+            }
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+            let body: Value = serde_json::from_slice(&buf[head_end..]).unwrap_or(Value::Null);
+            let _ = tx.send((head, body));
+        }
+    });
+    rx
+}
+
+/// Await one delivery. Bounded, because a webhook that never arrives must fail
+/// this suite rather than hang it.
+async fn next_webhook(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+) -> (String, Value) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for a webhook delivery")
+        .expect("webhook capture channel closed")
+}
+
+/// A harness whose webhook emitter points at a capturing loopback listener.
+///
+/// `allow_test_loopback()` for the same reason the anchors test documents: the
+/// strict default `SsrfPolicy` refuses loopback outright, so leaving it strict
+/// would make the SSRF guard the reason no delivery arrives and every assertion
+/// below would pass against a completely broken emitter.
+async fn webhook_harness(
+    lifecycle: bool,
+) -> (
+    Harness,
+    tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind webhook listener");
+    let addr = listener.local_addr().expect("addr");
+    let rx = spawn_webhook_capture(listener);
+
+    let mut cfg = config(false);
+    cfg.webhook = WebhookConfig {
+        enabled: true,
+        url: format!("http://{addr}/hook"),
+        secret: "u504-webhook-secret".into(),
+        ..WebhookConfig::default()
+    };
+    // did:key in BOTH modes: `producer()` is did:web and this harness has no
+    // did:web resolver fixture, so a did:web publish dies at DNS long before
+    // reaching anything this test is about.
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    let caps = if lifecycle {
+        cfg.lifecycle.enabled = true;
+        caps_030()
+    } else {
+        caps_050()
+    };
+    let emitter = acdp_registry_webhook::WebhookEmitter::spawn_with_policy(
+        cfg.webhook.clone(),
+        acdp::safe_http::SsrfPolicy::allow_test_loopback(),
+    );
+    let h = build_harness_with_webhook(cfg, caps, None, Some(emitter)).await;
+    (h, rx)
+}
+
+/// The published event must carry the context type's WIRE string.
+///
+/// Kills both mutations that replace `context_type_str`'s body wholesale
+/// (`context.rs:877` -> `String::new()` and -> `"xyzzy"`). That function is
+/// `DESIGN-04`'s typed accessor and `context.rs:720` is its only caller, so
+/// until now nothing in this suite executed it for its value.
+///
+/// The assertion still reads a MAPPED value rather than an echo: the wire form
+/// is `data_snapshot` where the Rust variant is `DataSnapshot`, so a
+/// stringly-typed shortcut that echoed the variant name would fail here.
+/// (`key-revocation` would have been the sharper witness, being hyphenated
+/// where every other arm is snake_case, but that type requires
+/// `metadata.revoked_key_fingerprint` and `metadata.compromised_since` per
+/// RFC-ACDP-0014 §4 and would redden this test in its fixture rather than at
+/// its assertion.)
+#[tokio::test]
+async fn webhook_publish_event_carries_the_mapped_context_type() {
+    let (h, mut rx) = webhook_harness(false).await;
+    let req = did_key_producer(190)
+        .publish_request()
+        .title("u504-context-type")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+
+    let (_head, event) = next_webhook(&mut rx).await;
+    assert_eq!(
+        event["context_type"], "data_snapshot",
+        "the delivered event must carry the mapped wire string; an empty or \
+         constant body for `context_type_str` reaches nothing else: {event}"
+    );
+}
+
+/// A valid `x-run-id` is forwarded; an over-long one is treated as ABSENT.
+///
+/// Kills all three survivors on `context.rs:442`
+/// (`!s.is_empty() && s.len() <= 256`):
+///   - `delete !`  — only EMPTY run ids would forward, so the first assertion
+///     fails.
+///   - `&&` -> `||` — a 300-char id satisfies `!is_empty()` and so would be
+///     forwarded, which the second assertion refuses.
+///   - `<=` -> `>`  — a short id fails `len() > 256` and would be dropped,
+///     which the first assertion catches.
+///
+/// Both directions are needed: neither assertion alone distinguishes all three.
+#[tokio::test]
+async fn webhook_publish_event_forwards_a_valid_run_id_and_drops_an_oversized_one() {
+    let (h, mut rx) = webhook_harness(false).await;
+
+    let req = did_key_producer(191)
+        .publish_request()
+        .title("u504-run-id-ok")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_run_id(&h.router, &req, Some("run-u504-abc")).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    let (_head, event) = next_webhook(&mut rx).await;
+    assert_eq!(
+        event["run_id"], "run-u504-abc",
+        "a valid x-run-id must reach the event: {event}"
+    );
+
+    // 300 chars — printable, non-empty, and over the 256 bound.
+    let long = "r".repeat(300);
+    let req2 = did_key_producer(192)
+        .publish_request()
+        .title("u504-run-id-long")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_run_id(&h.router, &req2, Some(&long)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an over-long run id is treated as absent, NOT rejected: {v}"
+    );
+    let (_head, event2) = next_webhook(&mut rx).await;
+    assert!(
+        event2["run_id"].is_null(),
+        "a 300-char x-run-id is out of range and must be dropped rather than \
+         forwarded: {event2}"
+    );
+}
+
+/// A retraction must be delivered as a RETRACTION.
+///
+/// Kills `context.rs:1563` (delete the `LifecycleEventType::Retracted` arm of
+/// the webhook match), which would emit the retract as the fall-through
+/// republished variant — a consumer would be told the context came BACK.
+#[tokio::test]
+async fn webhook_retraction_is_emitted_as_a_retraction() {
+    let (h, mut rx) = webhook_harness(true).await;
+    let ctx_id = lifecycle_ctx_in_tenant(&h, 193, "tenant-wh-a").await;
+    let _ = next_webhook(&mut rx).await; // the publish delivery
+
+    let envelope = signed_event_envelope(193, &ctx_id, "retracted", Some("u504"));
+    let (status, v) = post_lifecycle_with_tenant(
+        &h.router,
+        &ctx_id,
+        "retract",
+        &envelope,
+        Some("tenant-wh-a"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+
+    let (_head, event) = next_webhook(&mut rx).await;
+    assert_eq!(
+        event["type"], "context_retracted",
+        "a retraction must be delivered as `context_retracted`; the deleted \
+         match arm falls through to the republished variant and would tell a \
+         consumer the context came back: {event}"
+    );
+}
+
+/// The retract delivery carries the owning tenant, and omits the reserved one.
+///
+/// Kills `context.rs:1556` (`stored_tenant.filter(|t| t != "default")` ->
+/// `==`). Inverting it swaps both behaviours at once: a real tenant's delivery
+/// would lose its `X-Tenant-Id`, and an untenanted row would start asserting
+/// the reserved name `default` as though it were a tenant. Both halves are
+/// asserted, because the filter's job is precisely to distinguish them.
+#[tokio::test]
+async fn webhook_retraction_carries_the_tenant_but_never_the_reserved_default() {
+    let (h, mut rx) = webhook_harness(true).await;
+
+    // A tenanted context: the delivery must name the tenant.
+    let ctx_a = lifecycle_ctx_in_tenant(&h, 194, "tenant-wh-b").await;
+    let _ = next_webhook(&mut rx).await;
+    let env_a = signed_event_envelope(194, &ctx_a, "retracted", Some("u504"));
+    let (status, v) =
+        post_lifecycle_with_tenant(&h.router, &ctx_a, "retract", &env_a, Some("tenant-wh-b")).await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+    let (head, _e) = next_webhook(&mut rx).await;
+    assert!(
+        head.to_lowercase().contains("x-tenant-id: tenant-wh-b"),
+        "the retract delivery for a tenanted row must carry its tenant \
+         header; request head was:\n{head}"
+    );
+
+    // An UNTENANTED context: the row stores the reserved `default`, which must
+    // never travel as an asserted tenant.
+    let req = did_key_producer(195)
+        .publish_request()
+        .title("u504-untenanted")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    let ctx_b = v["ctx_id"].as_str().unwrap().to_string();
+    let _ = next_webhook(&mut rx).await;
+
+    let env_b = signed_event_envelope(195, &ctx_b, "retracted", Some("u504"));
+    let (status, v) = post_lifecycle(&h.router, &ctx_b, "retract", &env_b).await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+    let (head_b, _e) = next_webhook(&mut rx).await;
+    assert!(
+        !head_b.to_lowercase().contains("x-tenant-id:"),
+        "the reserved `default` tenant must NOT be forwarded as an asserted \
+         tenant header; request head was:\n{head_b}"
+    );
+}
+
+/// `publish` with an `x-run-id` header (FEAT-04's orchestrator correlation id).
+async fn publish_with_run_id(
+    app: &axum::Router,
+    req: &acdp::types::publish::PublishRequest,
+    run_id: Option<&str>,
+) -> (StatusCode, Value) {
+    let body = serde_json::to_vec(req).unwrap();
+    let mut builder = Request::builder().method("POST").uri("/contexts");
+    if let Some(r) = run_id {
+        builder = builder.header("x-run-id", r);
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    (status, v)
+}
