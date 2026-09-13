@@ -8243,10 +8243,21 @@ async fn an_idempotent_replay_is_charged_like_any_other_successful_publish() {
 /// 400 Failed to deserialize query string: limit: invalid digit found in string
 /// ```
 ///
-/// **Statuses are asserted PER CASE, never as "not 400".** The whole point of
-/// the local rejection type is that 415 and 422 survive; an assertion that
-/// merely rejected 400 would pass against an implementation that collapsed
-/// them, which is the design this phase explicitly rejected.
+/// **Statuses are asserted PER CASE, never as "not 400".** The point of the
+/// local rejection type is that **415 and 413 survive** rather than collapsing
+/// into 400; an assertion that merely rejected 400 would pass against an
+/// implementation that collapsed them, which is the design this phase
+/// explicitly rejected.
+///
+/// **U-523 removed 422 from that list, and the distinction matters.** 415 and
+/// 413 survive because RFC-ACDP-0007 §5 *assigns* them to codes this registry
+/// emits. 422 was never assigned to anything — it appears nowhere in that RFC —
+/// and reached the wire only because `JsonRejection::JsonDataError` carries it
+/// and the extractor passed axum's status straight through. §5 pins
+/// `schema_violation` to 400, so the wrong-shape row below now asserts 400.
+/// "Do not collapse distinct statuses" and "do not invent a status the protocol
+/// does not use" are both true; the first was being read as licence for the
+/// second.
 ///
 /// The harness MUST enable auth: `/auth/*` is mounted only when
 /// `cfg.auth.enabled`, so without it every row below asserts against a 404 and
@@ -8296,12 +8307,15 @@ async fn extractor_rejections_return_the_rfc0007_envelope() {
             "unsupported_media_type",
         ),
         (
+            // U-523: was UNPROCESSABLE_ENTITY. RFC-ACDP-0007 §5 pins
+            // `schema_violation` to 400, and 422 appears nowhere in that RFC --
+            // it was axum's `JsonDataError` status passed straight through.
             "valid JSON, wrong shape",
             "POST",
             "/auth/challenge",
             Some("application/json"),
             r#"{"agent_id":123}"#,
-            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::BAD_REQUEST,
             "schema_violation",
         ),
         (
@@ -10602,5 +10616,497 @@ async fn an_out_of_range_or_non_printable_idempotency_key_is_ignored_not_honored
     assert_ne!(
         c1["ctx_id"], c2["ctx_id"],
         "a key containing a control character must be IGNORED: {c1} vs {c2}"
+    );
+}
+
+/// Spec fixture `err-002-unsupported-media-type.json`, all five scenarios, on
+/// the endpoint the fixture actually names (`POST /contexts`).
+///
+/// **Why this test exists.** `err-002` arrived with the `16211e6` spec bump and
+/// was replayed by nothing: it is a behavioural fixture, so the generic replayer
+/// skips it, and no direct test asked for it. U-519 measured the resulting green
+/// as uninformative about the 415 path. It was concealing a real defect —
+/// `publish` took `body: Bytes` and never looked at `Content-Type`, so *every*
+/// scenario below answered 400 `schema_violation`, including scenario C, which
+/// the fixture rules out in as many words:
+///
+/// > *"The body MUST NOT be parsed: `schema_violation` is NOT conformant here,
+/// > because it asserts a structural validation that never ran and is pinned to
+/// > 400."*
+///
+/// `extractor_rejections_return_the_rfc0007_envelope` pinned C and E already —
+/// but on `/auth/challenge`, which routes through `AcdpJson` and was correct all
+/// along. Asserting on the route that carries the obligation is the whole point.
+///
+/// **Every case sends the SAME body and varies only `Content-Type`**, which the
+/// fixture's `input.note` requires: *"any rejection must therefore be
+/// attributable to the media type alone, never to body content."* The body is
+/// well-formed JSON of the wrong shape, so anything that gets PAST the gate must
+/// fail later at deserialization with `schema_violation`. Asserting that specific
+/// later code — rather than merely "not 415" — is what makes A and B fail if the
+/// gate ever starts rejecting a legal media type.
+///
+/// **The two "either" scenarios, and which branch this registry takes.** D
+/// (`application/json`) and E (absent) are both conformant either way, and the
+/// fixture forbids a harness from asserting one. They are asserted here anyway
+/// because *this registry's* choice is a fact worth pinning against silent
+/// drift, not because the spec mandates it:
+///
+/// * **D — accepted.** `AcdpJson` delegates to axum's `Json`, which accepts
+///   `application/json` and any `application/*+json`. RFC-ACDP-0001 §5.1 permits
+///   this and `registries/media-types.md` recommends it as a legacy-client
+///   fallback.
+/// * **E — accepted (inferred).** `POST /contexts` has never required the
+///   header, so rejecting it would break every publisher that omits one.
+///   Measured, not assumed: gating absent headers reddened **104 of 159** tests
+///   in this file, all publish paths sending no `Content-Type`. That is the
+///   shape of the client breakage. `/auth/*` rejects absent headers and keeps
+///   doing so — the fixture makes this a per-route choice and asks only that a
+///   registry document which it took.
+#[tokio::test]
+async fn publish_enforces_the_err002_media_type_matrix() {
+    let h = harness(true).await;
+
+    // Identical in every case. Well-formed JSON, wrong shape.
+    const BODY: &str = r#"{"definitely":"not a publish request"}"#;
+
+    // scenario, Content-Type, expected status, expected §5 code
+    let cases: &[(&str, Option<&str>, StatusCode, &str)] = &[
+        (
+            "A — canonical type is accepted",
+            Some("application/acdp+json"),
+            StatusCode::BAD_REQUEST,
+            "schema_violation",
+        ),
+        (
+            "B — canonical type WITH a charset parameter is accepted",
+            Some("application/acdp+json; charset=utf-8"),
+            StatusCode::BAD_REQUEST,
+            "schema_violation",
+        ),
+        (
+            "C — an unaccepted type is rejected 415, body unparsed",
+            Some("text/plain"),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+        ),
+        (
+            "D — application/json (fixture: either; this registry accepts)",
+            Some("application/json"),
+            StatusCode::BAD_REQUEST,
+            "schema_violation",
+        ),
+        (
+            "E — absent Content-Type (fixture: either; this registry infers)",
+            None,
+            StatusCode::BAD_REQUEST,
+            "schema_violation",
+        ),
+    ];
+
+    for (case, ct, want_status, want_code) in cases {
+        let mut b = Request::builder().method("POST").uri("/contexts");
+        if let Some(c) = ct {
+            b = b.header("content-type", *c);
+        }
+        let resp = h
+            .router
+            .clone()
+            .oneshot(b.body(Body::from(BODY)).unwrap())
+            .await
+            .unwrap();
+
+        let status = resp.status();
+        let got_ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("<none>")
+            .to_string();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+
+        assert_eq!(
+            status, *want_status,
+            "[{case}] wrong status; only Content-Type varied: body = {text}"
+        );
+        assert_eq!(
+            v.pointer("/error/code").and_then(Value::as_str),
+            Some(*want_code),
+            "[{case}] wrong §5 error.code: body = {text}"
+        );
+        // RFC-ACDP-0007 §4: the envelope is REQUIRED on every failure response,
+        // 415 included.
+        assert!(
+            got_ct.starts_with("application/acdp+json"),
+            "[{case}] response content-type = {got_ct}"
+        );
+        assert!(
+            v.pointer("/error/message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| !m.is_empty()),
+            "[{case}] error.message must be present and non-empty: body = {text}"
+        );
+        // The fixture puts "The error.message MUST NOT echo the request body"
+        // in scenario C's `behavior`, and it belongs there specifically: a 415
+        // is raised BEFORE the body is read, so a 415 message quoting the body
+        // would prove the body had been parsed after all -- the exact claim the
+        // code exists to deny. On the accepted paths a schema error naturally
+        // names the offending field, which is not an echo of the body and is
+        // what makes the error actionable.
+        if *want_status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+            assert!(
+                !text.contains("definitely"),
+                "[{case}] a 415 message quotes the request body, so the body was \
+                 read despite the media type being rejected: {text}"
+            );
+        }
+    }
+}
+
+/// `AcdpBytes`'s media-type predicate is a re-implementation of the one inside
+/// axum's `Json` (which `AcdpJson` delegates to). Two implementations of one
+/// accept-set is exactly how two routes silently diverge, so this pins them
+/// together instead of trusting the comment that says they match.
+///
+/// Asserted on **present** content types only. An absent header is a
+/// deliberate per-route difference — `/contexts` infers, `/auth/*` rejects —
+/// documented at `media_type_accepted` and pinned by
+/// `publish_enforces_the_err002_media_type_matrix`'s scenario E.
+///
+/// If axum widens or narrows what `Json` accepts, this fails rather than
+/// letting `POST /contexts` and `POST /auth/challenge` drift apart.
+#[tokio::test]
+async fn the_two_media_type_gates_agree() {
+    let mut cfg = config(true);
+    cfg.auth.enabled = true;
+    let h = harness_from_config(cfg).await;
+
+    // Each is sent to BOTH routes; the question asked of each response is only
+    // "did the media-type gate reject this?", never the downstream outcome,
+    // which legitimately differs between the two endpoints.
+    let types = [
+        "application/acdp+json",
+        "application/acdp+json; charset=utf-8",
+        "application/json",
+        "application/json; charset=utf-8",
+        "application/vnd.acdp+json",
+        "text/plain",
+        "text/plain; charset=utf-8",
+        "application/xml",
+        "application/jsonish",
+        "",
+    ];
+
+    for ct in types {
+        let mut gated = Vec::new();
+        for (route, body) in [
+            ("/contexts", r#"{"definitely":"not a publish request"}"#),
+            ("/auth/challenge", r#"{"agent_id":"did:web:a.test:x"}"#),
+        ] {
+            let resp = h
+                .router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(route)
+                        .header("content-type", ct)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            gated.push((route, resp.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE));
+        }
+        assert_eq!(
+            gated[0].1, gated[1].1,
+            "content-type {ct:?}: the two media-type gates disagree — \
+             /contexts rejected={}, /auth/challenge rejected={}. One of the two \
+             accept-set implementations has drifted from the other.",
+            gated[0].1, gated[1].1
+        );
+    }
+}
+
+/// The `/admin/*` lifecycle gate must make the SAME accept/reject decision as
+/// `POST /contexts` (U-523).
+///
+/// A **sibling** of `the_two_media_type_gates_agree` rather than an extension of
+/// it, deliberately: that test's name is referenced from `conformance.rs`'s
+/// `CoverageMechanism::Direct` lists, and renaming a registered test reddens
+/// that verifier only after both changes merge.
+///
+/// `admin_retract` and `admin_republish` were the last two routed body-bearing
+/// handlers with no media-type gate. They now use the same `AcdpBytes`
+/// extractor and therefore the same accept-set — one implementation, not a
+/// third.
+///
+/// **What this deliberately does NOT constrain.** Only the gate's verdict —
+/// 415 or not — on a **present** `Content-Type`. It says nothing about the
+/// downstream outcome, which legitimately differs (`/admin/*` requires an admin
+/// token and a lifecycle-enabled build, `/contexts` does not), and nothing
+/// about an absent header, which all three routes now infer. It also does not
+/// constrain the RESPONSE media type: `/admin/*` sits outside the
+/// `application/acdp+json` response-header layer by design, so its 415 envelope
+/// is served as `application/json` while `/contexts`'s is not. That difference
+/// is intended and is not what this pins.
+#[tokio::test]
+async fn the_admin_media_type_gate_matches_the_publish_gate() {
+    let mut cfg = config(true);
+    cfg.auth.admin_tokens = vec!["secret-admin".into()];
+    let h = harness_from_config(cfg).await;
+
+    let types = [
+        "application/acdp+json",
+        "application/acdp+json; charset=utf-8",
+        "application/json",
+        "application/vnd.acdp+json",
+        "text/plain",
+        "text/plain; charset=utf-8",
+        "application/xml",
+        "application/jsonish",
+        "",
+    ];
+
+    for ct in types {
+        let mut gated = Vec::new();
+        for (route, auth) in [
+            ("/contexts", false),
+            ("/admin/contexts/ctx_nonexistent/retract", true),
+        ] {
+            let mut b = Request::builder()
+                .method("POST")
+                .uri(route)
+                .header("content-type", ct);
+            if auth {
+                b = b.header("authorization", "Bearer secret-admin");
+            }
+            let resp = h
+                .router
+                .clone()
+                .oneshot(b.body(Body::from(r#"{"reason":"x"}"#)).unwrap())
+                .await
+                .unwrap();
+            gated.push(resp.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        }
+        assert_eq!(
+            gated[0], gated[1],
+            "content-type {ct:?}: /contexts rejected={}, /admin/*/retract \
+             rejected={}. The admin gate has drifted from the publish gate — \
+             both must use the same `AcdpBytes` accept-set.",
+            gated[0], gated[1]
+        );
+    }
+}
+
+/// **Every routed body-bearing handler shares ONE media-type gate (U-524).**
+///
+/// There are exactly five, and this drives all five through the same matrix:
+///
+/// | route | gated in |
+/// |---|---|
+/// | `POST /contexts` | #290 |
+/// | `POST /contexts/{ctx_id}/retract` | this unit |
+/// | `POST /contexts/{ctx_id}/republish` | this unit |
+/// | `POST /admin/contexts/{ctx_id}/retract` | #293 |
+/// | `POST /admin/contexts/{ctx_id}/republish` | #293 |
+///
+/// The two data-plane lifecycle writes were ungated until this unit — not by
+/// decision but by scope, since #290's grant named `POST /contexts` and #293's
+/// named `/admin/*`. The result was backwards: the *admin* copies of retract
+/// and republish were gated while the producer-facing ones were not. A count
+/// taken at the `body: Bytes` parameter rather than at the handler had made the
+/// remainder look like noise instead of a nameable two.
+///
+/// **Why one test over five routes rather than five tests.** The property is
+/// agreement, and agreement is not a per-route fact. A single break in
+/// `status_for_code` — the one place a wire code maps to a status — must redden
+/// every route here; if it reddens some and not others, the others are deciding
+/// a status locally, which is precisely the defect found in `AcdpBytes` in #293
+/// and the reason this unit's two new call sites are the risky part.
+///
+/// **This asserts the ABSOLUTE verdict per content type, not merely that the
+/// routes agree — and the difference is not cosmetic.** Measured: breaking
+/// `status_for_code`'s 415 arm reddens this test, the `err-002` matrix and the
+/// `/auth/*` extractor rows, but leaves `the_two_media_type_gates_agree` and
+/// `the_admin_media_type_gate_matches_the_publish_gate` **green**. Those two
+/// compare one route's verdict against another's, so a change that moves *both*
+/// sides equally — exactly what a break in the shared centre does — preserves
+/// the agreement they assert while destroying the behaviour. **An agreement
+/// test is blind to a uniform regression.** They remain useful for the
+/// narrower thing they do catch (one route drifting away from another), and
+/// they are deliberately **kept** rather than replaced: `conformance.rs` names
+/// test functions in `CoverageMechanism::Direct`, so removing or renaming one
+/// reddens that verifier only after both changes merge.
+///
+/// **Scope — the name was narrowed from `every_body_bearing_route_...` on
+/// purpose, and finding out why was the useful part.** There are **eight**
+/// routed body-bearing handlers, not five. The other three are `/auth/challenge`,
+/// `/auth/token` and `/auth/token/revoke`, which use `AcdpJson`, and `AcdpJson`
+/// **does not call `media_type_accepted`** — it delegates to `axum::Json` and
+/// maps `JsonRejection::MissingJsonContentType` to the §5 code
+/// (`extract.rs:294`). So the codebase has *two* accept predicates, and the
+/// original name asserted a single gate this test never exercised. Their exact
+/// relationship is pinned separately by
+/// `the_two_accept_predicates_agree_on_every_present_media_type`.
+///
+/// **What this deliberately does NOT constrain:** the downstream outcome (these
+/// routes differ legitimately — admin needs a token, lifecycle may be disabled,
+/// a context may not exist), the absent-header case (all five infer, pinned by
+/// `publish_enforces_the_err002_media_type_matrix` scenario E), and the response
+/// media type (`/admin/*` sits outside the `application/acdp+json` response
+/// layer by design).
+#[tokio::test]
+async fn every_acdp_bytes_route_shares_one_media_type_gate() {
+    let mut cfg = config(true);
+    cfg.auth.admin_tokens = vec!["secret-admin".into()];
+    let h = harness_from_config(cfg).await;
+
+    // (route, needs an admin token)
+    let routes: &[(&str, bool)] = &[
+        ("/contexts", false),
+        ("/contexts/ctx_nonexistent/retract", false),
+        ("/contexts/ctx_nonexistent/republish", false),
+        ("/admin/contexts/ctx_nonexistent/retract", true),
+        ("/admin/contexts/ctx_nonexistent/republish", true),
+    ];
+
+    // (content type, must the gate reject it?)
+    let types: &[(&str, bool)] = &[
+        ("application/acdp+json", false),
+        ("application/acdp+json; charset=utf-8", false),
+        ("application/json", false),
+        ("application/vnd.acdp+json", false),
+        ("text/plain", true),
+        ("text/plain; charset=utf-8", true),
+        ("application/xml", true),
+        ("application/jsonish", true),
+        ("", true),
+    ];
+
+    for (ct, want_rejected) in types {
+        for (route, needs_token) in routes {
+            let mut b = Request::builder()
+                .method("POST")
+                .uri(*route)
+                .header("content-type", *ct);
+            if *needs_token {
+                b = b.header("authorization", "Bearer secret-admin");
+            }
+            let resp = h
+                .router
+                .clone()
+                .oneshot(b.body(Body::from(r#"{"reason":"x"}"#)).unwrap())
+                .await
+                .unwrap();
+
+            let rejected = resp.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE;
+            assert_eq!(
+                rejected, *want_rejected,
+                "content-type {ct:?} on {route}: gate rejected={rejected}, expected \
+                 {want_rejected}. All five `AcdpBytes` routes must share one \
+                 accept-set — a route that disagrees is deciding acceptance \
+                 locally. (The three `/auth/*` routes use `AcdpJson`; see \
+                 `the_two_accept_predicates_agree_on_every_present_media_type`.)"
+            );
+        }
+    }
+}
+
+/// The repo has **two** media-type accept predicates, and until this test
+/// nothing said how they relate.
+///
+/// - `AcdpBytes` (the five raw-body routes) calls `media_type_accepted`
+///   (`extract.rs:102`): accept `application/json`, accept any
+///   `application/*+json`, accept an **absent** header, reject everything else.
+/// - `AcdpJson` (the three `/auth/*` routes) never calls it. It delegates to
+///   `axum::extract::Json`, whose own check is mime-suffix based, and maps
+///   `JsonRejection::MissingJsonContentType` to `unsupported_media_type`
+///   (`extract.rs:294`) — so it **rejects an absent header with 415**.
+///
+/// That they currently agree on every *present* media type is a coincidence of
+/// two independent implementations, not a structural guarantee: nothing makes
+/// `axum::Json`'s suffix rule and our hand-written one move together, and a
+/// future axum release narrowing (or widening) its rule would split the wire
+/// behaviour of `/auth/*` from `/contexts` with no local edit at all. This test
+/// converts that coincidence into an asserted contract, and pins the **one**
+/// place they are meant to differ so the difference can't be sanded off by
+/// accident either.
+///
+/// Both halves matter. Dropping the first lets the families drift apart
+/// silently; dropping the second lets someone "fix the inconsistency" by
+/// routing `AcdpJson` through `media_type_accepted`, which would start
+/// accepting a body-less-typed `/auth/token` request — a wire change on the
+/// most attacker-controllable surface in the service (`lib.rs:150`).
+#[tokio::test]
+async fn the_two_accept_predicates_agree_on_every_present_media_type() {
+    let mut cfg = config(true);
+    cfg.auth.enabled = true; // `/auth/*` is mounted only when auth is on
+    let h = harness_from_config(cfg).await;
+
+    let present = [
+        "application/acdp+json",
+        "application/acdp+json; charset=utf-8",
+        "application/json",
+        "application/vnd.acdp+json",
+        "text/plain",
+        "text/plain; charset=utf-8",
+        "application/xml",
+        "application/jsonish",
+        "",
+    ];
+
+    // `content_type: None` means "send no header at all".
+    async fn rejected_415(
+        h: &Harness,
+        uri: &str,
+        content_type: Option<&str>,
+        body: &'static str,
+    ) -> bool {
+        let mut b = Request::builder().method("POST").uri(uri);
+        if let Some(ct) = content_type {
+            b = b.header("content-type", ct);
+        }
+        let resp = h
+            .router
+            .clone()
+            .oneshot(b.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        resp.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE
+    }
+
+    const AUTH_BODY: &str = r#"{"agent_id":"did:web:a.test:x"}"#;
+    const CTX_BODY: &str = r#"{"reason":"x"}"#;
+
+    for ct in present {
+        let bytes_family = rejected_415(&h, "/contexts", Some(ct), CTX_BODY).await;
+        let json_family = rejected_415(&h, "/auth/challenge", Some(ct), AUTH_BODY).await;
+        assert_eq!(
+            bytes_family, json_family,
+            "content-type {ct:?}: `AcdpBytes` rejected={bytes_family} but `AcdpJson` \
+             rejected={json_family}. The two predicates are independent code \
+             (`media_type_accepted` vs `axum::Json`'s mime-suffix rule) and are \
+             required to agree on every PRESENT media type; a split here is a wire \
+             divergence between `/contexts` and `/auth/*` for the same header."
+        );
+    }
+
+    // The one deliberate difference, asserted in both directions so neither
+    // side can be changed without this test noticing.
+    assert!(
+        !rejected_415(&h, "/contexts", None, CTX_BODY).await,
+        "`AcdpBytes` must INFER an absent Content-Type, not reject it — scenario E \
+         of the ERR-002 matrix depends on it."
+    );
+    assert!(
+        rejected_415(&h, "/auth/challenge", None, AUTH_BODY).await,
+        "`AcdpJson` must REJECT an absent Content-Type with 415. Routing it through \
+         `media_type_accepted` to 'make the families consistent' would silently start \
+         accepting untyped bodies on the `/auth/*` surface."
     );
 }

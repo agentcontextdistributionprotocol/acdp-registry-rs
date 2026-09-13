@@ -5450,3 +5450,416 @@ this fed, and acdp-rs#279 for the upstream report.
 `acdp-client`'s own build stayed green — nothing in that crate observes `Send`-ness of its public
 futures — so the regression could only ever surface in a downstream axum consumer. Auto-traits are
 part of an async API's contract even though they appear in no signature.
+
+## U-520 PR A — the reuse that would have broken something else
+
+The obvious fix for an ungated `POST /contexts` was to route `publish` through the `AcdpJson`
+extractor that already gates `/auth/*`. It is the right instinct — one implementation of the
+accept-set, one envelope, one minted code — and it was wrong here for a reason that only showed up on
+the way to being measured.
+
+`AcdpJson` delegates to axum's `Json`, whose `JsonDataError` rejection carries **422**. So routing
+`publish` through it fixed the 415 and simultaneously moved *every wrong-shaped publish* from 400 to
+422. RFC-ACDP-0007 §5's status table pins `schema_violation` to 400. The reuse would have closed one
+conformance violation by opening another with a much wider blast radius.
+
+It surfaced as a one-line test failure — scenario A expected 400, got 422 — and the temptation at that
+moment is to adjust the expectation, because A is only supposed to assert "not rejected". Reading the
+spec's table instead is what turned a puzzling status into the reason not to take the obvious path.
+
+The fix that shipped keeps the reuse where it pays (`AcdpRejection`, the envelope, the code constant)
+and declines it where it costs (the deserializer and its status). The cost of that choice is a
+re-implemented six-line predicate, which is a genuine drift risk — so it is pinned by a test asserting
+both gates agree across a matrix of content types, rather than by the comment claiming they do.
+
+**Two things worth keeping from the measurement.**
+
+*The 104.* Gating an absent `Content-Type` reddened 104 of 159 integration tests. The fixture allows
+either reading, so the number is not a bug report — it is the shape of the client breakage the other
+reading would have caused, and it converted a coin-flip into an obvious decision. Scenario E accepts.
+
+*The two-line diff.* The entire non-comment change to `handlers/context.rs` is the import and the
+parameter type; the `body` binding is unchanged. That is also the evidence that nothing about hashing
+or signature verification moved — not a claim that it didn't, but a diff in which it could not have.
+When a change touches a signing path, the argument to reach for is one that makes the risky thing
+structurally absent rather than reviewed and found safe.
+
+## U-520 PR B — the falsification that failed, and what it caught
+
+Five of the six falsifications behaved. The sixth did not: mis-grading `err-002` as
+`RequiredByProfile` left the test **green**.
+
+The assertion was fine. The test never reached it. `registries/profiles.json` stores `profiles` as an
+**array** of objects with an `id` field, not a map keyed by profile name, so a `.get("acdp-registry-core")`
+returned `None`, the helper returned `None`, and the caller took its "spec unavailable, skipping"
+branch — reporting PASS while asserting nothing.
+
+Two things are worth separating here.
+
+The first is that **the skip branch is the hazard, not the lookup bug.** A lookup bug that panicked
+would have been obvious. What made it survive was a well-intentioned pattern copied from the
+surrounding tests: gracefully skip when the spec is unreachable. That pattern is correct for a
+developer running `cargo test` with no `ACDP_SPEC_DIR`, and it is exactly wrong in CI, where the spec
+IS reachable and a skip can only mean something is broken. The fix is not to remove the skip but to
+condition it: `assert!(!require_conformance())` before returning, which is the idiom `spec_fixtures()`
+already uses. A green skip and a green pass are indistinguishable in the summary line, and only one of
+them means anything.
+
+The second is that **I had already hit this exact shape an hour earlier and it did not transfer.**
+While measuring, my first Python probe of the same file crashed with `'NoneType' object is not
+subscriptable` on the same map-vs-array assumption; I fixed the probe, got my numbers, and then wrote
+the Rust against the assumption the probe had just disproved. The scratch tool and the shipped code
+were treated as different problems because they were written in different languages twenty minutes
+apart. When a throwaway script teaches you the shape of a file, that lesson belongs in a note, not in
+the script you are about to delete.
+
+**What this says about the practice, not the bug.** Falsifying every assertion individually is what
+separated these: had I falsified "the test suite" rather than each assertion, five reds would have
+drowned the one green that mattered. The green falsification is the informative one — a red proves the
+assertion works, a green proves the *test* does not — and it is the one that is easy to skim past,
+because a passing test after a deliberate break looks like a test that is merely lenient rather than
+one that never ran.
+
+## U-523 — a falsification that reddened nothing, and why that is the useful outcome
+
+Four assertions, four falsifications. Three reddened. The one for **415** reddened nothing, and the
+green was the informative result again — for a different reason than last time.
+
+Last unit a green falsification meant the test never ran. This time the test ran fine and asserted
+exactly what it claimed; **the thing I broke was not the thing it reads.** `AcdpBytes` hard-coded
+`StatusCode::UNSUPPORTED_MEDIA_TYPE` in its own rejection while `status_for_code` carried a 415 arm
+used only by `AcdpJson`. Breaking the shared arm left the publish path untouched, because the publish
+path never consulted it.
+
+That is worth more than the bug it revealed. The whole decision behind this unit is *the code decides
+the status, so code and status cannot disagree* — and the code contained two independent places where
+a status was chosen, which is precisely the drift the decision exists to prevent. **A guard against
+divergence that is itself duplicated has not removed the divergence; it has added a second copy of
+it.** The falsification is what surfaced that, and only because it was aimed at one arm rather than at
+"the suite".
+
+The fix was to make `AcdpBytes` derive its 415 from the same function, after which breaking that arm
+reddens both the publish matrix and `/auth/*` — one edit, two paths, which is the property the design
+claimed from the start and did not have.
+
+**The generalisable form:** when a falsification comes back green, resist reading it as "the assertion
+is lenient". Ask which of two different things happened — *the test never ran*, or *the test never
+reads what I varied*. Both are silent, both look like leniency, and they have opposite fixes: condition
+the skip, versus point the code at the single source it claims to use. See also `probe must read what
+you vary` — this is that rule applied to the guard rather than to the test.
+
+## U-506 — making the coverage tables name what actually guards each family (2026-09-13, lane-2)
+
+`conformance.rs`'s family tables said the `log` family's emission half was covered by two
+golden-recompute tests. It is not. This unit makes the tables truthful and pins the citations that
+were holding nothing.
+
+### The finding, reproduced before anything was planned
+
+Mutating `handlers/log.rs`'s `root_for` to `String::new()` — gutting the Merkle root every log
+endpoint serves:
+
+| | with the root gutted |
+|---|---|
+| the whole conformance suite | **73 passed, 0 failed** |
+| the two tests `PARTIAL_DIRECT` names for `log` | **both pass** |
+| `http_integration.rs` | **11 failed** |
+
+**`EXCUSED`'s `log` entry argued that a direct pass "would assert something about acdp-crypto's
+merkle code, not about this registry" — and then, four lines later, offered two golden-recompute
+tests as proof that "the emission half IS covered". Its own argument applied to its own golden
+tests, and the entry did not notice.** `log001_leaf_root_and_inclusion_golden_recomputed` and
+`log003_consistency_proof_golden_recomputed` reach only `merkle::*`; they never enter
+`handlers/log.rs`.
+
+`PARTIAL_DIRECT` was **not** wrong, which is worth stating: it pins exactly what it claims to pin.
+The defect was prose inviting a stronger reading than the mechanism supports.
+
+**Classified as a DOCUMENTATION defect, not a coverage defect.** The tests that hold the handler
+path exist; they were simply unnamed. The opposite conclusion would have sent someone writing
+duplicate tests — which is why the survivor/gap distinction from U-504 is applied here explicitly.
+
+### The number in the file was wrong, and it was my own doing
+
+`source_test_fn_body`'s doc comment said the mutation was "CAUGHT by ten tests" and referred to "the
+whole 69-test suite". It is **eleven**: U-502 added
+`log_proof_ctx_id_is_served_to_the_owning_tenant` to that log suite *after* the sentence was
+written. Both figures were true when written, neither had anything holding it, and the later edit
+that expired the first was mine. The count now lives in `LOG_HANDLER_GUARD_COUNT` where an assertion
+reads it, and the suite size is no longer restated in prose at all.
+
+### The structural constraint, and the limit it forces
+
+`conformance.rs` and `http_integration.rs` are **separate integration-test binaries**. Rust cannot
+reference a `#[tokio::test]` function across them, so **#249's `direct_fn!`/`DIRECT_FNS` compile-time
+binding is structurally unavailable here** — not merely unused. Cross-binary names can only be
+verified by reading the other file's text: existence plus a test attribute, with the same substring
+ceiling documented on `covered_direct_families_have_present_test_functions`.
+
+**So this unit makes the tables more TRUTHFUL without making the guarantee STRONGER, and those are
+different axes.** Stated at the check rather than left for a reader to infer, because a more accurate
+table reads like a stronger guarantee and is not one.
+
+### The second, more general defect: a hand-maintained list cannot catch omissions
+
+`this_file_cites_constructs_and_never_line_numbers` already reads sibling files from disk and asserts
+a construct is present — the right idiom, already in the file. But its list is hand-maintained, and
+it named **1 of the 9** `http_integration.rs` test functions this file cites. The other eight —
+including `publish_enforces_the_err002_media_type_matrix`, cited as the test that enforces the
+`err-002` gate — were pinned by nothing and would rot silently on a rename.
+
+So `CROSS_BINARY_GUARDS` is checked by a **derived equality** rather than by a longer list: read the
+sibling from disk, compute its present test-attributed functions, intersect with what this file cites
+by word-boundary match, require the result to equal the table. A `>=` floor would pass the very
+scanner that is silently missing citations.
+
+**Two design corrections found while building the falsifications**, both recorded in the code rather
+than fixed quietly:
+
+1. **The set equality does not protect the `log` group.** Those eleven names are cited *only* by the
+   table, so deleting one shrinks both sides together and the equality stays satisfied.
+   `LOG_HANDLER_GUARD_COUNT = 11` is that group's guard. The nine prose-cited names need no count —
+   prose keeps citing them, so the set difference fires.
+2. **`assert_eq!(cited, tabled)` was structurally unfireable and was removed.** Tabling a name *is*
+   citing it, so `tabled ⊆ cited` always and the reverse half could never fail. An assertion that
+   cannot fire reads as coverage and provides none.
+
+### The survey of the other 21 entries, and why eight look wrong but are not
+
+19 `Direct` blocks and 3 `PARTIAL_DIRECT` entries were classified by `log`'s own signature: a test
+that reads fixture `vectors` and recomputes through a library without building a router cannot be
+holding a handler. **The parser was checked against the known count of 19 before its output was
+trusted** — its first version matched exactly one family and reported "no families at risk", which is
+what a broken extraction looks like: a confident zero. That is U-504's own lesson, applied to myself
+one unit later.
+
+Nine families' named tests never touch the HTTP surface. **Eight are correct anyway, for three
+different reasons, and the reasons matter more than the count:**
+
+- **`can`, `lin`, `caps`** — pure-vector families. Canonicalisation, lineage derivation and
+  capabilities validation *are* recomputations; no registry path exists to hold, so a golden test is
+  the complete and correct test.
+- **`rcpt`, `lhr`** — word-for-word the same "The producer half IS covered and stays pinned"
+  construction `log` used, and **sound**. Measured, not read: a `panic!` in `receipt.rs`'s
+  `build_signer` reddens both `rcpt001_…_and_remintable` and `lhr001_…_and_remintable`, so they
+  genuinely traverse this registry's producer code. `log`'s goldens reach only `acdp-crypto`. That is
+  the whole difference, and it is why identical wording was not enough to convict them.
+- **`wit`, `dk`, `err`** — their registry-side path is held in a **third** place neither test binary
+  can see. A `panic!` in `witness.rs`'s `verify_cosignature_against_own_log` leaves conformance (73
+  pass) and `http_integration` (0 failures) entirely green and reddens **five `witness::tests::*`
+  unit tests inside the core crate**. The table credits no coverage that does not exist; it never
+  claimed to enumerate in-crate unit tests, and the comment now says so.
+
+**So `log` was the only family whose table asserted something its named tests did not hold** — a
+measured claim about the other 21, not an assumption that the first defect found was the only one.
+
+**The bound, stated rather than implied:** this is a structural discriminator plus three targeted
+probes, **not** a per-family mutation sweep. That is the ratchet's job (#216, U-504). A family whose
+named tests *do* build a router could still assert the wrong thing about it and nothing here would
+notice.
+
+### Falsification
+
+Five assertions, each individually, each firing its own message: the fn scanner broken →
+"scanner is broken"; one log test dropped → "expected exactly 11"; a nonexistent name tabled → "no
+longer defines it"; a test listed twice → "appears twice"; a prose-cited test untabled → "does not
+list them". And **green against the unmodified tree**, because a guard that flags correct entries is
+a guard someone reverts.
+
+`http_integration.rs` was **READ ONLY** for this unit (lane-1 was writing it concurrently under
+U-523), so the "rot" assertion was falsified by varying the **table** rather than the sibling file —
+which exercises the same assertion. The guard was then re-run after merging lane-1's #293, which
+touched that file: it passes, so no name this unit depends on was renamed.
+
+`log`'s own claim was falsified the way the finding was made: with `root_for` gutted, the conformance
+suite stays green and the failing `http_integration` set is **set-identical** to the tabled eleven —
+equality, not a matching count.
+
+### A note on where the decisions are recorded
+
+U-506's grant covered `conformance.rs`, `docs/**` and `CHANGELOG.md`; it did **not** include
+`ASSUMPTIONS.md` or `DECISIONS.md`. None of this unit's four judgement calls is a one-way door — the
+derived equality over a hand list, removing the unfireable assertion, the count const, and Phase 3's
+scope bound are each one commit to reverse — and all four are documented at the code they govern. So
+they are recorded here rather than by reaching outside the grant.
+## An agreement test is blind to a uniform regression
+
+Two tests written earlier in this arc — `the_two_media_type_gates_agree` and
+`the_admin_media_type_gate_matches_the_publish_gate` — compare one route's verdict against another's.
+Breaking `status_for_code`'s 415 arm, the single shared centre both routes consult, left **both
+green**. The break moved both sides equally, so the property they assert was preserved while the
+behaviour they exist to protect was destroyed.
+
+This is not leniency and it is not hard-coding; I initially mislabelled it as the latter. It is
+structural: an assertion of the form `a == b` cannot see a change that maps `a -> a'` and `b -> b'`
+together, and a shared implementation guarantees that changes to it are exactly of that shape. **The
+more centralised the code, the blinder its agreement tests become** — which inverts the usual
+intuition that consolidating logic makes it easier to test.
+
+The fix is not to delete them. They still catch the thing they were written for: one route drifting
+away from another. The fix is that at least one test must pin the **absolute** verdict — what status
+this input actually produces — so a uniform move has something to break. That test is
+`every_acdp_bytes_route_shares_one_media_type_gate`, and breaking the shared arm reddens it.
+
+**How to tell in advance:** ask what happens if the code under test is *replaced wholesale* with
+something wrong. If every assertion still passes, the suite is measuring internal consistency rather
+than behaviour. Relational assertions (agree, match, round-trip, idempotent) all share this blind
+spot and all read as strong coverage.
+
+## Check the name against the thing before shipping the name
+
+`every_body_bearing_route_shares_one_media_type_gate` covered five of eight body-bearing routes, and
+the missing three did not use the gate it named. The test was correct; the name was a false claim
+about the system, and a name is the most quotable unit a test has — it is what a future reader greps
+for and what a summary repeats.
+
+Verifying it cost one grep of the route table and one read of the other extractor. That grep is what
+surfaced the actual finding of this unit: the two accept predicates are independent implementations
+that agree by coincidence. **The overclaiming name was the only thing pointing at it** — the code
+compiled, the tests passed, and nothing else in the run would have asked whether `/auth/*` shared
+the gate.
+
+## A falsification can be absorbed by an earlier assertion
+
+Four falsifications, three mechanisms visible. The third — remapping
+`JsonRejection::MissingJsonContentType` off 415 — was aimed at the absent-header assertion at the end
+of the test, but reddened the present-type loop above it instead, because axum returns that same
+rejection variant for a *wrong* content type as well as an absent one. The run came back red, the
+mechanism named was real, and the assertion actually targeted was never evaluated.
+
+A red falsification is therefore not proof that the assertion you aimed at works. **Read which
+assertion fired, not merely that one did.** Where an earlier assertion absorbs the change, the later
+one needs a separate falsification chosen to leave the earlier one satisfied — here, making
+`AcdpJson` infer an absent header, which is also the precise "cleanup" the assertion exists to block.
+
+## Verifying code against code agrees with itself
+
+Two places in `conformance.rs` recorded that `did-ssrf-*` was "not HTTP-replayable", and both said so
+*carefully*. One noted it was "confirmed for this phase by re-reading `extract_shapes` directly rather
+than trusting the prior `DEFERRED` reason's claim on faith (it held up)". The other was headed "The
+prior `DEFERRED` reason's claim, **verified before building on it**". Both then walked the dispatcher
+shape by shape and concluded correctly that nothing matched.
+
+Every step was accurate and the conclusion was wrong. `did-ssrf-001`..`004` are ordinary HTTP
+publishes with concrete bodies; they now replay. **Re-reading the dispatcher can only ever establish
+what the dispatcher does.** It cannot distinguish *"this fixture is not an HTTP request"* from *"the
+dispatcher does not parse this spelling of one"* — and those two have opposite fixes. The check was
+diligent, repeated, and pointed at the wrong artifact: to catch this, the code had to be checked
+against the **fixture**, not against itself.
+
+The tell was available and unread: the reason string said "vectors / schema / informative" about a
+file containing `"endpoint": "POST /contexts"`. A classification that contradicts the thing it
+classifies is visible without any tooling, and it survived two deliberate verification passes because
+both passes asked "does the dispatcher reach the fallback?" instead of "is the fallback's claim
+true?".
+
+**How to apply:** when a check concludes that some input is out of scope, verify the *predicate
+against the input*, not the code path that produced it. "I re-read the function" is evidence about the
+function. See also `probe must read what you vary` and `assert the mechanism, not the symptom`.
+
+## A floor is satisfied by every number above it
+
+`MIN_REPLAYED_EXCHANGES: usize = 30` guarded the conformance replayer with `replayed >= 30`, and its
+own comment named the hazard correctly — "a fidelity gate may be over-matching and silently shrinking
+coverage". It could not catch that hazard. Coverage was 30 while `extract()` silently declined 12
+parseable fixtures, and 30 satisfies `>= 30`. The guard was calibrated to exactly the broken state and
+would have gone on passing as coverage decayed anywhere above its floor.
+
+Replaced with `REPLAYED_EXCHANGES_AT_PIN = 38` and `assert_eq!`. Falsified by dropping a single
+fixture: **37 passes the old floor and fails the new equality.** Movement in either direction is now a
+human decision — fewer means a dispatch gate started over-matching, more means fixtures became
+replayable and the coverage tables were not updated.
+
+This is the same lesson `TOTAL_FIXTURES_AT_PIN` already carries one level up, which is the useful
+part: the repo had *written down* that a `>=` floor "passes the very scanner that is silently missing
+items", pinned its fixture total as an equality on that reasoning, and left the exchange count a
+floor. **Knowing the rule did not propagate it to the neighbouring constant.** Worth a sweep when a
+lesson is recorded: find the other guards of the same shape, not just the one that prompted it.
+
+## Fixing the harness is half of curing a wrong-reason pass
+
+`pub-011` expects 400 `invalid_signature`. It was unreachable because the conformance harness bypassed
+DID verification — so the obvious cure was to make the harness verify signatures. That cure alone
+would have left the defect standing, and the fixture would have looked cured.
+
+Its `content_hash` is the literal placeholder `sha256:<recomputes-correctly-against-this-body>`, and
+the replayer pinned **no error code** for publishes, on the reasonable-sounding grounds that validation
+ordering is impl-defined. Measured with the harness fixed but the code still unpinned: `pub-011`
+**passes**, receiving `schema_violation: content_hash digest must be 64 lowercase hex chars`. A
+fixture whose entire purpose is signature verification, scored green by a schema error.
+
+**A wrong-reason pass has two independent causes — the check that cannot run, and the assertion too
+weak to notice.** Removing either one alone leaves a green test. They have to be counted separately,
+because fixing the dramatic one feels like completion: the harness change is the hard, interesting
+work, and it is exactly the moment you stop looking.
+
+The general form: whenever a test asserts a *class* of outcome (any 4xx, an error occurred, it threw)
+rather than the specific outcome it names, restoring the capability it was missing does not make it
+discriminating. Ask what else could produce the same class.
+
+## Pinning the codes said four of my own fixtures had never been right
+
+Pinning the expected error code turned up five publish fixtures passing for the wrong reason. Four
+were `did-ssrf-001..004` — fixtures **I had lit up in the previous unit** and reported as a coverage
+win. They return `schema_violation` because their bodies omit a required member, so they never reach
+the DID resolution they exist to exercise. The fifth, `pub-002`, was changed *by this unit*: pinning
+the producer key makes signature verification run before the hash gate, so it now fails on the
+signature rather than the hash its fixture names.
+
+Both went into a `CODE_DIVERGENCES` table that records the code actually returned, with a reason, and
+**asserts it**. The three available responses were: skip them (loses the coverage), leave them
+unpinned (keeps the wrong-reason pass), or pin the truth and name the gap. Only the third leaves a
+reader able to tell what is covered from what merely runs.
+
+The uncomfortable part is the useful part: "+8 fixtures replaying" was true last unit and **half of it
+was not coverage**. A count of things that execute is not a count of things that check. When reporting
+newly-covered items, the honest figure is how many now assert the thing they were written to assert —
+and you only learn that by pinning the specific outcome and seeing what breaks.
+
+## Four instances, one shape, three units
+
+The same defect has now been found four times: `pub-011`, `did-ssrf-001..004`, `pub-008`, and
+`cur-001` caught in advance. Every one had an identical structure — **the fixture names a specific
+error, the replayer pinned only the status, the registry returned a different 400 for an unrelated
+reason, and the fixture was scored as coverage of a rule it never reached.**
+
+What makes it worth a log entry is that the instances were *not* found by looking for the class. Each
+surfaced while doing something else, and the search that would have found all four at once —
+`grep 'want_error_code: None'` — was one command and was never run until the fourth. After the second
+instance the class was named, after the third it had a table, and the sweep still only happened
+because a reviewer asked for it explicitly.
+
+**When you find the same defect twice, stop fixing instances and enumerate the class.** The cost is
+usually one grep; the cost of not doing it is that the fourth instance is found by someone reading a
+green test and wondering.
+
+`pub-008` is the one that should sting: it predates all of this work. Every unit that touched the
+replayer ran it, saw it green, and moved on.
+
+## Inverting an invariant is a decision, and must read as one
+
+The sweep's fix required reversing an existing assertion — `want_error_code.is_none()`, documented as
+*"Shape A's publish branch never pins an error code (validation ordering is impl-defined), this must
+still hold"*. Someone wrote "this must still hold" on the exact property that was hiding the bug.
+
+The reasoning behind it was **correct**: RFC validation ordering genuinely is implementation-defined,
+so demanding a specific first-failing code genuinely can be wrong. The error was in what that licenses.
+*"We cannot assert THIS particular thing"* was silently widened into *"we assert nothing"*, and
+nothing is what let an unrelated rejection pass as coverage. The middle option — assert the code we
+DO return, and record why it differs from the fixture — is strictly stronger than silence and was
+available the whole time.
+
+So the assertion was inverted rather than deleted, and the comment now says it was inverted, by which
+unit, and why the original reasoning was sound but insufficient. **An invariant that turns out to be
+wrong should leave a scar, not a clean surface** — the next reader needs to know the property was
+considered and reversed, not that it never existed.
+
+## A guard's first act was to correct its author
+
+The new sweep guard asserts a known-positive bound: *N replayed fixtures name an error code*, so that
+an empty scan cannot read as a clean sweep. I wrote 14 from my own reading. The real number is 15, and
+the assertion failed on its first run.
+
+That is the bound check working exactly as intended, on the person who wrote it, thirty seconds after
+writing it — and it is an argument for putting the number in as an equality even when you are
+confident. A `>=` would have accepted 14 silently forever.

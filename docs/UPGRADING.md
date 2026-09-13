@@ -23,6 +23,87 @@ belongs in the per-crate changelogs.
 
 ## 0.1.4
 
+**Wire change: `POST /contexts/{ctx_id}/retract` and `/republish` now reject an unaccepted
+`Content-Type` with 415.**
+
+These two producer-facing lifecycle writes were the last routed body-bearing handlers with no
+media-type gate. They now behave exactly as `POST /contexts` and the `/admin/*` lifecycle endpoints do:
+
+| what you send | before 0.1.4 | 0.1.4 |
+|---|---|---|
+| `application/acdp+json`, with or without `; charset=utf-8` | parsed | parsed — **unchanged** |
+| `application/json` | parsed | parsed — **unchanged** |
+| **no `Content-Type` header** | parsed | parsed — **unchanged** |
+| `text/plain`, `application/xml`, anything else | 400 `schema_violation` | **415 `unsupported_media_type`** |
+
+**Who needs to act:** only a client sending a `Content-Type` on these two routes that is neither
+`application/json` nor an `application/*+json` type. Parameters are ignored and an absent header is
+still accepted.
+
+All five routed body-bearing handlers now share one accept-set: `POST /contexts`, the two routes
+above, and the two `/admin/*` lifecycle endpoints.
+
+**Wire change: `/auth/*` answers 400, not 422, on a wrong-shaped body.**
+
+A request to `/auth/challenge`, `/auth/token` or `/auth/revoke` whose body is valid JSON but does not
+match the endpoint's schema previously returned **422 Unprocessable Entity** with
+`error.code = "schema_violation"`. It now returns **400 Bad Request** with the same code.
+
+422 was never a deliberate choice: it is the status axum's JSON extractor attaches to a
+deserialization failure, and it reached the wire because the rejection passed that status through.
+**RFC-ACDP-0007 §5 pins `schema_violation` to 400, and 422 appears nowhere in that RFC** — so the old
+pair was a status/code combination the protocol does not define.
+
+**Who needs to act:** any client branching on `422` from `/auth/*`. Branch on `error.code` instead —
+it is unchanged (`schema_violation`), and it is the part RFC-ACDP-0007 §5 actually pins.
+
+**Explicitly unchanged**, because collapsing these into 400 is the way this fix could have gone wrong:
+
+| case | status |
+|---|---|
+| body exceeds the size limit | **413** — unchanged |
+| unacceptable `Content-Type` | **415** — unchanged |
+| malformed JSON | 400 — unchanged |
+
+**Wire change: `/admin/*` lifecycle endpoints now reject an unaccepted `Content-Type` with 415.**
+
+`POST /admin/contexts/{ctx_id}/retract` and `.../republish` were the last two routed body-bearing
+handlers with no media-type gate. They now behave exactly as `POST /contexts` does (see the entry
+below): an unacceptable `Content-Type` is **415 `unsupported_media_type`**, media-type parameters are
+ignored, and an **absent** `Content-Type` is still accepted. Same extractor, same accept-set — not a
+third implementation.
+
+**Wire change: `POST /contexts` now rejects an unaccepted `Content-Type` with 415.**
+
+Before 0.1.4 this endpoint never looked at `Content-Type`. It parsed the body whatever the header
+said, so a request sent as `text/plain` was answered **400 `schema_violation`**. It now answers
+**415 `unsupported_media_type`** and does not parse the body at all.
+
+This is a conformance fix — RFC-ACDP-0007 §4.1/§5 and spec fixture `err-002` require it, and
+`schema_violation` was stating something false, since it asserts a structural validation that never
+ran. But it is a behaviour change on a success-adjacent path, so check it before upgrading:
+
+| what you send to `POST /contexts` | before 0.1.4 | 0.1.4 |
+|---|---|---|
+| `application/acdp+json` | parsed | parsed — **unchanged** |
+| `application/acdp+json; charset=utf-8` | parsed | parsed — **unchanged** |
+| `application/json` | parsed | parsed — **unchanged** |
+| **no `Content-Type` header** | parsed | parsed — **unchanged** |
+| `text/plain`, `application/xml`, anything else | 400 `schema_violation` | **415 `unsupported_media_type`** |
+
+**Who needs to act:** only a client sending a `Content-Type` that is neither `application/json` nor
+an `application/*+json` type. Media-type *parameters* are ignored, so `; charset=utf-8` is fine, and
+omitting the header entirely is still accepted — that was deliberate, because requiring it would
+break every publisher that does not send one.
+
+A client that already sends `application/acdp+json`, or none at all, sees no difference.
+
+**Unchanged:** what is hashed and what is verified. The handler still receives the raw bytes and the
+content hash is still recomputed from the re-serialized request, exactly as before.
+
+**Not changed in this release:** `/admin/*` handlers are still ungated (tracked separately), and
+`/auth/*` continues to reject a missing `Content-Type` with 415, which it always has.
+
 **Upgrade the image and `docker/docker-compose.yml` together.** If you deploy the compose recipe,
 pulling one without the other does not boot.
 

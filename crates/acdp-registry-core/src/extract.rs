@@ -60,6 +60,157 @@ impl IntoResponse for AcdpRejection {
     }
 }
 
+/// True when `Content-Type` names a media type this registry accepts on a
+/// body-bearing request (RFC-ACDP-0007 §4.1).
+///
+/// **Deliberately the same accept-set as [`AcdpJson`]**, which delegates to
+/// axum's `Json`: `application/json`, or any `application/*+json` structured
+/// suffix — which is what makes `application/acdp+json` (the type
+/// RFC-ACDP-0001 §5.1 mandates) acceptable. **Media-type parameters are
+/// ignored**, so `application/acdp+json; charset=utf-8` is accepted;
+/// RFC-ACDP-0007 §4.1 requires that, and spec fixture `err-002` scenario B
+/// calls a naive string-equality implementation "the most likely real-world
+/// false positive".
+///
+/// This re-implements axum's `json_content_type` predicate rather than calling
+/// it — it is private, and the `mime` crate it uses is not a direct dependency
+/// here (adding one enters the `deny.toml` gate for a six-line predicate). The
+/// duplication is a real drift risk and is therefore pinned by a test that
+/// asserts **both paths agree** on a matrix of content types
+/// (`the_two_media_type_gates_agree`): if axum widens or narrows its accept-set,
+/// that test fails rather than the two routes silently diverging.
+///
+/// **An ABSENT `Content-Type` is ACCEPTED here, and that is a deliberate,
+/// measured choice.** `err-002` scenario E declares both readings conformant —
+/// a registry MAY reject with 415, or MAY infer `application/acdp+json` and
+/// proceed — and requires only that registries document which. This one infers,
+/// for one reason: `POST /contexts` has never required the header, so rejecting
+/// it is a breaking change for every publisher that omits it. Measured rather
+/// than assumed: gating absent headers reddened **104 of 159** tests in
+/// `http_integration.rs`, all of them publish paths that send no
+/// `Content-Type`. That is the shape of the client breakage, not a test
+/// artefact. Scenario C — a `Content-Type` that is present and unacceptable —
+/// is the mandatory rejection, and it is enforced.
+///
+/// This diverges from `AcdpJson`, which rejects an absent header (415) on
+/// `/auth/*`. The divergence is per-route and permitted: `/auth/*` has always
+/// rejected, and changing it is a separate wire change on routes no fixture
+/// points at. `the_two_media_type_gates_agree` therefore pins agreement on
+/// PRESENT content types only, which is the part that must not drift.
+///
+/// A malformed header that is not valid UTF-8 is rejected, as axum does.
+fn media_type_accepted(headers: &axum::http::HeaderMap) -> bool {
+    let Some(value) = headers.get(axum::http::header::CONTENT_TYPE) else {
+        return true;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    // Parameters (`; charset=utf-8`) are not part of the acceptance decision.
+    let essence = value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let Some(subtype) = essence.strip_prefix("application/") else {
+        return false;
+    };
+    subtype == "json" || subtype.ends_with("+json")
+}
+
+/// The raw request body, gated by the same media-type accept-set [`AcdpJson`]
+/// applies, rejecting with a §5 envelope.
+///
+/// **Why this exists rather than just using [`AcdpJson`] (U-520).** `publish`
+/// needs the media-type gate but must keep its `Bytes` body and its **400**
+/// on a wrong-shaped body. Routing it through `AcdpJson` was tried first and
+/// measured: it turns a wrong-shaped publish into a **422**, because
+/// `JsonRejection::JsonDataError` carries that status. RFC-ACDP-0007 §5's
+/// status table pins `schema_violation` to **400**, so that would have traded
+/// the 415 violation this fixes for a status violation on every malformed
+/// publish — the larger blast radius of the two. Gating without giving up the
+/// raw bytes keeps this change to exactly the one behaviour `err-002` names.
+///
+/// (`/auth/*` answers 422 here and is therefore non-conformant with that same
+/// table. That is a pre-existing, separate defect on routes no fixture points
+/// at; it is reported rather than fixed in passing, because widening this
+/// change to `/auth/*` is its own wire change and its own review.)
+pub struct AcdpBytes(pub axum::body::Bytes);
+
+impl<S> FromRequest<S> for AcdpBytes
+where
+    S: Send + Sync,
+{
+    type Rejection = AcdpRejection;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        if !media_type_accepted(req.headers()) {
+            return Err(AcdpRejection {
+                // Derived, not hard-coded, so this and `AcdpJson` cannot end up
+                // disagreeing about the status §5 assigns to one code. Found by
+                // falsification: breaking `status_for_code`'s 415 arm left this
+                // path green, which is the tell that the arm was not the thing
+                // under test here.
+                status: status_for_code(
+                    "unsupported_media_type",
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                ),
+                code: "unsupported_media_type",
+                // The same literal `AcdpJson` emits, so the two routes answer
+                // identically. It names only `application/json` and is thus
+                // INCOMPLETE rather than false -- see `json_message`'s note.
+                message: "Expected request with `Content-Type: application/json`".to_string(),
+            });
+        }
+        match axum::body::Bytes::from_request(req, state).await {
+            Ok(b) => Ok(AcdpBytes(b)),
+            Err(rej) => Err(AcdpRejection {
+                // Preserves 413 for an oversized body exactly as `AcdpJson`
+                // does -- `BytesRejection` wraps `LengthLimitError`.
+                status: status_for_code("payload_too_large", rej.status()),
+                code: "payload_too_large",
+                message: "request body exceeds the configured limit".to_string(),
+            }),
+        }
+    }
+}
+
+/// The HTTP status RFC-ACDP-0007 §5's table pins to a wire code.
+///
+/// **The code decides the status, not the extractor (U-523).** §5 is a table of
+/// `(code, status)` pairs, so a response whose code and status disagree is
+/// malformed however defensible either half looks alone. Deriving one from the
+/// other makes that disagreement unrepresentable rather than merely tested-for.
+///
+/// This replaced `status: rej.status()`, which passed axum's own status
+/// straight through. That was right for 413 and 415 and **wrong for 422**:
+/// `JsonRejection::JsonDataError` carries 422, so every wrong-shaped body on
+/// `/auth/*` answered **422 with code `schema_violation`** — and §5 pins
+/// `schema_violation` to **400** (`RFC-ACDP-0007-capabilities.md:228`). **422
+/// appears nowhere in RFC-ACDP-0007**; it was not a debatable status choice but
+/// a status the protocol does not use.
+///
+/// `fallback` keeps the property the old comment was protecting: both rejection
+/// enums are `#[non_exhaustive]`, so a future variant this table does not name
+/// keeps axum's own status rather than being forced to 400. Hard-coding 400 is
+/// exactly how an oversized body would silently stop being a 413.
+fn status_for_code(code: &str, fallback: StatusCode) -> StatusCode {
+    match code {
+        // RFC-ACDP-0007 §5: "Request body or query failed structural
+        // validation." Mirrors `http_status_for_acdp`'s own 400 arm for
+        // `AcdpError::SchemaViolation`, so the extractor and the error type
+        // cannot disagree about the same code.
+        "schema_violation" => StatusCode::BAD_REQUEST,
+        // RFC 9110 §15.5.16, and the reason this whole rejection type exists:
+        // 415 must survive rather than collapsing into 400.
+        "unsupported_media_type" => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        // `BytesRejection` wraps `LengthLimitError`.
+        "payload_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+        _ => fallback,
+    }
+}
+
 /// `axum::Json`, but rejecting with a §5 envelope.
 pub struct AcdpJson<T>(pub T);
 
@@ -81,7 +232,7 @@ where
                 // would silently downgrade an oversized body on `/auth/*`, an
                 // observable status change on exactly the path the 413 envelope
                 // work exists to make conformant.
-                status: rej.status(),
+                status: status_for_code(json_code(&rej), rej.status()),
                 code: json_code(&rej),
                 message: json_message(&rej).to_string(),
             }),

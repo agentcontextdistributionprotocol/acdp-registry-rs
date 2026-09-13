@@ -13,6 +13,8 @@ use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::event::WebhookEvent;
 use acdp_registry_types::{RegistryConfig, RegistryError};
 use axum::body::Bytes;
+
+use crate::extract::AcdpBytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -550,7 +552,16 @@ pub async fn admin_retract<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     Path(ctx_id): Path<String>,
-    body: Bytes,
+    // U-523: `AcdpBytes` rather than a bare `Bytes`, so this lifecycle endpoint
+    // enforces the same media-type gate `POST /contexts` got in U-520 --
+    // reusing that extractor rather than adding a second one, and taking the
+    // SAME absent-header choice (an absent `Content-Type` is inferred, not
+    // rejected). Three behaviours across three modules would be worse than the
+    // one inconsistency this unit set out to remove.
+    //
+    // The body stays raw: `admin_lifecycle_transition` deserializes it itself,
+    // exactly as before.
+    AcdpBytes(body): AcdpBytes,
 ) -> Result<Json<acdp::types::body::FullContext>, AdminLifecycleError> {
     admin_lifecycle_transition(
         state,
@@ -569,7 +580,16 @@ pub async fn admin_republish<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     Path(ctx_id): Path<String>,
-    body: Bytes,
+    // U-523: `AcdpBytes` rather than a bare `Bytes`, so this lifecycle endpoint
+    // enforces the same media-type gate `POST /contexts` got in U-520 --
+    // reusing that extractor rather than adding a second one, and taking the
+    // SAME absent-header choice (an absent `Content-Type` is inferred, not
+    // rejected). Three behaviours across three modules would be worse than the
+    // one inconsistency this unit set out to remove.
+    //
+    // The body stays raw: `admin_lifecycle_transition` deserializes it itself,
+    // exactly as before.
+    AcdpBytes(body): AcdpBytes,
 ) -> Result<Json<acdp::types::body::FullContext>, AdminLifecycleError> {
     admin_lifecycle_transition(
         state,

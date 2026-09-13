@@ -3044,3 +3044,341 @@ proposed in acdp-rs#279 — the breakage is invisible to `acdp-client`'s build a
 downstream axum consumer.
 
 **Status:** #285 should be closed unmerged; the bump bot will re-propose once upstream ships the fix.
+
+---
+
+## Decision: gate `POST /contexts`'s media type without routing it through `AcdpJson` (U-520, PR A)
+
+**The defect.** `publish` took `body: Bytes` and never read `Content-Type`. Measured across all five
+scenarios of spec fixture `err-002-unsupported-media-type.json`, same body, only the header varied:
+
+```
+A  application/acdp+json                 -> 400 schema_violation
+B  application/acdp+json; charset=utf-8  -> 400 schema_violation
+C  text/plain                            -> 400 schema_violation   <-- MUST be 415
+D  application/json                      -> 400 schema_violation
+E  (absent)                              -> 400 schema_violation
+```
+
+Scenario C is a violation and the fixture rules out precisely what we emitted: *"the body MUST NOT be
+parsed: `schema_violation` is NOT conformant here, because it asserts a structural validation that
+never ran and is pinned to 400."* `extract.rs`'s own comment had written the same harm down while the
+extractor was being built — and `publish` was then never routed through it.
+
+**Found only because the fixture was asserted where it points.** `err-002` is replayed by nothing, and
+`extractor_rejections_return_the_rfc0007_envelope` pinned C and E on `/auth/challenge`, which routes
+through `AcdpJson` and was correct all along. U-519 measured that green as uninformative about the 415
+path; it was concealing a live wire defect.
+
+**Rejected: routing `publish` through `AcdpJson`** — the first thing tried, and the obvious reuse.
+Measured, it moves a wrong-shaped body from **400 to 422**, because `JsonRejection::JsonDataError`
+carries 422. **RFC-ACDP-0007 §5's status table pins `schema_violation` to 400.** So that fix would
+have traded one conformance violation for another, on a far wider path — every malformed publish,
+rather than only the ones with an unacceptable media type. This is the "turn one violation into
+another" trap named in the assign, arriving from an unexpected direction.
+
+**Adopted: a new `AcdpBytes` extractor** in `extract.rs` — the media-type gate, then the raw `Bytes`.
+It reuses `AcdpRejection`, the envelope shape and the minted `unsupported_media_type` code, and leaves
+the 400, the raw bytes and the 413 path exactly as they were. The whole non-comment change to
+`context.rs` is two lines — the import and the parameter type — so `from_slice`, the content-hash
+recomputation and signature verification are byte-identical downstream. **Nothing about what `publish`
+hashes or verifies changed.**
+
+**Scenario E (absent `Content-Type`) is ACCEPTED, and that is measured rather than preferred.** The
+fixture declares E "either" and asks only that a registry document its choice. Gating absent headers
+reddened **104 of 159** tests in `http_integration.rs`, every one a publish path sending no
+`Content-Type` — the shape of real client breakage, not a test artefact. `/auth/*` rejects absent
+headers and continues to; the fixture makes this a per-route choice.
+
+**The duplication is pinned, not trusted.** `media_type_accepted` re-implements axum's private
+`json_content_type` predicate (`mime` is not a direct dependency here, and adding one enters the
+`deny.toml` gate for six lines). Two implementations of one accept-set is how routes drift, so
+`the_two_media_type_gates_agree` asserts both paths agree across ten content types; breaking the
+`+json` suffix rule reddens it and names the drift direction.
+
+**Falsified, not asserted:** removing the gate reddens scenario C specifically (415 -> 400); breaking
+the accept-set reddens the agreement test at `application/acdp+json`.
+
+**Status:** applied. `/admin/*` has the same ungated shape on three handlers and is deliberately NOT
+fixed here — it is U-522, so that wire change is reviewed on its own terms rather than riding in on a
+publish fix.
+
+---
+
+## Decision: count fixtures, not families — a parallel list, not a re-keyed partition (U-520, PR B)
+
+**The measurement.** At spec pin `16211e6` there are 144 fixtures. **11** are HTTP-replayed, **76** are
+requested by a direct test, and **57 are requested by nothing**. `err-002` — the fixture U-519 found —
+is one of the 57. It was never special; it was the one that happened to get noticed.
+
+Split against `registries/profiles.json` → `acdp-registry-core`, the profile this registry advertises:
+**12 required** (`pub-001/002/003/006/007/009-014`, `ret-002`), **3 conditional** (`dk-003`, `err-002`,
+`idem-007`), 42 neither. `pub` claims `CoverageMechanism::Replayed` on 3 replayed fixtures while the
+profile requires 14; `ret` claims it on `ret-001` alone.
+
+**The diagnosis is "an unasked question", not "a unit that is too coarse", and the distinction picks
+the fix.** The family partition answers *does this family have a coverage mechanism at all*, which
+genuinely must be asked per family: `anc`/`can`/`idem`/`wit` are covered by direct in-process tests and
+produce **zero** replayed exchanges, so a per-fixture replay-derived rule would brand all four
+uncovered — the exact design `:443-451` records as considered and rejected. Re-keying the partition to
+answer the second question would have destroyed the answer to the first.
+
+**`DEFERRED` rejected as the vehicle** — it is family-keyed, so listing `pub` there would (1) move
+`pub` out of `COVERED`, deleting the only guard that its tests still exist, (2) assert `pub` is
+uncovered while 3 of its fixtures replay — false in the opposite direction, (3) break `PARTIAL_DIRECT`,
+whose invariant is membership in `DEFERRED` ∪ `EXCUSED`, and (4) fail the partition test's issue
+allow-list outright.
+
+**Adopted: `UNEXERCISED_FIXTURES`, a fixture-level list ALONGSIDE the family partition**, following
+`PARTIAL_DIRECT`'s precedent — which exists because *"the partition above buckets by family, which
+leaves a gap once a family is only partly closable."* Same shape, one level finer. The partition is
+untouched and `DEFERRED` stays empty. Anchored to **#291**.
+
+**Every count is an equality, never a floor.** `TOTAL_FIXTURES_AT_PIN = 144`,
+`REPLAYABLE_FIXTURES_AT_PIN = 11` (derived in-test from the same `extract()` the replayer dispatches
+on, so it cannot drift), and 15 = 12 + 3. **A floor passes the very scanner that is silently missing
+items** — which is how a fixture arriving inside an already-covered family tripped nothing.
+
+**Falsified individually, each at a distinct assertion:** a simulated 145th fixture reddens the total
+(this is the `err-002` regression, reproduced); a mis-graded entry reddens the grade check; a
+non-existent id reddens the existence check; listing a replayed fixture reddens
+`no_unexercised_fixture_is_actually_replayed`; a wrong replayable count and a wrong required count each
+redden their own assertion.
+
+**One of those falsifications found a defect in this unit's own work.** The grade check initially
+PASSED while mis-graded, because `profiles.json`'s `profiles` is an **array**, not a map: the lookup
+returned `None`, the test took its "spec unavailable" branch, and it reported green while asserting
+nothing. Fixed, and the skip branch now asserts `!require_conformance()` first, so under CI's
+`ACDP_REQUIRE_CONFORMANCE` an unresolvable profile is a hard failure rather than a green skip.
+
+**Also corrected: the module doc called the `conformance` job "non-required",** contradicting its own
+required-checks note further down. Measured: `contexts` is
+`["rustfmt","clippy","tests","conformance (spec fixtures)"]` and `ci.yml`'s `conformance` job publishes
+that fourth name. This matters here because all three new tests are spec-gated, so a non-required
+conformance job would have made this whole ratchet advisory.
+
+**Status:** applied. Covering the 12 required fixtures is deliberately NOT in this unit — it is real
+conformance work, scoped from #291.
+
+---
+
+## Decision: the wire code decides the HTTP status, not the extractor (U-523)
+
+**The defect.** Every wrong-shaped body on `/auth/*` answered **422 with `error.code =
+"schema_violation"`**. RFC-ACDP-0007 §5 is a table of `(code, status)` pairs and it pins
+`schema_violation` to **400** (`RFC-ACDP-0007-capabilities.md:228`). **422 appears nowhere in that
+RFC.** This was not a debatable status choice — it was a status the protocol does not define, reaching
+the wire because `AcdpJson` set `status: rej.status()` and axum's `JsonRejection::JsonDataError`
+carries 422.
+
+**The fix is structural, not a patch.** `status_for_code(code, fallback)` derives the status from the
+wire code, so a response whose code and status disagree is **unrepresentable** rather than merely
+tested against. It mirrors `http_status_for_acdp`'s own arms, so the extractor and the error type
+cannot drift apart about the same code.
+
+**The fallback is the part that was already right and had to be kept.** `extract.rs`'s original
+comment warned in its own words: *"The rejection's OWN status, never a hard-coded 400 … hard-coding
+400 would silently downgrade an oversized body."* Both rejection enums are `#[non_exhaustive]`, so an
+unrecognised future variant still keeps axum's status. **413 and 415 survive**, and each is
+individually falsified rather than assumed.
+
+**`/admin/*` folded in (was U-522).** `admin_retract` and `admin_republish` were the last two routed
+body-bearing handlers with no media-type gate; both now use `AcdpBytes` and take the **same
+absent-header choice** as `POST /contexts`. One extractor, one accept-set — three behaviours across
+three modules would have been worse than the single inconsistency this started from.
+
+**A count worth correcting:** the unit was assigned as "three ungated body handlers" in `admin.rs`.
+There are **two routed** ones. The third `body: Bytes` is the private `admin_lifecycle_transition`
+helper, which is not a route and takes its bytes as an ordinary parameter — a grep counting parameter
+types, not handlers.
+
+**Falsified individually, and one falsification exposed a real gap in this work.** Reverting
+`status_for_code` reddens the wrong-shape row; breaking the 413 arm reddens the oversize test;
+un-gating `admin_retract` reddens the admin agreement test. Breaking the **415** arm initially reddened
+**nothing**, because `AcdpBytes` hard-coded its own 415 instead of deriving it — so the two paths could
+have drifted exactly as this decision claims to prevent. `AcdpBytes` now derives it too, and the same
+falsification reddens both the publish matrix and `/auth/*`.
+
+**Status:** applied. Recorded in `docs/UPGRADING.md`, not `CHANGELOG.md` — the root changelog forbids
+version sections and `root_changelog_stays_a_pointer` enforces it.
+
+## U-524 — the last two ungated routed body handlers, and the accept predicate nobody had compared
+
+**`POST /contexts/{ctx_id}/retract` and `/republish` now use `AcdpBytes`.** They were the only
+routed body-bearing handlers still parsing whatever arrived. This was never a decision: #290's grant
+named `POST /contexts` and #293's named `/admin/*`, and the data-plane lifecycle writes fell in
+neither. The result was backwards — the **admin** copies of retract/republish enforced a media type
+while the **producer-facing** ones did not, for the same operation on the same resource.
+
+The non-comment diff per handler is an import and a parameter type. That is the point: the body
+still reaches `lifecycle_transition` as raw `Bytes`, so hashing, signature verification and
+deserialization are byte-identical to before. Only the accept check is new.
+
+**The test name was the finding.** The new matrix test was written as
+`every_body_bearing_route_shares_one_media_type_gate` — 5 routes x 9 content types, asserting the
+absolute 415 verdict rather than mere agreement between routes. Checking the name before shipping it
+showed it was false twice over: there are **eight** routed body-bearing handlers, not five, and the
+other three (`/auth/*`) do not use `media_type_accepted` at all. `AcdpJson` delegates to
+`axum::extract::Json` and maps `JsonRejection::MissingJsonContentType` to the §5 code
+(`extract.rs:294`). Renamed to `every_acdp_bytes_route_shares_one_media_type_gate`.
+
+**So there are two accept predicates, and they agree by coincidence.** `media_type_accepted`
+(hand-written: `application/json`, any `application/*+json`, absent accepted) and `axum::Json`'s
+mime-suffix rule are independent code. They currently return the same verdict for every *present*
+media type and deliberately differ on an *absent* one — `AcdpBytes` infers, `AcdpJson` 415s. Nothing
+made the first property true and nothing was holding it: an axum release that narrowed its suffix
+rule would split the wire behaviour of `/auth/*` from `/contexts` with no local edit at all.
+
+**Decision: pin the relationship rather than unify the predicates.** The new
+`the_two_accept_predicates_agree_on_every_present_media_type` asserts agreement across all nine
+present types and asserts the absent-header divergence **in both directions**. Unifying them was the
+tempting alternative and is rejected: routing `AcdpJson` through `media_type_accepted` would start
+accepting untyped bodies on `/auth/*`, the most attacker-controllable surface in the service
+(`lib.rs:150`) — a wire change, dressed as a consistency cleanup. The second assertion exists
+specifically so that cleanup reddens.
+
+**Falsified, four ways, each naming its own mechanism.** Dropping the `+json` suffix rule splits the
+families on `application/acdp+json`; making `AcdpBytes` reject absent reddens the `/contexts`
+direction; remapping `MissingJsonContentType` off 415 splits them on `text/plain`; making `AcdpJson`
+infer an absent header reddens the `/auth/*` direction. That fourth one was necessary, not
+redundant: axum returns `MissingJsonContentType` for a *wrong* content type as well as an absent
+one, so falsification three tripped the present-type loop and **never reached** the final assertion.
+An earlier assertion masking a later one is exactly the failure `falsify each assertion, not each
+test` describes, and it was live here.
+
+**Status:** applied. Wire change recorded in `docs/UPGRADING.md` under 0.1.4, not `CHANGELOG.md`.
+
+## U-527 — the replayer understood the minority spelling
+
+**`extract()` gained Shape E, for `input.endpoint` + `input.body`.** Measured at pin `16211e6`: **6**
+of 144 fixtures use the `request.method`+`path` spelling Shape A reads; **65** use `input.endpoint`.
+Shape C handled exactly one endpoint literal (`GET /contexts/{ctx_id}`); everything else fell to the
+`"non-HTTP fixture (vectors / schema / informative)"` fallback.
+
+**The defect was the reason string, not the count.** Those fixtures declare a method, a path, a body
+and an expected status. Reporting them as "non-HTTP" told every reader the wrong thing to do about
+them, which is how six of issue #291's twelve stayed unread long enough to become an issue. A count
+says a fixture is unexercised; a reason says what would fix it.
+
+**Scope: fixtures with a CONCRETE body only — 12 of the 65.** The other 53 describe the request in
+prose (`body_summary: "Concrete payload omitted..."`). Supporting bodyless GETs would additionally
+admit `cur-001`, whose endpoint embeds `<previously-issued-cursor>` — an **angle**-bracket
+placeholder the template gate does not catch, since it looks for `{`/`}`. It would replay a literal
+placeholder in the query string and still receive its expected 400, passing for entirely the wrong
+reason. `cur-002` is fully concrete and would be a real win; it is deliberately left, because it and
+the `<...>` gate extension must land together. **Recorded rather than silently skipped.**
+
+**`pub-001` and `pub-011` are excluded by a named predicate, and this is not working the failure
+around.** `config()` sets `playground.enabled = true`, which by its own comment bypasses DID
+verification, so this harness cannot reach a signature-verification outcome at all — `pub-001`
+measurably replays to **200, publish accepted**, against an expected 400 `invalid_signature`, with a
+signature of 64 literal `A`s. Skipping them with the real reason is what every other arm of
+`extract()` does. Both stay in `UNEXERCISED_FIXTURES` pointing at U-528.
+
+**`pub-011` is the sharper half and the reason the exclusion is a predicate rather than a fix.** It
+expects the same code and *would have replayed green*: its `content_hash` is the literal placeholder
+`"sha256:<recomputes-correctly-against-this-body>"` and the publish arm pins no error code, so a
+schema rejection would have been scored as signature coverage. **Admitting it would have added a fake
+green, which is worse than the honest gap it replaced.** Per the assign it is U-528's; nothing here
+tries to fix it.
+
+**`MIN_REPLAYED_EXCHANGES` (a `>=` floor) became `REPLAYED_EXCHANGES_AT_PIN = 38` (an equality).** A
+floor cannot catch the failure it exists for: a dispatch bug that stops matching fixtures leaves the
+count *lower*, and any number above the floor satisfies it. **U-527 is its own proof** — `extract()`
+was silently declining 12 parseable fixtures and the floor read healthy the whole time. Falsified:
+dropping one fixture yields 37, which passes `>= 30` and fails the equality.
+
+**Status:** applied. 30 → 38 exchanges, 11 → 19 replayable fixtures, required-but-unexercised 12 → 8.
+No wire change, so nothing in `docs/UPGRADING.md`.
+
+## U-528 — the harness could not check a signature, and the tests could not tell
+
+**The replayer now pins the fixture producer's key, and the U-527 predicate is deleted, not narrowed.**
+`config()` sets `playground.enabled = true`, which skips DID verification, so every replayed signature
+reached the store unexamined — `pub-001` publishes a signature of 64 literal `A`s and was **accepted
+with a 200** against its expected 400 `invalid_signature`.
+
+**Turning the playground off was the obvious fix and is the wrong one.** It would require a live
+`did:web` resolver — DNS and TLS — in-process for every replayed publish. `playground.pinned_keys`
+already performs **real** `acdp::crypto::verify` Ed25519 verification of a `did:web` producer with no
+resolver; it is the mechanism `sig001_*`/`rev001_*` in this file have used all along. U-528 points the
+replayer at it.
+
+**`pinned_only = false`, deliberately** — that is the blast-radius decision. Strict mode would reject
+every other agent with `key_not_authorized`, rewriting the verdict of fixtures that have nothing to do
+with signatures. And `replay_harness()` is kept separate from `harness()` (eight other callers) and
+from `shape_d_config()`, because `idem_playground_branch_honors_supports_idempotency_key_gate` depends
+on `pinned_keys` being **empty** as its precondition, and `replay_shape_d` panics if a seeded publish
+fails to return 200.
+
+**The second fix, which the harness change alone would have hidden.** The publish arm pinned no error
+code, so a publish fixture asserted only *"some 400"*. `pub-011` is the proof: with the key un-pinned
+it receives `schema_violation: content_hash digest must be 64 lowercase hex chars, got:
+<recomputes-correctly-against-this-body>` and **passes anyway**, scored as `invalid_signature`
+coverage. Fixing only the harness leaves that intact. Codes are now pinned for publishes too.
+
+**Pinning the codes exposed five wrong-reason passes, four of them mine.** `did-ssrf-001..004` — which
+U-527 lit up — return `schema_violation` (their bodies omit the required `version` member) and never
+reach DID resolution at all. And `pub-002` moved *because of this unit*: unpinned it returned
+`hash_mismatch` matching its fixture, but the pinned path verifies the signature before the hash gate,
+and its body fails both.
+
+**Recorded in `CODE_DIVERGENCES`, not skipped and not excused.** Each entry names the code this
+registry actually returns and why; the replayer asserts that code, so any of them changing in either
+direction fails the build. Skipping them would have removed the coverage; ignoring them would have
+kept the wrong-reason pass. `code_divergences_are_real_live_and_still_divergent` additionally fails if
+an entry's fixture stops replaying or if its recorded code becomes the expected one — **an unexercised
+excuse reads exactly like a live one.**
+
+**`FIXTURE_PRODUCER_PUBLIC_KEY_B64` is checked against the spec.** A rotated keypair would verify every
+signature fixture against the wrong key and **still go green**, because those fixtures expect a
+rejection — a wrong key produces green exactly where a right key does.
+`fixture_producer_key_still_matches_the_spec` closes that.
+
+**Status:** applied. 38 → 40 exchanges, 19 → 21 replayable, required-but-unexercised **8 → 6**
+(`pub-001`, `pub-011`). No wire change.
+
+## U-531 — the gate knew one notation, and the sweep found a fourth wrong-reason pass
+
+**The template gate now covers both placeholder notations.** It tested `path.contains('{')` and
+`'}'` only. The spec also writes placeholders with **angle** brackets — `cur-001`'s endpoint carries
+`cursor=<previously-issued-cursor>` — and a brace-only gate waves those straight through. The
+consequence is not a crash but a **pass**: the literal text is a perfectly good malformed cursor, so
+the registry returns the 400 the fixture expects and the fixture is scored green having tested nothing
+about expired cursors.
+
+**Its test now varies the spelling** — five placeholder paths across both notations and both path and
+query position, plus a placeholder-free complement so the gate cannot satisfy everything by rejecting
+everything. A count-based assertion ("N fixtures are gated") would have passed throughout the entire
+blind period, which is how the gate arrived here half-blind.
+
+**`cur-002` admitted, `cur-001` excluded on its own merits.** U-527 required a concrete body for every
+method, which excluded `cur-002` (a fully concrete search request) purely to avoid admitting
+`cur-001`. With the gate fixed, that blanket exclusion is no longer load-bearing, so Shape E accepts a
+bodyless `GET`/`HEAD`. `cur-002` replays **and is checked** — it returns its expected `invalid_cursor`.
+`cur-001` is skipped by the gate with a written reason.
+
+**The sweep found a fourth instance, older than any of them.** With `CODE_DIVERGENCES` in place the
+question was one grep: exactly one `want_error_code: None` remained, in **Shape A's publish arm**, and
+`pub-008` was passing behind it. That fixture exists to prove a non-`did:web` `agent_id` is rejected;
+its `signature.value` is 96 base64 chars where ed25519 requires 88, so signature-shape validation
+rejects it first and the `agent_id` rule is never reached. It had been replaying green since long
+before U-527.
+
+**A pre-existing assertion was deliberately inverted.**
+`four_pre_existing_exchanges_still_use_original_shapes` asserted
+`want_error_code.is_none()` — *"Shape A's publish branch never pins an error code, this must still
+hold"*. That invariant is what let `pub-008` hide. The ordering argument behind it was never wrong; it
+simply does not justify asserting **nothing**. Where this registry genuinely orders validation
+differently, `CODE_DIVERGENCES` records the code it does return, which is a stronger statement than
+silence.
+
+**The negative result is now asserted, not re-derivable.**
+`every_replayed_fixture_pins_a_code_when_it_names_one` makes the rule structural: if a fixture supplies
+an `error_code`, the exchange built from it must pin a code — its own, or a recorded divergence. No
+future shape can opt out by leaving it `None`. 15 replayed fixtures name a code at the pin, and the
+bound is asserted so an empty scan cannot read as clean. **My first guess at that bound was 14 and the
+known-positive check caught it** — the guard's first act was to correct its author.
+
+**Status:** applied. 40 → 41 exchanges, 21 → 22 replayable. **`required-but-unexercised` does not
+move: it stays 6** — `cur-001`/`cur-002` are not profile-required. No wire change.
