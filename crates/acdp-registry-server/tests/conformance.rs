@@ -13386,6 +13386,50 @@ async fn no_unexercised_fixture_is_actually_replayed() {
 /// the mutation that motivated the whole entry.
 const LOG_HANDLER_GUARD_COUNT: usize = 11;
 
+/// ## U-506's survey of every other family, and what it found
+///
+/// `log` was found by a mutation. The same question was then asked of every other
+/// family carrying a `Direct(...)` or `PARTIAL_DIRECT` entry — **do the named
+/// tests execute the path the entry credits them with?** — using a structural
+/// discriminator derived from `log`'s own signature: a test that reads fixture
+/// `vectors` and recomputes through a library, without ever building a router,
+/// cannot be holding a handler.
+///
+/// 19 `Direct` blocks and 3 `PARTIAL_DIRECT` entries were classified (the parser
+/// was checked against that known count before its output was trusted — an
+/// extraction expression that silently matches one family looks exactly like a
+/// clean bill of health). Nine families' named tests never touch the HTTP
+/// surface. **Eight of the nine are correct anyway**, for three different
+/// reasons, and the reasons matter more than the count:
+///
+/// * `can`, `lin`, `caps` — pure-vector families. Canonicalisation, lineage
+///   derivation and capabilities validation ARE recomputations; there is no
+///   registry path to hold, so a golden test is the complete and correct test.
+/// * `rcpt`, `lhr` — word-for-word the same "The producer half IS covered and
+///   stays pinned" construction `log` used, and **sound**. Measured, not read: a
+///   `panic!` planted in `receipt.rs`'s `build_signer` reddens
+///   `rcpt001_registry_receipt_golden_recomputed_and_remintable` and
+///   `lhr001_lineage_head_receipt_golden_recomputed_and_remintable`. Those two
+///   genuinely traverse this registry's own producer code. `log`'s two goldens
+///   reach only `acdp-crypto`'s merkle functions, which is the whole difference.
+/// * `wit`, `dk`, `err` — their registry-side path is held in a THIRD place
+///   neither this file nor `http_integration.rs` can see. A `panic!` in
+///   `witness.rs`'s `verify_cosignature_against_own_log` leaves both test
+///   binaries entirely green (73 pass, 0 http failures) and reddens five
+///   `witness::tests::*` unit tests inside the core crate. So the table credits
+///   no coverage that does not exist; it simply never claimed to enumerate
+///   in-crate unit tests, and this comment is where a reader learns that.
+///
+/// So **`log` was the only family whose table asserted something its named tests
+/// did not hold**, and that is a measured claim about the other 21 rather than an
+/// assumption that the first defect found was the only one.
+///
+/// The bound, stated rather than implied: this survey is a structural
+/// discriminator plus three targeted probes. It is **not** a per-family mutation
+/// sweep — that is the mutation ratchet's job (#216, U-504) and its scope is
+/// recorded in `docs/ENGINEERING-LOG.md`. A family whose named tests DO build a
+/// router could still assert the wrong thing about it, and nothing here would
+/// notice.
 /// Tests in `http_integration.rs` that this file cites, by what they hold.
 ///
 /// The first group is U-506's finding. The rest were already cited in this
