@@ -23,15 +23,20 @@
 # unless auth.allow_ephemeral_secret = true:
 #   echo "ACDP_REGISTRY_JWT_SECRET=$(openssl rand -base64 32)" >> docker/.env
 #
-# CAVEAT if you instead uncomment `jwt_secret` in config.docker.toml: compose
-# renders the variable below as SET-TO-EMPTY, not absent, and an env var beats
-# the TOML file in the precedence chain — so the value you put in the file is
-# discarded unless you also set ACDP_REGISTRY_JWT_SECRET here. With auth off
-# that is harmless. With auth on it fails loudly, EXCEPT when
-# allow_ephemeral_secret = true, where it downgrades to a process-lifetime
-# key after emitting a single startup `warn!` naming the hazard (main.rs) —
-# quiet, not silent, and easy to miss in a log tail. Prefer the .env line
-# above to editing the TOML.
+# FIXED IN #271 — this paragraph used to be a caveat and is kept as a note
+# because the old behaviour is worth recognising if you meet it on an older
+# image. It read: compose renders the variable below as SET-TO-EMPTY rather than
+# absent, and an env var beats the TOML file, so a `jwt_secret` you put in
+# config.docker.toml was silently discarded.
+#
+# That is no longer true. The registry now treats an EMPTY `ACDP_REGISTRY_*`
+# variable as absent rather than as an override, so `${VAR:-}` passthroughs like
+# the two below no longer clobber your config file, and uncommenting
+# `jwt_secret` in config.docker.toml does what it looks like it does. Any empty
+# variable that was ignored is named in a startup `warn!`.
+#
+# Either mechanism still works, and the .env line above is still the more
+# convenient one for a secret you do not want in a file that gets committed.
 
 services:
   postgres:
@@ -64,9 +69,25 @@ services:
       # Deliberately EMPTY, not a placeholder. On the HS256 default this
       # stack uses, a non-empty value IS validated here — the check does not
       # depend on auth being enabled — so a placeholder would stop the
-      # quickstart booting. Set ACDP_REGISTRY_JWT_SECRET to override, and see
-      # the header note before putting a secret in config.docker.toml instead.
+      # quickstart booting. Set ACDP_REGISTRY_JWT_SECRET to override.
+      #
+      # #271 RETIRED the caveat that used to sit here. An empty value no longer
+      # overrides: the registry treats an empty `ACDP_REGISTRY_*` variable as
+      # ABSENT, so putting `jwt_secret` in config.docker.toml now works as
+      # written and this line no longer discards it. The startup log names any
+      # empty variable it ignored.
       ACDP_REGISTRY_AUTH__JWT_SECRET: ${ACDP_REGISTRY_JWT_SECRET:-}
+      # #271: an env path to enable auth, which this recipe previously lacked --
+      # the header told you to "set a real secret before enabling auth" and then
+      # gave you no way to enable it, so you had to edit the TOML and hit the
+      # precedence caveat below.
+      #
+      # The `:-` (EMPTY default) form is load-bearing and `:-false` would be a
+      # security bug. Verified with `docker compose config`: `${VAR:-false}`
+      # renders the literal string "false", which is NON-empty and therefore
+      # still an override -- it would force `auth.enabled = true` in your TOML
+      # back to false. `${VAR:-}` renders "", which the registry now ignores.
+      ACDP_REGISTRY_AUTH__ENABLED: ${ACDP_REGISTRY_AUTH_ENABLED:-}
       RUST_LOG: info,acdp=info,acdp_registry=info
     ports:
       - "8443:8443"

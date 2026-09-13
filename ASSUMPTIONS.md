@@ -2827,6 +2827,49 @@ than assumed.
 - **Blast radius if wrong:** one file moves. No behaviour depends on which file the steps live in.
 - **Status:** UNCONFIRMED — cheap to reverse; recorded so the choice is visible rather than assumed.
 
+## U-511 — #271: an empty env override is treated as absent (2026-09-13, lane-1)
+
+- **Assumption:** this is a correction of wrong semantics, not a breaking change — so it is
+  decided here rather than escalated as `blocked`.
+- **Evidence, measured before deciding rather than argued from intuition.** What an empty override
+  did *today* is not uniform; it depends on the field's type, and four of the five arms are a
+  refusal to boot or a garbage value that no deployment can have depended on:
+
+  | field type | behaviour with an empty env override, BEFORE this change |
+  |---|---|
+  | number | hard ERROR — `invalid type: string "", expected an integer` |
+  | bool | hard ERROR — `expected a boolean` |
+  | `Vec`, not a list-parse key | hard ERROR — `expected a sequence` |
+  | `Vec`, list-parse key | `[""]` — a one-element list of nothing |
+  | `String` | overrode with `""` |
+
+  Only the `String` arm produced something an operator could lean on. No document in this repo
+  promises that an empty env var clears a TOML value — the sole mention anywhere is U-509's own log
+  entry describing it as a trap. `docker/config.docker.toml` keeps `jwt_secret` commented out, so
+  the shipped recipe's behaviour is unchanged either way.
+- **Why it is still made loud:** the one arm that genuinely changes is a `String` override, and a
+  silent change of meaning is what turns into a support ticket. `empty_env_overrides_ignored()`
+  plus a startup `warn!` in `main.rs` names every variable that was dropped.
+- **Status:** CONFIRMED as a correction. Decided under the autonomy ladder, not escalated, because
+  the enumeration shows the old behaviour was unusable in four of five arms and undocumented in the
+  fifth.
+
+- **Assumption (WRONG as first written, caught during implementation):** that the reporting helper
+  and the loader could each decide "empty" independently.
+- **What is actually true:** the first draft used `v.trim().is_empty()` in the helper and
+  `v.is_empty()` in `load`. A whitespace-only value would then be **applied by `load` and reported
+  as ignored by the helper** — the warning would have been misinformation. Both now use strict
+  `is_empty()`, and `the_ignored_override_report_matches_what_load_actually_drops` asserts the two
+  agree on exactly that case. The JSON escape hatches keep `trim()` deliberately, because
+  whitespace is never valid JSON; that divergence is documented at its site.
+- **Status:** CONFIRMED by falsification — reverting the helper to `trim()` reddens exactly one test.
+
+- **UNCONFIRMED — an upgrade-ordering hazard, stated rather than assumed away.** The recipe now
+  passes `ACDP_REGISTRY_AUTH__ENABLED: ${...:-}`, which renders as an empty string. A registry
+  binary from *before* this change rejects an empty boolean with a hard error, so pulling the new
+  `docker-compose.yml` against an older image breaks the boot. Called out in README's Configuration
+  section. Not mitigated in code: the alternative is omitting the passthrough, which leaves the gap
+  #271 was filed about.
 ### 9. `mutants.yml` derives the spec pin from `ci.yml` instead of restating it
 **Status: CONFIRMED (2026-09-13)** — decided and settled in the same pass, because the evidence
 that forced it was a bot PR already in flight rather than a judgement call.

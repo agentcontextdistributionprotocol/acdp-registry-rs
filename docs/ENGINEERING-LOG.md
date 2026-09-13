@@ -4964,3 +4964,67 @@ operator who set `auth.enabled = true` in the file would have it silently forced
 That is the same precedence trap the header already documents for `jwt_secret`. Logged as
 `UNCONFIRMED` in `ASSUMPTIONS.md` for a unit that can design the passthrough safely, rather than
 taken here to make a CI step convenient.
+
+## U-511 — #271: an empty env override is treated as absent
+
+Two behaviours composed into a footgun: an env var beats the TOML file, and `docker compose`
+renders an *unset* variable as **set-to-empty** rather than absent. So every `${VAR:-}` passthrough
+in a compose `environment:` block silently replaced whatever the operator wrote in their config
+file. The shipped recipe carried **two separate caveats about this one rule**, which is the signal
+that the rule was the defect rather than its documentation.
+
+### The measurement that decided "correction, not breaking change"
+
+The unit could have gone either way, and the deciding question — *could anyone be relying on the
+old behaviour?* — turns entirely on what empty did today. It is not uniform:
+
+| field type | empty override, BEFORE |
+|---|---|
+| number | hard ERROR (`invalid type: string ""`) |
+| bool | hard ERROR |
+| `Vec`, not a list-parse key | hard ERROR (`expected a sequence`) |
+| `Vec`, list-parse key | `[""]` — a one-element list of nothing |
+| `String` | overrode with `""` |
+
+Four of five arms are a refusal to boot or a value nobody wants, so no deployment can have depended
+on them. Only the `String` arm was leanable-on, and nothing in the repo documents it. Treating
+empty as absent therefore **fixes three hard errors and one garbage value** and changes one arm
+from "override with empty" to "fall through" — decided under the autonomy ladder rather than
+escalated.
+
+It is still made **loud**: `RegistryConfig::empty_env_overrides_ignored()` plus a startup `warn!`
+names every dropped variable. A behaviour change nobody can see is the part that becomes a support
+ticket.
+
+### `${VAR:-false}` is not the safe form, and that is the counter-intuitive part
+
+The obvious way to give the recipe an env path to enable auth is
+`ACDP_REGISTRY_AUTH__ENABLED: ${VAR:-false}`. **That is still a security regression after this
+change.** Verified with `docker compose config` rather than reasoned about: `${VAR:-false}` renders
+the literal string `"false"`, which is *non-empty*, so it is a real override and would force an
+operator's `auth.enabled = true` back to `false`. Only `${VAR:-}` — which renders `""` — becomes
+safe. The recipe uses that form, and both the inline caveat and the header paragraph it replaced
+now say what is true instead of warning about a trap that no longer exists.
+
+### The test-fixture defect the falsification pass exposed
+
+Falsifying the JSON-hatch filter reddened **four** tests, only one of which touched the broken
+code. The other three inherited a leaked `ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON=""` — the failing
+test panicked before reaching its own cleanup, and `cargo test` runs tests as threads sharing one
+environment. A falsification run that names the wrong culprit is worse than no falsification,
+because it sends the next reader to the wrong file.
+
+Fixed with an `EnvGuard` that holds the lock and restores every variable it touched **on drop,
+including on panic**. Re-running the same falsification now reddens exactly one test.
+
+Two comments were corrected as collateral, both of which had become false: the existing env test's
+`SAFETY` note claimed "no other test in this crate reads or writes process env" — already false
+before this unit, since that same test does two separate env round-trips — and its inner note about
+"preserving the only-one-test invariant". The invariant is now a lock, not an assurance.
+
+### Upgrade ordering, stated because it is a real hazard
+
+The recipe now passes an empty `ACDP_REGISTRY_AUTH__ENABLED`. A binary from before this change
+rejects an empty boolean outright, so pulling the new `docker-compose.yml` against an older image
+breaks the boot. Called out in README's Configuration section. Not mitigated in code — the
+alternative is omitting the passthrough, which leaves the gap #271 was filed about.
