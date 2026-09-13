@@ -112,12 +112,24 @@ fn rustls_is_a_normal_dependency() {
 /// The cert is generated here rather than committed: `.gitignore:39-43`
 /// refuses certificate material, and a checked-in PEM would expire.
 ///
-/// **Compiled out under `storage-pg`** rather than skipped at runtime. That
-/// build needs a live database to get past storage init, and CI's `postgres`
-/// job runs only `--test pg_integration`, so this test would never execute
-/// there anyway. A `#[cfg]` leaves no skip branch that could quietly swallow a
-/// real failure; a runtime `return` would.
-#[cfg(not(feature = "storage-pg"))]
+/// **Compiled only for the backends this test can actually drive**, rather
+/// than skipped at runtime. A `#[cfg]` leaves no skip branch that could
+/// quietly swallow a real failure; a runtime `return` would.
+///
+/// The excluded builds, and why each is excluded rather than fixed:
+/// - `storage-pg` needs a live database to get past storage init, and CI's
+///   `postgres` job runs only `--test pg_integration`, so this would never
+///   execute there.
+/// - **no storage backend at all** (`--no-default-features`, a real CI
+///   configuration) exits 1 at startup with `no storage backend feature
+///   enabled` before reaching any TLS work — measured in U-532.
+///
+/// Stated as a positive list on purpose. The first version said
+/// `not(feature = "storage-pg")`, which silently included the no-backend
+/// build and failed `clippy (no storage backend)` with `cannot find value
+/// backend` — an exclusion list is only correct for the variants its author
+/// happened to enumerate.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn tls_startup_installs_a_provider_and_serves() {
     use std::io::Write as _;
