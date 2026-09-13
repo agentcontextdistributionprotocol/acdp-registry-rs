@@ -1,0 +1,32 @@
+# CI-only overlay stacked on top of `docker-compose.yml` + `compose.ci.yml`.
+#
+# Enables auth so CI reaches `validate_config`'s auth-gated branch
+# (`crates/acdp-registry-server/src/main.rs:129-142`). The shipped recipe runs
+# `auth.enabled = false` (`config.docker.toml`), so without this overlay that
+# branch, and the HS256 empty-secret refusal inside it, are never executed by any
+# check in this repo's CI.
+#
+# ── Why this is an overlay and NOT a passthrough added to docker-compose.yml ──
+#
+# The obvious "fix" is to add `ACDP_REGISTRY_AUTH__ENABLED: ${VAR:-false}` to the
+# recipe's own environment block. That would be a security regression, for the
+# reason the recipe's own header already documents about `jwt_secret`: compose
+# renders an unset variable as SET-TO-EMPTY rather than absent, and an env var
+# beats the TOML file in the precedence chain. An operator who set
+# `auth.enabled = true` in `config.docker.toml` would have it silently forced
+# back to `false` by the default. Turning someone's auth off to make a CI step
+# convenient is not a trade worth making.
+#
+# So the shipped recipe is left exactly as it is, and this overlay is honest
+# about what it is: an ADDITIONAL configuration exercised on top of the recipe,
+# not the recipe itself. The `--check` run without this overlay is the one that
+# speaks for the documented quickstart.
+#
+# The gap that remains -- the recipe documents "set a real secret before enabling
+# auth" but offers no env path to actually enable it, so an operator must edit
+# the TOML and hit the precedence caveat -- is reported rather than papered over
+# here. See ASSUMPTIONS.md, U-509.
+services:
+  registry:
+    environment:
+      ACDP_REGISTRY_AUTH__ENABLED: "true"
