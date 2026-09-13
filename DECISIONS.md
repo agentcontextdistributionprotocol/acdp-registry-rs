@@ -3247,3 +3247,46 @@ An earlier assertion masking a later one is exactly the failure `falsify each as
 test` describes, and it was live here.
 
 **Status:** applied. Wire change recorded in `docs/UPGRADING.md` under 0.1.4, not `CHANGELOG.md`.
+
+## U-527 — the replayer understood the minority spelling
+
+**`extract()` gained Shape E, for `input.endpoint` + `input.body`.** Measured at pin `16211e6`: **6**
+of 144 fixtures use the `request.method`+`path` spelling Shape A reads; **65** use `input.endpoint`.
+Shape C handled exactly one endpoint literal (`GET /contexts/{ctx_id}`); everything else fell to the
+`"non-HTTP fixture (vectors / schema / informative)"` fallback.
+
+**The defect was the reason string, not the count.** Those fixtures declare a method, a path, a body
+and an expected status. Reporting them as "non-HTTP" told every reader the wrong thing to do about
+them, which is how six of issue #291's twelve stayed unread long enough to become an issue. A count
+says a fixture is unexercised; a reason says what would fix it.
+
+**Scope: fixtures with a CONCRETE body only — 12 of the 65.** The other 53 describe the request in
+prose (`body_summary: "Concrete payload omitted..."`). Supporting bodyless GETs would additionally
+admit `cur-001`, whose endpoint embeds `<previously-issued-cursor>` — an **angle**-bracket
+placeholder the template gate does not catch, since it looks for `{`/`}`. It would replay a literal
+placeholder in the query string and still receive its expected 400, passing for entirely the wrong
+reason. `cur-002` is fully concrete and would be a real win; it is deliberately left, because it and
+the `<...>` gate extension must land together. **Recorded rather than silently skipped.**
+
+**`pub-001` and `pub-011` are excluded by a named predicate, and this is not working the failure
+around.** `config()` sets `playground.enabled = true`, which by its own comment bypasses DID
+verification, so this harness cannot reach a signature-verification outcome at all — `pub-001`
+measurably replays to **200, publish accepted**, against an expected 400 `invalid_signature`, with a
+signature of 64 literal `A`s. Skipping them with the real reason is what every other arm of
+`extract()` does. Both stay in `UNEXERCISED_FIXTURES` pointing at U-528.
+
+**`pub-011` is the sharper half and the reason the exclusion is a predicate rather than a fix.** It
+expects the same code and *would have replayed green*: its `content_hash` is the literal placeholder
+`"sha256:<recomputes-correctly-against-this-body>"` and the publish arm pins no error code, so a
+schema rejection would have been scored as signature coverage. **Admitting it would have added a fake
+green, which is worse than the honest gap it replaced.** Per the assign it is U-528's; nothing here
+tries to fix it.
+
+**`MIN_REPLAYED_EXCHANGES` (a `>=` floor) became `REPLAYED_EXCHANGES_AT_PIN = 38` (an equality).** A
+floor cannot catch the failure it exists for: a dispatch bug that stops matching fixtures leaves the
+count *lower*, and any number above the floor satisfies it. **U-527 is its own proof** — `extract()`
+was silently declining 12 parseable fixtures and the floor read healthy the whole time. Falsified:
+dropping one fixture yields 37, which passes `>= 30` and fails the equality.
+
+**Status:** applied. 30 → 38 exchanges, 11 → 19 replayable fixtures, required-but-unexercised 12 → 8.
+No wire change, so nothing in `docs/UPGRADING.md`.
