@@ -1,0 +1,294 @@
+# The mutation oracle for #216 (unit U-502).
+#
+# WHY THIS EXISTS. `tests/conformance.rs` guards its direct-coverage claims two
+# ways, and neither can prove a test asserts anything:
+#
+#   * two substring guards over `include_str!` -- `assert!(true)`, or the letters
+#     of `assert` in a comment, satisfy them; and
+#   * `DIRECT_FNS`, added by #249, which makes deleting or renaming a registered
+#     test a COMPILE ERROR.
+#
+# Both are PRESENCE oracles. A test that exists, compiles, runs, and asserts
+# nothing passes both. Only breaking the code and watching the test go red
+# distinguishes that case, and that is what this job does.
+#
+# NOT ON pull_request, DELIBERATELY. #216 lists blocking PRs on a mutation run as
+# a non-goal, and this is far too slow for it. It is a scheduled ratchet.
+name: mutants
+
+on:
+  schedule:
+    # 05:17 UTC on Mondays. Off the hour on purpose: GitHub's scheduler queues
+    # heavily at :00 and a delayed weekly run is a run nobody reads.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: ""
+
+  # ------------------------------------------------------------------------
+  # THE RATCHET. These two numbers ARE the baseline -- #216 asks for a number in
+  # the repo, not a description, and this is it.
+  #
+  # They live in the same file as the check that reads them so the two cannot
+  # drift apart, and raising either is a one-line diff that shows up in review.
+  # That visibility is the whole mechanism: a budget that can be raised silently
+  # is not a ratchet.
+  # ------------------------------------------------------------------------
+
+  # Exact size of the mutation scope defined by .cargo/mutants.toml, measured at
+  # the sha named in docs/ENGINEERING-LOG.md. Checked as an EQUALITY, never a
+  # floor: if the scope silently shrinks -- a glob edited, a scoped file renamed
+  # or deleted -- the survivor count falls with it, and a `<=` budget would read
+  # that as an improvement. This assertion is what makes the budget below mean
+  # anything.
+  MUTANTS_EXPECTED_SCOPE: "74"
+
+  # Surviving mutants at that sha. Each is enumerated with its own written reason in
+  # docs/ENGINEERING-LOG.md; this number is the machine-readable half of that list.
+  # It ratchets DOWN as survivors are killed and must never be raised without a
+  # reason recorded in the same commit.
+  #
+  # The two, so a reader knows what the 2 is made of and does not assume it is
+  # slack:
+  #   handlers/log.rs:117:19  `!= -> ==` in requester_can_retrieve -- A REAL
+  #     UNASSERTED BRANCH, not an accepted one. Inverting the tenant gate denies a
+  #     matching tenant AND discloses to a mismatched one. No test reaches it: every
+  #     /log/proof test fetches without an X-Tenant-Id, so requested_tenant is
+  #     always None. The killing test belongs in http_integration.rs, outside this
+  #     unit's claim. BUDGET GOES TO 1 WHEN IT LANDS.
+  #   handlers/log.rs:131:18  `== -> !=` in root_for -- accepted, equivalent mutant.
+  #     It guards only `log.cache_root(...)`; the returned root is identical either
+  #     way and append-only makes (size -> root) immutable, so only *which* sizes
+  #     get cached changes. Unkillable by any assertion over responses.
+  MUTANTS_SURVIVOR_BUDGET: "2"
+
+jobs:
+  mutants:
+    name: mutation oracle (scoped ratchet)
+    runs-on: ubuntu-latest
+    # Measured locally at ~7 min wall-clock for this scope with -j4.
+    # The cap is generous against a slower runner but finite, so a hung run fails
+    # instead of burning the job limit.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # THE SPEC IS NOT OPTIONAL HERE, and this is the step most likely to be
+      # mistaken for boilerplate. #216 is titled "mutation oracle for
+      # DIRECT-COVERAGE tests". Without ACDP_SPEC_DIR, 42 of the 70 conformance
+      # tests -- essentially every `Direct`-registered family test the coverage
+      # tables name -- return before asserting anything:
+      #
+      #     let Some(fixtures) = spec_fixtures() else { eprintln!("...skipping..."); return; };
+      #
+      # The suite still reports "69 passed" either way (measured: 0.09s skipping
+      # vs 0.36s doing the work), so the omission is invisible in a green log. An
+      # oracle for those tests that never runs them would be an unverified
+      # artefact wearing a number.
+      #
+      # Our own checkout MUST stay ahead of checkout-spec -- actions/checkout
+      # cleans its destination, so running it second wipes the spec tree. Same
+      # ordering and the same pinned ref as ci.yml's conformance job; a spec-repo
+      # push cannot change this job's result without a commit here.
+      - name: Check out the ACDP spec
+        id: spec
+        uses: agentcontextdistributionprotocol/acdp-ci/actions/checkout-spec@015910153b61c32abbe018afe85d44868897bf3b # v1
+        with:
+          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
+      - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        with:
+          tool: cargo-mutants
+
+      # No --file, no --test-workspace, no scope flags: every one of those lives
+      # in .cargo/mutants.toml, which cargo-mutants reads automatically. That is
+      # deliberate -- `test_workspace` is mandatory for the verdicts to mean
+      # anything (DECISIONS.md #17), and a setting that cannot be omitted from the
+      # command line cannot be omitted by accident. This is the same command a
+      # developer runs locally, which is the point.
+      #
+      # `|| true` because a surviving mutant makes cargo-mutants exit non-zero,
+      # and survivors are BUDGETED here rather than banned. The budget check below
+      # is what decides pass or fail -- and it fails if this step produced no
+      # readable report at all, so a crashed run cannot slip through as success.
+      - name: cargo mutants (scope and test command come from .cargo/mutants.toml)
+        env:
+          # Inherited by the `cargo test` that cargo-mutants runs for each mutant,
+          # which is how the 42 fixture-replay tests above actually execute.
+          # REQUIRE mode on purpose: it turns a broken spec checkout into a hard
+          # failure instead of 42 tests silently skipping and the run still
+          # reporting a number.
+          ACDP_SPEC_DIR: ${{ steps.spec.outputs.path }}
+          ACDP_REQUIRE_CONFORMANCE: "1"
+        run: cargo mutants -j2 || true
+
+      # THE RATCHET. Four assertions, each able to fail on its own, and the
+      # script ACCUMULATES rather than exiting at the first failure -- an early
+      # `exit 1` would mask every assertion after it, so a run that breaks three
+      # things would only ever report one of them.
+      #
+      # Falsified before it shipped, against fabricated reports, one fixture per
+      # assertion plus one that trips three at once. The falsification extracts
+      # THIS block out of THIS file and runs it, so the text proved to fail is
+      # the text that runs here -- not a copy that can drift.
+      # AC8 -- THE HARNESS CHECK, and it exists because this unit shipped a wrong
+      # baseline once. `cargo-mutants` does not copy `.git` by default;
+      # `conformance_gate.rs`'s `no_tracked_file_contains_a_conflict_marker` shells
+      # out to `git ls-files` and panics in the copy; `cargo test` stops at the
+      # first failing binary, and that gate runs before `http_integration`. Result:
+      # 41 of 48 "caught" verdicts were scored by that panic, not by any mutation.
+      # `copy_vcs = true` fixes that INSTANCE. This step is what notices the CLASS.
+      #
+      # Why cargo-mutants cannot notice it for us, measured rather than assumed:
+      # its unmutated baseline runs PACKAGE-scoped even under `test_workspace`
+      # (baseline.log says `--package=acdp-registry-core`, the mutant logs say
+      # `--workspace`). So the baseline never even builds the test binary that was
+      # failing, and a green baseline is compatible with every verdict being noise.
+      #
+      # THE SIGNAL. A harness-wide failure kills everything identically, so one
+      # test name becomes the SOLE failing test for almost every mutant. A genuine
+      # suite does not concentrate like that. Both numbers measured on this repo:
+      #
+      #   broken run (no copy_vcs): sole killer `no_tracked_file_contains_a_conflict_marker`
+      #                             for 41 of 48 caught  = 85%
+      #   healthy run (copy_vcs):   largest sole killer      3 of 48 caught  = ~6%,
+      #                             and most mutants die to 2-10 tests at once
+      #
+      # The 50% threshold sits in a gap an order of magnitude wide, so it is not a
+      # tuned number. It is deliberately a CEILING that fails, not a warning.
+      - name: harness check (AC8) — no verdict may rest on an unrelated failure
+        run: |
+          set -uo pipefail
+          caught=$(wc -l < mutants.out/caught.txt | tr -d ' ')
+          if [ "$caught" -eq 0 ]; then
+            echo "no caught mutants; nothing to concentrate. skipping."
+            exit 0
+          fi
+          # For each mutant, the set of tests that failed. Only mutants killed by
+          # exactly ONE test can indicate concentration; a mutant killed by several
+          # is evidence of a real behavioural kill, not a harness-wide panic.
+          for f in mutants.out/log/*.log; do
+            case "$(basename "$f")" in baseline.log) continue ;; esac
+            names=$(grep -aoE '^test [a-z0-9_:]+ \.\.\. FAILED' "$f" \
+                      | sed 's/^test //; s/ \.\.\. FAILED$//' | sort -u)
+            [ -z "$names" ] && continue
+            [ "$(printf '%s\n' "$names" | grep -c .)" -eq 1 ] && printf '%s\n' "$names"
+          done | sort | uniq -c | sort -rn > /tmp/sole_killers.txt || true
+          echo "--- sole-killer concentration (count, test) ---"
+          head -10 /tmp/sole_killers.txt || true
+          if [ ! -s /tmp/sole_killers.txt ]; then
+            echo "every caught mutant died to more than one test; no concentration."
+            exit 0
+          fi
+          top_n=$(awk 'NR==1{print $1}' /tmp/sole_killers.txt)
+          top_t=$(awk 'NR==1{$1="";sub(/^ /,"");print}' /tmp/sole_killers.txt)
+          echo "caught=$caught  largest sole killer=$top_n ($top_t)"
+          # Integer comparison, no floats: fail when top_n > caught/2.
+          if [ "$((top_n * 2))" -gt "$caught" ]; then
+            echo "::error::'$top_t' is the SOLE failing test for $top_n of $caught caught" \
+                 "mutants. That is the signature of a failure affecting every mutant" \
+                 "equally -- a panic in the build copy, a missing fixture, an" \
+                 "environment difference -- rather than of mutations being detected." \
+                 "These verdicts are NOT trustworthy. Reproduce with" \
+                 "\`cargo mutants\` locally and read which test failed in" \
+                 "mutants.out/log/, do not raise the budget."
+            exit 1
+          fi
+          echo "harness check OK"
+
+      - name: ratchet
+        run: |
+          set -uo pipefail
+          OUT=mutants.out
+          json="$OUT/outcomes.json"
+
+          # (1) No report, or an unreadable one, must FAIL -- never read as "zero
+          #     survivors". A broken run reporting success is the exact failure
+          #     mode this whole unit exists to remove. ci.yml's #[ignore] step
+          #     takes the same posture for the same reason.
+          if [ ! -f "$json" ]; then
+            echo "::error::$json does not exist. The mutation run produced no report," \
+                 "so this check cannot conclude anything and fails rather than passing."
+            exit 1
+          fi
+          if ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$json" 2>/dev/null; then
+            echo "::error::$json is not valid JSON. Refusing to infer a survivor count" \
+                 "from an unparseable report."
+            exit 1
+          fi
+
+          # One python3 -c, no heredoc: a heredoc inside a YAML block scalar
+          # needs its terminator at column 0, which YAML indentation makes
+          # impossible. The assert makes a changed report format an error rather
+          # than a silent zero.
+          vals="$(python3 -c "import json;d=json.load(open('$json'));k=('total_mutants','missed','caught','timeout','unviable');assert all(isinstance(d.get(x),int) for x in k),'missing/non-integer counts';print(*(d[x] for x in k))" 2>&1)"
+          prc=$?
+          if [ "$prc" -ne 0 ]; then
+            echo "::error::outcomes.json parsed as JSON but lacks the integer counts" \
+                 "this check reads (total_mutants/missed/caught/timeout/unviable):" \
+                 "$vals. The report format changed; fix this check, do not weaken it."
+            exit 1
+          fi
+          # The word splitting below is the point: $vals is five integers on one
+          # line and this is how they become $1..$5. The assert above already
+          # proved they are integers, so there is nothing to glob or re-split.
+          # shellcheck disable=SC2086
+          set -- $vals
+          total=$1 missed=$2 caught=$3 timeout=$4 unviable=$5
+
+          echo "scope=$total caught=$caught missed=$missed timeout=$timeout unviable=$unviable"
+          echo "expected scope=$MUTANTS_EXPECTED_SCOPE  survivor budget=$MUTANTS_SURVIVOR_BUDGET"
+
+          rc=0
+
+          # (2) EQUALITY on scope, never a floor -- see the env block above.
+          if [ "$total" -ne "$MUTANTS_EXPECTED_SCOPE" ]; then
+            echo "::error::mutation scope is $total, expected exactly" \
+                 "$MUTANTS_EXPECTED_SCOPE. The set of mutants changed. If that was" \
+                 "deliberate, update MUTANTS_EXPECTED_SCOPE in this workflow in the" \
+                 "same commit -- until then the survivor budget is measuring a" \
+                 "different thing than it was set against."
+            rc=1
+          fi
+
+          # (3) The budget.
+          if [ "$missed" -gt "$MUTANTS_SURVIVOR_BUDGET" ]; then
+            echo "::error::$missed mutants survived, budget is" \
+                 "$MUTANTS_SURVIVOR_BUDGET. A surviving mutant is a change to src/" \
+                 "that no test noticed. Kill it with a test, or -- if it is genuinely" \
+                 "unreachable -- raise the budget IN THE SAME COMMIT with a written" \
+                 "reason. Survivors are listed in mutants.out/missed.txt."
+            rc=1
+          fi
+
+          # (4) A TIMEOUT is an unresolved verdict, not a kill. Folding it into
+          #     "not missed" is the optimistic reading and lets a real survivor
+          #     hide behind a slow test.
+          if [ "$timeout" -ne 0 ]; then
+            echo "::error::$timeout mutant(s) timed out. A timeout is not a kill --" \
+                 "the mutant's fate is unknown. Investigate mutants.out/timeout.txt," \
+                 "or raise minimum_test_timeout in .cargo/mutants.toml; do not let it" \
+                 "stand as an implicit pass."
+            rc=1
+          fi
+
+          [ "$rc" -eq 0 ] && echo "ratchet OK"
+          exit "$rc"
+
+      # Uploaded unconditionally: on a red run these files ARE the finding, and on
+      # a green one they are how the next person re-derives the budget instead of
+      # trusting it.
+      - name: upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-out
+          path: mutants.out/
+          if-no-files-found: warn
