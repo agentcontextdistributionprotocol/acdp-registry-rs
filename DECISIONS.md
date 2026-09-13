@@ -2882,3 +2882,35 @@ U-503's ordering, so a vacuously-passing guard is caught before its verdict is t
 `build + push` at `docker.yml`'s step 16, which likewise requires `success()`. So a skipped gate there
 never let a publish escape — the job goes red and nothing is pushed. What was lost was log legibility.
 The exposure case is the `pull_request` one above.
+
+### Correction to the addendum above (U-516): AC8 bought legibility, not exposure
+
+The addendum ends "The exposure case is the `pull_request` one above." **That is wrong, and it is my
+sentence, not the reviewer's.** Verified rather than reasoned:
+
+```
+$ gh api .../required_status_checks -q 'if (.contexts | index("build")) then "MEMBER" else "NOT" end'
+NOT
+```
+
+On a pull request the two paths are indistinguishable in outcome:
+
+| | job result | `build` required? | merge |
+|---|---|---|---|
+| gate **skipped** by an earlier failure | red | no | proceeds |
+| gate **ran and failed** | red | no | proceeds |
+
+So the `if: success()` default produced **no exposure at all** — in either direction, the merge was
+never blocked. The exposure came entirely from `build` not being a member of the contexts list, and
+would have persisted whatever the `if:` chain did.
+
+**The two halves of U-516 are orthogonal, and AC8 is the smaller one.** Moving the assertion into an
+already-required job is the whole of what closes the exposure; `!cancelled()` buys independence
+between two unrelated guards and a legible log — a skipped step reads like a passed one — and nothing
+more. Had AC8 shipped alone, the gate still could not have blocked a merge.
+
+Recorded because the error is instructive in shape: a correct mechanism (`if: success()` really does
+skip the step) carried a wrong consequence (that this let something through). The harmful step is the
+merge, and the merge's condition is the contexts list — which had been measured, correctly, twice the
+same day, and was not re-read when the consequence was written. Naming the mechanism is not the same
+as tracing it to the harm. Credit to lane-3 for the catch, on both ends.
