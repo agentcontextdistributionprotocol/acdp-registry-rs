@@ -26,6 +26,7 @@
 #![cfg(feature = "storage-sqlite")]
 
 mod common;
+mod didweb;
 
 use std::sync::Arc;
 
@@ -11108,5 +11109,227 @@ async fn the_two_accept_predicates_agree_on_every_present_media_type() {
         "`AcdpJson` must REJECT an absent Content-Type with 415. Routing it through \
          `media_type_accepted` to 'make the families consistent' would silently start \
          accepting untyped bodies on the `/auth/*` surface."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// U-521: the did:web lifecycle branch, which had no coverage and structurally
+// could not have any.
+//
+// U-504 left `handlers/context.rs:1542` as an accepted survivor: deleting the
+// `LifecycleEventType::Retracted` arm of `lifecycle_transition`'s **did:web**
+// dispatch sends a retract to `republish_verified` instead — the context comes
+// BACK. Nothing noticed, because `signed_event_envelope` signs only as did:key,
+// so `actor.starts_with("did:key:")` held in every lifecycle test here.
+//
+// The did:web retract was written then and did NOT work: it died at
+// `key_resolution_unreachable`, because `retract_verified` resolves the actor
+// through a real `WebResolver` and playground mode does not bypass it. That
+// diagnosis is now this test's falsification target.
+// ---------------------------------------------------------------------------
+
+/// A lifecycle harness whose resolver reaches an in-process HTTPS `did:web`
+/// server instead of the real internet.
+///
+/// **Why this builds its own harness instead of extending the shared one.**
+/// `common/mod.rs` hard-codes `WebResolver::new()` in both of its constructors
+/// and takes no resolver argument. Rather than add a parameter to a shared helper
+/// for one caller, this follows the precedent `metrics_integration.rs` already
+/// sets: a test that needs different wiring assembles it from the same public
+/// pieces (`RegistryServer`, `AuthService`, `AppStateInner`, `build_router`).
+async fn didweb_lifecycle_harness(resolver: Arc<WebResolver>) -> Harness {
+    let mut cfg = config(false);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.lifecycle.enabled = true;
+
+    let db = tempfile::Builder::new()
+        .prefix("acdp-didweb-")
+        .suffix(".sqlite")
+        .tempfile()
+        .unwrap();
+    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    store.migrate().await.unwrap();
+    let server = RegistryServer::try_new(store, caps_030(), AUTHORITY)
+        .unwrap()
+        .with_lifecycle()
+        .expect("lifecycle enabled");
+    let server = Arc::new(server);
+
+    let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+    let secret = JwtSecret::from_bytes(&[42u8; 32]);
+    let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
+    let auth = Arc::new(AuthService::new(
+        AuthConfig::default(),
+        challenges,
+        signer,
+        resolver,
+        AUTHORITY.into(),
+    ));
+    let state = AppStateInner::new(server, auth, None, cfg, None);
+    Harness {
+        router: build_router(state),
+        db: Some(db),
+    }
+}
+
+/// A lifecycle event signed by the **did:web** producer for `seed` — the
+/// identity `producer(seed)` publishes under.
+///
+/// `signed_event_envelope` hard-codes a did:key actor, which is precisely why the
+/// did:web arm of the dispatch was unreachable.
+fn signed_event_envelope_did_web(
+    seed: u8,
+    ctx_id: &str,
+    event_type: &str,
+    reason: Option<&str>,
+) -> Value {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    let event = LifecycleEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        acdp::types::primitives::CtxId(ctx_id.to_string()),
+        LifecycleEventType::parse(event_type).unwrap(),
+        chrono::Utc::now(),
+        AgentDid::new(didweb::didweb_for_seed(seed)),
+        reason.map(str::to_string),
+    )
+    .expect("valid event")
+    .sign_with(key, didweb::didweb_key_id_for_seed(seed))
+    .expect("signed event");
+    json!({ "event": event })
+}
+
+/// Neither fixture certificate may be allowed to lapse quietly.
+///
+/// A TLS fixture that expires presents as an inscrutable handshake failure years
+/// later, on someone else's watch. This turns that into an early, named failure.
+/// It reads each certificate's own `notAfter` rather than a date written in a
+/// comment, so it cannot drift from the file it describes.
+///
+/// **Both** files are checked, by name. The fixture is a chain -- a CA and the
+/// leaf it signed -- and an expired CA fails exactly as opaquely as an expired
+/// leaf, so checking only the one the server presents would leave half the
+/// fixture unguarded. The loop asserts on the file it is holding, so a future
+/// third file added to the chain is a compile error here, not a silent gap.
+#[test]
+fn didweb_fixture_certificates_are_not_near_expiry() {
+    for (label, bytes) in [
+        ("leaf (agents-test-cert.pem)", didweb::CERT_PEM),
+        ("CA (agents-test-ca.pem)", didweb::CA_PEM),
+    ] {
+        assert_cert_not_near_expiry(label, bytes);
+    }
+}
+
+/// The per-certificate half of the check above.
+fn assert_cert_not_near_expiry(label: &str, bytes: &[u8]) {
+    let pem = std::str::from_utf8(bytes).expect("cert is PEM text");
+    let b64: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("");
+    let der = B64.decode(b64.as_bytes()).expect("cert base64");
+    // notAfter is the second UTCTime/GeneralizedTime in the TBSCertificate's
+    // Validity SEQUENCE. Scanning for the tag pair is enough here and avoids
+    // pulling an X.509 parser in for one assertion.
+    let mut years: Vec<i32> = Vec::new();
+    let mut i = 0;
+    while i + 2 < der.len() {
+        let (tag, len) = (der[i], der[i + 1] as usize);
+        if (tag == 0x17 && len == 13) || (tag == 0x18 && len == 15) {
+            let s = std::str::from_utf8(&der[i + 2..i + 2 + len]).unwrap_or("");
+            let y = if tag == 0x17 {
+                s.get(0..2).and_then(|v| v.parse::<i32>().ok()).map(|y| {
+                    if y < 50 {
+                        2000 + y
+                    } else {
+                        1900 + y
+                    }
+                })
+            } else {
+                s.get(0..4).and_then(|v| v.parse::<i32>().ok())
+            };
+            if let Some(y) = y {
+                years.push(y);
+            }
+            i += 2 + len;
+            continue;
+        }
+        i += 1;
+    }
+    assert!(
+        years.len() >= 2,
+        "could not read the {label} certificate's validity dates (found {years:?}); if the \
+         encoding changed, fix this parser rather than deleting the check -- it is what stops \
+         a lapsed fixture from presenting as a mystery TLS error"
+    );
+    let not_after = *years.iter().max().expect("a notAfter year");
+    let this_year: i32 = 2026;
+    assert!(
+        not_after - this_year >= 5,
+        "the did:web fixture's {label} certificate expires in {not_after}, within 5 years. \
+         Regenerate the WHOLE CHAIN per tests/fixtures/didweb/README.md -- the leaf is signed \
+         by the CA, so they are replaced together. A TLS fixture that lapses fails as an \
+         inscrutable handshake error, which is why this asserts early."
+    );
+}
+
+/// A did:web retract must retract — not republish.
+///
+/// **Kills `handlers/context.rs:1542`.** Deleting that match arm drops the event
+/// through to `republish_verified`, so the context stays active and a consumer is
+/// told it came back.
+///
+/// This is the first test in the repo to exercise the did:web half of
+/// `lifecycle_transition` at all. The control asserts the actor really is
+/// `did:web:`, because a did:key actor here would silently re-cover the arm
+/// `lc001_retraction_flow_end_to_end` already pins and prove nothing new.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_did_web_retract_retracts_rather_than_republishing() {
+    let addr = didweb::spawn_didweb_server().await;
+    let resolver = Arc::new(
+        WebResolver::with_test_endpoint(didweb::CA_PEM, didweb::DIDWEB_AUTHORITY, addr)
+            .expect("test-endpoint resolver"),
+    );
+    let h = didweb_lifecycle_harness(resolver).await;
+
+    let req = producer(64)
+        .publish_request()
+        .title("u521-didweb-lifecycle")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "did:web publish must resolve through the fixture server: {v}"
+    );
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+
+    let envelope = signed_event_envelope_did_web(64, &ctx_id, "retracted", Some("u521 did:web"));
+    assert!(
+        envelope["event"]["actor"]
+            .as_str()
+            .unwrap()
+            .starts_with("did:web:"),
+        "the actor must be did:web, or this re-covers the did:key arm lc001 already \
+         pins: {envelope}"
+    );
+
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the did:web retract must get past key resolution and be accepted. A \
+         `key_resolution_unreachable` here means the fixture server or the \
+         test-endpoint resolver is not wired: {v}"
+    );
+    assert_eq!(
+        v["registry_state"]["status"], "retracted",
+        "a did:web retract must RETRACT; the deleted match arm sends it to \
+         `republish_verified` instead and the context stays active: {v}"
     );
 }
