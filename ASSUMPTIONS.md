@@ -2495,3 +2495,29 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   listing — the rejected first draft of #133.
 - **Status:** CONFIRMED under the configuration named, which is the only configuration in which the
   claim means anything.
+
+## U-503 — a shell script is the right home for a CI tag guard
+
+- **Plan:** `plans/u-503-immutable-sha-tag.md` (Phase 1)
+- **Assumed:** that `docker/assert-image-tags.sh` is an acceptable place for this guard even
+  though **the repo contained no `*.sh` files at all** before it, and CI runs no `shellcheck`,
+  `actionlint` or `yamllint` — so nothing lints it.
+- **Chose:** the shell script, for two reasons that are not about convenience. First, the
+  alternative that matches repo convention — a Rust test under `crates/**` reading
+  `docker.yml`, the shape used for the route-documentation guard — is **outside this unit's
+  path grant**, and needing it would be a `claim-request` rather than a judgement call.
+  Second, a script taking the tag set as an argument is a better shape for this particular
+  job: it is falsifiable in milliseconds against the real pre-fix data, with no CI round
+  trip, which is what let Phase 1 demonstrate rejection instead of asserting it.
+- **Mitigation for the absent linter:** `--self-test` is wired into `docker.yml` (Phase 2), so
+  the script is exercised on every workflow run rather than trusted. A guard nobody runs is
+  the failure mode this is guarding against.
+- **Alternatives:** a Rust test under `crates/**` (out of grant, and would need a claim
+  request); an inline `run:` assert in `docker.yml` matching the file's existing
+  `assert semver tag` idiom — rejected because it cannot be executed locally, so the
+  falsification requirement could not have been met; adding `shellcheck` to CI — rejected,
+  `.github/workflows/ci.yml` is out of grant.
+- **Blast radius if wrong:** low and local. The script is 1 file, invoked from 2 workflow
+  steps; if the convention is unwelcome the logic moves to a Rust test in one commit, and the
+  self-test table moves with it unchanged.
+- **Status:** UNCONFIRMED
