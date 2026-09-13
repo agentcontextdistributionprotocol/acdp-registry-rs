@@ -125,6 +125,27 @@ env:
   # equivalents (log.rs:131, context.rs:1223, context.rs:627).
   MUTANTS_SURVIVOR_BUDGET: "8"
 
+  # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
+  # unconditional `timeout != 0` until U-504, on the stated reasoning that "a
+  # timeout is not a kill -- it lets a real survivor hide behind a slow test".
+  # That reasoning is about SLOW TESTS and it still holds. It does not cover a
+  # mutant that provably cannot terminate, and the new scope contains exactly one:
+  #
+  #   handlers/context.rs:1277:12  `delete !` on `if !should_refill { break; }` in
+  #     run_search_with_refill. Inverting it breaks when the loop SHOULD refill and
+  #     loops forever when it should not -- which is every unfiltered search in the
+  #     suite. Non-termination cannot be converted into a fast assertion failure by
+  #     any test: the binary hangs and the verdict is TIMEOUT. Measured directly,
+  #     `-j1 --examine-re 'delete ! in run_search_with_refill'`: :1223:16 MISSED in
+  #     10s, :1277:12 TIMEOUT at the full 300s. A timeout here IS the detection.
+  #
+  # Deliberately NOT relaxed to an unconditional pass: a SECOND timeout is exactly
+  # the case the original reasoning warned about, and it fails this job. Budget is
+  # a ceiling on a named mutant, not a category exemption. It costs the scheduled
+  # run ~5 minutes of wall clock, which is the price of scoring it honestly rather
+  # than folding it into "not missed".
+  MUTANTS_TIMEOUT_BUDGET: "1"
+
 jobs:
   mutants:
     name: mutation oracle (scoped ratchet)
@@ -396,11 +417,15 @@ jobs:
           # (4) A TIMEOUT is an unresolved verdict, not a kill. Folding it into
           #     "not missed" is the optimistic reading and lets a real survivor
           #     hide behind a slow test.
-          if [ "$timeout" -ne 0 ]; then
-            echo "::error::$timeout mutant(s) timed out. A timeout is not a kill --" \
-                 "the mutant's fate is unknown. Investigate mutants.out/timeout.txt," \
-                 "or raise minimum_test_timeout in .cargo/mutants.toml; do not let it" \
-                 "stand as an implicit pass."
+          if [ "$timeout" -gt "$MUTANTS_TIMEOUT_BUDGET" ]; then
+            echo "::error::$timeout mutant(s) timed out, budget is" \
+                 "$MUTANTS_TIMEOUT_BUDGET. A timeout is not a kill -- the mutant's" \
+                 "fate is unknown. The budgeted one is a provably non-terminating" \
+                 "mutant named in the env block; a NEW timeout is more likely a test" \
+                 "that got slow, which is exactly how a real survivor hides. Read" \
+                 "mutants.out/timeout.txt and identify which it is. Raising" \
+                 "minimum_test_timeout in .cargo/mutants.toml is the fix for a slow" \
+                 "test; raising this budget needs a named mutant and a written reason."
             rc=1
           fi
 
