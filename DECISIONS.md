@@ -2605,3 +2605,41 @@ engineering log all say it, so it cannot be mistaken for complete closure.
 
 **Status:** `CONFIRMED (2026-09-13)` as scope. The leader may prefer full closure; that is a
 `cargo check` → `cargo build` swap in two lines.
+
+## Unit U-513 — the falsified latency claim, corrected (lane-3, 2026-09-13)
+
+### 1. The correction is a distribution, not a better number — CONFIRMED (Opus)
+
+U-510's entry quoted "18 seconds of headroom" from **one sample of each job**, and paired it with a
+trigger that had **already fired before the sentence was written** (run 34766261172: clippy 98s vs
+tests 86s). Measured across n=5 post-change runs, clippy spans 98-176s and tests 86-165s — spreads of
+78s and 79s against per-run margins of 4-27s. **A margin smaller than the run-to-run spread is not a
+margin**, so the fix could not be a fresher number; any single-sample margin here is meaningless.
+
+The corrected text makes a categorical claim instead: before the change clippy was never near the
+critical path (slowest 54s vs tests' fastest 142s); after it, the distributions overlap and clippy led
+in **2 of 5** runs, one on `main`. Derived cost, mean of `max(0, clippy - tests)`: **~8s** against a
+~150s critical path.
+
+Edited **in place** under the narrow exception the assign granted, with the superseded figure left
+visible and the deletion count stated (**7** in `ENGINEERING-LOG.md`, 0 elsewhere). The normal
+append-only rule exists to stop lanes destroying each other's entries, not to preserve a defect —
+appending would have left the false sentence as the first thing a reader meets.
+
+### 2. The split: declined again, on re-derived grounds — CONFIRMED (Opus)
+
+The original decline rested on *"it relieves a job that is not the bottleneck"*, which is false in 2
+of 5 runs. Re-derived rather than restated: the scheduled split would buy ~8s and cost two things
+that survive — the feature lists become two sources of truth (this repo has already had a
+written-out list go stale silently, and `ci.yml` says so), and breakage detection is delayed by up to
+a day.
+
+**A third option is strictly better than both and is recorded rather than taken:** move the five
+build steps to a separate job running *in parallel*. Added latency becomes zero, and it *moves* the
+lists rather than copying them, so neither surviving objection applies. It is not taken because a new
+job is not a required context, so the builds would stop blocking merges — the property U-510 chose the
+`clippy` job to obtain. **The blocker is identical to U-508's `lint`: one branch-protection change
+unblocks both.**
+
+**Status:** declined, with the trigger recorded as fired and weighed so no reader concludes it went
+unnoticed.
