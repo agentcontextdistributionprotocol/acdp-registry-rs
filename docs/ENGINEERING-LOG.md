@@ -4421,11 +4421,12 @@ hold entries from several releases. Use the commands.
   | mutants in scope | **74** |
   | viable (the honest denominator) | **48** |
   | **caught** | **46** |
-  | **survivors (missed)** | **2** |
+  | **survivors (missed)** | **2** (one since killed → budget **1**) |
   | timeout | 0 |
   | unviable (does not compile) | 26 |
 
-  **The committed survivor budget is 2**, in
+  **The committed survivor budget is 1** (survivor 1 below was killed rather than
+  accepted), in
   `.github/workflows/mutants.yml`'s `env`, alongside an exact-equality check on
   the scope size.
 
@@ -4491,9 +4492,22 @@ hold entries from several releases. Use the commands.
      `if let Some(tenant)` block never executes.
      `log_entries_leaf_presence_is_tenant_scoped` looks like the guard and is not —
      it exercises the batched `/log/entries` path, a different predicate.
-     **Budgeted, not accepted:** the killing test belongs in
-     `http_integration.rs`, outside this unit's claim, and is requested rather
-     than written here. The budget ratchets to 1 when it lands.
+     **KILLED, not budgeted.** The claim on `http_integration.rs` was granted and
+     the two tests landed in the same commit as the ratchet:
+     `log_proof_ctx_id_is_served_to_the_owning_tenant` and
+     `log_proof_ctx_id_is_withheld_from_a_foreign_tenant` — two tests rather than
+     one because inverting the operator breaks **both** directions, and a single
+     test would stop at whichever assertion ran first and never evaluate the other.
+     Falsified: with `==` the first fails `left: 404, right: 200` (the owning tenant
+     denied) and the second `left: 200, right: 404` with the response body carrying
+     the other tenant's full `leaf` — `ctx_id`, `content_hash`, `key_fingerprint`,
+     `receipt_hash`. Reverted, both green. **Budget therefore 1, not 2.**
+
+     **Say what this is accurately.** The code is CORRECT: `!=` is the right
+     operator and no cross-tenant disclosure ships. What the oracle found is an
+     *unguarded correct property* — nothing executed the branch, so nothing would
+     have noticed if it stopped being correct. "Mutation testing found a
+     cross-tenant disclosure" would be false.
   2. `handlers/log.rs:131:18` — `replace == with !=` in `root_for`.
      **Accepted: an equivalent mutant.** Line 131 is `if tree_size == current {`
      and it guards *only* `log.cache_root(...)`. `root_for` returns the same

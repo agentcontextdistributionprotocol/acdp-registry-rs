@@ -9575,3 +9575,112 @@ async fn late_failures_are_charged_on_exactly_two_of_the_four_publish_branches()
         "exactly two of four branches charge late failures"
     );
 }
+
+/// `get_json` with an `X-Tenant-Id`. The untenanted `get_json` above cannot
+/// reach the tenant arm of `requester_can_retrieve` at all: with no header,
+/// `requested_tenant` is `None` and the `if let Some(tenant)` block never
+/// executes. That is precisely why the two tests below needed a new helper
+/// rather than an extra assertion in an existing test.
+async fn get_json_with_tenant(
+    app: &axum::Router,
+    uri: &str,
+    tenant: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder().uri(uri);
+    if let Some(t) = tenant {
+        builder = builder.header("X-Tenant-Id", t);
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    (status, v)
+}
+
+/// Publish one public did:key context into `tenant`, on the full verified
+/// pipeline, and return its `ctx_id` and the `/log/proof?ctx_id=` URI for it.
+///
+/// **Public on purpose.** These tests are about the TENANT gate in
+/// `requester_can_retrieve`, which runs only after the §4.5 visibility check
+/// has already said yes. A restricted or private context would be withheld by
+/// visibility, and a test that passes for the wrong reason proves nothing about
+/// the gate it is named for.
+async fn log_proof_ctx_in_tenant(h: &Harness, seed: u8, tenant: &str) -> String {
+    let req = did_key_producer(seed)
+        .publish_request()
+        .title("log-proof-tenant-scope")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    let ctx_id = v["ctx_id"].as_str().expect("ctx_id").to_string();
+    format!("/log/proof?ctx_id={}", pct_encode_path_segment(&ctx_id))
+}
+
+/// The §8.2 `ctx_id` proof surface must still serve the tenant that owns the
+/// row. This is the FIRST of the two directions of `requester_can_retrieve`'s
+/// tenant gate (`handlers/log.rs`, `if stored != tenant`), and it is split from
+/// the second deliberately: inverting that operator breaks BOTH directions, and
+/// a single test asserting both would stop at whichever assertion came first,
+/// leaving the other never evaluated.
+///
+/// **Found by the mutation oracle added in #216 / U-502, not by review.**
+/// `replace != with ==` at `handlers/log.rs:117:19` survived the first valid
+/// baseline. The code is CORRECT — `!=` is the right operator and no
+/// cross-tenant disclosure ships — but nothing executed the branch, so nothing
+/// would have noticed if it stopped being correct. Four test files mention
+/// `X-Tenant-Id` 26 times and none of those mentions is near a `/log/proof`
+/// request; `log_entries_leaf_presence_is_tenant_scoped` looks like this guard
+/// but exercises the BATCHED `/log/entries` predicate, which is a different
+/// code path (see `handlers/log.rs:474`).
+#[tokio::test]
+async fn log_proof_ctx_id_is_served_to_the_owning_tenant() {
+    let h = log_harness().await;
+    let uri = log_proof_ctx_in_tenant(&h, 160, "tenant-proof-a").await;
+
+    let (status, v) = get_json_with_tenant(&h.router, &uri, Some("tenant-proof-a")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the tenant that owns the row must still be served its ctx_id-addressed \
+         proof; a tenant gate that denies the MATCHING tenant is inverted: {v}"
+    );
+    assert!(
+        v.get("leaf").is_some(),
+        "the owning tenant gets the `leaf` echo, so the assertion is about the \
+         gate opening rather than merely about a 200: {v}"
+    );
+}
+
+/// The second direction: a requester scoped to a DIFFERENT tenant must be
+/// refused, and refused as `not_found` — indistinguishable from absence, the
+/// same §4.5 shape the visibility path uses, so the response cannot be used to
+/// confirm that someone else's `ctx_id` exists.
+///
+/// This is the direction with teeth. Inverting `if stored != tenant` makes a
+/// mismatched tenant fall through to `Ok(true)`, which would serve another
+/// tenant's proof and `leaf` echo. See the sibling test above for why the two
+/// directions are separate tests and for the provenance of the finding.
+#[tokio::test]
+async fn log_proof_ctx_id_is_withheld_from_a_foreign_tenant() {
+    let h = log_harness().await;
+    let uri = log_proof_ctx_in_tenant(&h, 161, "tenant-proof-a").await;
+
+    let (status, v) = get_json_with_tenant(&h.router, &uri, Some("tenant-proof-b")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a foreign tenant must not receive another tenant's ctx_id-addressed \
+         proof: {v}"
+    );
+    assert_eq!(
+        v["error"]["code"], "not_found",
+        "and it must be `not_found`, not a distinguishable forbidden — otherwise \
+         the refusal itself confirms the ctx_id exists: {v}"
+    );
+}

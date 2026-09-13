@@ -53,19 +53,24 @@ env:
   # It ratchets DOWN as survivors are killed and must never be raised without a
   # reason recorded in the same commit.
   #
-  # The two, so a reader knows what the 2 is made of and does not assume it is
-  # slack:
-  #   handlers/log.rs:117:19  `!= -> ==` in requester_can_retrieve -- A REAL
-  #     UNASSERTED BRANCH, not an accepted one. Inverting the tenant gate denies a
-  #     matching tenant AND discloses to a mismatched one. No test reaches it: every
-  #     /log/proof test fetches without an X-Tenant-Id, so requested_tenant is
-  #     always None. The killing test belongs in http_integration.rs, outside this
-  #     unit's claim. BUDGET GOES TO 1 WHEN IT LANDS.
-  #   handlers/log.rs:131:18  `== -> !=` in root_for -- accepted, equivalent mutant.
-  #     It guards only `log.cache_root(...)`; the returned root is identical either
-  #     way and append-only makes (size -> root) immutable, so only *which* sizes
-  #     get cached changes. Unkillable by any assertion over responses.
-  MUTANTS_SURVIVOR_BUDGET: "2"
+  # The 1 is ONE NAMED MUTANT, not slack:
+  #   handlers/log.rs:131:18  `== -> !=` in root_for -- an EQUIVALENT MUTANT, and
+  #     the only accepted survivor. It guards only `log.cache_root(...)`; `root_for`
+  #     returns the same root on both branches, and append-only makes any
+  #     (size -> root) pair immutable, so a cached historical root is still correct
+  #     and an uncached current root is merely recomputed. Only *which* sizes get
+  #     cached changes, and no assertion over responses can see that. Killing it
+  #     would need instrumentation counting merkle computations -- observable work
+  #     rather than a result -- which is a performance harness dressed as a
+  #     correctness one. It is accepted for that reason, not because nobody looked.
+  #
+  # The other survivor of the first valid baseline was KILLED rather than budgeted:
+  #   handlers/log.rs:117:19  `!= -> ==` in requester_can_retrieve -- the tenant gate
+  #     on the §8.2 ctx_id proof surface. Now covered by
+  #     log_proof_ctx_id_is_served_to_the_owning_tenant and
+  #     log_proof_ctx_id_is_withheld_from_a_foreign_tenant in http_integration.rs,
+  #     which is why this budget reads 1 and not 2.
+  MUTANTS_SURVIVOR_BUDGET: "1"
 
 jobs:
   mutants:
