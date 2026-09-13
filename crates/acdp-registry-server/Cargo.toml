@@ -27,6 +27,24 @@ anyhow             = { workspace = true }
 async-trait        = { workspace = true }
 axum               = { workspace = true }
 axum-server        = { workspace = true }
+# W5/U-530: an EXPLICIT rustls crypto provider, because the graph enables two.
+#
+# `axum-server`'s `tls-rustls` feature turns on rustls's `aws-lc-rs` (root
+# `Cargo.toml:35`) and `reqwest`'s `rustls-tls` turns on `ring` via
+# `hyper-rustls` (`:72`). Both edges are unconditional -- neither is
+# `optional` nor behind a storage feature -- so EVERY build variant carries
+# two providers and rustls refuses to pick one. Nothing in `crates/` called
+# `install_default`, so `registry.tls.enabled = true` panicked at startup
+# (rc=101) inside rustls's provider lookup, AFTER `main` had already logged
+# `listening` with the address. Measured, not inferred: U-532.
+#
+# `ring` rather than `aws-lc-rs`: it is what `hyper-rustls`/`tokio-rustls`
+# already select, and `aws-lc-rs` drags `aws-lc-sys` + `prebuilt-nasm` -- a
+# C/asm build dependency -- into the shipped binary's TLS path.
+#
+# This is a NORMAL dependency on purpose. It was previously `[dev-dependencies]`
+# only, which is precisely why the panic could not reach any test binary.
+rustls             = { version = "0.23", features = ["ring"] }
 base64             = { workspace = true }
 chrono             = { workspace = true }
 dotenvy            = { workspace = true }
@@ -57,6 +75,10 @@ serde          = { workspace = true }
 serde_json     = { workspace = true }
 sqlx           = { workspace = true }
 tempfile       = "3"
+# U-530: generate a throwaway cert/key in-process for `tests/tls_startup.rs`.
+# Deliberately NOT a PEM committed to the tree -- `.gitignore:39-43` refuses
+# certificate material on purpose. Dev-only: nothing in `src/` uses it.
+rcgen          = "0.14"
 ed25519-dalek  = { version = "3.0", features = ["rand_core"] }
 uuid           = { workspace = true }
 # Serialize PG integration tests so they don't fight over the shared
