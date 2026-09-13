@@ -17,12 +17,28 @@
 # operator must do?" -- even when the answer is "no", which must then be written
 # down rather than left as an absent section.
 #
-# ── Why it lives beside the image build ──
+# ── Where it runs, and which copy can actually block (U-516) ──
 #
-# `docker.yml` builds and publishes the operator-facing artifact. Asserting that
-# the version that artifact will carry has operator notes is the same audience
-# and the same moment. It also runs on pull_request, so a release PR -- which is
-# where the version bump actually happens -- is gated before it merges.
+# TWO workflows call this script, and only one of them can stop a merge.
+#
+#   ci.yml, job `fmt` (check name `rustfmt`) -- BLOCKS.
+#   docker.yml, job `build` (check name `build`) -- REPORTS ONLY.
+#
+# main's required_status_checks.contexts is exactly
+#   ["rustfmt","clippy","tests","conformance (spec fixtures)"]
+# and there are no branch rules or rulesets carrying additional ones. `build` is
+# NOT a member of that list, so a red `build` leaves the merge button green.
+# U-514 sited this script only in docker.yml and described it as gating the
+# release PR; that was wrong -- it reported. U-516 added the ci.yml copy, inside
+# a job whose check name is already required, which needed no repo-settings
+# change and no fifth context.
+#
+# The docker.yml copy is kept deliberately rather than as a leftover: docker.yml
+# also triggers on the `acdp-registry-server/v*` tag push, which ci.yml never
+# runs on. So ci.yml covers the pull request and docker.yml covers the tag.
+#
+# If `build` ever becomes a required context, that does not make the ci.yml copy
+# redundant -- it is still the one that reddens in seconds instead of minutes.
 #
 # ── Modes ──
 #

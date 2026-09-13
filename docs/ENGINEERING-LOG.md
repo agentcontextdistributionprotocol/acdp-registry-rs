@@ -5174,3 +5174,48 @@ prefix match would make the gate pass on the wrong section.
 The hazard text is not inside the rendered GitHub Release body. A reader who reads only the release
 notes and follows no link still does not see it. Option 1 remains available and its design is written
 up in `DECISIONS.md`; the convention established here is what such a template would render.
+
+## U-516 — the gate that reported: making an enforcement claim testable
+
+`docker/assert-upgrade-notes.sh` was added in U-514 with four negative controls, all of which fired
+in real CI. Every one of them tested whether the *script* discriminates. None tested whether the
+*workflow it ran in* could stop a merge. The unit then wrote "blocks" — a claim about the second
+thing, resting on evidence about the first.
+
+The controls were not weak; they were aimed one layer below the claim. A script that correctly
+rejects a missing section, running in a job nobody requires, produces exactly the same green
+transcript as a working gate. That is the whole failure mode, and it is invisible to any amount of
+testing of the script itself.
+
+What made it visible was a question the unit never asked: *which check name does this workflow
+publish, and is that name in `required_status_checks.contexts`?* Two `gh api` calls. The answer was
+`build`, and the list was `["rustfmt","clippy","tests","conformance (spec fixtures)"]`.
+
+Two things worth keeping separate here, because conflating them is how this recurs:
+
+**An equality, not a floor.** "At least one required job runs the script" cannot catch the case that
+actually occurred, where the name assumed to be required is spelled differently from the one GitHub
+publishes. The check has to be membership of a quoted name in a quoted list. `build` versus `docker`
+versus `rustfmt` is precisely that distance.
+
+**Observation and cause are separate sentences.** In the same window this unit ran, two sessions
+independently misattributed one real failure — `release-plz update` failing locally — first to the
+toolchain, then to a malformed macOS 27.0 SDK. Neither attribution was tested and both were wrong.
+Measured here with `RUSTC_WRAPPER=""`:
+
+```
+cargo package -p acdp-registry-types   -> rc=0     (0 intra-workspace deps)
+cargo package -p acdp-registry-server  -> rc=101   no matching package named `acdp-registry-auth`
+                                                   found; location searched: crates.io index
+```
+
+The cause is `release-plz.toml`'s `publish = false`: nothing in this workspace is on crates.io, so
+`cargo package` cannot resolve a path dependency on a sibling through the registry index. The
+discriminator is exact — the one crate with no intra-workspace dependency packages cleanly; the seven
+with at least one do not. Both wrong attributions pointed the same direction, at "local quirk,
+someone could work around it", when the truth is structural and would reproduce on a clean Linux
+runner. "Fails here, cause not established" would have been a complete and honest report; a confident
+wrong cause was not.
+
+This changes nothing about U-514's conclusion, and strengthens its stated reason: a `[changelog].body`
+template cannot be verified short of an actual release for seven of the eight crates, anywhere.
