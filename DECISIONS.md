@@ -2914,3 +2914,133 @@ skip the step) carried a wrong consequence (that this let something through). Th
 merge, and the merge's condition is the contexts list — which had been measured, correctly, twice the
 same day, and was not re-read when the consequence was written. Naming the mechanism is not the same
 as tracing it to the harm. Credit to lane-3 for the catch, on both ends.
+
+## 19. U-504 — extending the mutation ratchet to `handlers/context.rs` (lane-2, 2026-09-13)
+
+Ten assumptions from `plans/u-504-context-ratchet.md`, all resolved here. **8 CONFIRMED, 1 CHANGED,
+2 DEFERRED with named follow-ups** (entry 5 and 6 are the deferrals; the count is 8+1+2 = 11 because
+entry 4 is confirmed with a recorded contingency, listed under CONFIRMED).
+
+**Declared deviation, same as U-502:** `/reconcile` calls for fresh subagents to analyse each entry;
+this session does not spawn agents, so every entry was resolved in-context. Compensation: each
+verdict below rests on a measurement, a `file:line`, or a named mutation — not on reasoning about
+the code. Where a verdict rests on a claim that could expire, the claim was re-measured at the final
+sha rather than carried forward.
+
+**None of the eleven needed the human**, and none is a one-way door: the budget numbers, the job
+count, and the guard are each one commit to reverse.
+
+### Settled by Opus, with the evidence
+
+| # | assumption | verdict | the evidence, not the argument |
+|---|---|---|---|
+| 1 | budget may rise 1 → 8 | **CONFIRMED** | final run 8/8, and the measured survivor set is **content-identical** to the 8 named in the workflow |
+| 2 | `timeout != 0` becomes a ceiling of 1 | **CONFIRMED** | targeted run: `:1277` TIMEOUT at the full 300s, `:1223` MISSED in 10s |
+| 3 | `-j1` over `-j2` | **CONFIRMED** | same shard: `-j6`/`-j8` > 10 min still building, `-j1` 1m55s |
+| 4 | `:81`/`:82` are equivalent, not gaps | **CONFIRMED** (contingent) | search serves only public rows to anonymous, audience member **and the producer**; sibling `"private"` arm CAUGHT |
+| 7 | AC-8 invariant 4 bans any 40-hex in `mutants.yml` | **CHANGED** | the real file carries four legitimate 40-hex *action* pins; narrowed to `ref:` lines |
+| 8 | AC-8 as a pure function over text | **CONFIRMED** | all four falsified; then the falsification test falsified by disabling each check (4/4) |
+| 9 | one refill test kills all six | **CONFIRMED** | six mutations, each changing the measured count (10 → 60, or cursor absent) |
+| 10 | no claim on `context.rs` | **CONFIRMED** | all 20 kills are additive tests in the granted file; leader confirmed |
+
+### Deferred, with what settles them
+
+| # | assumption | verdict | settled by |
+|---|---|---|---|
+| 5 | `:1399` ×2 deferred rather than asserted from `http_integration.rs` | **DEFERRED** | a rejected-transition label assertion in `metrics_integration.rs`. `/metrics` is not mounted in the http harness (404, measured) and that file is a separate binary *precisely* to isolate the process-global recorder — asserting there would put 158 tests behind shared mutable state |
+| 6 | `:1542` (did:web retract) unkillable in this unit | **DEFERRED** | an HTTPS fixture serving `agents.test`'s did.json. Verified unreachable, not assumed: a did:web-signed retract was written and dies at `key_resolution_unreachable`, because `retract_verified` resolves through a real `WebResolver` and playground does not bypass it |
+
+Both deferrals are **real gaps, named as such**, not dismissals. The did:web one is the more
+significant: that entire verification branch has no coverage and structurally cannot until the
+fixture exists.
+
+### The decision that changed shape, and why it is the instructive one
+
+Entry 7 is the only CHANGED, and it would have shipped a guard that fails against the correct file.
+The proposal — "no hardcoded 40-hex ref anywhere in `mutants.yml`" — was written from the *idea* of
+the file. Run against the actual file it reports four violations, all of them correct behaviour
+(pinning actions by SHA). **The lesson generalises past this guard: a sweep must be run against a
+known positive AND a known negative before it is trusted, and the known negative here was the file
+it is meant to protect.** A guard that cries wolf on the correct state is a guard someone deletes.
+
+### The method finding worth carrying forward
+
+**A survivor is a fact; "a survivor means a missing test" is an inference.** Eight of the 28 were not
+gaps, and the alternative branch — the mutation changes nothing observable — is *manufactured on
+purpose* by defence-in-depth. So the redundant-guard case is commonest in the most-hardened code,
+which is exactly where a tenant-isolation audit points an oracle first.
+
+The discriminator is cheap and mechanical: **two mutations at one site with opposite verdicts is
+positive evidence of equivalence.** Seen twice here — `t == tenant` CAUGHT beside `delete !`
+SURVIVED, and `"private"` CAUGHT beside `"public"`/`"restricted"` SURVIVED. Each time the caught
+sibling proves the site is reachable and the survivor unobservable.
+
+Recorded because I got it wrong first: `:1223` was reported to the board as an uncovered tenant gate
+before `search_filters_by_tenant` — a **green** test that should have reddened — turned out to be the
+evidence rather than the noise. Noticing that a passing test is the signal is the hard direction, and
+the retraction is the reason the other four equivalence claims were measured rather than argued.
+---
+
+## Decision: hold acdp at 0.13.1 — 0.13.2's regression has no correct downstream fix (U-518)
+
+**Symptom.** #285 (`deps/acdp-0.13.2`, Cargo.toml + Cargo.lock only) fails seven checks with:
+
+```
+error[E0277]: the trait bound `fn(...) -> ... {retrieve::<...>}: Handler<_, _>` is not satisfied
+  --> crates/acdp-registry-core/src/lib.rs:79:42
+  note: required by a bound in `axum::routing::get`
+```
+
+**Cause — established, not inferred.** Two hypotheses were tested and both were wrong before the
+real one was found, which is worth recording because the error names a route line and no cause:
+
+1. *`FullContext` lost `Serialize`.* **False** — `acdp-types`' `src/` is byte-identical between
+   0.13.1 and 0.13.2, and `assert_ir::<Json<FullContext>>()` compiles.
+2. *`RegistryError` lost `IntoResponse`.* **False** — `assert_ir::<Result<Json<FullContext>,
+   RegistryError>>()` compiles. The return type was never the problem.
+
+The real cause is the **other** half of axum's `Handler` bound: the handler's *future* must be
+`Send`. `acdp-client` 0.13.2's issue-#264 refactor extracted a shared `discover_revocations`
+(`revocation.rs:453`) taking
+
+```rust
+keep: &dyn Fn(&KeyRevocation) -> bool,
+on_drop: &dyn Fn(&KeyRevocation, &CtxId, DropSite),
+```
+
+with no `Sync` bound. `&dyn Fn(..)` is `Send` only if the `dyn Fn` is `Sync`; both are held across
+awaits, so the future is `!Send`, and that propagates through the public
+`find_revocations` / `find_registry_attested_revocations` → `verified::verify_retrieved` →
+`cross_registry::resolve` → our `retrieve` (`context.rs:913`). `acdp-client` 0.13.1's
+`revocation.rs` contains **zero** `dyn Fn`; the refactor introduced them.
+
+**Proven by construction rather than by reading:** `+ Sync` added to those two parameters in a local
+copy of 0.13.2, wired in via `[patch.crates-io]`, makes `acdp-registry-core` compile clean —
+including an explicit `fn is_send<T: Send>(_: T)` assertion on `retrieve`'s future.
+
+**Decision: do not adopt 0.13.2. Stay on 0.13.1. Filed upstream as acdp-rs#279** with the diagnosis,
+the verified one-line fix, and a suggested regression guard.
+
+**Why there is no downstream fix.** The `!Send` is baked into upstream's public future types. The
+three options and why each is wrong here:
+
+- *Restructure `retrieve` to run resolution off-task* (dedicated single-thread runtime + channel) —
+  a real architecture change to accommodate a bug that a one-line upstream patch fixes.
+- *Carry a `[patch.crates-io]` fork* — forks a signature-verification dependency for a routine
+  version bump. Kept in reserve if 0.13.2 ever becomes necessary before a fix lands; it is not
+  necessary, because —
+- *Nothing in 0.13.2 is needed here.* Its headline change types the `unsupported_media_type` wire
+  code as `AcdpError::UnsupportedMediaType`. This repo already emits that code as a string
+  (`crates/acdp-registry-core/src/extract.rs:143`, from #247) and never matches the typed variant,
+  so holding costs no behaviour. The spec-pin half of 0.13.2's changelog is tracked separately in
+  #272 and does not depend on the crate bump.
+
+**No diagnostic guard was added, deliberately.** The obvious one — a `Send` assertion per handler —
+means hand-listing eight signatures that drift as handlers change and that silently fail to cover a
+ninth. A hand-maintained table cannot catch an omission. The reproduction recipe is recorded in
+`docs/ENGINEERING-LOG.md` instead, which is drift-free and gets the next reader to the cause in
+minutes. The guard that would actually work belongs upstream, in `acdp-client`'s own suite, and is
+proposed in acdp-rs#279 — the breakage is invisible to `acdp-client`'s build and surfaces only in a
+downstream axum consumer.
+
+**Status:** #285 should be closed unmerged; the bump bot will re-propose once upstream ships the fix.
