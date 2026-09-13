@@ -23,6 +23,26 @@ belongs in the per-crate changelogs.
 
 ## 0.1.4
 
+**Wire change: `POST /contexts/{ctx_id}/retract` and `/republish` now reject an unaccepted
+`Content-Type` with 415.**
+
+These two producer-facing lifecycle writes were the last routed body-bearing handlers with no
+media-type gate. They now behave exactly as `POST /contexts` and the `/admin/*` lifecycle endpoints do:
+
+| what you send | before 0.1.4 | 0.1.4 |
+|---|---|---|
+| `application/acdp+json`, with or without `; charset=utf-8` | parsed | parsed — **unchanged** |
+| `application/json` | parsed | parsed — **unchanged** |
+| **no `Content-Type` header** | parsed | parsed — **unchanged** |
+| `text/plain`, `application/xml`, anything else | 400 `schema_violation` | **415 `unsupported_media_type`** |
+
+**Who needs to act:** only a client sending a `Content-Type` on these two routes that is neither
+`application/json` nor an `application/*+json` type. Parameters are ignored and an absent header is
+still accepted.
+
+All five routed body-bearing handlers now share one accept-set: `POST /contexts`, the two routes
+above, and the two `/admin/*` lifecycle endpoints.
+
 **Wire change: `/auth/*` answers 400, not 422, on a wrong-shaped body.**
 
 A request to `/auth/challenge`, `/auth/token` or `/auth/revoke` whose body is valid JSON but does not

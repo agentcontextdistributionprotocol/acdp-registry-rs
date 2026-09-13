@@ -10902,3 +10902,211 @@ async fn the_admin_media_type_gate_matches_the_publish_gate() {
         );
     }
 }
+
+/// **Every routed body-bearing handler shares ONE media-type gate (U-524).**
+///
+/// There are exactly five, and this drives all five through the same matrix:
+///
+/// | route | gated in |
+/// |---|---|
+/// | `POST /contexts` | #290 |
+/// | `POST /contexts/{ctx_id}/retract` | this unit |
+/// | `POST /contexts/{ctx_id}/republish` | this unit |
+/// | `POST /admin/contexts/{ctx_id}/retract` | #293 |
+/// | `POST /admin/contexts/{ctx_id}/republish` | #293 |
+///
+/// The two data-plane lifecycle writes were ungated until this unit — not by
+/// decision but by scope, since #290's grant named `POST /contexts` and #293's
+/// named `/admin/*`. The result was backwards: the *admin* copies of retract
+/// and republish were gated while the producer-facing ones were not. A count
+/// taken at the `body: Bytes` parameter rather than at the handler had made the
+/// remainder look like noise instead of a nameable two.
+///
+/// **Why one test over five routes rather than five tests.** The property is
+/// agreement, and agreement is not a per-route fact. A single break in
+/// `status_for_code` — the one place a wire code maps to a status — must redden
+/// every route here; if it reddens some and not others, the others are deciding
+/// a status locally, which is precisely the defect found in `AcdpBytes` in #293
+/// and the reason this unit's two new call sites are the risky part.
+///
+/// **This asserts the ABSOLUTE verdict per content type, not merely that the
+/// routes agree — and the difference is not cosmetic.** Measured: breaking
+/// `status_for_code`'s 415 arm reddens this test, the `err-002` matrix and the
+/// `/auth/*` extractor rows, but leaves `the_two_media_type_gates_agree` and
+/// `the_admin_media_type_gate_matches_the_publish_gate` **green**. Those two
+/// compare one route's verdict against another's, so a change that moves *both*
+/// sides equally — exactly what a break in the shared centre does — preserves
+/// the agreement they assert while destroying the behaviour. **An agreement
+/// test is blind to a uniform regression.** They remain useful for the
+/// narrower thing they do catch (one route drifting away from another), and
+/// they are deliberately **kept** rather than replaced: `conformance.rs` names
+/// test functions in `CoverageMechanism::Direct`, so removing or renaming one
+/// reddens that verifier only after both changes merge.
+///
+/// **Scope — the name was narrowed from `every_body_bearing_route_...` on
+/// purpose, and finding out why was the useful part.** There are **eight**
+/// routed body-bearing handlers, not five. The other three are `/auth/challenge`,
+/// `/auth/token` and `/auth/token/revoke`, which use `AcdpJson`, and `AcdpJson`
+/// **does not call `media_type_accepted`** — it delegates to `axum::Json` and
+/// maps `JsonRejection::MissingJsonContentType` to the §5 code
+/// (`extract.rs:294`). So the codebase has *two* accept predicates, and the
+/// original name asserted a single gate this test never exercised. Their exact
+/// relationship is pinned separately by
+/// `the_two_accept_predicates_agree_on_every_present_media_type`.
+///
+/// **What this deliberately does NOT constrain:** the downstream outcome (these
+/// routes differ legitimately — admin needs a token, lifecycle may be disabled,
+/// a context may not exist), the absent-header case (all five infer, pinned by
+/// `publish_enforces_the_err002_media_type_matrix` scenario E), and the response
+/// media type (`/admin/*` sits outside the `application/acdp+json` response
+/// layer by design).
+#[tokio::test]
+async fn every_acdp_bytes_route_shares_one_media_type_gate() {
+    let mut cfg = config(true);
+    cfg.auth.admin_tokens = vec!["secret-admin".into()];
+    let h = harness_from_config(cfg).await;
+
+    // (route, needs an admin token)
+    let routes: &[(&str, bool)] = &[
+        ("/contexts", false),
+        ("/contexts/ctx_nonexistent/retract", false),
+        ("/contexts/ctx_nonexistent/republish", false),
+        ("/admin/contexts/ctx_nonexistent/retract", true),
+        ("/admin/contexts/ctx_nonexistent/republish", true),
+    ];
+
+    // (content type, must the gate reject it?)
+    let types: &[(&str, bool)] = &[
+        ("application/acdp+json", false),
+        ("application/acdp+json; charset=utf-8", false),
+        ("application/json", false),
+        ("application/vnd.acdp+json", false),
+        ("text/plain", true),
+        ("text/plain; charset=utf-8", true),
+        ("application/xml", true),
+        ("application/jsonish", true),
+        ("", true),
+    ];
+
+    for (ct, want_rejected) in types {
+        for (route, needs_token) in routes {
+            let mut b = Request::builder()
+                .method("POST")
+                .uri(*route)
+                .header("content-type", *ct);
+            if *needs_token {
+                b = b.header("authorization", "Bearer secret-admin");
+            }
+            let resp = h
+                .router
+                .clone()
+                .oneshot(b.body(Body::from(r#"{"reason":"x"}"#)).unwrap())
+                .await
+                .unwrap();
+
+            let rejected = resp.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE;
+            assert_eq!(
+                rejected, *want_rejected,
+                "content-type {ct:?} on {route}: gate rejected={rejected}, expected \
+                 {want_rejected}. All five `AcdpBytes` routes must share one \
+                 accept-set — a route that disagrees is deciding acceptance \
+                 locally. (The three `/auth/*` routes use `AcdpJson`; see \
+                 `the_two_accept_predicates_agree_on_every_present_media_type`.)"
+            );
+        }
+    }
+}
+
+/// The repo has **two** media-type accept predicates, and until this test
+/// nothing said how they relate.
+///
+/// - `AcdpBytes` (the five raw-body routes) calls `media_type_accepted`
+///   (`extract.rs:102`): accept `application/json`, accept any
+///   `application/*+json`, accept an **absent** header, reject everything else.
+/// - `AcdpJson` (the three `/auth/*` routes) never calls it. It delegates to
+///   `axum::extract::Json`, whose own check is mime-suffix based, and maps
+///   `JsonRejection::MissingJsonContentType` to `unsupported_media_type`
+///   (`extract.rs:294`) — so it **rejects an absent header with 415**.
+///
+/// That they currently agree on every *present* media type is a coincidence of
+/// two independent implementations, not a structural guarantee: nothing makes
+/// `axum::Json`'s suffix rule and our hand-written one move together, and a
+/// future axum release narrowing (or widening) its rule would split the wire
+/// behaviour of `/auth/*` from `/contexts` with no local edit at all. This test
+/// converts that coincidence into an asserted contract, and pins the **one**
+/// place they are meant to differ so the difference can't be sanded off by
+/// accident either.
+///
+/// Both halves matter. Dropping the first lets the families drift apart
+/// silently; dropping the second lets someone "fix the inconsistency" by
+/// routing `AcdpJson` through `media_type_accepted`, which would start
+/// accepting a body-less-typed `/auth/token` request — a wire change on the
+/// most attacker-controllable surface in the service (`lib.rs:150`).
+#[tokio::test]
+async fn the_two_accept_predicates_agree_on_every_present_media_type() {
+    let mut cfg = config(true);
+    cfg.auth.enabled = true; // `/auth/*` is mounted only when auth is on
+    let h = harness_from_config(cfg).await;
+
+    let present = [
+        "application/acdp+json",
+        "application/acdp+json; charset=utf-8",
+        "application/json",
+        "application/vnd.acdp+json",
+        "text/plain",
+        "text/plain; charset=utf-8",
+        "application/xml",
+        "application/jsonish",
+        "",
+    ];
+
+    // `content_type: None` means "send no header at all".
+    async fn rejected_415(
+        h: &Harness,
+        uri: &str,
+        content_type: Option<&str>,
+        body: &'static str,
+    ) -> bool {
+        let mut b = Request::builder().method("POST").uri(uri);
+        if let Some(ct) = content_type {
+            b = b.header("content-type", ct);
+        }
+        let resp = h
+            .router
+            .clone()
+            .oneshot(b.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        resp.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE
+    }
+
+    const AUTH_BODY: &str = r#"{"agent_id":"did:web:a.test:x"}"#;
+    const CTX_BODY: &str = r#"{"reason":"x"}"#;
+
+    for ct in present {
+        let bytes_family = rejected_415(&h, "/contexts", Some(ct), CTX_BODY).await;
+        let json_family = rejected_415(&h, "/auth/challenge", Some(ct), AUTH_BODY).await;
+        assert_eq!(
+            bytes_family, json_family,
+            "content-type {ct:?}: `AcdpBytes` rejected={bytes_family} but `AcdpJson` \
+             rejected={json_family}. The two predicates are independent code \
+             (`media_type_accepted` vs `axum::Json`'s mime-suffix rule) and are \
+             required to agree on every PRESENT media type; a split here is a wire \
+             divergence between `/contexts` and `/auth/*` for the same header."
+        );
+    }
+
+    // The one deliberate difference, asserted in both directions so neither
+    // side can be changed without this test noticing.
+    assert!(
+        !rejected_415(&h, "/contexts", None, CTX_BODY).await,
+        "`AcdpBytes` must INFER an absent Content-Type, not reject it — scenario E \
+         of the ERR-002 matrix depends on it."
+    );
+    assert!(
+        rejected_415(&h, "/auth/challenge", None, AUTH_BODY).await,
+        "`AcdpJson` must REJECT an absent Content-Type with 415. Routing it through \
+         `media_type_accepted` to 'make the families consistent' would silently start \
+         accepting untyped bodies on the `/auth/*` surface."
+    );
+}
