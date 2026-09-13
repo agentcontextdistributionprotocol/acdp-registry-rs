@@ -25,29 +25,85 @@
 //! request to a genuine server. The only thing faked is where DNS points.
 
 use std::net::SocketAddr;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 use acdp::crypto::SigningKey;
 use axum::{routing::get, Json, Router};
 use axum_server::tls_rustls::RustlsConfig;
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
+};
 
-/// The **leaf** certificate the fixture server presents for `agents.test`.
-/// `CA:FALSE`, `serverAuth`, `SAN=DNS:agents.test`.
-pub const CERT_PEM: &[u8] = include_bytes!("../fixtures/didweb/agents-test-cert.pem");
-
-/// The **CA** that signed [`CERT_PEM`], and the only certificate the resolver
-/// trusts.
+/// The generated fixture chain: a CA and the `agents.test` leaf it signed.
 ///
-/// These are two certificates on purpose, and the first shape I tried was wrong
-/// in a way worth recording: one self-signed `CA:TRUE` cert doing both jobs.
-/// TLS refused it with `CaUsedAsEndEntity` — rustls will not accept a CA
-/// certificate as an end-entity, so "make it a CA so it can also be the trust
-/// root" does not work. `with_test_endpoint(pem, ..)` takes a single *root*, so
-/// the fixture has to be a real chain: the CA here, the leaf above signed by it.
-pub const CA_PEM: &[u8] = include_bytes!("../fixtures/didweb/agents-test-ca.pem");
+/// **Generated per process, never committed.** `.gitignore:39-43` forbids TLS
+/// material repo-wide (`*.pem`/`*.crt`/`*.key`) under an explicit
+/// `# TLS material` header, and the repo's only negation there is an empty
+/// placeholder — there is no committed TLS material anywhere in it. A committed
+/// fixture would have needed an exception to a secret-bearing ignore rule, which
+/// is repo policy rather than a lane's call. Generating the chain needs no
+/// exception, puts no private key in git, and removes the expiry problem
+/// outright: there is nothing to lapse, so there is no expiry guard to maintain
+/// either. (`rcgen`'s default validity runs to the year 4096, and it is
+/// regenerated every run regardless.)
+pub struct Fixture {
+    /// PEM of the CA — the only certificate the resolver trusts.
+    pub ca_pem: String,
+    /// PEM of the leaf the server presents for `agents.test`.
+    pub leaf_pem: String,
+    /// PEM of the leaf's private key.
+    pub leaf_key_pem: String,
+}
 
-/// The leaf's private key. Test-only; `.test` is IANA-reserved and cannot resolve.
-pub const KEY_PEM: &[u8] = include_bytes!("../fixtures/didweb/agents-test-key.pem");
+/// The process-wide chain. Built once: every test in this binary that spawns a
+/// server shares one CA, so a resolver configured from [`ca_pem`] trusts any of
+/// them.
+fn fixture() -> &'static Fixture {
+    static CHAIN: OnceLock<Fixture> = OnceLock::new();
+    CHAIN.get_or_init(|| {
+        // The chain is TWO certificates on purpose, and the shape is not
+        // negotiable: a single self-signed `CA:TRUE` certificate serving as both
+        // the leaf and the trust root is rejected by rustls with
+        // `CaUsedAsEndEntity`, and `WebResolver::with_test_endpoint` takes a
+        // single *root*, so the root cannot be dropped either. It has to be what
+        // a real deployment has.
+        let ca_key = KeyPair::generate().expect("generate CA key");
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "ACDP test did:web CA");
+        let ca_cert = ca_params.self_signed(&ca_key).expect("self-sign CA");
+
+        let leaf_key = KeyPair::generate().expect("generate leaf key");
+        let mut leaf_params =
+            CertificateParams::new(vec![DIDWEB_AUTHORITY.to_string()]).expect("leaf params");
+        leaf_params.is_ca = IsCa::ExplicitNoCa;
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        leaf_params
+            .distinguished_name
+            .push(DnType::CommonName, DIDWEB_AUTHORITY);
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &issuer)
+            .expect("sign leaf with the fixture CA");
+
+        Fixture {
+            ca_pem: ca_cert.pem(),
+            leaf_pem: leaf_cert.pem(),
+            leaf_key_pem: leaf_key.serialize_pem(),
+        }
+    })
+}
+
+/// The CA certificate, to hand to `WebResolver::with_test_endpoint` as the
+/// trusted root.
+pub fn ca_pem() -> &'static str {
+    &fixture().ca_pem
+}
 
 /// The authority the served DIDs live under.
 pub const DIDWEB_AUTHORITY: &str = "agents.test";
@@ -115,9 +171,13 @@ pub async fn spawn_didweb_server() -> SocketAddr {
         ),
     );
 
-    let config = RustlsConfig::from_pem(CERT_PEM.to_vec(), KEY_PEM.to_vec())
-        .await
-        .expect("fixture cert/key must load; see tests/fixtures/didweb/README.md");
+    let f = fixture();
+    let config = RustlsConfig::from_pem(
+        f.leaf_pem.clone().into_bytes(),
+        f.leaf_key_pem.clone().into_bytes(),
+    )
+    .await
+    .expect("generated fixture leaf/key must load");
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind did:web listener");
     let addr = listener.local_addr().expect("addr");

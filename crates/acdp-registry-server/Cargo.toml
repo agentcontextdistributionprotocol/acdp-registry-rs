@@ -91,3 +91,14 @@ serial_test    = "3"
 # `bind_rustls` path, which no test enters) is NOT fixed here: it is filed as
 # U-530. This entry fixes the test binary only.
 rustls         = { version = "0.23", features = ["ring"] }
+# U-521 option B: generate the did:web fixture's CA+leaf chain at test runtime
+# instead of committing PEM files. `.gitignore:39-43` forbids TLS material
+# repo-wide (`*.pem`/`*.crt`/`*.key`) with its only negation an empty
+# placeholder, and the repo has zero committed TLS material -- so a committed
+# fixture would have needed a repo-policy exception. Generating it needs none,
+# commits no private key, and removes the expiry problem entirely: nothing that
+# does not exist can lapse.
+#
+# Dev-only and provably outside the shipped feature graph for the same reason as
+# `rustls` above -- `resolver = "2"` -- measured the same way.
+rcgen          = "0.14"

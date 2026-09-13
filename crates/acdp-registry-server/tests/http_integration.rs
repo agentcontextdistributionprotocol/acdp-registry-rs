@@ -11199,87 +11199,29 @@ fn signed_event_envelope_did_web(
     json!({ "event": event })
 }
 
-/// Neither fixture certificate may be allowed to lapse quietly.
-///
-/// A TLS fixture that expires presents as an inscrutable handshake failure years
-/// later, on someone else's watch. This turns that into an early, named failure.
-/// It reads each certificate's own `notAfter` rather than a date written in a
-/// comment, so it cannot drift from the file it describes.
-///
-/// **Both** files are checked, by name. The fixture is a chain -- a CA and the
-/// leaf it signed -- and an expired CA fails exactly as opaquely as an expired
-/// leaf, so checking only the one the server presents would leave half the
-/// fixture unguarded. The loop asserts on the file it is holding, so a future
-/// third file added to the chain is a compile error here, not a silent gap.
-#[test]
-fn didweb_fixture_certificates_are_not_near_expiry() {
-    for (label, bytes) in [
-        ("leaf (agents-test-cert.pem)", didweb::CERT_PEM),
-        ("CA (agents-test-ca.pem)", didweb::CA_PEM),
-    ] {
-        assert_cert_not_near_expiry(label, bytes);
-    }
-}
-
-/// The per-certificate half of the check above.
-fn assert_cert_not_near_expiry(label: &str, bytes: &[u8]) {
-    let pem = std::str::from_utf8(bytes).expect("cert is PEM text");
-    let b64: String = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<Vec<_>>()
-        .join("");
-    let der = B64.decode(b64.as_bytes()).expect("cert base64");
-    // notAfter is the second UTCTime/GeneralizedTime in the TBSCertificate's
-    // Validity SEQUENCE. Scanning for the tag pair is enough here and avoids
-    // pulling an X.509 parser in for one assertion.
-    let mut years: Vec<i32> = Vec::new();
-    let mut i = 0;
-    while i + 2 < der.len() {
-        let (tag, len) = (der[i], der[i + 1] as usize);
-        if (tag == 0x17 && len == 13) || (tag == 0x18 && len == 15) {
-            let s = std::str::from_utf8(&der[i + 2..i + 2 + len]).unwrap_or("");
-            let y = if tag == 0x17 {
-                s.get(0..2).and_then(|v| v.parse::<i32>().ok()).map(|y| {
-                    if y < 50 {
-                        2000 + y
-                    } else {
-                        1900 + y
-                    }
-                })
-            } else {
-                s.get(0..4).and_then(|v| v.parse::<i32>().ok())
-            };
-            if let Some(y) = y {
-                years.push(y);
-            }
-            i += 2 + len;
-            continue;
-        }
-        i += 1;
-    }
-    assert!(
-        years.len() >= 2,
-        "could not read the {label} certificate's validity dates (found {years:?}); if the \
-         encoding changed, fix this parser rather than deleting the check -- it is what stops \
-         a lapsed fixture from presenting as a mystery TLS error"
-    );
-    let not_after = *years.iter().max().expect("a notAfter year");
-    let this_year: i32 = 2026;
-    assert!(
-        not_after - this_year >= 5,
-        "the did:web fixture's {label} certificate expires in {not_after}, within 5 years. \
-         Regenerate the WHOLE CHAIN per tests/fixtures/didweb/README.md -- the leaf is signed \
-         by the CA, so they are replaced together. A TLS fixture that lapses fails as an \
-         inscrutable handshake error, which is why this asserts early."
-    );
-}
-
 /// A did:web retract must retract — not republish.
 ///
-/// **Kills `handlers/context.rs:1542`.** Deleting that match arm drops the event
-/// through to `republish_verified`, so the context stays active and a consumer is
-/// told it came back.
+/// **Kills the `LifecycleEventType::Retracted` arm of `lifecycle_transition`'s
+/// did:web dispatch**, U-504's accepted survivor.
+///
+/// **What deleting that arm actually does, measured rather than assumed.** The
+/// event falls through to `republish_verified`, and that function validates
+/// `event_type` itself — so the request comes back **400 `schema_violation`:
+/// "event_type 'retracted' does not match this endpoint (expected
+/// 'republished')"**. The defect is that did:web retracts break *entirely*, not
+/// that they silently succeed as republishes. I wrote the silent-republish
+/// version first and running the mutant disproved it; the distinction matters
+/// because the version I nearly recorded (a retracted context quietly
+/// readvertised as live) is a data-integrity hole, while the real one is a loud
+/// denial of function.
+///
+/// **Which assertion does the killing, stated because it is not the obvious
+/// one.** The mutant is caught by the *acceptance* assertion (the retract must
+/// return 200), not by the status assertion after it. That status assertion
+/// guards a different class — a retract accepted but not persisted — which no
+/// mutation at this site can produce. Rather than leave it unfalsifiable it is
+/// written as a **before/after pair** on the context's state, so it cannot pass
+/// against a response that never carries a status at all.
 ///
 /// This is the first test in the repo to exercise the did:web half of
 /// `lifecycle_transition` at all. The control asserts the actor really is
@@ -11289,8 +11231,12 @@ fn assert_cert_not_near_expiry(label: &str, bytes: &[u8]) {
 async fn a_did_web_retract_retracts_rather_than_republishing() {
     let addr = didweb::spawn_didweb_server().await;
     let resolver = Arc::new(
-        WebResolver::with_test_endpoint(didweb::CA_PEM, didweb::DIDWEB_AUTHORITY, addr)
-            .expect("test-endpoint resolver"),
+        WebResolver::with_test_endpoint(
+            didweb::ca_pem().as_bytes(),
+            didweb::DIDWEB_AUTHORITY,
+            addr,
+        )
+        .expect("test-endpoint resolver"),
     );
     let h = didweb_lifecycle_harness(resolver).await;
 
@@ -11308,6 +11254,21 @@ async fn a_did_web_retract_retracts_rather_than_republishing() {
         "did:web publish must resolve through the fixture server: {v}"
     );
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+    // The "before" half of the state pair: this context is definitely NOT
+    // retracted, so if the post-retract assertion could also pass here it would
+    // be decorative.
+    //
+    // The two responses carry the status in DIFFERENT places -- publish returns a
+    // summary with a top-level `status`, retract returns the full context with
+    // `registry_state.status`. Found by asserting the nested path here and
+    // getting `Null`. Reading each where it actually lives is the point; reading
+    // the nested path on both would have made this assertion vacuous rather than
+    // wrong, which is the more dangerous of the two.
+    assert_eq!(
+        v["status"], "active",
+        "a freshly published context must read `active`, or the retracted-status \
+         assertion below is not discriminating anything: {v}"
+    );
 
     let envelope = signed_event_envelope_did_web(64, &ctx_id, "retracted", Some("u521 did:web"));
     assert!(
@@ -11323,13 +11284,19 @@ async fn a_did_web_retract_retracts_rather_than_republishing() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "the did:web retract must get past key resolution and be accepted. A \
-         `key_resolution_unreachable` here means the fixture server or the \
-         test-endpoint resolver is not wired: {v}"
+        "the did:web retract must get past key resolution and be accepted. THIS is \
+         the assertion that catches a deleted `Retracted` arm: without it the \
+         event reaches `republish_verified`, which rejects `event_type: \
+         'retracted'` with a 400 `schema_violation`. A \
+         `key_resolution_unreachable` here means something else -- the fixture \
+         server or the test-endpoint resolver is not wired: {v}"
     );
     assert_eq!(
         v["registry_state"]["status"], "retracted",
-        "a did:web retract must RETRACT; the deleted match arm sends it to \
-         `republish_verified` instead and the context stays active: {v}"
+        "a did:web retract must RETRACT. Paired with the `active` assertion above, \
+         so this is a state CHANGE and not a field that happens to read \
+         `retracted`. Note this is NOT what catches the deleted match arm -- that \
+         mutation 400s at the assertion above; this one guards a retract that is \
+         accepted but does not persist: {v}"
     );
 }
