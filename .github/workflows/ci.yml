@@ -65,6 +65,16 @@ jobs:
       # Keep the `docker.yml` copy: it additionally triggers on the
       # `acdp-registry-server/v*` tag push, which ci.yml never sees. This one
       # blocks the pull request; that one covers the tag.
+      # ── AC8 NEGATIVE CONTROL (throwaway branch only) ──
+      # Deliberately fails BEFORE the gate. The next step is a copy of the gate
+      # with no `if:`, which must be SKIPPED; the real gate below carries
+      # `!cancelled()` and must still RUN and report. Two outcomes in one run.
+      - name: deliberate failure before the gate
+        run: exit 1
+
+      - name: CONTROL - gate without if, must be SKIPPED
+        run: bash docker/assert-upgrade-notes.sh --check
+
       - name: assert the version has operator upgrade notes
         if: ${{ !cancelled() }}
         run: bash docker/assert-upgrade-notes.sh --check
