@@ -147,7 +147,15 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         if !media_type_accepted(req.headers()) {
             return Err(AcdpRejection {
-                status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                // Derived, not hard-coded, so this and `AcdpJson` cannot end up
+                // disagreeing about the status §5 assigns to one code. Found by
+                // falsification: breaking `status_for_code`'s 415 arm left this
+                // path green, which is the tell that the arm was not the thing
+                // under test here.
+                status: status_for_code(
+                    "unsupported_media_type",
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                ),
                 code: "unsupported_media_type",
                 // The same literal `AcdpJson` emits, so the two routes answer
                 // identically. It names only `application/json` and is thus
@@ -160,11 +168,46 @@ where
             Err(rej) => Err(AcdpRejection {
                 // Preserves 413 for an oversized body exactly as `AcdpJson`
                 // does -- `BytesRejection` wraps `LengthLimitError`.
-                status: rej.status(),
+                status: status_for_code("payload_too_large", rej.status()),
                 code: "payload_too_large",
                 message: "request body exceeds the configured limit".to_string(),
             }),
         }
+    }
+}
+
+/// The HTTP status RFC-ACDP-0007 §5's table pins to a wire code.
+///
+/// **The code decides the status, not the extractor (U-523).** §5 is a table of
+/// `(code, status)` pairs, so a response whose code and status disagree is
+/// malformed however defensible either half looks alone. Deriving one from the
+/// other makes that disagreement unrepresentable rather than merely tested-for.
+///
+/// This replaced `status: rej.status()`, which passed axum's own status
+/// straight through. That was right for 413 and 415 and **wrong for 422**:
+/// `JsonRejection::JsonDataError` carries 422, so every wrong-shaped body on
+/// `/auth/*` answered **422 with code `schema_violation`** — and §5 pins
+/// `schema_violation` to **400** (`RFC-ACDP-0007-capabilities.md:228`). **422
+/// appears nowhere in RFC-ACDP-0007**; it was not a debatable status choice but
+/// a status the protocol does not use.
+///
+/// `fallback` keeps the property the old comment was protecting: both rejection
+/// enums are `#[non_exhaustive]`, so a future variant this table does not name
+/// keeps axum's own status rather than being forced to 400. Hard-coding 400 is
+/// exactly how an oversized body would silently stop being a 413.
+fn status_for_code(code: &str, fallback: StatusCode) -> StatusCode {
+    match code {
+        // RFC-ACDP-0007 §5: "Request body or query failed structural
+        // validation." Mirrors `http_status_for_acdp`'s own 400 arm for
+        // `AcdpError::SchemaViolation`, so the extractor and the error type
+        // cannot disagree about the same code.
+        "schema_violation" => StatusCode::BAD_REQUEST,
+        // RFC 9110 §15.5.16, and the reason this whole rejection type exists:
+        // 415 must survive rather than collapsing into 400.
+        "unsupported_media_type" => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        // `BytesRejection` wraps `LengthLimitError`.
+        "payload_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+        _ => fallback,
     }
 }
 
@@ -189,7 +232,7 @@ where
                 // would silently downgrade an oversized body on `/auth/*`, an
                 // observable status change on exactly the path the 413 envelope
                 // work exists to make conformant.
-                status: rej.status(),
+                status: status_for_code(json_code(&rej), rej.status()),
                 code: json_code(&rej),
                 message: json_message(&rej).to_string(),
             }),

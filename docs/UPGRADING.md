@@ -23,6 +23,36 @@ belongs in the per-crate changelogs.
 
 ## 0.1.4
 
+**Wire change: `/auth/*` answers 400, not 422, on a wrong-shaped body.**
+
+A request to `/auth/challenge`, `/auth/token` or `/auth/revoke` whose body is valid JSON but does not
+match the endpoint's schema previously returned **422 Unprocessable Entity** with
+`error.code = "schema_violation"`. It now returns **400 Bad Request** with the same code.
+
+422 was never a deliberate choice: it is the status axum's JSON extractor attaches to a
+deserialization failure, and it reached the wire because the rejection passed that status through.
+**RFC-ACDP-0007 §5 pins `schema_violation` to 400, and 422 appears nowhere in that RFC** — so the old
+pair was a status/code combination the protocol does not define.
+
+**Who needs to act:** any client branching on `422` from `/auth/*`. Branch on `error.code` instead —
+it is unchanged (`schema_violation`), and it is the part RFC-ACDP-0007 §5 actually pins.
+
+**Explicitly unchanged**, because collapsing these into 400 is the way this fix could have gone wrong:
+
+| case | status |
+|---|---|
+| body exceeds the size limit | **413** — unchanged |
+| unacceptable `Content-Type` | **415** — unchanged |
+| malformed JSON | 400 — unchanged |
+
+**Wire change: `/admin/*` lifecycle endpoints now reject an unaccepted `Content-Type` with 415.**
+
+`POST /admin/contexts/{ctx_id}/retract` and `.../republish` were the last two routed body-bearing
+handlers with no media-type gate. They now behave exactly as `POST /contexts` does (see the entry
+below): an unacceptable `Content-Type` is **415 `unsupported_media_type`**, media-type parameters are
+ignored, and an **absent** `Content-Type` is still accepted. Same extractor, same accept-set — not a
+third implementation.
+
 **Wire change: `POST /contexts` now rejects an unaccepted `Content-Type` with 415.**
 
 Before 0.1.4 this endpoint never looked at `Content-Type`. It parsed the body whatever the header
