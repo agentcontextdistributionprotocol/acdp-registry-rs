@@ -1231,6 +1231,10 @@ hold entries from several releases. Use the commands.
   wholesale deletion and gutting but not `assert!(true)`-grade hollowing; the real
   fix is `cargo-mutants` or a fault-injection harness. #130 had been the de-facto
   anchor for that separate concern, so it was split out before #130 closed.
+  **Update (U-502): that fix has landed for a bounded scope** — `.cargo/mutants.toml`
+  and the scheduled `.github/workflows/mutants.yml`, baseline 74 mutants / 48 viable /
+  46 caught / 2 survivors. See the U-502 entry at the end of this file. `#216` remains
+  open for the rest. Left standing rather than rewritten: it was true when written.
 
 - **Corrected two false security claims in the Railway recipe, and disclosed its
   read posture** (#208). [`docker/RAILWAY.md`](docker/RAILWAY.md) claimed the
@@ -1941,6 +1945,11 @@ hold entries from several releases. Use the commands.
     all** — proving a test asserts something real needs a mutation oracle
     (`cargo-mutants` or fault injection over `src/`), not a text oracle.
     Recorded on `#130` rather than overclaimed in the file.
+    **Two updates, appended rather than rewritten, since both were true as
+    written:** the mutation-oracle thread moved from `#130` to `#216` when
+    `#130` closed; and the oracle now EXISTS for a bounded scope (U-502 —
+    `.cargo/mutants.toml`, scheduled `mutants.yml`, 46 of 48 viable mutants
+    caught, 2 survivors). See the U-502 entry at the end of this file.
   - `HARNESS_PROFILES`, `caps()`, `config()`, `KNOWN_FAMILIES`,
     `CORE_INEXCUSABLE_FAMILIES`, `EXCUSED` and `MIN_REPLAYED_EXCHANGES`
     are byte-identical to their prior contents — the ratchet was closed on
@@ -4527,6 +4536,7 @@ hold entries from several releases. Use the commands.
 
   **`#216` stays open.** Its item 1 is fault injection over `src/` generally; this
   is a bounded 74-mutant ratchet. PARTIAL BY DESIGN.
+
 ## U-501 — #242: publishes that fail late are now charged on two of four branches
 
 `P5` (`H-A`) split the publish limiter into `peek` (read-only, never inserts) before the

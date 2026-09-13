@@ -480,10 +480,26 @@
 //! `include_str!` cannot distinguish an assertion from the letters `a-s-s-e-r-t` in a
 //! comment, and tightening the substring only moves the goalposts one mutation further
 //! out. Proving a test asserts something REAL needs a mutation oracle -- break the code
-//! under test, observe the test go red (`cargo-mutants`, or a fault-injection harness
-//! over `src/`) -- which is a different mechanism, not a stricter regex. Tracked on
-//! **#216**, split out of #130 when that issue closed so this thread keeps an open
-//! anchor of its own; #130 was the uncovered-family ratchet and never really this.
+//! under test, observe the test go red -- which is a different mechanism, not a stricter
+//! regex.
+//!
+//! **THAT ORACLE NOW EXISTS** (#216, unit U-502). `.cargo/mutants.toml` configures
+//! `cargo-mutants` over `acdp-registry-core`'s `receipt.rs` and `handlers/log.rs`, and
+//! `.github/workflows/mutants.yml` runs it on a schedule against a committed survivor
+//! budget that fails the job when it is exceeded. The baseline is in
+//! `docs/ENGINEERING-LOG.md`: 74 mutants, 48 viable, **46 caught, 2 survivors**. So do not
+//! reach for `cargo-mutants` as a thing someone should do one day -- run `cargo mutants`.
+//!
+//! Two limits on that, because a reader who over-trusts this is worse off than one who
+//! ignores it. The scope is two files, NOT this file and NOT the workspace (1398 mutants),
+//! so a mutation of code outside those two is still unoracled. And the oracle exercises
+//! the tests in THIS file only in require mode: 42 of the 70 tests here return early
+//! without `ACDP_SPEC_DIR`, so the scheduled job sets it and a bare local
+//! `cargo test --workspace` does not.
+//!
+//! #216 stays open for the remaining scope, split out of #130 when that issue closed so
+//! this thread keeps an open anchor of its own; #130 was the uncovered-family ratchet and
+//! never really this.
 //! Do not read a passing ratchet as evidence that the tests it names prove
 //! anything; read it as evidence they have not been deleted.
 //!
@@ -9024,7 +9040,14 @@ const PARTIAL_DIRECT: &[(&str, &[&str])] = &[
 /// WHAT THIS STILL DOES NOT CATCH, stated because a guard whose reach is left
 /// unstated gets trusted past it: a test that exists, compiles, runs, and
 /// asserts nothing -- the first four rows. No text or symbol oracle can; that
-/// needs a mutation oracle, which is why #216 is narrowed here and not closed.
+/// needs a mutation oracle, which is why #216 was narrowed here and not closed.
+///
+/// **That oracle now exists** (#216, unit U-502): `.cargo/mutants.toml` plus the
+/// scheduled `.github/workflows/mutants.yml`, baseline and limits in
+/// `docs/ENGINEERING-LOG.md`. So this table is no longer the last word on the
+/// first four rows -- run `cargo mutants`. It remains the right mechanism for the
+/// deletion/rename/comment-out class, which it turns into a compile error for
+/// free, and #216 stays open only for the scope the oracle does not yet cover.
 /// `#[ignore]` above `#[test]` is also not caught by this table (the function is
 /// still a real function); the CI step added by this unit catches that instead.
 macro_rules! direct_fn {
@@ -9160,10 +9183,21 @@ fn source_has_present_test_fn(name: &str) -> bool {
 /// attribute order is caught by a CI step that asks the test harness rather than
 /// the source. What remains un-oracled is only the first class above -- a test
 /// that exists, runs, and asserts nothing -- which is why these text guards are
-/// kept as a cheap first line rather than retired, and why #216 stays open. That property needs a mutation
-/// oracle -- break the code under test and observe the test go red (`cargo-mutants` or
-/// a fault-injection harness over `src/`) -- not a text oracle. Tracked on #216 rather
-/// than patched a fourth time (it was on #130 until that issue closed; the mutation
+/// kept as a cheap first line rather than retired. That property needs a mutation
+/// oracle -- break the code under test and observe the test go red -- not a text oracle.
+///
+/// **That oracle now exists and this file is no longer the only line of defence**
+/// (#216, unit U-502): `.cargo/mutants.toml` plus the scheduled
+/// `.github/workflows/mutants.yml`, baseline and limits recorded in
+/// `docs/ENGINEERING-LOG.md`. It was measured against exactly the blindness described
+/// above: mutating `handlers/log.rs`'s `root_for` to `String::new()` -- gutting the
+/// Merkle root the log endpoints serve -- leaves all three presence oracles here GREEN
+/// (both text guards and `direct_fns_matches_the_coverage_tables_exactly`), and indeed
+/// the whole 69-test suite green in default mode, while the mutation oracle reports it
+/// CAUGHT by ten tests in `http_integration.rs`.
+///
+/// #216 stays open for the scope the oracle does not yet cover, rather than being
+/// patched a fourth time here (it was on #130 until that issue closed; the mutation
 /// oracle was always a separate concern riding on the same number).
 fn source_test_fn_body(name: &str) -> Option<&'static str> {
     let def_needle = format!("fn {name}(");
