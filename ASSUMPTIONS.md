@@ -3598,3 +3598,54 @@ passed with both still open. `:928` stays **UNCONFIRMED deliberately**: the flag
 report as the entry requires, no `playground.refuse_on_no_live_pin` key exists in the tree, and closing
 it because nobody objected for three days is exactly the inertia another entry in this file forbids.
 **Owner:** the leader.
+
+## U-533 — driving required-but-unexercised from 6 to 1 (2026-09-13, lane-2)
+
+Plan: plans/u-533-unexercised-fixtures.md
+
+1. **Assumed:** the five retirable fixtures should be made *replayable* by widening the replayer's
+   shape dispatch, since that is what U-527/U-528 did for the previous batches.
+   - **CHANGED.** Measured per fixture: `pub-006`/`pub-009` carry 96-char signatures where ed25519
+     needs 88, so widening Shape A to accept a 403 would have produced two green replays asserting
+     nothing about `key_not_authorized` — the `pub-008` defect, recreated inside the unit meant to
+     remove it. `pub-010` has no inline body. `pub-003`/`ret-002` need seeding shapes the seeder does
+     not model.
+   - **Chose:** direct tests that assert the *rule* with material that reaches it, and that assert
+     each fixture's own blocker so the reasoning expires loudly if a spec bump changes it.
+   - **Status:** CHANGED (2026-09-13).
+
+2. **Assumed:** `pub-010`'s 201 makes it a second U-526 blocker, so the target is 6 -> 2.
+   - **CHANGED, before escalating.** The `anc-001`/`idem-001` precedent already in this file handles a
+     201-vs-200 divergence: assert the corrected status, assert the fixture's own literal separately,
+     record it, neither fake nor fix. `pub-010`'s subject is `contributors[]`, so the status is
+     incidental.
+   - **Chose:** retire `pub-010` under that precedent; leave `pub-007`, whose subject *is* the response
+     shape, with its row and an expanded reason.
+   - **Status:** CHANGED (2026-09-13) — a false alarm caught by reading the file before reporting.
+
+3. **Assumed:** `ret-002` cannot be retired without a production seam, because one scenario needs an
+   all-superseded lineage.
+   - **DEFERRED in part.** `expired` is producible via `expires_at`, so 2 of 3 scenarios drive. The
+     third is unreachable over HTTP, and the fixture's own note says so.
+   - **Chose:** drive two, and assert that the fixture still calls the third abnormal, rather than
+     fabricating the state through a store insert that no client could reach.
+   - **Status:** DEFERRED (2026-09-13) — evidence that would settle it: an admin path that can produce
+     the state, or a spec bump dropping the note. Either reddens the assertion.
+
+4. **Assumed:** retiring a fixture from `UNEXERCISED_FIXTURES` and updating the count is sufficient,
+   since that is what the accounting test's doc comment describes.
+   - **CHANGED.** That doc comment says "and nothing else", and nothing verified the retirement.
+     Deleting the rows and changing the count goes green unaided.
+   - **Chose:** `EXERCISED_FIXTURES`, compile-bound and runtime-checked. **And on testing it, found it
+     closes only half the hole** — a retirement registering nothing is still green. Documented with
+     the derived-partition follow-up named; a conservation law was rejected because it would redden on
+     a legitimate spec bump.
+   - **Status:** CHANGED (2026-09-13), with a named residual gap rather than an implied total fix.
+
+5. **Assumed:** `../acdp-spec-pinned` is a safe source for fixture counts, its name implying it sits
+   at the pin.
+   - **CHANGED.** It is at `d1f06d0` with **143** fixtures; the pin has **144**; a nested clone has
+     **145**. Neither checkout is the pin and the drift runs in both directions.
+   - **Chose:** `git archive <pin> | tar -x` into scratch for every measurement, re-verified
+     byte-identical after a mid-unit warning that the checkouts had moved.
+   - **Status:** CHANGED (2026-09-13) — AC6 is load-bearing, not ceremony.

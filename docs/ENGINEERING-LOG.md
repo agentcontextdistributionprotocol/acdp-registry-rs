@@ -6086,3 +6086,89 @@ named outsider pins (2 each), which is what those pins exist for.
 The generalisable lesson: **count the distinct expressions a suite can bottom out in, not the number
 of comparisons it performs.** Two differentials terminating at the same leaf give the coverage of one,
 and the doc comment claiming otherwise is itself the defect.
+
+## U-533 — required-but-unexercised 6 -> 1, and a retirement that cannot be faked
+
+*2026-09-13, lane-2.*
+
+### The counts
+
+`required` **6 -> 1**; the survivor is `pub-007`. `conditional` **3**,
+`TOTAL_FIXTURES_AT_PIN` **144** and `REPLAYABLE_FIXTURES_AT_PIN` **22** all unchanged **and asserted
+as such** — in a diff, "did not move" and "was not checked" are the same thing, so each is a live
+assertion rather than a claim in prose.
+
+### Why AC6's "measure against `git archive <pin>`" is load-bearing
+
+There are **three** spec trees on this box and **neither checkout is the pin**:
+
+| tree | HEAD | fixtures |
+|---|---|---|
+| nested clone `agentcontextdistributionprotocol/` | `a0adda7` | **145** (adds `rev-003`) |
+| `acdp-spec-pinned/` | `d1f06d0` | **143** |
+| `git archive 16211e64…` | — | **144** |
+
+The drift runs in **both directions**, so using either checkout fails `TOTAL_FIXTURES_AT_PIN` in a
+different way — and the directory whose name says `-pinned` is the one that is behind. Two sessions
+reported different shas for "the spec checkout" and **both were right about different trees**. Measure
+the archive; never the working tree.
+
+### The five retirements, and why four are direct tests rather than replays
+
+The obvious repair was to widen the replayer. Measuring each fixture body showed that would have been
+actively harmful:
+
+* **`pub-006` / `pub-009`** carry `signature.value` of **96 base64 chars where ed25519 needs 88**.
+  Shape validation rejects them before RFC-ACDP-0001 §5.11 step 2, so they would have replayed green
+  on `400 invalid_signature` while asserting nothing about `key_not_authorized` — the identical
+  `pub-008` defect from U-531 and the `did-ssrf-001..004` defect before it. Widening Shape A would
+  have **manufactured two new wrong-reason passes inside the unit whose purpose is removing them.**
+  `pub-006` has a second blocker: both its DIDs use `did:agent:`, unsupported here.
+* **`pub-010`** has no inline body at all — its excerpt's signature is the literal placeholder
+  `<base64 signature that verifies under alice's did:web key>`.
+* **`pub-003`** is blocked by seeding only: `input.preconditions` matches no seeding path. Widening
+  Shape D's shared seeder was rejected because `REPLAYABLE_FIXTURES_AT_PIN` is an equality and one
+  fixture is not worth changing what others replay.
+* **`ret-002`** needs lineage seeding with per-version statuses, which `parse_shape_d` cannot express.
+
+Every blocker is **asserted, not described**, so a spec bump that fixes one reddens the test that
+depends on it.
+
+### `pub-007` stays, and `pub-010` is not a second instance of it
+
+Both expect **201** where this repo returns **200**. The first read was that U-526 blocks two fixtures
+and the target should be 6 -> 2 — **nearly escalated, and wrong.** This file already carries the
+`anc-001` / `idem-001` precedent: assert the corrected status, assert the fixture's own literal
+separately so the deviation is demonstrably real, record it, neither fake nor fix it. That covers
+`pub-010`, whose subject is `contributors[]`.
+
+It does **not** cover `pub-007`, whose entire subject *is* the response shape and the `Location`
+header — a corrected status there deletes the fixture's point. Its row stays, with that reasoning in
+it.
+
+### The defect worth more than the retirements
+
+`fixture_accounting_totals_are_exact`'s own doc comment said moving a fixture OUT "requires editing
+the list and the count, **and nothing else**". Nothing checked that a retired fixture was exercised.
+Deleting five rows and changing a `6` to a `1` went green unaided — a hand-maintained list cannot
+catch an omission, the same shape as the `>=` floor this file has fixed twice.
+
+`EXERCISED_FIXTURES` now binds each retirement to the test that requests it: **compile-time** via a
+`stringify!` macro over the same token (rename/delete/comment-out = compile error), and **at runtime**
+by calling each registered test and asserting the fixture id reached `find_fixture_by_id`.
+
+**Testing that guard found it closes only half the hole**, and that is recorded rather than papered
+over: a retirement that registers *nothing* is still green, because the two tables are not joined by an
+invariant. A conservation law (`required + retired == 6`) was considered and **rejected** — a spec bump
+legitimately adding a required fixture would redden it for a correct reason, and a guard that fails on
+correct input is one someone deletes. The real closure is deriving the set from `profiles.json`'s 72
+`required_fixtures`, named as the follow-up.
+
+### `ret-002` scenario 1: undriven, on the fixture's own authority
+
+All-versions-superseded cannot be produced over HTTP — superseding a head makes the superseding
+version the new non-superseded head. The fixture's own note calls it "Abnormal state: reachable only
+via admin correction or data corruption". Rather than fabricate it with a store-level insert, which
+would assert against a state no client can reach, the test **asserts the note still says so**, so the
+scenario becomes visibly owed if the spec changes its mind. `expired` proved producible via
+`expires_at`, so no `blocked` was needed in this unit.
