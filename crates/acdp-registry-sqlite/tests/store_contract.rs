@@ -35,11 +35,33 @@ use acdp_registry_store::ExtendedRegistryStore;
 const THREADS: usize = 16;
 const AUTHORITY: &str = "reg.test";
 
-async fn store() -> (Arc<SqliteStore>, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let store = SqliteStore::connect(tmp.path(), 4).await.unwrap();
+/// The database file name inside each test's own temp DIRECTORY.
+///
+/// Mirrors `acdp-registry-server`'s `common::DB_FILE_NAME`, which cannot be
+/// imported here — it lives in a different crate's test support module. The
+/// value is arbitrary; what matters is that the directory, not the file, is
+/// what the test owns.
+const DB_FILE_NAME: &str = "registry.sqlite";
+
+/// Own the temp DIRECTORY, not the temp FILE.
+///
+/// `tempfile::NamedTempFile` deletes exactly the path it owns, while SQLite
+/// writes two sidecars beside it (`-wal` and `-shm`). Those are not the owned
+/// path, so they outlive the test. #309 fixed this in the server harness;
+/// measured here at `7b3797e`, this crate's suite still leaked **34** files
+/// into `$TMPDIR` per run. A `TempDir` removes the whole directory, sidecars
+/// included.
+///
+/// `acdp-registry-server/tests/tmpdir_hygiene.rs` is the standing guard for
+/// the server side; it does not cover this crate, which is why the leak
+/// survived #309.
+async fn store() -> (Arc<SqliteStore>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::connect(&dir.path().join(DB_FILE_NAME), 4)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
-    (Arc::new(store), tmp)
+    (Arc::new(store), dir)
 }
 
 fn producer(seed: u8) -> Producer {
@@ -83,6 +105,46 @@ fn response(outcome: &PublishCommitOutcome) -> &PublishResponse {
     match outcome {
         PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => r,
     }
+}
+
+/// `count_idempotency_records` must count the rows that exist.
+///
+/// Measured in U-540: replacing the whole method with `Ok(Some(0))` left the
+/// suite green. The count feeds operational reporting, so a constant zero
+/// reads as "no idempotency records are being retained" — the shape of answer
+/// that makes an eviction bug invisible rather than loud.
+///
+/// Asserted as a DELTA across a publish, not as a single figure. `Some(0)` on
+/// an empty store is the correct answer, so a test that only checked the
+/// populated case would pass against a method that always returns zero for
+/// exactly one of its two observations; pinning both ends removes that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn count_idempotency_records_counts_the_rows_that_exist() {
+    let (store, _tmp) = store().await;
+
+    let empty = store.count_idempotency_records().await.expect("count ok");
+    assert_eq!(
+        empty,
+        Some(0),
+        "a fresh store retains no idempotency records"
+    );
+
+    let p = producer(64);
+    commit(
+        Arc::clone(&store),
+        request(&p, "counted row"),
+        Some("count-key-1".to_string()),
+    )
+    .await
+    .unwrap()
+    .expect("publish ok");
+
+    let populated = store.count_idempotency_records().await.expect("count ok");
+    assert_eq!(
+        populated,
+        Some(1),
+        "one keyed publish retains exactly one idempotency record; a constant          `Some(0)` here would report an empty table over a populated one"
+    );
 }
 
 /// Race N identical publishes sharing one idempotency key: exactly one
@@ -264,6 +326,64 @@ mod lifecycle {
             .unwrap();
         let r = response(&outcome);
         (r.ctx_id.clone(), r.lineage_id.clone())
+    }
+
+    /// `lifecycle_events_of_ctx` must return the events that were committed.
+    ///
+    /// Measured in U-540: replacing the WHOLE METHOD BODY with `Ok(vec![])`
+    /// left the entire workspace suite green. Every other assertion about
+    /// lifecycle state in this file reads the PROJECTED context (status,
+    /// `retracted_at`, §7.2 precedence) rather than the event list itself, so
+    /// the store could report "this context has no lifecycle history" and
+    /// nothing noticed.
+    ///
+    /// The assertion is on CONTENT, not just length: a length check alone
+    /// would be satisfied by any one event, which is a weaker claim than the
+    /// method actually returning what was written.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_events_of_ctx_returns_the_committed_events() {
+        let (store, _tmp) = store().await;
+        let actor = AgentDid::new("did:web:agents.test:contract-63".to_string());
+        let (ctx_id, _lineage) = published_ctx(&store, 63, "event list row").await;
+
+        // Before any event, the list is empty for a real, existing context —
+        // which also proves the emptiness asserted after the commit would be a
+        // genuine change of state rather than a constant.
+        let before = store
+            .lifecycle_events_of_ctx(ctx_id.as_str())
+            .await
+            .expect("events ok");
+        assert!(
+            before.is_empty(),
+            "a freshly published context has no events"
+        );
+
+        let retract = event(
+            &actor,
+            &ctx_id,
+            LifecycleEventType::Retracted,
+            Some("event list reason"),
+        );
+        let expected_event_id = retract.event_id.clone();
+        store
+            .commit_lifecycle_event(&retract)
+            .expect("retract applied");
+
+        let after = store
+            .lifecycle_events_of_ctx(ctx_id.as_str())
+            .await
+            .expect("events ok");
+        assert_eq!(
+            after.len(),
+            1,
+            "one event was committed, so one must come back; `Ok(vec![])`              reports a context with no lifecycle history at all"
+        );
+        assert_eq!(
+            after[0].event_id, expected_event_id,
+            "the returned event must be the one committed, not merely some event"
+        );
+        assert_eq!(after[0].event_type, LifecycleEventType::Retracted);
+        assert_eq!(after[0].ctx_id, ctx_id);
     }
 
     /// The documented 4-step atomic contract: resolve, retry-idempotency,
@@ -470,14 +590,15 @@ mod transparency_log {
 
     const REGISTRY_DID: &str = "did:web:reg.test";
 
-    async fn log_store() -> (Arc<SqliteStore>, tempfile::NamedTempFile) {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 4)
+    /// Owns the directory, not the file — see `super::store`.
+    async fn log_store() -> (Arc<SqliteStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&dir.path().join(super::DB_FILE_NAME), 4)
             .await
             .unwrap()
             .with_transparency_log();
         store.migrate().await.unwrap();
-        (Arc::new(store), tmp)
+        (Arc::new(store), dir)
     }
 
     fn signer() -> ReceiptSigner {
@@ -1105,6 +1226,96 @@ mod visibility_sql {
                 );
             }
         }
+    }
+
+    /// The `LIMIT limit + 1` SENTINEL in `list_contexts`, which is what tells
+    /// `try_paginate_rows` whether another page exists. Every other caller of
+    /// `list_contexts` in this repository passes a limit of 50 or 100 — larger
+    /// than any fixture set — so the boundary is never reached and the sentinel
+    /// is never exercised. Measured in U-540: mutating `limit + 1` to
+    /// `limit * 1` or `limit - 1` left the entire suite green.
+    ///
+    /// The repo's other pagination coverage is on `search`, a DIFFERENT method,
+    /// which is why this gap survived review: `list_contexts` has ten call
+    /// sites and reads as covered.
+    ///
+    /// This test pins the boundary itself: three rows, a limit of two.
+    ///   * `limit * 1` fetches 2, so no sentinel row is seen and `next_cursor`
+    ///     comes back `None` — caught by the assertion below.
+    ///   * `limit - 1` fetches 1, so the first page is short — caught too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_contexts_signals_more_rows_through_the_limit_sentinel() {
+        let (store, _tmp) = store().await;
+        let dom = "sentinel-domain";
+        let tenant = "sentinel-tenant";
+        let owner = agent(OWNER);
+
+        for i in 0..3 {
+            publish(
+                &store,
+                &format!("sentinel row {i}"),
+                Visibility::Public,
+                &[],
+                dom,
+                tenant,
+            )
+            .await;
+        }
+
+        // limit=2 over 3 visible rows: the page must be FULL and must announce
+        // that more remain. `total_estimate` is deliberately not asserted here —
+        // it is a different mechanism with its own test above, and folding it in
+        // would make a sentinel failure indistinguishable from a count failure.
+        let page1 = store
+            .list_contexts(2, None, Some(&owner), Some(tenant), true)
+            .await
+            .expect("list ok");
+        assert_eq!(
+            page1.items.len(),
+            2,
+            "page must fill to the limit; a short page means the LIMIT bind is              below `limit` (e.g. `limit - 1`)"
+        );
+        assert!(
+            page1.next_cursor.is_some(),
+            "3 rows exist and the limit is 2, so the `limit + 1` sentinel must              have seen a third row and set a cursor. `None` here means the              sentinel is gone (e.g. `limit * 1`) and pagination silently ends              one page early"
+        );
+
+        // And the cursor must actually resume: the tail page carries the third
+        // row and closes the walk. Without this, a cursor that is merely
+        // non-None would satisfy the assertion above.
+        let page2 = store
+            .list_contexts(
+                2,
+                page1.next_cursor.as_deref(),
+                Some(&owner),
+                Some(tenant),
+                true,
+            )
+            .await
+            .expect("list page 2 ok");
+        assert_eq!(
+            page2.items.len(),
+            1,
+            "the tail page holds the remaining row"
+        );
+        assert!(
+            page2.next_cursor.is_none(),
+            "the walk is complete, so no further cursor"
+        );
+
+        // The two pages together are the whole visible set, with no row
+        // repeated or dropped across the boundary.
+        let seen: HashSet<&str> = page1
+            .items
+            .iter()
+            .chain(page2.items.iter())
+            .map(|c| c.body.ctx_id.as_str())
+            .collect();
+        assert_eq!(
+            seen.len(),
+            3,
+            "the paged walk must yield all 3 rows exactly once"
+        );
     }
 
     /// Pages fill to `limit` even when the ordered scan interleaves rows the

@@ -24,7 +24,7 @@ not its value.
 | mutants | **138** (`cargo mutants --list --no-config --file <path>`) |
 | verdicts obtained | **95 of 138 (69%)** |
 | caught | 47 |
-| **missed (survivors)** | **14** |
+| **missed (survivors)** | **14** — of which **4 killed by U-543**, 10 open |
 | unviable | 34 |
 | **survivor rate among viable** | **14 / 61 = 23%** |
 | extrapolated survivors at 138 | **~20**, against a budget of **5** |
@@ -42,22 +42,22 @@ Each is a change to `src/` that the whole workspace suite did not notice. None h
 triaged into "real gap" vs "equivalent mutant" — that triage is the work of the units that
 pay them down, and is deliberately not pre-judged here.
 
-| site | mutation |
-|---|---|
-| `store.rs:49:16` | `delete !` in `SqliteStore::connect` |
-| `store.rs:154:9` | `count_idempotency_records` → `Ok(Some(0))` |
-| `store.rs:342:26` | `+` → `*` in `list_contexts` |
-| `store.rs:342:26` | `+` → `-` in `list_contexts` |
-| `store.rs:380:9` | `lifecycle_events_of_ctx` → `Ok(vec![])` |
-| `store.rs:568:9` | `put` → `Ok(())` |
-| `store.rs:821:9` | `mark_superseded` → `Ok(())` |
-| `store.rs:832:9` | `first_version_ctx_id` → `Ok(None)` |
-| `store.rs:923:9` | `idempotency_evict_expired` → `Ok(())` |
-| `store.rs:994:35` | `>` → `<` in `commit_publish` |
-| `store.rs:994:35` | `>` → `==` in `commit_publish` |
-| `store.rs:994:35` | `>` → `>=` in `commit_publish` |
-| `store.rs:1090:59` | `==` → `!=` in `commit_publish` |
-| `store.rs:1306:35` | `!=` → `==` in `commit_publish` |
+| site | mutation | status |
+|---|---|---|
+| `store.rs:49:16` | `delete !` in `SqliteStore::connect` | open |
+| `store.rs:154:9` | `count_idempotency_records` → `Ok(Some(0))` | **KILLED (U-543)** |
+| `store.rs:342:26` | `+` → `*` in `list_contexts` | **KILLED (U-543)** |
+| `store.rs:342:26` | `+` → `-` in `list_contexts` | **KILLED (U-543)** |
+| `store.rs:380:9` | `lifecycle_events_of_ctx` → `Ok(vec![])` | **KILLED (U-543)** |
+| `store.rs:568:9` | `put` → `Ok(())` | open |
+| `store.rs:821:9` | `mark_superseded` → `Ok(())` | open |
+| `store.rs:832:9` | `first_version_ctx_id` → `Ok(None)` | open |
+| `store.rs:923:9` | `idempotency_evict_expired` → `Ok(())` | open |
+| `store.rs:994:35` | `>` → `<` in `commit_publish` | open |
+| `store.rs:994:35` | `>` → `==` in `commit_publish` | open |
+| `store.rs:994:35` | `>` → `>=` in `commit_publish` | open |
+| `store.rs:1090:59` | `==` → `!=` in `commit_publish` | open |
+| `store.rs:1306:35` | `!=` → `==` in `commit_publish` | open |
 
 ### The one survivor that was run to ground
 
@@ -117,12 +117,36 @@ Two traps found the hard way, both worth inheriting:
   dying at 50/138. It also forces a cold rebuild, which pushed consumption to ~1566 MiB/min
   — so the 60 MiB/mutant figure above is a **warm-cache** number and not a ceiling.
 
-**The mechanism behind the ~60 MiB/mutant is still unexplained.** It is not the temp tree
-(flat while free fell) and not `target/` (grew ~400 MiB across the same window). One
-hypothesis was tested and **eliminated**: deleted-but-still-open files. Sampled *during* a
-live run, `lsof +L1` held flat at **192 MiB across 362–368 fds** while 1 GiB disappeared —
-the same figure measured with nothing running. Cause is settled (it stops when the run
-stops); mechanism is open. Do not let this file imply otherwise.
+**The ~60 MiB/mutant mechanism is now SUBSTANTIALLY EXPLAINED — corrected here, because this
+file previously recorded it as open.** #309 (lane-3) found a SQLite sidecar leak: harnesses
+owned a `tempfile::NamedTempFile`, which deletes exactly the path it owns, while SQLite writes
+`-wal` and `-shm` beside it. Those outlive the test. Lane-3 reports that in the same 290s
+window measured above, the leak alone produced 5,286 files / 1,689 MiB = **349 MiB/min** —
+about **two-thirds** of the 544 MiB/min observed.
+
+Stated as two-thirds rather than "solved" on purpose: **~195 MiB/min remains unattributed**,
+and this file should not trade one confident wrong answer for another. The leak is fixed at
+source; the files already leaked are still resident.
+
+Why neither of the two sessions watching found it: both instrumented the *cargo-mutants temp
+tree* and `target/`, and the leak was in neither — it was loose in `/private/var/folders`,
+a root nobody had enumerated.
+
+One hypothesis was separately tested and **eliminated**: deleted-but-still-open files. Sampled
+*during* a live run, `lsof +L1` held flat at **192 MiB across 362–368 fds** while 1 GiB
+disappeared — the same figure measured with nothing running.
+
+**U-543 found and fixed a second instance of the same leak** that #309 did not cover, because
+`tests/tmpdir_hygiene.rs` guards the *server* harness only. Measured like-for-like on one
+command, `cargo test -p acdp-registry-sqlite --test store_contract`:
+
+| source | files leaked per run, before → after |
+|---|---|
+| `acdp-registry-sqlite/tests/{store_contract,parity}.rs` | **28 → 0** |
+| `acdp-registry-sqlite/src/store.rs` `#[cfg(test)]` (13 sites) | **26 → 0** |
+
+The "before" figure was nearly missed: a first measurement scoped to `$TMPDIR` at depth 1
+returned a confident **0**. An empty result is only as wide as its root.
 
 ---
 

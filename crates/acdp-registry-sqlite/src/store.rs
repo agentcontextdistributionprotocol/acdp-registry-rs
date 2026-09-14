@@ -1986,6 +1986,17 @@ fn map_sqlx_err(e: sqlx::Error) -> AcdpError {
 
 #[cfg(test)]
 mod tests {
+    /// Database file name inside each test's own temp DIRECTORY.
+    ///
+    /// These tests own a `TempDir`, not a `NamedTempFile`, and the difference
+    /// is not cosmetic: `NamedTempFile` removes exactly the path it owns, while
+    /// SQLite writes `-wal` and `-shm` sidecars beside it that are therefore
+    /// never cleaned up. Measured at `7b3797e`: this module leaked 26 files per
+    /// `--lib` run into $TMPDIR, on top of 28 per run from tests/. Same defect
+    /// #309 fixed in the server harness; `tests/tmpdir_hygiene.rs` guards that
+    /// side only, which is why this survived.
+    const TEST_DB_FILE_NAME: &str = "registry.sqlite";
+
     use super::fts5_escape;
 
     #[test]
@@ -2086,8 +2097,10 @@ mod tests {
         use acdp_registry_store::ExtendedRegistryStore;
         use std::sync::Arc;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 4).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 4)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         let store = Arc::new(store);
 
@@ -2168,8 +2181,10 @@ mod tests {
         use acdp::types::primitives::{AgentDid, ContextType, Visibility};
         use acdp_registry_store::ExtendedRegistryStore;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
 
         let p = Producer::new(
@@ -2228,8 +2243,10 @@ mod tests {
         use acdp_registry_store::ExtendedRegistryStore;
         use std::sync::Arc;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         let store = Arc::new(store);
 
@@ -2340,8 +2357,10 @@ mod tests {
         use acdp::types::primitives::{AgentDid, ContextType, Visibility};
         use acdp_registry_store::ExtendedRegistryStore;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
 
         let p = Producer::new(
@@ -2439,8 +2458,10 @@ mod tests {
         use acdp_registry_store::ExtendedRegistryStore;
         use std::sync::Arc;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         let store = Arc::new(store);
 
@@ -2531,8 +2552,10 @@ mod tests {
         use acdp_registry_store::ExtendedRegistryStore;
         use std::sync::{Arc, Mutex};
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         let store = Arc::new(store);
 
@@ -2683,8 +2706,10 @@ mod tests {
         use acdp_registry_store::ExtendedRegistryStore;
         use std::sync::Arc;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         let store = Arc::new(store);
 
@@ -2770,8 +2795,10 @@ mod tests {
         use acdp_registry_store::ExtendedRegistryStore;
         use std::sync::{Arc, Mutex};
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         let store = Arc::new(store);
 
@@ -2888,8 +2915,10 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         let store = Arc::new(store);
 
@@ -2993,8 +3022,10 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         let store = Arc::new(store);
 
@@ -3074,8 +3105,10 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         let store = Arc::new(store);
 
@@ -3187,8 +3220,10 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
         let store = Arc::new(store);
 
@@ -3310,8 +3345,10 @@ mod tests {
         use acdp::types::primitives::{AgentDid, ContextType, Visibility};
         use acdp_registry_store::ExtendedRegistryStore;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 2).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join(TEST_DB_FILE_NAME), 2)
+            .await
+            .unwrap();
         store.migrate().await.unwrap();
 
         let p = Producer::new(
