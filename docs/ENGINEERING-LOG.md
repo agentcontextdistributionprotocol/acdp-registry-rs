@@ -6446,3 +6446,43 @@ sidecars signature that identified the defect in the first place. The leaked nam
 
 Both guards carry their limits in their own doc comments, including that a source scan fails on a
 pattern being present and never on a correct-but-absent test.
+
+## U-554 — a release PR that breaks CI is a process defect, not an accident
+
+The v0.1.4 release PR failed three checks that pass on main. All three fail on one assertion,
+`root_changelog_stays_a_pointer`: the workspace is at 0.1.4 but `acdp-registry-auth`, `-pg` and
+`-webhook` have no `## [0.1.4]` section.
+
+**Three rules, any two of which are compatible.** Every crate is `version = { workspace = true }`, so
+a release bumps all eight. release-plz writes a changelog section only for crates with commits in
+their own directory, and no configuration option exists to change that. The guard requires every
+crate to document the version it ships. The three crates that fail are exactly the three with zero
+commits since v0.1.3.
+
+**It recurs, and that is measured rather than predicted.** In the previous window all eight crates had
+at least two commits, so every one got a section and the guard passed. It has simply never been
+exercised against "a crate did not change" — and it fires on every release where one hasn't.
+
+Two traps worth keeping from the measurement itself. **`git tag -l 'v*'` matches nothing in this
+repo**, because `git_tag_name = "{{ package }}/v{{ version }}"` puts the package first; anchoring a
+range on that glob yields a degenerate range and a confident zero for every crate. The counts here
+were cross-checked against each crate's own tag, and all eight `v0.1.3` tags resolve to the same
+commit, so the two anchors are equivalent.
+
+**The fix documents the non-change instead of narrowing the guard.** A consumer upgrading auth
+0.1.3 → 0.1.4 would otherwise find no record at all and could not tell "nothing changed" from
+"someone forgot". Narrowing would also have undone U-538's hardening of that same walk, which was
+written for precisely this neighbourhood.
+
+**Ordering mattered more than speed.** release-plz does not force-push its branch: it opens a new
+timestamped branch and PR each run and abandons the old one — #278 and #286 are two PRs for the same
+version, the first closed in favour of the second. A hand-edit on the open PR would have been
+stranded on an abandoned branch and the replacement would have gone red again with nobody watching.
+So the fix lands on main and lets regeneration carry it.
+
+**Two testing notes that generalise.** First, the fix's own PR is green at 0.1.3 and that green
+proves nothing, because every changelog already carries its section — the real proof was reproducing
+the failure at the PR head and clearing it there. Second, the script was tested twice: once
+standalone and once **extracted from the parsed YAML**, because escaping differs between the two. It
+did differ — a backtick pair inside a double-quoted string would have executed `pr` by command
+substitution in the runner but never in the standalone copy.
