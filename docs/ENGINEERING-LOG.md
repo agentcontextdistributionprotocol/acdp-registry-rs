@@ -6486,3 +6486,30 @@ the failure at the PR head and clearing it there. Second, the script was tested 
 standalone and once **extracted from the parsed YAML**, because escaping differs between the two. It
 did differ — a backtick pair inside a double-quoted string would have executed `pr` by command
 substitution in the runner but never in the standalone copy.
+
+### Postscript — the linter was right about the family, not the line
+
+`actionlint`'s shellcheck pass rejected the generator twice with `SC2016`, "expressions don't expand
+in single quotes", pointing at the two lines that write the stub's markdown code spans. The code was
+correct — a backtick inside single quotes is a literal, which is precisely why single quotes were
+used — so a `# shellcheck disable=SC2016` would have been defensible and one line long.
+
+It was the wrong fix, because the suppression would have covered the *adjacent* form too. In a
+double-quoted string or an unquoted heredoc those backticks are command substitution, not text: a
+later contributor adding another `$VERSION` to that paragraph would reasonably switch to `"`, and the
+step — which runs with a push token against the release branch — would then execute
+`version = { workspace = true }` and `crates/<name>/` as commands. The warning named the family; this
+line happened to be its safe member.
+
+The fix costs the same and removes the family: hold the backtick in `BT` and pass it as a `printf`
+argument, so it never sits inside a quoted string under any quoting style. `actionlint` goes from two
+findings to zero, and the dangerous refactor becomes impossible by construction rather than merely
+absent today.
+
+Verification was done against the **parsed YAML**, not the file — this is the second defect in this
+block that exists only after YAML parsing, the first being a backtick that would have invoked the `pr`
+paginator. The extracted script was re-run against an eight-crate fixture (six missing a `0.1.4`
+section, two already written by release-plz): six stubbed, two skipped, and the generated prose
+asserted byte-identical to before the change. A canary defining `version()` and `crates()` as failing
+shell functions stayed silent, which is what makes "nothing executed" a measurement rather than a
+reading of the diff.
