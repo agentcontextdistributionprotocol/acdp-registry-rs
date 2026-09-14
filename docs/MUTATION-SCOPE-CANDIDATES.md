@@ -317,5 +317,78 @@ mutation cannot change observable behaviour — and an eighth needs a test seam 
 That ratio is the single most useful number here for anyone sizing this work: **a survivor list is
 not a work list**, and #307 should never have been sized by its survivor count.
 
-**The only remaining work on this file is the 43 mutants that have never been judged** — 95 of 138
-have verdicts. That is blocked on disk headroom for a sharded run, not on anyone's time.
+### U-548: the disk block is lifted, and the judged/unjudged split was lost
+
+**Both halves of the sentence that used to close this section were wrong, and they are corrected
+here rather than quietly deleted.** It read: *"the only remaining work on this file is the 43
+mutants that have never been judged — 95 of 138 have verdicts. That is blocked on disk headroom
+for a sharded run."*
+
+**"43 unjudged" can no longer be resolved to a list.** The per-mutant verdict files for the 95
+judged mutants lived only in a session scratchpad and were deleted during an ENOSPC cleanup that
+freed 59 MiB. Every surviving `outcomes.json` on the machine was parsed to look for them — with a
+control confirming the parser finds the pattern when it is present — and none contains a
+`sqlite/src/store.rs` verdict. **The remaining work on this file is therefore all 138, not 43.**
+The per-run ledger is committed under `docs/mutation-runs/` from now on precisely so this cannot
+recur; a 40-minute measurement must not live somewhere a cleanup can reach.
+
+**"Blocked on disk headroom" is disproven.** `--copy-target=false` removes the block outright:
+
+| measurement | value |
+|---|---|
+| command | `cargo mutants --no-config --file crates/acdp-registry-sqlite/src/store.rs --shard 1/8 --copy-target=false --test-workspace=true --minimum-test-timeout=300 -j1` |
+| wall clock, 18 mutants | **97 s** |
+| peak consumption below the post-clean baseline | **2547 MiB** (free 4770 → 2223) |
+| peak temp tree observed | **2649 MiB** |
+| **residual after exit** | **0** — free returned 4770 → 4770, temp trees 0 |
+| sidecar `.sqlite` files created by the run | **0** |
+
+Two caveats that keep those numbers honest. The temp tree was sampled at 30 s and the last in-run
+sample landed 26 s before exit, so the true peak is **≥ 2649 MiB**, not exactly it. And the residual
+figure is a **net-zero equality**, not a rate: 97 s spans too few steps to support a MiB/min claim,
+and the tree grew monotonically throughout so there was never a flat phase to measure a rate
+against. What is established is that a complete shard leaves nothing behind.
+
+The `0 sidecar files` line is a direct count under `$TMPDIR`, date-bounded to the run window with
+`TZ=UTC`, with two controls: a probe file created in the same root was visible to the same `find`,
+and an unbounded `-newermt` returned the full 312 900 pre-existing files. Those 312 900 are the
+known pre-existing backlog, untouched by this run — **the leak fix holds.**
+
+**Projected cost for the full 138 in one pass**, from this shard's measured per-class means
+(unviable 2.2 s, caught 9.0 s, baseline 16.3 s once) against the ≆33 % viable rate seen here:
+**≈ 10.5 minutes.** Treat that as a **floor, not an estimate** — a *caught* mutant fails fast, while
+a *missed* one runs the entire workspace suite to green, so any shard containing survivors costs
+more per mutant than this one did.
+
+**A note on a non-finding, kept because the error is instructive.** The ~30 s cold build initially
+looked anomalous and was nearly written up as unexplained. It is not. An independent
+`cargo test -p acdp-registry-server --test conformance_gate` from a cleaned `target/` compiled the
+workspace in **25.77 s** — this machine simply builds this workspace that fast. The recorded budget
+I was measuring against, `cargo test --locked --workspace --no-run` ≈ **2.0 GiB cold**, is a *disk*
+figure; the "several minutes" I was implicitly comparing against was never recorded anywhere and was
+my own addition. **A fabricated premise had produced a real-looking anomaly**, and it would have
+shipped inside a paragraph whose every other sentence was measured.
+
+### U-548: what the re-run proved about U-543's kills
+
+Shard 1/8 was chosen over an unrun shard because it is the only shard whose expected result is on
+record: `DECISIONS.md` fixes it at **3 caught / 3 missed / 12 unviable**. A **prediction of 6 caught
+/ 0 missed / 12 unviable was written down before the run** and is reproduced in the PR. The run
+returned exactly that.
+
+**This is the first time U-543's kills were checked by cargo-mutants at all.** They were originally
+falsified by hand-applying each mutant and observing the suite redden — never by the oracle that
+actually gates CI. `342:26` (`+`→`*`), `342:26` (`+`→`-`) and `380:9` (`Ok(vec![])`) all came back
+**CaughtMutant**. The kills hold under the real harness.
+
+**The prediction turned on a line-range check, not on the kill set, and that distinction matters.**
+U-543's kill set is **four** mutants, not three — it also includes `154:9
+count_idempotency_records → Ok(Some(0))`. The prediction survives only because shard 1/8 spans
+lines 202–394 and therefore excludes `154:9`. Anyone re-deriving this from "U-543 killed three"
+will get the right answer for the wrong reason.
+
+**A set identity that was previously only an inference is now established.** Before the run, the
+claim "the control's 3 missed were `342:26`×2 and `380:9`" rested on three counts coinciding, which
+is strictly weaker than the sets coinciding. The re-run settles it by elimination: the other three
+caught mutants are `386:9`×2 (`log_tree_size`) and `394:9` (`log_leaf_hashes`), which U-543 never
+touched and which must therefore have been the control's original 3 caught.
