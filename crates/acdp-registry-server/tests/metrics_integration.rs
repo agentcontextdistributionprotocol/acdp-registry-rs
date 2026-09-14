@@ -115,7 +115,7 @@ fn metrics_config() -> RegistryConfig {
 
 struct Harness {
     router: axum::Router,
-    _db: tempfile::NamedTempFile,
+    _db: tempfile::TempDir,
 }
 
 async fn harness(cfg: RegistryConfig) -> Harness {
@@ -135,10 +135,11 @@ async fn harness_with_caps(
 ) -> Harness {
     let db = tempfile::Builder::new()
         .prefix("acdp-metrics-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join("registry.sqlite"), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     let server = RegistryServer::try_new(store, caps, AUTHORITY).unwrap();
     let server = if lifecycle {

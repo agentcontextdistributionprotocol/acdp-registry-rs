@@ -3672,3 +3672,56 @@ Plan: plans/u-533-unexercised-fixtures.md
    - **Chose:** `git archive <pin> | tar -x` into scratch for every measurement, re-verified
      byte-identical after a mid-unit warning that the checkouts had moved.
    - **Status:** CHANGED (2026-09-13) — AC6 is load-bearing, not ceremony.
+
+## U-542 — own the directory, not the file: the sqlite sidecar leak
+
+Plan: `plans/u-542-sqlite-sidecar-leak.md`
+
+### U-542-A1 — a scoped delta equality replaces the assign's `$TMPDIR`-wide count
+
+**Assumed:** asserting the no-leak property on *one harness's own paths* is at least as strong as
+counting every `acdp-*` file in `$TMPDIR` before and after a run, and is materially more reliable.
+
+**Chose:** `tests/tmpdir_hygiene.rs` builds a `StoreMode::File` harness, records `db_path()`, drops
+it, and asserts `== 0` of `{db}`, `{db}-wal`, `{db}-shm` still exist.
+
+**Alternatives:** the assign's process-wide before/after count. Rejected because three lanes plus a
+leader share one `$TMPDIR` on this machine, so a process-wide count is perturbed by unrelated
+processes — it would fail randomly, which is how a guard gets ignored. It also cannot attribute a
+delta to the test that caused it, and scanning 312k entries costs real time per call.
+
+**Blast radius:** test-only, one file, reversible in a commit.
+
+**Status:** CONFIRMED (2026-09-14) — the property was demonstrated in both directions on the same
+binary: RED pre-fix naming `acdp-test-lI6bJ5.sqlite-{wal,shm}`, GREEN post-fix. The assign's
+criterion was *additionally* satisfied as a measurement rather than discarded: 260 tests produced
+`DELTA=0` against a pre-fix control of 1 test producing `+2`.
+
+### U-542-A2 — the three self-cleaning sites are converted anyway
+
+**Assumed:** `http_integration.rs:2690/2792/2859` do not currently leak — each calls
+`store.pool().close()`, and a clean SQLite close checkpoints the WAL and removes both sidecars.
+
+**Evidence:** 0 files in `$TMPDIR` for `acdp-livez-`, `acdp-degraded-`, `acdp-degraded-version-`,
+*and* all three are plain `#[tokio::test]` with no `#[cfg]`/`#[ignore]` — so zero means "ran and
+cleaned up", not "never ran". That distinction is the whole argument and was checked.
+
+**Chose:** convert them to `TempDir` regardless.
+
+**Alternatives:** leave them, documented as safe. Rejected: their safety is incidental to a
+`pool().close()` call a later edit could remove, and nothing would catch that. Owning the directory
+makes the property structural instead of a habit.
+
+**Blast radius:** three small test edits.
+
+**Status:** CONFIRMED (2026-09-14) — all three still pass.
+
+### U-542-A3 — `acdp-reload-` is not a leak and is left alone
+
+**Assumed:** `http_integration.rs:3682` writes a `.toml` config, not a database, so SQLite sidecars
+are impossible.
+
+**Evidence:** 0 `acdp-reload-*` files in `$TMPDIR`; the site's suffix is `.toml`; it is the only
+surviving `.tempfile()` in the granted tree after this unit.
+
+**Status:** CONFIRMED (2026-09-14).
