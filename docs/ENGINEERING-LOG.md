@@ -6267,7 +6267,7 @@ Adopting a revision now changes **three** values and the bumper rewrites only th
 `ref:`, `conformance-digest:`, and `TOTAL_FIXTURES_AT_PIN`. So a `bump spec` PR arrives RED on
 `conformance` until the other two are updated. `TOTAL_FIXTURES_AT_PIN` already had that
 property, the bump PR is held for review and never auto-merged, and the failure message names
-the exact command that prints the replacement digest — but it is a real added cost, stated in
+the replacement digest itself — but it is a real added cost, stated in
 `.spec-pin` where the value lives rather than in a footnote. `CONTRIBUTING.md` carries the
 three-step procedure.
 

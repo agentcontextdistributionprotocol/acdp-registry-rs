@@ -151,8 +151,9 @@ Adopting a revision changes **three** values, and the bot rewrites only the firs
 `bump spec` PR **arrives red on `conformance`** and needs two edits by hand:
 
 1. `ref:` in `.spec-pin` — the bot does this.
-2. `conformance-digest:` in `.spec-pin` — by hand. The failing test prints the exact
-   command; it is an RFC 6962 Merkle root over the pinned revision's `*.json` fixtures.
+2. `conformance-digest:` in `.spec-pin` — by hand, but you do not have to compute it:
+   the failing test prints the digest it measured from the tree in front of it, so this is
+   a copy. (It is an RFC 6962 Merkle root over the revision's `*.json` fixtures.)
 3. `TOTAL_FIXTURES_AT_PIN` in `crates/acdp-registry-server/tests/conformance.rs` — by
    hand, if the fixture count changed.
 

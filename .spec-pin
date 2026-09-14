@@ -41,8 +41,9 @@
 #
 # So a `bump spec` PR ARRIVES RED on the `conformance` job until 2 and 3 are updated.
 # That is a real cost, stated here rather than discovered: 3 already had this property,
-# so such a PR was never green on arrival, and the failure message names the exact
-# command that prints the replacement digest.
+# so such a PR was never green on arrival, and the failure CARRIES the replacement digest
+# -- it prints the digest it computed from the tree in front of it, so adopting a revision
+# is a copy, not a second command to look up.
 #
 # `conformance-digest` is an RFC 6962 Merkle root over the fixture directory --
 # leaf_hash(<file name> 0x00 <file bytes>) per `*.json` file, ordered by name, combined

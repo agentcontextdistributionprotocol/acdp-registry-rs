@@ -3302,9 +3302,6 @@ fn spec_tree_pin_verdict(root: &Path) -> Result<(), String> {
         })
         .unwrap_or(0);
     let found_rev = git_revision_of(root);
-    let recompute = "ACDP_SPEC_DIR=<tree> cargo test -p acdp-registry-server \
-                     --features storage-sqlite,playground --test conformance \
-                     prints_the_spec_fixture_digest -- --ignored --nocapture";
 
     // Right revision, wrong content is a DIFFERENT problem with an opposite
     // fix, so it gets its own message. One generic "not at the pin" would send
@@ -3324,8 +3321,7 @@ fn spec_tree_pin_verdict(root: &Path) -> Result<(), String> {
              * `.spec-pin`'s `conformance-digest:` is STALE -- it was not updated when\n    \
              `ref:` was bumped. The `bump spec` bot rewrites `ref:` ONLY, by design, so a\n    \
              bump PR arrives in exactly this state: replace the digest with the found one\n    \
-             above (and check TOTAL_FIXTURES_AT_PIN) as part of adopting the revision.\n\n\
-             Recompute a tree's digest with:\n    {recompute}",
+             above (and check TOTAL_FIXTURES_AT_PIN) as part of adopting the revision.",
             sha = pin.sha,
             root = root.display(),
             fx = fixtures.display(),
@@ -3342,6 +3338,33 @@ fn spec_tree_pin_verdict(root: &Path) -> Result<(), String> {
                  would be a confident wrong answer>"
             .to_string(),
     };
+    // The diagnosis BRANCHES on what was actually observed. A single fixed
+    // explanation would pre-diagnose every case, and would be wrong for the one
+    // that looks most innocent: an ARCHIVE EXTRACT of the correct revision with
+    // one fixture edited is unnameable, carries the right file count, and would
+    // be told "the tree is a different spec revision" -- sending the reader to
+    // check out a revision they already have. The digest cannot separate those
+    // two causes; only git can, and only when there is git metadata to ask.
+    let diagnosis = match &found_rev {
+        Some(_) => {
+            "THIS IS NOT A FIXTURE-COUNT FAILURE. The tree IS a different spec \
+                    revision -- named above -- so every count, family partition and replay \
+                    in this suite would be measured against fixtures nobody pinned. A wrong \
+                    tree yields a PLAUSIBLE count, which is why this is checked by revision \
+                    rather than left to `TOTAL_FIXTURES_AT_PIN`. Beware in particular a \
+                    directory NAMED for the pin: the one on this repository's own machine was \
+                    two revisions behind it."
+        }
+        None => {
+            "THIS IS NOT A FIXTURE-COUNT FAILURE, and it is NOT NECESSARILY A DIFFERENT \
+                 REVISION either: this tree cannot be named, so the content mismatch above \
+                 has two possible causes and the digest cannot tell them apart. Either it is \
+                 a different revision, or it is an extract of the RIGHT revision with fixture \
+                 files edited, added or removed -- the file count alone will not show that. \
+                 If it is a checkout, `git -C <tree> status --porcelain` settles it; if it is \
+                 an extract, re-extract it from the pin below and compare."
+        }
+    };
     Err(format!(
         "ACDP_SPEC_DIR does not carry the pinned ACDP spec revision's fixtures.\n\n  \
          wanted revision : {want_sha}  (.spec-pin)\n  \
@@ -3350,19 +3373,14 @@ fn spec_tree_pin_verdict(root: &Path) -> Result<(), String> {
          fixture dir     : {fx}  ({count} *.json files)\n  \
          wanted digest   : {want_digest}\n  \
          found digest    : {found}\n\n\
-         THIS IS NOT A FIXTURE-COUNT FAILURE. The tree is a different spec revision, so \
-         every count, family partition and replay in this suite would be measured against \
-         fixtures nobody pinned -- and a wrong tree yields a PLAUSIBLE count, which is why \
-         this is checked by revision rather than left to `TOTAL_FIXTURES_AT_PIN`. Beware in \
-         particular a directory NAMED for the pin: the one on this repository's own machine \
-         was two revisions behind it.\n\n\
+         {diagnosis}\n\n\
          Materialise the pinned revision:\n    \
          git -C <spec checkout> worktree add <dir> {want_sha}\n  \
          or, with no git metadata needed in the result:\n    \
          mkdir <dir> && git -C <spec checkout> archive {want_sha} | tar x -C <dir>\n\n\
          To adopt the tree you handed me INSTEAD, bump the pin deliberately: `.spec-pin`'s \
-         `ref:` and `conformance-digest:`, plus `TOTAL_FIXTURES_AT_PIN` here. Print any \
-         tree's digest with:\n    {recompute}",
+         `ref:` and `conformance-digest:` -- the `found digest` line above IS the replacement \
+         value, computed by this same code -- plus `TOTAL_FIXTURES_AT_PIN` here.",
         want_sha = pin.sha,
         root = root.display(),
         fx = fixtures.display(),
@@ -3392,37 +3410,6 @@ fn assert_spec_tree_is_at_pin(root: &Path) {
     if let Err(message) = verdict {
         panic!("{message}");
     }
-}
-
-/// Prints the digest of whatever `ACDP_SPEC_DIR` names. A TOOL, not a check --
-/// hence `#[ignore]` -- and deliberately the SAME code the guard runs, so the
-/// value a reader pastes into `.spec-pin` cannot have been computed by a second
-/// implementation that drifted from the first.
-///
-/// It reads the environment directly instead of calling `spec_root()`, because
-/// `spec_root()` now refuses a drifted tree: routing this through it would make
-/// the tool unable to tell you the digest of precisely the tree you need it for.
-#[test]
-#[ignore = "a tool, not a check: prints the digest of ACDP_SPEC_DIR for .spec-pin"]
-fn prints_the_spec_fixture_digest() {
-    let dir = std::env::var("ACDP_SPEC_DIR")
-        .expect("set ACDP_SPEC_DIR to the spec tree whose digest you want");
-    let fixtures = resolve_fixture_dir(&dir)
-        .unwrap_or_else(|| panic!("no fixture directory resolvable under ACDP_SPEC_DIR '{dir}'"));
-    let count = std::fs::read_dir(&fixtures)
-        .expect("read fixture dir")
-        .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
-        .count();
-    let revision = git_revision_of(Path::new(&dir))
-        .unwrap_or_else(|| "<not nameable: no git metadata of its own>".to_string());
-    println!("ACDP_SPEC_DIR       : {dir}");
-    println!(
-        "fixture dir         : {}  ({count} *.json files)",
-        fixtures.display()
-    );
-    println!("revision            : {revision}");
-    println!("conformance-digest: {}", spec_fixture_digest(&fixtures));
 }
 
 /// Spec checkout root from `ACDP_SPEC_DIR`, or `None` (skip) when unset.

@@ -3541,7 +3541,8 @@ One supersedes a prior CONFIRMED decision in this file.
   bumper rewrites only the first. A `bump spec` PR therefore arrives RED on `conformance`.
 - **Why accepted:** `TOTAL_FIXTURES_AT_PIN` already had that property, so such a PR was never
   green on arrival; the PR is held for review and never auto-merged; and the failure message
-  names the exact command that prints the replacement digest. The alternative — deriving the
+  itself carries the replacement digest, computed from the tree in front of it, so the fix is a
+  copy rather than a second command to look up. The alternative — deriving the
   digest at test time from whatever tree is present — is the hole this unit exists to close.
 - **Rejected — auto-updating the digest in the bump PR.** That would make the bot's PR
   self-certifying: it would rewrite the value that proves the tree is what the bot says it is.
