@@ -89,27 +89,72 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 74 mutants, and every exclusion below is deliberate
+# THE RATCHETING SCOPE — 213 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
-# Measured at 5c401db: receipt.rs 9 + handlers/log.rs 65 = 74.
+# MEASURED AT 60b08b7 (unit U-539), with the command that reproduces it:
 #
-# NOT the whole workspace (1398 mutants at 5c401db, measured via `--no-config`).
-# At the ~6.2s/mutant marginal cost measured in DECISIONS.md #17 that is ~2.4h, and
-# #216 lists "blocking PRs on a full mutation run" as a non-goal. This is a
+#     cargo mutants --list            # config is auto-read from this file
+#
+#     crates/acdp-registry-core/src/handlers/context.rs   139
+#     crates/acdp-registry-core/src/handlers/log.rs        65
+#     crates/acdp-registry-core/src/receipt.rs              9
+#     ----------------------------------------------------------
+#     total                                               213
+#
+# `MUTANTS_EXPECTED_SCOPE` in .github/workflows/mutants.yml pins exactly this
+# number, as an EQUALITY rather than a floor, and the two were checked against
+# each other in U-539 rather than assumed to agree.
+#
+# NOT the whole workspace: 1427 mutants at 60b08b7, measured via
+#
+#     cargo mutants --list --no-config
+#
+# At the ~6.2s/mutant marginal cost measured in DECISIONS.md #17 that is ~2.5h,
+# and #216 lists "blocking PRs on a full mutation run" as a non-goal. This is a
 # scheduled job over a bounded set, by design.
 #
-# NOT handlers/context.rs (134 mutants at 5c401db) even though it is the densest
-# core logic. It is held by another unit this wave and will change underneath this
-# one, so a budget keyed to it would go red for a reason unrelated to the property
-# it guards — and a red check nobody can explain gets disabled, after which the real
-# regression walks through. Tracked separately. The staleness is not hypothetical:
-# DECISIONS.md #17 recorded context.rs at 132 one day before this file measured 134,
-# and the workspace at 1383 against 1398 here.
+# ---------------------------------------------------------------------------
+# handlers/context.rs — THE EXCLUSION THAT WAS, AND WHY IT IS NOW AN INCLUSION
+# ---------------------------------------------------------------------------
+# This paragraph used to say "NOT handlers/context.rs", and the glob list below
+# has included it since U-504. The comment outlived the decision it explained and
+# survived several edits to this file — which is exactly the failure this file
+# spends 159 lines trying to prevent, so it is corrected here rather than quietly
+# deleted.
+#
+# THE ORIGINAL REASONING, which was sound: at 5c401db context.rs was held by
+# another unit in the same wave and would change underneath this scope, so a
+# budget keyed to it would go red for a reason unrelated to the property it
+# guards — and a red check nobody can explain gets disabled, after which the real
+# regression walks through. That hazard was real and is not hypothetical: #17
+# recorded context.rs at 132 one day before this file measured 134.
+#
+# WHY IT NO LONGER APPLIES: the unit holding context.rs finished and landed. The
+# file is now stable enough to key a budget to, and it is the densest core logic
+# in the scope — 139 of the 213 mutants, and the home of four of the five
+# budgeted survivors enumerated in mutants.yml. Excluding it would have left the
+# ratchet measuring the thin end of the codebase.
+#
+# THE DRIFT IS ITSELF THE LESSON. Between 5c401db and 60b08b7 context.rs moved
+# 134 -> 139 while nothing here noticed. Any arithmetic built on the old figure
+# is wrong by construction: 74 + 134 = 208, not the 213 this scope actually
+# contains. That is why the numbers above name the command that reproduces them
+# — a figure without its command is a claim, not a measurement.
 #
 # A NOTE ON WIDENING THIS. `--file` UNIONS with these globs rather than replacing
-# them (measured: config alone -> 9; config + `--file handlers/log.rs` -> 74). So a
-# stray `--file` can only ever widen a run, never silently narrow it to nothing.
-# To deliberately escape this scope, pass `--no-config`.
+# them. RE-MEASURED at 60b08b7, because the original demonstration (config alone
+# -> 9; config + `--file handlers/log.rs` -> 74) was taken when the glob list held
+# only receipt.rs and no longer reproduces — a `--file` naming a path already in
+# the globs now changes nothing, so it cannot show the property. Using a file
+# OUTSIDE the scope instead:
+#
+#     cargo mutants --list                                          -> 213
+#     cargo mutants --list --no-config --file .../handlers/admin.rs ->  49
+#     cargo mutants --list            --file .../handlers/admin.rs  -> 262
+#
+# 213 + 49 = 262 exactly: a union, not a replacement. So a stray `--file` can only
+# ever widen a run, never silently narrow it to nothing. To deliberately escape
+# this scope, pass `--no-config`.
 examine_globs = [
     "crates/acdp-registry-core/src/receipt.rs",
     "crates/acdp-registry-core/src/handlers/log.rs",
