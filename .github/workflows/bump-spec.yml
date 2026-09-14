@@ -21,7 +21,15 @@ jobs:
   bump:
     uses: agentcontextdistributionprotocol/acdp-ci/.github/workflows/bump-spec-ref.yml@v1
     with:
-      file: .github/workflows/ci.yml
+      # `.spec-pin`, not `ci.yml`: U-536 moved the pin to a single declarative
+      # source that `ci.yml`, `mutants.yml` and the conformance harness all read.
+      # `.spec-pin`'s format is bumper-compatible on purpose and says so in the
+      # file -- one line naming the spec repo (the anchor this bumper looks for),
+      # then `ref:`, then the digest BELOW it, because a 64-hex digest contains a
+      # 40-hex run and this bumper would otherwise read the digest's first 40
+      # characters as the current pin. Verified by running the bumper's own awk
+      # and perl against the real file, not assumed.
+      file: .spec-pin
       sha: ${{ github.event.inputs.sha }}
     secrets:
       ACDP_BOT_APP_ID: '${{ secrets.ACDP_BOT_APP_ID }}'

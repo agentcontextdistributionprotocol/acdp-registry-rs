@@ -1,0 +1,82 @@
+name: read-spec-pin
+description: >-
+  Read the pinned ACDP spec revision out of this repository's `.spec-pin` -- the single
+  declarative source -- and expose it as step outputs, so no workflow restates the sha.
+  See `.spec-pin` itself for the format and why it is load-bearing.
+
+# WHY THIS IS AN ACTION RATHER THAN A COPY-PASTED STEP.
+#
+# Two jobs in two files need the pin: `ci.yml`'s `conformance` job and `mutants.yml`'s
+# scheduled mutation run. Before U-536 the second DERIVED the sha by grepping the first,
+# which worked but coupled two workflows through the text of one of them: nothing in
+# `ci.yml` said another workflow parsed it, and a perfectly valid reindentation of its
+# spec step broke the derivation silently. `mutants.yml` is `schedule:`-only, so that
+# breakage surfaced on the following Monday's cron rather than on the PR that caused it.
+#
+# The alternative to this action was the same ~15 lines of shell in both files plus a test
+# asserting the two copies stay identical. That test would guard the SPELLING, not the
+# property: it breaks on reindentation and passes on a semantic change. `spec_pin_violations`
+# in `crates/acdp-registry-server/tests/conformance_gate.rs` instead asserts the property --
+# neither workflow restates a sha, and both use this reader -- which a human can check by
+# inspection.
+
+inputs:
+  file:
+    description: 'The pin file, relative to the workspace root.'
+    required: false
+    default: .spec-pin
+
+outputs:
+  ref:
+    description: 'The pinned spec commit: a 40-character lowercase hex sha.'
+    value: ${{ steps.read.outputs.ref }}
+  repository:
+    description: >-
+      The spec repository the pin names. Passed through to `checkout-spec` explicitly
+      rather than relying on that action's default: if the two ever disagreed, the spec
+      bumper would resolve a sha from one repository while CI checked out another.
+    value: ${{ steps.read.outputs.repository }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read the spec pin
+      id: read
+      shell: bash
+      env:
+        FILE: ${{ inputs.file }}
+      run: |
+        set -euo pipefail
+
+        if [ ! -f "$FILE" ]; then
+          echo "::error::read-spec-pin: '$FILE' does not exist. It is the single" \
+               "declarative source for the pinned ACDP spec revision; this action is" \
+               "used by every job that checks the spec out, so a missing pin file is a" \
+               "hard failure rather than a default. (Does this job run actions/checkout" \
+               "before this step?)" >&2
+          exit 1
+        fi
+
+        # COUNT DECLARATIONS, NOT OCCURRENCES OF THE SHA. The pattern is the exact shape
+        # every consumer parses -- a whole `ref:` line -- so the pin sha appearing in prose
+        # elsewhere in the repository (it does: docs/ENGINEERING-LOG.md records the last
+        # bump as narrative history) can never trip this. And asserting the COUNT rather
+        # than "a match exists" means a second declaration fails here instead of being
+        # resolved arbitrarily: two jobs would not necessarily resolve it the same way.
+        for key in ref repository; do
+          case "$key" in
+            ref)        pat='^ref: [0-9a-f]{40}$' ;;
+            repository) pat='^repository: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' ;;
+          esac
+          n=$(grep -cE "$pat" "$FILE" || true)
+          if [ "$n" -ne 1 ]; then
+            echo "::error::read-spec-pin: expected exactly one \`$key:\` declaration in" \
+                 "$FILE matching /$pat/, found $n. Zero means no consumer can find the" \
+                 "pin; more than one means they may not all choose the same value." >&2
+            exit 1
+          fi
+          value=$(grep -E "$pat" "$FILE" | head -1)
+          value=${value#*: }
+          echo "$key=$value" >> "$GITHUB_OUTPUT"
+          echo "read-spec-pin: $key=$value"
+        done

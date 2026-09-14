@@ -140,6 +140,73 @@ rather than restating them.
 - Each migration must be idempotent (`CREATE TABLE IF NOT EXISTS`, `ON CONFLICT
   DO NOTHING`, etc.).
 
+## Adopting a new ACDP spec revision
+
+The pinned spec revision lives in **`.spec-pin`** at the repo root — one declarative
+source, read by `ci.yml`, `mutants.yml`, the `bump spec` bot, and the conformance
+harness. **Never restate the sha anywhere else**; `spec_pin_violations`
+(`crates/acdp-registry-server/tests/conformance_gate.rs`) fails the build if you do.
+
+Adopting a revision changes **three** values, and the bot rewrites only the first, so a
+`bump spec` PR **arrives red on `conformance`** and needs two edits by hand:
+
+1. `ref:` in `.spec-pin` — the bot does this.
+2. `conformance-digest:` in `.spec-pin` — by hand, but you do not have to compute it:
+   the failing test prints the digest it measured from the tree in front of it, so this is
+   a copy. (It is an RFC 6962 Merkle root over the revision's `*.json` fixtures.)
+3. `TOTAL_FIXTURES_AT_PIN` in `crates/acdp-registry-server/tests/conformance.rs` — by
+   hand, if the fixture count changed.
+
+That is a real cost and it is deliberate: the alternative is computing the digest from
+whatever tree happens to be present, which is exactly the hole it closes. Three spec
+checkouts on one machine disagreed by up to two fixtures before this existed, and the
+directory named `-pinned` was the one two revisions behind.
+
+To run the conformance suite against a spec tree, materialise the pinned revision rather
+than pointing at a checkout you already have:
+
+```bash
+mkdir -p /tmp/spec-at-pin
+git -C <your acdp spec checkout> archive $(grep '^ref: ' .spec-pin | cut -d' ' -f2) \
+  | tar x -C /tmp/spec-at-pin
+ACDP_REQUIRE_CONFORMANCE=1 ACDP_SPEC_DIR=/tmp/spec-at-pin \
+  cargo test -p acdp-registry-server --features storage-sqlite,playground --test conformance
+```
+
+The harness **refuses** a tree that is not at the pin, and names the revision it found
+instead of failing on a fixture count. It decides from content, not from git: a
+`git archive` extract has no `.git`, so the tree that must pass is precisely the one
+`git rev-parse` cannot identify.
+
+### Editing `.spec-pin`
+
+Its format is an external contract with acdp-ci's `bump-spec-ref` bot, which finds the pin
+by substring-matching every line, **comments included**:
+
+- **Do not spell `repository: <the spec repo>` or `acdp-ci/actions/checkout-spec@` in a
+  comment.** Either makes the file look like it has two pin anchors, and the bot then
+  declines to bump it at all — the pin freezes with nothing going red. Describe the forms
+  in prose, as the existing comments do.
+- **Keep `conformance-digest:` below `ref:`.** A 64-hex digest contains a 40-hex run, so
+  above `ref:` it would be read as the pin.
+
+Both rules are asserted by `spec_pin_violations`, so you will find out on your PR rather
+than the next time the bot tries to bump.
+
+## Composite actions and the lint gate
+
+`actionlint` cannot parse an `action.yml` — it enumerates `.github/workflows/*` only, and
+pointed at an action file it reports `"jobs" section is missing`. So the `run:` blocks in
+`.github/actions/*/action.yml` are covered by a **separate** `lint.yml` step that extracts
+each block and runs `shellcheck` over it. Two consequences worth knowing:
+
+- A `${{ … }}` expression is replaced by a placeholder before linting (the same
+  substitution actionlint makes internally), so a quoting defect *inside* an expression is
+  not caught.
+- The step fails if it extracts zero blocks from a non-zero number of action files. That is
+  deliberate: an extractor that matches nothing reports success identically to one that
+  finds nothing wrong.
+
 ## Security disclosures
 
 See [SECURITY.md](SECURITY.md).
