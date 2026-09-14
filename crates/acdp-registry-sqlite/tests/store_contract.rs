@@ -342,6 +342,50 @@ async fn a_contributor_may_supersede_but_an_unrelated_signer_may_not() {
     );
 }
 
+/// `connect` must create a missing parent directory chain.
+///
+/// `store.rs:49` is `if !parent.as_os_str().is_empty()`, guarding
+/// `create_dir_all(parent)`. U-540 measured `delete !` surviving the whole
+/// suite, and the reason is that every other test hands `connect` a path whose
+/// parent ALREADY EXISTS — `tempfile::tempdir()` creates it. When the directory
+/// is already there, `create_dir_all` is a no-op, so skipping it changes
+/// nothing and the mutant is invisible.
+///
+/// Inverted, the guard means "create the parent only when there ISN'T one",
+/// so a real deployment pointed at `/var/lib/acdp/registry.sqlite` before that
+/// directory exists fails to start, while the no-parent case calls
+/// `create_dir_all("")`.
+///
+/// The precondition is asserted explicitly: without it this test would pass
+/// against the mutant the moment someone changed the fixture to a directory
+/// that happens to exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_creates_a_missing_parent_directory_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("a").join("b").join(DB_FILE_NAME);
+    let parent = nested
+        .parent()
+        .expect("nested path has a parent")
+        .to_path_buf();
+
+    assert!(
+        !parent.exists(),
+        "precondition: the parent chain must be ABSENT, or this test passes \
+         without exercising create_dir_all at all"
+    );
+
+    let store = SqliteStore::connect(&nested, 2)
+        .await
+        .expect("connect must create the missing parent chain, not fail on it");
+    store.migrate().await.expect("migrate");
+
+    assert!(parent.is_dir(), "the parent chain was created");
+    assert!(
+        nested.is_file(),
+        "the database exists at the requested path"
+    );
+}
+
 /// `count_idempotency_records` must count the rows that exist.
 ///
 /// Measured in U-540: replacing the whole method with `Ok(Some(0))` left the

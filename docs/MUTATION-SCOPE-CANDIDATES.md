@@ -24,7 +24,7 @@ not its value.
 | mutants | **138** (`cargo mutants --list --no-config --file <path>`) |
 | verdicts obtained | **95 of 138 (69%)** |
 | caught | 47 |
-| **missed (survivors)** | **14** — **5 killed**, **7 equivalent**, **1 needs a seam**, **1 open** |
+| **missed (survivors)** | **14** — **6 killed**, **7 equivalent**, **1 needs a seam**, **0 open** |
 | unviable | 34 |
 | **survivor rate among viable** | **14 / 61 = 23%** |
 | extrapolated survivors at 138 | **~20**, against a budget of **5** |
@@ -44,7 +44,7 @@ pay them down, and is deliberately not pre-judged here.
 
 | site | mutation | status |
 |---|---|---|
-| `store.rs:49:16` | `delete !` in `SqliteStore::connect` | open |
+| `store.rs:49:16` | `delete !` in `SqliteStore::connect` | **KILLED (U-547)** |
 | `store.rs:154:9` | `count_idempotency_records` → `Ok(Some(0))` | **KILLED (U-543)** |
 | `store.rs:342:26` | `+` → `*` in `list_contexts` | **KILLED (U-543)** |
 | `store.rs:342:26` | `+` → `-` in `list_contexts` | **KILLED (U-543)** |
@@ -290,3 +290,32 @@ caller. It is a property of the current call graph, not of the methods.
 **Running classification: 5 killed, 7 equivalent, 1 needs a seam, 1 open** — out of 14 known
 survivors, from 95 of 138 mutants judged. The one still open is `49:16` `delete !` in
 `SqliteStore::connect`.
+
+### U-547: the last known survivor, and what the whole exercise showed
+
+`store.rs:49:16` is `if !parent.as_os_str().is_empty()`, guarding `create_dir_all(parent)`.
+Deleting the `!` inverts it to "create the parent only when there isn't one".
+
+It survived because **every existing test hands `connect` a path whose parent already exists** —
+`tempfile::tempdir()` creates it — so `create_dir_all` is a no-op and skipping it changes nothing.
+A real deployment pointed at `/var/lib/acdp/registry.sqlite` before that directory exists would
+fail to start. Killed by `connect_creates_a_missing_parent_directory_chain`, which asserts the
+parent is **absent** as an explicit precondition, so the test cannot silently stop exercising the
+branch if someone changes the fixture.
+
+### The known list is now fully resolved
+
+| | |
+|---|---|
+| killed | **6** |
+| equivalent | **7** |
+| needs a seam | **1** (`1306:35`, race-only) |
+| open | **0** |
+
+**Half the known survivors were not coverage gaps.** Seven of fourteen were equivalent — code whose
+mutation cannot change observable behaviour — and an eighth needs a test seam rather than a test.
+That ratio is the single most useful number here for anyone sizing this work: **a survivor list is
+not a work list**, and #307 should never have been sized by its survivor count.
+
+**The only remaining work on this file is the 43 mutants that have never been judged** — 95 of 138
+have verdicts. That is blocked on disk headroom for a sharded run, not on anyone's time.
