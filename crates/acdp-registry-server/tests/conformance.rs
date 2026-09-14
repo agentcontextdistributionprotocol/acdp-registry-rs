@@ -9919,9 +9919,6 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
     // asserted by `publish_enforces_the_err002_media_type_matrix` in
     // `http_integration.rs`; it is listed here because nothing reads the
     // FIXTURE, which is a different claim.
-    ("dk-003", Unexercised::ConditionalOnCapability),
-    ("err-002", Unexercised::ConditionalOnCapability),
-    ("idem-007", Unexercised::ConditionalOnCapability),
 ];
 
 /// Total fixtures in the pinned spec's `schemas/conformance`, as an **equality**.
@@ -12369,6 +12366,377 @@ async fn ret002_lineage_current_returns_the_newest_non_superseded_version() {
     );
 }
 
+/// POST `body` to `/contexts` with an optional `Content-Type`, returning
+/// `(status, parsed body)`. `None` sends NO Content-Type header at all, which is
+/// `err-002` scenario E and is not the same thing as sending an empty one.
+async fn post_contexts_json(
+    app: &axum::Router,
+    body: &Value,
+    content_type: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut b = Request::builder().method("POST").uri("/contexts");
+    if let Some(ct) = content_type {
+        b = b.header("content-type", ct);
+    }
+    let resp = app
+        .clone()
+        .oneshot(
+            b.body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    (status, v)
+}
+
+/// `major.minor >= 0.5`, on the advertised version string. Deliberately not a
+/// semver dependency: this compares the two leading integers and nothing else,
+/// which is all the `err-002` condition asks about.
+fn version_at_least_0_5_0(v: &str) -> bool {
+    let mut it = v.split('.');
+    let major: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+    let minor: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+    (major, minor) >= (0, 5)
+}
+
+// ---------------------------------------------------------------------------
+// U-553: the three `ConditionalOnCapability` fixtures, exercised.
+//
+// Each of these is REQUIRED of this registry only because of what it advertises,
+// so each test asserts the CONDITION from the harness's own capabilities before
+// asserting the behaviour -- a test that skips that step is asserting a rule the
+// registry may not be under.
+//
+// All three read their fixture. That is the claim being established, and it is a
+// DIFFERENT claim from "the behaviour is enforced": `err-002`'s behaviour was
+// already enforced and asserted by `publish_enforces_the_err002_media_type_matrix`
+// (`http_integration.rs`, #290) while nothing read the fixture, which is exactly
+// why it stayed in `UNEXERCISED_FIXTURES` after that test landed. A hand-written
+// table of five scenarios cannot notice the spec growing a sixth.
+// ---------------------------------------------------------------------------
+
+/// Scenarios `err-002` declares at the pin. An equality, so a spec bump that adds
+/// or removes one is a build failure and a human decision -- the same ratchet
+/// reasoning as `TOTAL_FIXTURES_AT_PIN`, applied inside a fixture.
+const ERR002_SCENARIOS_AT_PIN: usize = 5;
+
+/// `dk-003` (RFC-ACDP-0007 §3.1, RFC-ACDP-0001 §5.4): a registry that does not
+/// advertise `did:key` MUST reject a `did:key` publish with `key_resolution_failed`
+/// (HTTP 400) -- permanent, not transient, and not an algorithm complaint.
+///
+/// The fixture names its own request body by path -- `sig-003`'s
+/// `vectors[0].expected.publish_request_body` -- so this test loads BOTH fixtures
+/// and sends that exact golden: a cryptographically flawless `did:key` publish.
+/// That is what makes the rejection attributable to the DID method alone. A
+/// hand-rolled body would leave "it was rejected for being malformed" open.
+///
+/// **The mechanism, not the symptom.** `400` alone proves nothing here -- almost
+/// every rejection in this suite is a 400. Three things are asserted instead: the
+/// registry genuinely does not advertise `did:key` (the fixture's precondition,
+/// read from the harness's capabilities rather than assumed); the code is exactly
+/// the one the fixture pins; and the SAME request with a `did:web` agent does NOT
+/// produce that code. The last is the one that fails if a registry starts
+/// answering `key_resolution_failed` to everything.
+#[tokio::test(flavor = "multi_thread")]
+async fn dk003_did_key_publish_refused_when_method_not_advertised() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping dk-003");
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "dk-003") else {
+        panic!("dk-003 not found at the pinned spec");
+    };
+
+    // The fixture's precondition, asserted against what this harness actually
+    // advertises. If the registry ever adds did:key, this fixture stops applying
+    // and this test must be reconsidered rather than silently inverted.
+    let advertised = caps().supported_did_methods;
+    assert!(
+        !advertised.iter().any(|m| m == "did:key"),
+        "dk-003 applies only to a registry that does NOT advertise did:key, but this \
+         harness advertises {advertised:?}. The fixture's precondition no longer holds, \
+         so the assertion below would be testing a rule this registry is not under."
+    );
+    let excerpt = &fx["input"]["registry_capabilities_excerpt"]["supported_did_methods"];
+    assert_eq!(
+        excerpt.as_array().map(|a| a.len()),
+        Some(1),
+        "dk-003's own capabilities excerpt should advertise exactly one method: {fx}"
+    );
+
+    // The body the fixture names, taken from the fixture it names it in.
+    let Some(sig003) = find_fixture_by_id(&fixtures, "sig-003") else {
+        panic!("dk-003 names sig-003's publish_request_body, but sig-003 is not at the pin");
+    };
+    let body = sig003["vectors"][0]["expected"]["publish_request_body"].clone();
+    assert!(
+        body.is_object(),
+        "sig-003 vectors[0].expected.publish_request_body missing -- dk-003 names this \
+         exact path for its request: {sig003}"
+    );
+    let agent_id = body["agent_id"].as_str().unwrap_or_default().to_string();
+    assert!(
+        agent_id.starts_with("did:key:"),
+        "dk-003 needs a did:key publish; sig-003's golden carries agent_id {agent_id:?}"
+    );
+
+    let want_status = fx["expected"]["http_status"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("dk-003 expected.http_status missing: {fx}"))
+        as u16;
+    let want_code = fx["expected"]["error_code"]
+        .as_str()
+        .unwrap_or_else(|| panic!("dk-003 expected.error_code missing: {fx}"));
+
+    let app = harness().await;
+    let (status, got) = post_contexts_json(&app, &body, Some("application/acdp+json")).await;
+    assert_eq!(
+        status.as_u16(),
+        want_status,
+        "dk-003: a did:key publish against a did:web-only registry must answer \
+         {want_status}; got {status}. body = {got}"
+    );
+    assert_eq!(
+        got["error"]["code"], want_code,
+        "dk-003: the code is the fixture's whole subject -- key_resolution_unreachable \
+         would claim the failure is transient (retrying can never succeed here) and \
+         unsupported_algorithm would blame ed25519, which this registry does support. \
+         body = {got}"
+    );
+
+    // Vary exactly what the fixture varies: the DID method. The same request under
+    // an advertised method must not produce this code, or the assertion above is
+    // satisfied by a registry that rejects everything identically.
+    let mut did_web_variant = body.clone();
+    did_web_variant["agent_id"] = serde_json::json!("did:web:agents.example.com");
+    let (_, other) =
+        post_contexts_json(&app, &did_web_variant, Some("application/acdp+json")).await;
+    assert_ne!(
+        other["error"]["code"], want_code,
+        "dk-003: swapping the agent to an ADVERTISED did:web method still produced \
+         {want_code}, so that code is not attributable to the DID method and this test \
+         would pass against a registry that answers it unconditionally. body = {other}"
+    );
+}
+
+/// `err-002` (RFC-ACDP-0007 §4.1, §5): the media-type matrix, **driven by the
+/// fixture's own `scenarios[]`** rather than by a table written here.
+///
+/// **This establishes a different claim from `publish_enforces_the_err002_media_
+/// type_matrix`** (`http_integration.rs`, #290), which enforces and asserts the
+/// behaviour with a hand-written five-row table. That test is correct and stays.
+/// What it cannot do is notice the fixture changing: a sixth scenario, a changed
+/// expectation, or latitude being withdrawn all leave it green. `err-002` remained
+/// in `UNEXERCISED_FIXTURES` after it landed for exactly that reason -- "the gate
+/// is enforced" and "the fixture is read" are different claims.
+///
+/// **The condition is asserted, not assumed.** `err-002` is REQUIRED only of
+/// registries advertising `acdp_version >= 0.5.0`; a 0.3.0/0.4.0 registry MUST NOT
+/// emit the code at all, so running this against the default 0.1.0 harness would
+/// assert a requirement the registry is forbidden to satisfy.
+///
+/// **`either` is honoured as latitude.** Scenarios D and E pin *choice*, not
+/// behaviour. Asserting one would encode this registry's policy as conformance --
+/// which the fixture calls out in as many words -- so those scenarios assert only
+/// that the answer is one of the two conformant shapes.
+#[tokio::test(flavor = "multi_thread")]
+async fn err002_media_type_matrix_is_driven_by_the_fixture() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping err-002");
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "err-002") else {
+        panic!("err-002 not found at the pinned spec");
+    };
+
+    let scenarios = fx["scenarios"]
+        .as_array()
+        .unwrap_or_else(|| panic!("err-002 scenarios[] missing or not an array: {fx}"));
+    assert_eq!(
+        scenarios.len(),
+        ERR002_SCENARIOS_AT_PIN,
+        "err-002 declares {} scenarios at this pin, not {ERR002_SCENARIOS_AT_PIN}. A \
+         scenario was added or removed upstream: read it and decide, then update the \
+         constant. This is the assertion a hand-written table cannot make.",
+        scenarios.len()
+    );
+
+    // err-002 binds only at >= 0.5.0. Assert that rather than trusting the helper's
+    // name, so a change to `anc_caps_050` cannot silently move this test off its
+    // own precondition.
+    let caps_050 = anc_caps_050();
+    assert!(
+        version_at_least_0_5_0(&caps_050.acdp_version),
+        "err-002 is REQUIRED only at acdp_version >= 0.5.0, and a lower registry MUST \
+         NOT emit unsupported_media_type at all -- but this harness advertises {:?}",
+        caps_050.acdp_version
+    );
+    let app = anc_harness_050().await;
+
+    // Every scenario sends a well-formed, genuinely publishable body, so "success"
+    // is asserted as SUCCESS rather than inferred from a later validation error.
+    // That is the whole reason this needs the SDK builder: the fixture's own note
+    // rules out the cheaper approach --
+    //
+    //   "A harness that sends a malformed body cannot distinguish
+    //    415-for-media-type from 400-for-body and is not exercising this fixture."
+    //
+    // DELIBERATE DEVIATION, and the reason, because the fixture also says every
+    // case should send the same body: a byte-identical body republished five times
+    // is a DUPLICATE PUBLISH after the first, so scenarios B onward would answer
+    // `duplicate_publish` -- a body-content rejection, which is precisely what the
+    // note forbids. The note's requirement is ATTRIBUTABILITY ("any rejection must
+    // therefore be attributable to the media type alone, never to body content"),
+    // and five independently-valid bodies differing only in `title` preserve that:
+    // none of them is refusable on content, so any rejection is still the media
+    // type's doing. Each is built and signed in full, because patching a field onto
+    // an already-signed body breaks `content_hash` -- measured, not assumed: the
+    // first version of this test did exactly that and every scenario answered
+    // `hash_mismatch`.
+    let mut checked = 0usize;
+    for sc in scenarios {
+        let name = sc["name"].as_str().unwrap_or("<unnamed>");
+        let ct = sc["request_content_type"].as_str();
+        let want = sc["expected"]["outcome"]
+            .as_str()
+            .unwrap_or_else(|| panic!("err-002 scenario {name:?}: expected.outcome missing"));
+
+        let req = anc_producer(83)
+            .publish_request()
+            .title(format!("err-002 scenario {name}"))
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .acdp_version("0.5.0")
+            .build()
+            .expect("SDK builds a valid publish request");
+        let this_body = serde_json::to_value(&req).expect("PublishRequest serialises");
+        let (status, got) = post_contexts_json(&app, &this_body, ct).await;
+
+        match want {
+            "success" => {
+                assert!(
+                    status.is_success(),
+                    "err-002 {name:?}: Content-Type {ct:?} MUST be accepted -- \
+                     application/acdp+json is the one mandatory member of every accept-set, \
+                     and media-type PARAMETERS must be ignored when deciding. got {status}, \
+                     body = {got}"
+                );
+            }
+            "failure" => {
+                let want_status = sc["expected"]["http_status"].as_u64().unwrap_or(415) as u16;
+                let want_code = sc["expected"]["error_code"].as_str().unwrap_or("");
+                assert_eq!(
+                    status.as_u16(),
+                    want_status,
+                    "err-002 {name:?}: Content-Type {ct:?} must be rejected {want_status}; \
+                     got {status}, body = {got}"
+                );
+                assert_eq!(
+                    got["error"]["code"], want_code,
+                    "err-002 {name:?}: schema_violation is NOT conformant here -- it asserts \
+                     a structural validation that never ran. body = {got}"
+                );
+                // The fixture pins the envelope and forbids echoing the body.
+                assert!(
+                    got["error"]["message"].is_string(),
+                    "err-002 {name:?}: the standard error envelope is REQUIRED on every \
+                     failure response, 415 included: {got}"
+                );
+                let msg = got["error"]["message"].as_str().unwrap_or_default();
+                assert!(
+                    !msg.contains("err-002 scenario"),
+                    "err-002 {name:?}: error.message MUST NOT echo the request body, but it \
+                     contains this request's title: {msg:?}"
+                );
+            }
+            "either" => {
+                // Latitude, pinned as latitude. The only non-conformant answer is one
+                // that is neither acceptance nor the exact shape scenario C requires.
+                let rejected_correctly =
+                    status.as_u16() == 415 && got["error"]["code"] == "unsupported_media_type";
+                assert!(
+                    status.is_success() || rejected_correctly,
+                    "err-002 {name:?}: BOTH outcomes are conformant, but the registry must \
+                     pick one of them -- either accept, or reject exactly as scenario C \
+                     requires (415 + unsupported_media_type). got {status}, body = {got}"
+                );
+            }
+            other => panic!("err-002 {name:?}: unknown expected.outcome {other:?}"),
+        }
+        checked += 1;
+    }
+    assert_eq!(
+        checked, ERR002_SCENARIOS_AT_PIN,
+        "every declared scenario must have been driven, not merely iterated"
+    );
+}
+
+/// `idem-007` (RFC-ACDP-0003 §6.4, RFC-ACDP-0007 §3.5 item 10): a capabilities
+/// document advertising `acdp_version >= 0.3.0` while `supports_idempotency_key`
+/// is absent or false is self-contradictory, and a consumer MUST reject it.
+///
+/// Validated against the published validator over the wire type, exactly as
+/// `caps_vectors_validate_capabilities_document` does and for the same reason:
+/// `acdp-registry-server` is bin-only, so a test in this crate cannot import its
+/// own `build_capabilities`, and an HTTP leg would only prove this test's own
+/// hand-written document round-trips.
+///
+/// **The mechanism is the version-conditionality**, so the fixture's own
+/// `conformant_contrast` is asserted too: the SAME documents at `0.2.0` must be
+/// ACCEPTED. Without that, a validator that rejected every document would pass.
+#[test]
+fn idem007_capabilities_at_0_3_0_must_advertise_idempotency() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping idem-007");
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "idem-007") else {
+        panic!("idem-007 not found at the pinned spec");
+    };
+
+    let inputs = fx["input"]
+        .as_array()
+        .unwrap_or_else(|| panic!("idem-007 input[] missing or not an array: {fx}"));
+    assert_eq!(
+        inputs.len(),
+        2,
+        "idem-007 pins two documents -- supports_idempotency_key ABSENT and explicitly \
+         FALSE -- and they are different code paths in any validator that reads the field \
+         rather than its presence: {fx}"
+    );
+    let want = fx["expected"]["outcome"]
+        .as_str()
+        .unwrap_or_else(|| panic!("idem-007 expected.outcome missing: {fx}"));
+    assert_eq!(
+        want, "reject",
+        "idem-007's expected outcome is the whole fixture; if the spec softened it, this \
+         test must be re-read rather than re-pointed"
+    );
+
+    for doc in inputs {
+        let name = doc["name"].as_str().unwrap_or("<unnamed>");
+        let body = doc["response_body"].clone();
+        assert_eq!(
+            body["acdp_version"], "0.3.0",
+            "idem-007 {name:?}: the document must advertise 0.3.0 or the rule does not bind"
+        );
+        assert_capabilities_outcome(&body, want, &format!("idem-007 {name:?}"));
+
+        // The fixture's own conformant_contrast: the SAME document at 0.2.0 is fully
+        // conformant. This is what makes the assertion above about the VERSION GATE
+        // rather than about the document being rejectable for some other reason.
+        let mut older = body.clone();
+        older["acdp_version"] = serde_json::json!("0.2.0");
+        assert_capabilities_outcome(
+            &older,
+            "accept",
+            &format!("idem-007 {name:?} at 0.2.0 (fixture's conformant_contrast)"),
+        );
+    }
+}
+
 /// **Fixtures this suite retired from [`UNEXERCISED_FIXTURES`], and the test that
 /// requests each (U-533).**
 ///
@@ -12429,8 +12797,9 @@ macro_rules! exercised_by {
 
 /// Size of [`EXERCISED_FIXTURES`], as an **equality** rather than a floor, so
 /// dropping a registration is loud. Five at U-533: `pub-003`, `pub-006`,
-/// `pub-009`, `pub-010`, `ret-002`.
-const EXERCISED_FIXTURES_AT_PIN: usize = 5;
+/// `pub-009`, `pub-010`, `ret-002`. Eight at U-553, which added the three
+/// `ConditionalOnCapability` rows: `dk-003`, `err-002`, `idem-007`.
+const EXERCISED_FIXTURES_AT_PIN: usize = 8;
 
 #[rustfmt::skip]
 const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
@@ -12439,6 +12808,12 @@ const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
     exercised_by!("pub-009", pub006_pub009_key_id_did_must_equal_agent_id),
     exercised_by!("pub-010", pub010_non_did_web_contributor_is_accepted_and_persisted),
     exercised_by!("ret-002", ret002_lineage_current_returns_the_newest_non_superseded_version),
+    // U-553: the three ConditionalOnCapability rows. Each test asserts the
+    // fixture's CONDITION from the harness's own capabilities before asserting
+    // the behaviour, so none of them claims a rule this registry is not under.
+    exercised_by!("dk-003", dk003_did_key_publish_refused_when_method_not_advertised),
+    exercised_by!("err-002", err002_media_type_matrix_is_driven_by_the_fixture),
+    exercised_by!("idem-007", idem007_capabilities_at_0_3_0_must_advertise_idempotency),
 ];
 
 /// Every fixture this suite claims to have retired must really be requested by
@@ -14950,13 +15325,21 @@ async fn fixture_accounting_totals_are_exact() {
         "expected exactly 1 required-but-unexercised (`pub-007`, blocked on U-526). An EXACT \
          equality, not a floor: a floor would read a silently shrinking list as an improvement"
     );
-    // U-533 checked and did NOT move this -- `dk-003`, `err-002` and `idem-007`
-    // are untouched. Asserted so "did not move" is distinguishable from
-    // "was not checked", which look identical in a diff.
+    // U-533 checked and did NOT move this; U-553 retired all three. `dk-003`,
+    // `err-002` and `idem-007` are now each requested by a named test registered
+    // in EXERCISED_FIXTURES and checked at runtime by
+    // `exercised_fixtures_are_really_requested`.
+    //
+    // ZERO is asserted as an equality for the same reason the other counts are:
+    // a floor would read a silently shrinking list as an improvement, and this
+    // number can only go UP again via a spec bump adding a conditional fixture --
+    // which is exactly the event that should stop the build and force a human to
+    // classify it, as `err-002` was not when it arrived with the 16211e6 bump.
     assert_eq!(
-        conditional, 3,
-        "expected exactly 3 conditional-but-unexercised (dk-003, err-002, idem-007) -- unchanged \
-         by U-533"
+        conditional, 0,
+        "expected 0 conditional-but-unexercised; U-553 retired dk-003, err-002 and \
+         idem-007. A NEW conditional fixture arriving from a spec bump lands here: \
+         classify it and write the test, do not relax this to a floor"
     );
     assert_eq!(
         required + conditional,
