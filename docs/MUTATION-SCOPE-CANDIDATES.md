@@ -24,7 +24,7 @@ not its value.
 | mutants | **138** (`cargo mutants --list --no-config --file <path>`) |
 | verdicts obtained | **95 of 138 (69%)** |
 | caught | 47 |
-| **missed (survivors)** | **14** — **5 killed** (U-543 ×4, U-544 ×1), **3 equivalent**, **1 needs a seam**, **5 open** |
+| **missed (survivors)** | **14** — **5 killed**, **7 equivalent**, **1 needs a seam**, **1 open** |
 | unviable | 34 |
 | **survivor rate among viable** | **14 / 61 = 23%** |
 | extrapolated survivors at 138 | **~20**, against a budget of **5** |
@@ -49,10 +49,10 @@ pay them down, and is deliberately not pre-judged here.
 | `store.rs:342:26` | `+` → `*` in `list_contexts` | **KILLED (U-543)** |
 | `store.rs:342:26` | `+` → `-` in `list_contexts` | **KILLED (U-543)** |
 | `store.rs:380:9` | `lifecycle_events_of_ctx` → `Ok(vec![])` | **KILLED (U-543)** |
-| `store.rs:568:9` | `put` → `Ok(())` | open |
-| `store.rs:821:9` | `mark_superseded` → `Ok(())` | open |
-| `store.rs:832:9` | `first_version_ctx_id` → `Ok(None)` | open |
-| `store.rs:923:9` | `idempotency_evict_expired` → `Ok(())` | open |
+| `store.rs:568:9` | `put` → `Ok(())` | **EQUIVALENT (U-546)** |
+| `store.rs:821:9` | `mark_superseded` → `Ok(())` | **EQUIVALENT (U-546)** |
+| `store.rs:832:9` | `first_version_ctx_id` → `Ok(None)` | **EQUIVALENT (U-546)** |
+| `store.rs:923:9` | `idempotency_evict_expired` → `Ok(())` | **EQUIVALENT (U-546)** |
 | `store.rs:994:35` | `>` → `<` in `commit_publish` | **EQUIVALENT (U-544)** |
 | `store.rs:994:35` | `>` → `==` in `commit_publish` | **EQUIVALENT (U-544)** |
 | `store.rs:994:35` | `>` → `>=` in `commit_publish` | **EQUIVALENT (U-544)** |
@@ -247,3 +247,46 @@ other than them — the lineage takeover the comment at that site says the check
 **Consequence for sizing this issue:** the 14 known survivors are not 14 units of work. At least
 3 are equivalent and 1 needs infrastructure. Expect that ratio to hold for the 43 unjudged
 mutants too.
+
+### U-546: the whole `-> Ok(())` write-path family is dead trait surface
+
+Slice 3 killed **nothing**, and that is the correct outcome. All four are `RegistryStore` trait
+methods that `SqliteStore` must implement because the trait requires them, and that **nothing in
+this workspace ever calls**.
+
+**Resolved by TYPE, because the name is ambiguous.** A bare `.put(` count is meaningless here:
+`ChallengeStore::put(ChallengeRecord) -> Result<(), AuthError>` owns 12 of the call sites, all in
+`acdp-registry-auth`, and is a different trait entirely.
+`RegistryStore::put(Body) -> Result<(), AcdpError>` has exactly **three**, and all three are
+*delegating wrapper impls* that forward to another implementation:
+
+| method | call sites | all delegating? |
+|---|---|---|
+| `put` | `parity.rs:772`, `http_integration.rs:8665`, `memory_ext.rs:38` | yes |
+| `mark_superseded` | `parity.rs:793`, `http_integration.rs:8692`, `memory_ext.rs:50` | yes |
+| `first_version_ctx_id` | `parity.rs:799`, `http_integration.rs:8698`, `memory_ext.rs:53` | yes |
+| `idempotency_evict_expired` | `parity.rs:828`, `http_integration.rs:8730`, `memory_ext.rs:74` | yes |
+
+No originating caller exists. The UFCS form (`RegistryStore::put(&x, …)`) that a dot-grep would
+miss returns nothing either.
+
+**One near-miss worth keeping.** The upstream `acdp` crate *does* call
+`self.idempotency_evict_expired(...)` in non-test code — `acdp-0.1.0/src/registry/store.rs:405`.
+That is inside `impl RegistryStore for **InMemoryStore**` (line 308), a different type, so it says
+nothing about `SqliteStore`'s implementation. `SqliteStore::idempotency_lookup` deliberately does
+**not** evict at lookup — its comment says the background task `evict_idempotency` keeps the table
+bounded instead. A workspace-only grep would have missed that call entirely, and a
+type-blind reading of it would have wrongly promoted this one to "reachable".
+
+**Confirmed empirically, with a control.** `panic!` armed in all four methods, full
+`cargo test --workspace` with `ACDP_SPEC_DIR` set and `ACDP_REQUIRE_CONFORMANCE=1`:
+**0 runtime panics, 0 failed binaries.** The same probe placed in `get()` — a method that *is*
+called — produced 9 panic lines, so the detector demonstrably works and the zero is a real zero
+rather than a broken check.
+
+**Revisit trigger:** this equivalence expires the moment any of the four gains an originating
+caller. It is a property of the current call graph, not of the methods.
+
+**Running classification: 5 killed, 7 equivalent, 1 needs a seam, 1 open** — out of 14 known
+survivors, from 95 of 138 mutants judged. The one still open is `49:16` `delete !` in
+`SqliteStore::connect`.
