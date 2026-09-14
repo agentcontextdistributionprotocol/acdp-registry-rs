@@ -381,12 +381,29 @@ jobs:
           rc=0
 
           # (2) EQUALITY on scope, never a floor -- see the env block above.
+          #
+          # THE FAILURE TEXT BELOW IS WHERE THIS TRAP IS ACTUALLY MET. The usual
+          # cause is NOT a config edit: it is an ordinary `src/` change to an
+          # already-scoped file, made by someone who has never opened
+          # .cargo/mutants.toml, landing on a Monday cron detached from the PR
+          # that caused it. Telling them only "update MUTANTS_EXPECTED_SCOPE"
+          # sends them to one of the TWO places the figure lives. So the message
+          # names both, and prints the commands, rather than assuming the reader
+          # will go looking for a comment in another file.
           if [ "$total" -ne "$MUTANTS_EXPECTED_SCOPE" ]; then
             echo "::error::mutation scope is $total, expected exactly" \
-                 "$MUTANTS_EXPECTED_SCOPE. The set of mutants changed. If that was" \
-                 "deliberate, update MUTANTS_EXPECTED_SCOPE in this workflow in the" \
-                 "same commit -- until then the survivor budget is measuring a" \
-                 "different thing than it was set against."
+                 "$MUTANTS_EXPECTED_SCOPE. The set of mutants changed. This is an" \
+                 "EQUALITY on purpose -- a floor would tolerate silent shrinkage," \
+                 "which is the failure the pin exists to prevent -- so it fires on" \
+                 "ANY src/ edit that adds or removes a mutable expression in a" \
+                 "scoped file, not just on a config change. You probably did not" \
+                 "touch the config. Re-measure and update BOTH places in the same" \
+                 "commit: MUTANTS_EXPECTED_SCOPE in this file, AND the per-file" \
+                 "table in .cargo/mutants.toml, which is prose and will not fail" \
+                 "on its own if you forget it."
+            echo "::error::re-measure with: cargo mutants --list | wc -l   (total)" \
+                 "and: cargo mutants --list | sed 's/:[0-9]*:[0-9]*:.*//' |" \
+                 "sort | uniq -c   (per-file split)"
             rc=1
           fi
 

@@ -31,6 +31,60 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-542 (lane-3) — the sqlite sidecar leak: owning the file is not owning the directory -->
+
+### U-542 — 89.3 GiB of orphaned SQLite sidecars, and the shape that caused it
+
+`tempfile::NamedTempFile` deletes exactly the path it owns. SQLite creates `-wal` and `-shm`
+**beside** that path, so every file-backed test orphaned two files. One `$TMPDIR` held **312,898
+`acdp-*` sqlite files / 89.3 GiB**: 143,466 `-wal` + 143,428 `-shm` against **14** surviving bare
+`.sqlite`. Fourteen parents against 286,894 orphans is the whole diagnosis — the guard was working
+on one of the three files it needed to.
+
+**Fix:** own the directory. `Harness.db` is now a `tempfile::TempDir` containing `registry.sqlite`,
+so the drop removes everything SQLite put in the tree — including whatever a future SQLite version
+decides to add. `tls_startup.rs:145` already had this shape; it was the model.
+
+**How it was found, which is the transferable part.** The disk decline that led here was chased for
+hours across three sessions and every candidate was eliminated correctly — Colima's images (flat,
+by allocated size and mtime), swap (no new swapfile), the lane worktrees. The consumer was in
+`/private/var/folders`, and **every search had been rooted at `$HOME` or the workspace**, neither of
+which contains it. Three empty results in a row read as "we have looked everywhere" when they meant
+"we have looked in the same place three times". An empty search result is only as wide as its root;
+publish the roots beside the negative.
+
+**Two measurement notes worth keeping.**
+- `du` reported 117,162 MB for that directory and was **distrusted** on the strength of a real prior
+  incident where it over-reported a 208k-entry directory by 20x. An independent `stat -f '%b'` sum
+  over all 347,827 loose files returned 114,355 MB against a children-sum of 3,211 MB — **`du` was
+  right and the suspicion was wrong**. A prior that survives contact with a control is worth more
+  than one quietly dropped.
+- Prefix counting needs care: `find -name 'acdp-pin-*'` reports 8,294 because it substring-matches
+  `acdp-pin-cell-`; the true figure is 7,924. Deriving the prefix list *from the filesystem* rather
+  than from a hand-written table is also what surfaced `acdp-rev-e2e-`, which the hand list missed.
+
+**The guard, and why it is not a `$TMPDIR` count.** `tests/tmpdir_hygiene.rs` builds a file-backed
+harness, drops it, and asserts `== 0` of `{db}`, `{db}-wal`, `{db}-shm` remain — an equality, since
+a `<=` bound would be satisfied by the very leak it exists to catch. It is scoped to one harness's
+own paths because several test binaries share one `$TMPDIR` on a developer machine, and a
+process-wide count would fail randomly, which is how a guard gets ignored.
+
+**It was demonstrated in both directions on the same binary**, which is the acceptance evidence:
+RED before the fix, naming `acdp-test-lI6bJ5.sqlite-{wal,shm}`; GREEN after. The whole-`$TMPDIR`
+criterion was additionally satisfied as a measurement — 260 tests produced a delta of **0**, against
+a pre-fix control of 1 test producing **+2**. A delta of zero means nothing without that control:
+it is also what you would see if no file-backed test had run.
+
+**Reclaiming the 89.3 GiB was deliberately left out of scope.** `/private/var/folders` is shared
+machine state, a live test may hold an open WAL, and a 287k-file removal is an explicit human
+decision. Fixing first is what makes reclaiming worth doing at all — space returned to a suite that
+recreates it buys hours, not a solution.
+
+**The latent class.** Any `NamedTempFile` whose path is handed to something that may write siblings
+— SQLite, a lockfile, a `.journal` — has this defect waiting. Owning the directory is the general
+answer.
+
+
 <!-- unit U-507 (lane-3) — reconciling ASSUMPTIONS.md's open entries; the census, and what it caught -->
 
 ### U-507 — `ASSUMPTIONS.md`'s open entries, reconciled against the tree
@@ -6344,3 +6398,51 @@ purely a text search. It enforces table invariants an oracle structurally cannot
 Independent confirmation worth recording: the run's single survivor was exactly the
 `log.rs:131:18 == -> !=` mutant the workflow already enumerates as equivalent — a budgeted
 entry re-derived rather than re-read.
+
+## U-545 — a guard is only as wide as the filter that sized it
+
+U-542 (#309) stopped the SQLite sidecar leak in `acdp-registry-server` and, by existing, made the
+class look closed. It was not. Two crates were still leaking, and the reason the second one was
+invisible is the part worth keeping.
+
+**The census that sized U-542 used an `acdp-*` filename filter.** The surviving sites call
+`tempfile::NamedTempFile::new()` with no prefix, so their files land as `.tmpXXXXXX` and that filter
+could never have counted them: 17,538 `-wal` + 17,538 `-shm` = **35,076 files**, against 174,003
+`*-wal` in the directory in total. The filter was not wrong about what it measured; it was silently
+narrower than the question being asked of it. **A tool default is a filter you never typed** — and so
+re-reading your own pipeline cannot reveal the omission, because the omission is not in anything you
+wrote. The same failure arrived from the opposite direction moments later, when an `ls -1` reading
+omitted dotfiles and returned a clean-looking 0. What settled it was arithmetic over two independent
+enumerations: 156,465 + 17,538 = 174,003, exactly.
+
+**The other crate was invisible for a structural reason.** `acdp-registry-core` leaked from a
+`#[cfg(test)]` module inside `src/`. No integration test can reach that — it is a different
+compilation target — and the crate had no `tests/` directory at all, so there was nowhere the defect
+could have been caught and nobody listed it as a candidate. Meanwhile the starting list *included*
+`acdp-registry-pg`, which has zero `tempfile` references and is Postgres-backed. The list was wrong
+in both directions, which is the argument for re-deriving a class from the tree rather than
+inheriting it.
+
+**Two mechanisms, because neither closes the class alone.** The source scan keys on the call shape —
+a file guard bound and connected within ten lines — and contains no prefix anywhere, since a
+no-prefix call is the *default* form and therefore the most likely shape of the next instance. The
+runtime guard proves that shape actually cleans up, in the crate that had never had a test target.
+
+**Both were falsified separately, and that is the lesson that cost the most.** The scan went red on
+the real defect reintroduced in `witness.rs`, naming the exact `file:line`. On the strength of that
+red I described both guards as working. The core guard did not compile — `store.migrate()` is a
+trait method and its trait was not in scope — and had never executed once. `cargo test -p <pkg>
+--test <name>` compiles that package's target and nothing else, so a red from one guard is **zero
+evidence** about a guard beside it in the same commit. It does not feel that way: a clean
+falsification reads as "the unit is in good shape" rather than "this one assertion in this one binary
+fires". A brand-new test file in a crate with no prior `tests/` directory is the worst case, because
+nothing in that package had ever proven its dev-dependencies or trait imports. `cargo test
+--workspace --no-run` costs one command and would have caught it.
+
+The runtime falsification left exactly **two** files behind, `-wal` and `-shm` — not three. The guard
+cleaned the parent and orphaned both siblings, reproducing on demand the 14-parents-vs-286,894-
+sidecars signature that identified the defect in the first place. The leaked names were
+`.tmpFXt9XC-*`: the blind spot, caught by name in the failure output.
+
+Both guards carry their limits in their own doc comments, including that a source scan fails on a
+pattern being present and never on a correct-but-absent test.

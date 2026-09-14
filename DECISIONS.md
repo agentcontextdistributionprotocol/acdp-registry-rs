@@ -3614,3 +3614,67 @@ tests exercise, the reach argument expires and this should be re-taken.
 
 **Not claimed:** that the substring component is strong. All six of #216's defeats still
 reproduce; the `assert`-in-a-comment defeat was re-confirmed in this unit.
+
+## U-542 — sqlite sidecar leak (2026-09-14, decided by Opus under `/drive`)
+
+**The defect.** `tempfile::NamedTempFile` deletes exactly the path it owns. SQLite creates `-wal`
+and `-shm` *beside* that path, so a file-owning guard orphans two files per file-backed test.
+Measured in one `$TMPDIR` before the fix: **312,898 `acdp-*` sqlite files / 89.3 GiB**, split
+143,466 `-wal` + 143,428 `-shm` against **14** surviving bare `.sqlite`. Fourteen parents against
+286,894 orphans is the signature — the guard was working on one of the three files it needed to.
+
+**Decided:** own the *directory*. `Harness.db` becomes a `tempfile::TempDir` holding
+`registry.sqlite`, so dropping it removes everything SQLite put in the tree — including files a
+future SQLite version might add. `tls_startup.rs:145` already had this shape and was the model.
+
+**Enumeration, and a correction to the assigning table.** Prefixes derived from the filesystem
+rather than from a hand list: 9 sqlite prefixes reconciling to 312,898, plus 7 unrelated
+`acdp-u511-*.toml` = **312,905**, matching the leader's independent count exactly. The assign's
+table listed 8 prefixes and **missed `acdp-rev-e2e-` (1,984 files, `http_integration.rs:4224`)**.
+Separately, a naive `find -name 'acdp-pin-*'` reports 8,294 because it substring-matches
+`acdp-pin-cell-`; the true `acdp-pin-` figure is 7,924.
+
+**All 14 `.tempfile()` sites accounted for:** 13 databases converted (10 that leaked, plus 3 that
+self-cleaned via `pool().close()` — converted anyway, see U-542-A2), 1 `.toml` config left alone
+(U-542-A3).
+
+**Deviation from the stated acceptance criterion, made deliberately and reported:** the guard
+asserts a delta equality scoped to one harness's own paths rather than a `$TMPDIR`-wide count,
+because concurrent lanes share that directory (U-542-A1). The criterion was still satisfied as a
+measurement: 260 tests → `DELTA=0`, against a pre-fix control of 1 test → `+2`.
+
+**Not in scope, by standing constraint:** deleting the 89 GiB of already-leaked files.
+`/private/var/folders` is shared machine state, a live test may hold an open WAL, and a 287k-file
+removal is an explicit human decision. Fixing first is what makes reclaiming worth doing — space
+returned to a suite that recreates it buys hours, not a solution.
+
+## U-545 — the tmpdir hygiene guard spans the class (2026-09-14, decided by Opus)
+
+**Decision: ship two mechanisms, not one.** A workspace-wide source scan
+(`acdp-registry-server/tests/tmpdir_hygiene.rs`) and a runtime guard in a previously-unguarded crate
+(`acdp-registry-core/tests/tmpdir_hygiene.rs`). Rationale in U-545-A3: the scan proves every site
+takes the safe shape, the runtime test proves the shape is correct, and neither implies the other.
+
+**Decision: key the scan on the call shape, never on a filename prefix.** The leader's instruction
+was explicit — "do NOT narrow the scan and do not allowlist it; both rebuild the blind spot the unit
+exists to remove" — and the measurement in U-545-A2 is the reason: a prefix filter was structurally
+incapable of seeing 35,076 of these files.
+
+**Decision: fix `acdp-registry-core/src/witness.rs` under the granted claim-request** rather than
+scan-only. A guard that reports a live leak it is not permitted to fix ships a red test.
+
+**Correction recorded against my own prior unit.** #309 closed U-542 for `acdp-registry-server`. Its
+sizing census used an `acdp-*` filter and therefore covered one crate **and one prefix**. This unit
+widens both. That is a real limit on what #309 proved, and it is written into the guard's own doc
+comment so the next reader does not inherit the same false sense of closure — a cured instance is
+exactly what stops people looking.
+
+**Deliberately NOT done:** the ~89 GiB of already-leaked files in `$TMPDIR` remain untouched, per the
+standing constraint. Shared machine state, a live test may hold an open WAL, and a 287k-file removal
+is an explicit human decision. This unit stops growth; it reclaims nothing.
+
+**Open and honest:** `cargo test --workspace --all-targets --no-run` failed to link
+`acdp-registry-pg`'s `store_contract` target while the volume had ~118 MiB free. `acdp-registry-pg`
+is outside this grant and untouched by this diff. I did not establish the cause — the command that
+would have read the full error is the one that first hit `ENOSPC` — so it is reported as an
+unexplained environmental failure, not attributed to disk.

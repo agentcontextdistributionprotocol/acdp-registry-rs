@@ -1,0 +1,26 @@
+# Purpose-built cargo-mutants config for the acdp-registry-sqlite/src/store.rs tranche.
+#
+# WHY THIS FILE EXISTS, and it is not convenience.
+# U-549 ran five shards through `--no-config --file <path>` with the non-glob
+# settings restored by hand on the command line. `--no-config` discards the WHOLE
+# of .cargo/mutants.toml, and the hand-restored list silently omitted
+# `copy_vcs = true`. Without it `.git` is absent from the mutant tree, three
+# git-dependent conformance tests panic with `fatal: not a git repository` in
+# EVERY mutant tree, and every mutant is marked CaughtMutant for a reason that has
+# nothing to do with the mutation. Those five shards reported 60 caught / 0 missed
+# and were void.
+#
+# The baseline cannot catch this: cargo-mutants runs the baseline package-scoped
+# (`--package=acdp-registry-sqlite`) while every mutant runs `--workspace`, so the
+# baseline never executes the failing tests and reports a clean Success.
+# .cargo/mutants.toml predicted exactly this in its own prose, and `--no-config`
+# discarded the warning along with the setting.
+#
+# `--config <file>` REPLACES rather than merges, which is the property wanted here:
+# every setting is in one reviewable place instead of enumerated on a command line.
+# Enumerating what you lost is precisely the step that failed.
+
+test_workspace = true          # mutants run --workspace; must match how CI judges
+copy_vcs = true               # .git in the mutant tree; without it the baseline is a lie
+minimum_test_timeout = 300    # a MISSED mutant is the slow case -- it runs the suite to green
+examine_globs = ["crates/acdp-registry-sqlite/src/store.rs"]

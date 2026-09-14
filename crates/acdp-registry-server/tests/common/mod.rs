@@ -115,19 +115,51 @@ pub enum StoreMode {
 /// `None`.
 pub struct Harness {
     pub router: axum::Router,
-    pub db: Option<tempfile::NamedTempFile>,
+    /// Owns the temporary **directory** that holds the SQLite database, not
+    /// the database file itself. U-542: `NamedTempFile` removes only the path
+    /// it owns, while SQLite creates `-wal` and `-shm` *beside* that path, so
+    /// a file-owning guard orphaned two files per test — 286,894 of them in
+    /// one `$TMPDIR` against 14 surviving parents. Owning the directory makes
+    /// cleanup cover everything SQLite puts in it, including files a future
+    /// SQLite version might add. Enforced by `tests/tmpdir_hygiene.rs`.
+    pub db: Option<tempfile::TempDir>,
+    /// Path to the database file inside [`Self::db`]. Held separately so
+    /// [`Self::db_path`] can keep returning a borrow rather than building a
+    /// `PathBuf` per call.
+    db_file: Option<std::path::PathBuf>,
 }
 
+/// File name of the SQLite database inside a harness's temporary directory.
+/// Shared so the standalone harnesses in `http_integration.rs` and
+/// `metrics_integration.rs` cannot drift from `build_harness_with_webhook`.
+pub const DB_FILE_NAME: &str = "registry.sqlite";
+
 impl Harness {
+    /// Assemble a file-backed harness from a router and the temporary
+    /// **directory** that owns its database.
+    ///
+    /// U-542 added a private `db_file`, which stops the struct-literal
+    /// construction the standalone harnesses in `http_integration.rs` used.
+    /// They go through here instead, which also guarantees they agree with
+    /// `build_harness_with_webhook` on where inside the directory the database
+    /// lives — a mismatch would leave `db_path()` pointing at nothing.
+    pub fn with_db_dir(router: axum::Router, dir: tempfile::TempDir) -> Self {
+        let db_file = dir.path().join(DB_FILE_NAME);
+        Self {
+            router,
+            db: Some(dir),
+            db_file: Some(db_file),
+        }
+    }
+
     /// Path to the backing SQLite file, for tests that need to reach past
     /// the HTTP surface (e.g. ageing an idempotency record to simulate
     /// expiry without sleeping). Only valid for a [`StoreMode::File`]
     /// harness.
     pub fn db_path(&self) -> &std::path::Path {
-        self.db
-            .as_ref()
+        self.db_file
+            .as_deref()
             .expect("db_path() called on a StoreMode::Memory harness")
-            .path()
     }
 }
 
@@ -151,19 +183,22 @@ pub async fn build_harness_with_webhook(
     cross_registry: Option<Arc<CrossRegistryResolver>>,
     webhook: Option<acdp_registry_webhook::WebhookEmitter>,
 ) -> Harness {
-    let (store, db) = match store_mode {
+    let (store, db, db_file) = match store_mode {
         StoreMode::File => {
-            let db = tempfile::Builder::new()
+            // U-542: own the directory, not the file. SQLite writes `-wal` and
+            // `-shm` next to the database; only a directory-scoped guard takes
+            // them with it when the harness drops.
+            let dir = tempfile::Builder::new()
                 .prefix("acdp-test-")
-                .suffix(".sqlite")
-                .tempfile()
+                .tempdir()
                 .unwrap();
-            let store = SqliteStore::connect(db.path(), 1).await.unwrap();
-            (store, Some(db))
+            let path = dir.path().join("registry.sqlite");
+            let store = SqliteStore::connect(&path, 1).await.unwrap();
+            (store, Some(dir), Some(path))
         }
         StoreMode::Memory => {
             let store = SqliteStore::connect_in_memory().await.unwrap();
-            (store, None)
+            (store, None, None)
         }
     };
     // RFC-ACDP-0012: mirror the binary's run() wiring — an enabled [log]
@@ -215,6 +250,7 @@ pub async fn build_harness_with_webhook(
     Harness {
         router: build_router(state),
         db,
+        db_file,
     }
 }
 

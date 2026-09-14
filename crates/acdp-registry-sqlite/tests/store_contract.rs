@@ -27,19 +27,43 @@ use acdp::producer::Producer;
 use acdp::registry::store::{
     PendingIdempotencyCommit, PublishCommit, PublishCommitOutcome, RegistryStore,
 };
-use acdp::types::primitives::{AgentDid, ContextType, Visibility};
+use acdp::types::primitives::{AgentDid, ContextType, CtxId, Visibility};
 use acdp::types::publish::{PublishRequest, PublishResponse};
+use acdp::types::search::SearchParams;
 use acdp_registry_sqlite::SqliteStore;
 use acdp_registry_store::ExtendedRegistryStore;
+use chrono::{Duration, Utc};
 
 const THREADS: usize = 16;
 const AUTHORITY: &str = "reg.test";
 
-async fn store() -> (Arc<SqliteStore>, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let store = SqliteStore::connect(tmp.path(), 4).await.unwrap();
+/// The database file name inside each test's own temp DIRECTORY.
+///
+/// Mirrors `acdp-registry-server`'s `common::DB_FILE_NAME`, which cannot be
+/// imported here — it lives in a different crate's test support module. The
+/// value is arbitrary; what matters is that the directory, not the file, is
+/// what the test owns.
+const DB_FILE_NAME: &str = "registry.sqlite";
+
+/// Own the temp DIRECTORY, not the temp FILE.
+///
+/// `tempfile::NamedTempFile` deletes exactly the path it owns, while SQLite
+/// writes two sidecars beside it (`-wal` and `-shm`). Those are not the owned
+/// path, so they outlive the test. #309 fixed this in the server harness;
+/// measured here at `7b3797e`, this crate's suite still leaked **34** files
+/// into `$TMPDIR` per run. A `TempDir` removes the whole directory, sidecars
+/// included.
+///
+/// `acdp-registry-server/tests/tmpdir_hygiene.rs` is the standing guard for
+/// the server side; it does not cover this crate, which is why the leak
+/// survived #309.
+async fn store() -> (Arc<SqliteStore>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::connect(&dir.path().join(DB_FILE_NAME), 4)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
-    (Arc::new(store), tmp)
+    (Arc::new(store), dir)
 }
 
 fn producer(seed: u8) -> Producer {
@@ -48,6 +72,12 @@ fn producer(seed: u8) -> Producer {
         AgentDid::new(format!("did:web:agents.test:contract-{seed}")),
         format!("did:web:agents.test:contract-{seed}#key-1"),
     )
+}
+
+/// The DID `producer(seed)` signs as. Mirrors the construction in `producer`
+/// above — kept beside it so the two cannot drift.
+fn did(seed: u8) -> AgentDid {
+    AgentDid::new(format!("did:web:agents.test:contract-{seed}"))
 }
 
 fn request(p: &Producer, title: &str) -> PublishRequest {
@@ -79,10 +109,380 @@ fn commit(
     })
 }
 
+/// Publish one context through the real commit path and hand back its `ctx_id`.
+fn publish(
+    store: &Arc<SqliteStore>,
+    req: PublishRequest,
+) -> impl std::future::Future<Output = CtxId> + use<> {
+    let store = Arc::clone(store);
+    async move {
+        let outcome = commit(store, req, None)
+            .await
+            .expect("join")
+            .expect("commit ok");
+        response(&outcome).ctx_id.clone()
+    }
+}
+
+fn tagged(p: &Producer, title: &str, tags: Vec<&str>) -> PublishRequest {
+    p.publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .tags(tags)
+        .build()
+        .expect("valid publish request")
+}
+
+fn typed(p: &Producer, title: &str, t: ContextType) -> PublishRequest {
+    p.publish_request()
+        .title(title)
+        .context_type(t)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid publish request")
+}
+
+fn expiring(p: &Producer, title: &str, at: chrono::DateTime<Utc>) -> PublishRequest {
+    p.publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .expires_at(at)
+        .build()
+        .expect("valid publish request")
+}
+
+/// Run a search as an anonymous reader with the public arm open, and return the
+/// matched `ctx_id`s as a set. Every U-550 assertion is on an EXACT set, because
+/// several of the mutants WIDEN the result rather than emptying it.
+fn search_ids(store: &Arc<SqliteStore>, params: SearchParams) -> std::collections::HashSet<String> {
+    store
+        .search(&params, None, true)
+        .expect("search ok")
+        .matches
+        .iter()
+        .map(|m| m.ctx_id.as_str().to_string())
+        .collect()
+}
+
 fn response(outcome: &PublishCommitOutcome) -> &PublishResponse {
     match outcome {
         PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => r,
     }
+}
+
+/// An UNEXPIRED idempotency record must REPLAY, and the TTL comparison is what
+/// decides that.
+///
+/// `store.rs:994` is `if expires_at > now`. U-540 measured `<`, `==` and `>=`
+/// all surviving there, and U-544 established WHY, which is not a coverage gap:
+/// **all three are outcome-equivalent, because the branch is redundant.**
+///
+/// Probed rather than argued. With `<` applied, this test still passes, and an
+/// `eprintln!` at the step-7 conflict gate fires exactly once: skipping the TTL
+/// branch lets the publish proceed to
+/// `INSERT … ON CONFLICT(agent_id, key) DO NOTHING`, which collides with the
+/// live record, reports zero rows, rolls the new context back and replays the
+/// stored response — the SAME `IdempotentReplay`, with the SAME `ctx_id`, by a
+/// second route. The idempotency contract is enforced twice over, so breaking
+/// the first enforcement is invisible at this API.
+///
+/// So this test does NOT kill those three mutants and is not claimed to. It
+/// pins the contract itself, which was otherwise asserted nowhere at this
+/// layer: a repeated keyed publish returns the original context rather than
+/// minting a second one.
+///
+/// The assertion is on `ctx_id` EQUALITY across the two calls, not merely on
+/// the `IdempotentReplay` variant: a replay that returned a different context
+/// would satisfy the variant while breaking the guarantee.
+///
+/// `>` → `>=` carries a second, independent equivalence argument on top of the
+/// redundancy above: `now` is `Utc::now()` taken inside `commit_publish` while
+/// `expires_at` is rebuilt from stored MILLISECONDS, so the two differ only
+/// when the clock lands exactly on a stored millisecond boundary — not
+/// reachable deterministically, and a test that waited for it would be a flake
+/// generator. Same argument the repo already accepts for
+/// `handlers/context.rs:642:39`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unexpired_idempotency_record_replays_rather_than_minting_again() {
+    let (store, _tmp) = store().await;
+    let p = producer(65);
+    let key = "ttl-replay-key".to_string();
+
+    let first = commit(
+        Arc::clone(&store),
+        request(&p, "ttl replay row"),
+        Some(key.clone()),
+    )
+    .await
+    .unwrap()
+    .expect("first publish ok");
+    assert!(
+        matches!(first, PublishCommitOutcome::Inserted(_)),
+        "the first publish under a fresh key must INSERT"
+    );
+    let first_ctx = response(&first).ctx_id.clone();
+
+    // Same key, same content, well inside the 1h TTL the helper sets.
+    let second = commit(
+        Arc::clone(&store),
+        request(&p, "ttl replay row"),
+        Some(key.clone()),
+    )
+    .await
+    .unwrap()
+    .expect("second publish ok");
+    assert!(
+        matches!(second, PublishCommitOutcome::IdempotentReplay(_)),
+        "an unexpired record must replay; `expires_at < now` or `== now` skips          the liveness branch entirely and mints a second context"
+    );
+    assert_eq!(
+        response(&second).ctx_id,
+        first_ctx,
+        "the replay must return the ORIGINAL context; a different ctx_id is a          duplicate publish wearing a replay's variant"
+    );
+
+    // Exactly one context was minted, which is the property the key sells.
+    assert_eq!(
+        store.count_idempotency_records().await.expect("count ok"),
+        Some(1),
+        "one key, one retained record"
+    );
+}
+
+/// Racing publishes that share one idempotency key but carry DIFFERENT content
+/// must yield exactly one winner and reject every loser as a duplicate.
+///
+/// `store.rs:1306` (`if prior_hash != req.content_hash.0`, where U-540 measured
+/// `!=` → `==` surviving) sits behind this path. **This test does not reach it,
+/// and does not claim to.** Probed: an `eprintln!` at `inserted == 0` fires
+/// ZERO times across the whole suite, this test included. SQLite's
+/// `BEGIN IMMEDIATE` serialises the racers, so every loser finds the committed
+/// record at the step-1 read and is refused there (`store.rs:1003`) instead.
+///
+/// That leaves :1306 reachable only under interleaving this harness does not
+/// produce — recorded in #307 as needing a seam, not as a coverage gap a test
+/// can close by trying harder.
+///
+/// It has to be a real race. The obvious deterministic route — pre-expire the
+/// record so the `ON CONFLICT DO NOTHING` collides — does not work: step 1
+/// DELETEs an expired record for this key (`store.rs:964`) precisely so the
+/// claim in step 7 cannot collide with a stale row. Tried, and it published
+/// cleanly. So :1306 is reachable only when a record is absent at the read and
+/// present at the insert, which is the race window itself.
+///
+/// The existing `concurrent_identical_idempotency_key_mints_exactly_one_ctx_id`
+/// races the SAME content, where the hashes match and this comparison is never
+/// the deciding branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_publishes_sharing_a_key_with_different_content_reject_the_losers() {
+    let (store, _tmp) = store().await;
+    let p = producer(66);
+    let key = "race-different-content".to_string();
+
+    let handles: Vec<_> = (0..THREADS)
+        .map(|i| {
+            commit(
+                Arc::clone(&store),
+                request(&p, &format!("racer content {i}")),
+                Some(key.clone()),
+            )
+        })
+        .collect();
+
+    let mut inserted = 0usize;
+    let mut duplicates = 0usize;
+    let mut other: Vec<String> = Vec::new();
+    for h in handles {
+        match h.await.unwrap() {
+            Ok(PublishCommitOutcome::Inserted(_)) => inserted += 1,
+            Err(AcdpError::DuplicatePublish(_)) => duplicates += 1,
+            Ok(o) => other.push(format!("unexpected Ok: {o:?}")),
+            Err(e) => other.push(format!("unexpected Err: {e:?}")),
+        }
+    }
+
+    assert!(
+        other.is_empty(),
+        "every racer must either win outright or be refused as a duplicate;          got {other:?}. An `IdempotentReplay` here is the `==` inversion: the          loser's DIFFERENT content was matched against the winner's hash and          accepted, handing it the winner's ctx_id"
+    );
+    assert_eq!(inserted, 1, "exactly one racer may mint a context");
+    assert_eq!(
+        duplicates,
+        THREADS - 1,
+        "every other racer carries different content under the same key and          must be refused"
+    );
+    assert_eq!(
+        store.count_idempotency_records().await.expect("count ok"),
+        Some(1),
+        "one key, one retained record"
+    );
+}
+
+/// A CONTRIBUTOR on v1 may supersede it — and that is what the `==` at
+/// `store.rs:1090` decides.
+///
+/// Ownership for supersession is `prev_agent == req.agent_id
+/// || prev_contributors.iter().any(|c| c == req.agent_id)`. U-540 measured the
+/// contributor arm's `==` → `!=` surviving the whole suite, because every
+/// existing supersession test supersedes as the ORIGINAL PRODUCER, where the
+/// first arm already returns true and the second is never consulted.
+///
+/// Inverted, the arm means "any contributor who is NOT you", so:
+///   * a genuine contributor is refused (this test fails), and
+///   * worse, any signer is admitted whenever v1 lists at least one
+///     contributor other than them — the lineage takeover the comment at that
+///     site says the check exists to prevent (RFC-ACDP-0001 §5.9).
+///
+/// Both directions are asserted below, because the refusal alone would also be
+/// produced by a broken lookup, while the pair pins the comparison itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contributor_may_supersede_but_an_unrelated_signer_may_not() {
+    let (store, _tmp) = store().await;
+    let owner = producer(67);
+    let contributor = producer(68);
+    let stranger = producer(69);
+
+    // v1 is owned by `owner` and lists `contributor` — and NOT `stranger`.
+    let v1_req = owner
+        .publish_request()
+        .title("contributor supersession v1")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .contributors(vec![did(68)])
+        .build()
+        .expect("valid v1 request");
+    let v1 = commit(Arc::clone(&store), v1_req, None)
+        .await
+        .unwrap()
+        .expect("v1 publish");
+    let v1_body = store
+        .get(&response(&v1).ctx_id)
+        .expect("retrieve ok")
+        .expect("v1 present")
+        .body;
+
+    // A signer who is neither the producer nor a contributor is refused, and
+    // is told only "not found" — no existence oracle.
+    let stranger_req = stranger
+        .supersede_body(&v1_body)
+        .title("takeover attempt")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid request");
+    let err = commit(Arc::clone(&store), stranger_req, None)
+        .await
+        .unwrap()
+        .expect_err("a non-owner, non-contributor must not supersede");
+    assert!(
+        matches!(err, AcdpError::SupersededTarget { .. }),
+        "expected SupersededTarget for an unrelated signer, got {err:?}. With          the contributor arm inverted this signer is ADMITTED whenever v1          lists any contributor other than them — a lineage takeover"
+    );
+
+    // The listed contributor succeeds. This is the half no existing test
+    // covers, because every other supersession runs as the original producer.
+    let contrib_req = contributor
+        .supersede_body(&v1_body)
+        .title("contributor supersession v2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid request");
+    let v2 = commit(Arc::clone(&store), contrib_req, None)
+        .await
+        .unwrap()
+        .expect("a listed contributor MUST be allowed to supersede");
+    assert_eq!(
+        response(&v2).lineage_id,
+        response(&v1).lineage_id,
+        "the contributor's v2 continues v1's lineage"
+    );
+}
+
+/// `connect` must create a missing parent directory chain.
+///
+/// `store.rs:49` is `if !parent.as_os_str().is_empty()`, guarding
+/// `create_dir_all(parent)`. U-540 measured `delete !` surviving the whole
+/// suite, and the reason is that every other test hands `connect` a path whose
+/// parent ALREADY EXISTS — `tempfile::tempdir()` creates it. When the directory
+/// is already there, `create_dir_all` is a no-op, so skipping it changes
+/// nothing and the mutant is invisible.
+///
+/// Inverted, the guard means "create the parent only when there ISN'T one",
+/// so a real deployment pointed at `/var/lib/acdp/registry.sqlite` before that
+/// directory exists fails to start, while the no-parent case calls
+/// `create_dir_all("")`.
+///
+/// The precondition is asserted explicitly: without it this test would pass
+/// against the mutant the moment someone changed the fixture to a directory
+/// that happens to exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_creates_a_missing_parent_directory_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("a").join("b").join(DB_FILE_NAME);
+    let parent = nested
+        .parent()
+        .expect("nested path has a parent")
+        .to_path_buf();
+
+    assert!(
+        !parent.exists(),
+        "precondition: the parent chain must be ABSENT, or this test passes \
+         without exercising create_dir_all at all"
+    );
+
+    let store = SqliteStore::connect(&nested, 2)
+        .await
+        .expect("connect must create the missing parent chain, not fail on it");
+    store.migrate().await.expect("migrate");
+
+    assert!(parent.is_dir(), "the parent chain was created");
+    assert!(
+        nested.is_file(),
+        "the database exists at the requested path"
+    );
+}
+
+/// `count_idempotency_records` must count the rows that exist.
+///
+/// Measured in U-540: replacing the whole method with `Ok(Some(0))` left the
+/// suite green. The count feeds operational reporting, so a constant zero
+/// reads as "no idempotency records are being retained" — the shape of answer
+/// that makes an eviction bug invisible rather than loud.
+///
+/// Asserted as a DELTA across a publish, not as a single figure. `Some(0)` on
+/// an empty store is the correct answer, so a test that only checked the
+/// populated case would pass against a method that always returns zero for
+/// exactly one of its two observations; pinning both ends removes that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn count_idempotency_records_counts_the_rows_that_exist() {
+    let (store, _tmp) = store().await;
+
+    let empty = store.count_idempotency_records().await.expect("count ok");
+    assert_eq!(
+        empty,
+        Some(0),
+        "a fresh store retains no idempotency records"
+    );
+
+    let p = producer(64);
+    commit(
+        Arc::clone(&store),
+        request(&p, "counted row"),
+        Some("count-key-1".to_string()),
+    )
+    .await
+    .unwrap()
+    .expect("publish ok");
+
+    let populated = store.count_idempotency_records().await.expect("count ok");
+    assert_eq!(
+        populated,
+        Some(1),
+        "one keyed publish retains exactly one idempotency record; a constant          `Some(0)` here would report an empty table over a populated one"
+    );
 }
 
 /// Race N identical publishes sharing one idempotency key: exactly one
@@ -264,6 +664,64 @@ mod lifecycle {
             .unwrap();
         let r = response(&outcome);
         (r.ctx_id.clone(), r.lineage_id.clone())
+    }
+
+    /// `lifecycle_events_of_ctx` must return the events that were committed.
+    ///
+    /// Measured in U-540: replacing the WHOLE METHOD BODY with `Ok(vec![])`
+    /// left the entire workspace suite green. Every other assertion about
+    /// lifecycle state in this file reads the PROJECTED context (status,
+    /// `retracted_at`, §7.2 precedence) rather than the event list itself, so
+    /// the store could report "this context has no lifecycle history" and
+    /// nothing noticed.
+    ///
+    /// The assertion is on CONTENT, not just length: a length check alone
+    /// would be satisfied by any one event, which is a weaker claim than the
+    /// method actually returning what was written.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_events_of_ctx_returns_the_committed_events() {
+        let (store, _tmp) = store().await;
+        let actor = AgentDid::new("did:web:agents.test:contract-63".to_string());
+        let (ctx_id, _lineage) = published_ctx(&store, 63, "event list row").await;
+
+        // Before any event, the list is empty for a real, existing context —
+        // which also proves the emptiness asserted after the commit would be a
+        // genuine change of state rather than a constant.
+        let before = store
+            .lifecycle_events_of_ctx(ctx_id.as_str())
+            .await
+            .expect("events ok");
+        assert!(
+            before.is_empty(),
+            "a freshly published context has no events"
+        );
+
+        let retract = event(
+            &actor,
+            &ctx_id,
+            LifecycleEventType::Retracted,
+            Some("event list reason"),
+        );
+        let expected_event_id = retract.event_id.clone();
+        store
+            .commit_lifecycle_event(&retract)
+            .expect("retract applied");
+
+        let after = store
+            .lifecycle_events_of_ctx(ctx_id.as_str())
+            .await
+            .expect("events ok");
+        assert_eq!(
+            after.len(),
+            1,
+            "one event was committed, so one must come back; `Ok(vec![])`              reports a context with no lifecycle history at all"
+        );
+        assert_eq!(
+            after[0].event_id, expected_event_id,
+            "the returned event must be the one committed, not merely some event"
+        );
+        assert_eq!(after[0].event_type, LifecycleEventType::Retracted);
+        assert_eq!(after[0].ctx_id, ctx_id);
     }
 
     /// The documented 4-step atomic contract: resolve, retry-idempotency,
@@ -470,14 +928,15 @@ mod transparency_log {
 
     const REGISTRY_DID: &str = "did:web:reg.test";
 
-    async fn log_store() -> (Arc<SqliteStore>, tempfile::NamedTempFile) {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 4)
+    /// Owns the directory, not the file — see `super::store`.
+    async fn log_store() -> (Arc<SqliteStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&dir.path().join(super::DB_FILE_NAME), 4)
             .await
             .unwrap()
             .with_transparency_log();
         store.migrate().await.unwrap();
-        (Arc::new(store), tmp)
+        (Arc::new(store), dir)
     }
 
     fn signer() -> ReceiptSigner {
@@ -1107,6 +1566,96 @@ mod visibility_sql {
         }
     }
 
+    /// The `LIMIT limit + 1` SENTINEL in `list_contexts`, which is what tells
+    /// `try_paginate_rows` whether another page exists. Every other caller of
+    /// `list_contexts` in this repository passes a limit of 50 or 100 — larger
+    /// than any fixture set — so the boundary is never reached and the sentinel
+    /// is never exercised. Measured in U-540: mutating `limit + 1` to
+    /// `limit * 1` or `limit - 1` left the entire suite green.
+    ///
+    /// The repo's other pagination coverage is on `search`, a DIFFERENT method,
+    /// which is why this gap survived review: `list_contexts` has ten call
+    /// sites and reads as covered.
+    ///
+    /// This test pins the boundary itself: three rows, a limit of two.
+    ///   * `limit * 1` fetches 2, so no sentinel row is seen and `next_cursor`
+    ///     comes back `None` — caught by the assertion below.
+    ///   * `limit - 1` fetches 1, so the first page is short — caught too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_contexts_signals_more_rows_through_the_limit_sentinel() {
+        let (store, _tmp) = store().await;
+        let dom = "sentinel-domain";
+        let tenant = "sentinel-tenant";
+        let owner = agent(OWNER);
+
+        for i in 0..3 {
+            publish(
+                &store,
+                &format!("sentinel row {i}"),
+                Visibility::Public,
+                &[],
+                dom,
+                tenant,
+            )
+            .await;
+        }
+
+        // limit=2 over 3 visible rows: the page must be FULL and must announce
+        // that more remain. `total_estimate` is deliberately not asserted here —
+        // it is a different mechanism with its own test above, and folding it in
+        // would make a sentinel failure indistinguishable from a count failure.
+        let page1 = store
+            .list_contexts(2, None, Some(&owner), Some(tenant), true)
+            .await
+            .expect("list ok");
+        assert_eq!(
+            page1.items.len(),
+            2,
+            "page must fill to the limit; a short page means the LIMIT bind is              below `limit` (e.g. `limit - 1`)"
+        );
+        assert!(
+            page1.next_cursor.is_some(),
+            "3 rows exist and the limit is 2, so the `limit + 1` sentinel must              have seen a third row and set a cursor. `None` here means the              sentinel is gone (e.g. `limit * 1`) and pagination silently ends              one page early"
+        );
+
+        // And the cursor must actually resume: the tail page carries the third
+        // row and closes the walk. Without this, a cursor that is merely
+        // non-None would satisfy the assertion above.
+        let page2 = store
+            .list_contexts(
+                2,
+                page1.next_cursor.as_deref(),
+                Some(&owner),
+                Some(tenant),
+                true,
+            )
+            .await
+            .expect("list page 2 ok");
+        assert_eq!(
+            page2.items.len(),
+            1,
+            "the tail page holds the remaining row"
+        );
+        assert!(
+            page2.next_cursor.is_none(),
+            "the walk is complete, so no further cursor"
+        );
+
+        // The two pages together are the whole visible set, with no row
+        // repeated or dropped across the boundary.
+        let seen: HashSet<&str> = page1
+            .items
+            .iter()
+            .chain(page2.items.iter())
+            .map(|c| c.body.ctx_id.as_str())
+            .collect();
+        assert_eq!(
+            seen.len(),
+            3,
+            "the paged walk must yield all 3 rows exactly once"
+        );
+    }
+
     /// Pages fill to `limit` even when the ordered scan interleaves rows the
     /// requester may not see, and `total_estimate` is the honest count of
     /// visible rows — not the page size. Pre-DESIGN-01 the in-Rust filter
@@ -1200,4 +1749,277 @@ mod visibility_sql {
             "pagination drains exactly the visible public set"
         );
     }
+}
+
+// ── U-550: the four survivor clusters from the full-138 mutation run ─────────
+//
+// U-549 ran all 138 mutants of `store.rs` under a valid harness and found 19
+// survivors, 11 of which had never been judged. Those 11 are four test-shaped
+// clusters, not eleven problems. Each test below names the mutants it kills and
+// was falsified against every one of them by hand-application before the oracle
+// was consulted -- two instruments, because U-548 is the standing argument
+// against trusting one.
+
+/// The tag filter is post-SQL (tags are stored as JSON), and nothing exercised
+/// it. Three mutants lived here.
+///
+/// - `1585:37` deletes the `!` in `.filter(|s| !s.is_empty())`. `want` then
+///   keeps only the EMPTY segments. For `tags=alpha` that leaves `want` empty,
+///   `all()` over an empty iterator is `true`, the `!` makes it `false`, the
+///   early return never fires and **every context passes the tag filter**.
+/// - `1588:24` deletes the `!` in `if !want.iter().all(...)`, inverting the
+///   test so contexts that DO carry every tag are the ones rejected.
+/// - `1588:74` flips `bt == w` to `bt != w`, so "has any tag other than this
+///   one" stands in for "has this one".
+///
+/// Asserting an EXACT set is what kills all three: each mutant changes WHICH
+/// contexts come back, and two of them widen the result rather than emptying
+/// it, so a `contains` assertion would pass against them.
+///
+/// The second query pins the trimming specifically. `"alpha, ,beta"` has an
+/// empty middle segment, which the filter drops; under `1585:37` `want` becomes
+/// `[""]`, no context carries an empty tag, and the result is empty instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tag_filter_admits_only_contexts_carrying_every_requested_tag() {
+    let (store, _dir) = store().await;
+    let p = producer(60);
+
+    let alpha_beta = publish(&store, tagged(&p, "alpha-beta", vec!["alpha", "beta"])).await;
+    let beta_only = publish(&store, tagged(&p, "beta-only", vec!["beta"])).await;
+    let untagged = publish(&store, tagged(&p, "untagged", vec![])).await;
+
+    // Precondition: without three distinct contexts the widening mutants
+    // (1585:37, 1588:74) would have nothing extra to wrongly admit.
+    assert_eq!(
+        [&alpha_beta, &beta_only, &untagged]
+            .iter()
+            .map(|c| c.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3,
+        "precondition: three distinct contexts"
+    );
+
+    assert_eq!(
+        search_ids(
+            &store,
+            SearchParams {
+                tags: Some("alpha".into()),
+                ..Default::default()
+            }
+        ),
+        std::collections::HashSet::from([alpha_beta.as_str().to_string()]),
+        "tags=alpha must admit exactly the context carrying alpha -- not every \
+         context (1585:37), not the complement (1588:24), not 'has some other \
+         tag' (1588:74)"
+    );
+
+    assert_eq!(
+        search_ids(
+            &store,
+            SearchParams {
+                tags: Some("alpha, ,beta".into()),
+                ..Default::default()
+            }
+        ),
+        std::collections::HashSet::from([alpha_beta.as_str().to_string()]),
+        "empty segments are trimmed away, and the remaining tags are ANDed"
+    );
+
+    assert_eq!(
+        search_ids(
+            &store,
+            SearchParams {
+                tags: Some("beta".into()),
+                ..Default::default()
+            }
+        ),
+        std::collections::HashSet::from([
+            alpha_beta.as_str().to_string(),
+            beta_only.as_str().to_string()
+        ]),
+        "tags=beta admits BOTH carriers -- pins the AND semantics as a subset \
+         relation rather than equality of tag lists"
+    );
+}
+
+/// `1596:86` flips `c.as_str() == df` to `!=` in the `derived_from` filter, so
+/// "derives from this context" becomes "derives from something else".
+///
+/// The mutant EMPTIES the result rather than widening it: the only element of
+/// the child's `derived_from` equals the query, so `any(|c| c != df)` is false,
+/// `is_none_or` yields false, and the child is rejected. The unrelated context
+/// has an empty `derived_from`, and `any()` over empty is also false, so it
+/// stays out too. An assertion that merely required the child to be absent
+/// would therefore pass against the mutant -- the exact-set form is load-bearing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_derived_from_filter_admits_only_direct_descendants() {
+    let (store, _dir) = store().await;
+    let p = producer(61);
+
+    let parent = publish(&store, tagged(&p, "parent", vec![])).await;
+    let child = publish(
+        &store,
+        p.publish_request()
+            .title("child")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .derived_from(vec![parent.clone()])
+            .build()
+            .expect("valid publish request"),
+    )
+    .await;
+    let unrelated = publish(&store, tagged(&p, "unrelated", vec![])).await;
+
+    let got = search_ids(
+        &store,
+        SearchParams {
+            derived_from: Some(parent.as_str().to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        got,
+        std::collections::HashSet::from([child.as_str().to_string()]),
+        "derived_from=<parent> admits exactly the child; got {got:?}"
+    );
+    assert!(
+        !got.contains(unrelated.as_str()),
+        "an unrelated context never derives from the parent"
+    );
+}
+
+/// `1632:9` and `1644:9` both replace an idempotency-eviction body with
+/// `Ok(())`. `evict_idempotency` is a thin public wrapper over
+/// `idempotency_evict_inner`, so ONE test kills both: stubbing either leaves the
+/// row in place.
+///
+/// Both directions are asserted. Evicting at a moment BEFORE the TTL must keep
+/// the record -- that half passes against the mutants and is not claimed to kill
+/// them; it is here so the test asserts the mechanism (`expires_at_ms <= now`)
+/// rather than merely "the table got smaller". Evicting AFTER the TTL is the
+/// half that reddens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evicting_idempotency_drops_expired_records_and_spares_live_ones() {
+    let (store, _dir) = store().await;
+    let p = producer(62);
+
+    let before = Utc::now();
+    commit(
+        Arc::clone(&store),
+        request(&p, "keyed"),
+        Some("evict-key".into()),
+    )
+    .await
+    .expect("join")
+    .expect("commit ok");
+
+    assert_eq!(
+        store.count_idempotency_records().await.unwrap(),
+        Some(1),
+        "precondition: the keyed publish stored exactly one record"
+    );
+
+    // The record's TTL is one hour (see `commit`). Evicting now must spare it.
+    store.evict_idempotency(before).await.expect("evict ok");
+    assert_eq!(
+        store.count_idempotency_records().await.unwrap(),
+        Some(1),
+        "a record whose expires_at is still in the future must survive eviction"
+    );
+
+    store
+        .evict_idempotency(before + Duration::hours(2))
+        .await
+        .expect("evict ok");
+    assert_eq!(
+        store.count_idempotency_records().await.unwrap(),
+        Some(0),
+        "past its TTL the record must actually be DELETED -- stubbing either \
+         evict_idempotency (1644:9) or idempotency_evict_inner (1632:9) to \
+         Ok(()) leaves it behind"
+    );
+}
+
+/// `1869:5` replaces the whole of `context_type_str` with a constant, twice:
+/// `String::new()` and `"xyzzy".into()`. Every context then lands in the
+/// `context_type` COLUMN under the same string.
+///
+/// The seam is the FILTER, not a read-back. `SearchResult.context_type` is
+/// rebuilt from the stored body JSON (`store.rs:1615`), so asserting on a
+/// returned context's type passes against both mutants and proves nothing.
+/// Search filters on the column instead (`store.rs:1416`,
+/// `AND context_type = ?`), which is the only place the mutated value is read.
+/// Two types are published and each is queried, so a constant cannot satisfy
+/// both: collapsing them makes each query return the wrong set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_context_type_column_keeps_each_type_distinguishable() {
+    let (store, _dir) = store().await;
+    let p = producer(63);
+
+    let snapshot = publish(&store, typed(&p, "a-snapshot", ContextType::DataSnapshot)).await;
+    let analysis = publish(&store, typed(&p, "an-analysis", ContextType::Analysis)).await;
+
+    assert_eq!(
+        search_ids(
+            &store,
+            SearchParams {
+                context_type: Some("data_snapshot".into()),
+                ..Default::default()
+            }
+        ),
+        std::collections::HashSet::from([snapshot.as_str().to_string()]),
+        "type=data_snapshot must select exactly the snapshot; a constant \
+         context_type_str stores both rows under one string and breaks this"
+    );
+    assert_eq!(
+        search_ids(
+            &store,
+            SearchParams {
+                context_type: Some("analysis".into()),
+                ..Default::default()
+            }
+        ),
+        std::collections::HashSet::from([analysis.as_str().to_string()]),
+        "and type=analysis must select exactly the analysis"
+    );
+}
+
+/// `project_status_inline` decides whether an Active context reads as Expired,
+/// and three mutants lived in its one guard, `Some(exp) if exp <= now`:
+/// `1897:26` replacing the guard with `true` and with `false`, and `1897:30`
+/// flipping `<=` to `>`.
+///
+/// Search projects status and then filters on it, defaulting to `active`, so a
+/// past-deadline context must DROP OUT of a default search while a
+/// future-deadline one must remain. Both directions are required and neither
+/// alone suffices:
+///
+/// - `true` (always expired) is caught only by the future-deadline context
+///   disappearing.
+/// - `false` (never expired) is caught only by the past-deadline context
+///   appearing.
+/// - `>` inverts both, so either half catches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_projection_expires_a_context_only_once_its_deadline_has_passed() {
+    let (store, _dir) = store().await;
+    let p = producer(64);
+    let now = Utc::now();
+
+    let lapsed = publish(&store, expiring(&p, "lapsed", now - Duration::hours(1))).await;
+    let live = publish(&store, expiring(&p, "live", now + Duration::hours(24))).await;
+
+    let active = search_ids(&store, SearchParams::default());
+
+    assert!(
+        active.contains(live.as_str()),
+        "a context whose deadline is 24h away is still ACTIVE -- the `true` \
+         guard (1897:26) and the flipped `>` (1897:30) both expire it wrongly"
+    );
+    assert!(
+        !active.contains(lapsed.as_str()),
+        "a context whose deadline passed an hour ago must project to EXPIRED \
+         and drop out of a default (active) search -- the `false` guard \
+         (1897:26) and the flipped `>` (1897:30) both keep it active"
+    );
 }
