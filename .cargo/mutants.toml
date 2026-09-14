@@ -89,29 +89,69 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 213 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 351 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
-# MEASURED AT 60b08b7 (unit U-539), with the command that reproduces it:
+# MEASURED AT a66e1f2 (unit U-540), with the command that reproduces it:
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
 #     crates/acdp-registry-core/src/handlers/context.rs   139
+#     crates/acdp-registry-sqlite/src/store.rs            138
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs              9
 #     ----------------------------------------------------------
-#     total                                               213
+#     total                                               351
 #
 # `MUTANTS_EXPECTED_SCOPE` in .github/workflows/mutants.yml pins exactly this
-# number, as an EQUALITY rather than a floor, and the two were checked against
-# each other in U-539 rather than assumed to agree.
+# number, as an EQUALITY rather than a floor, and the two are checked against
+# each other every time this list changes rather than assumed to agree.
 #
-# NOT the whole workspace: 1427 mutants at 60b08b7, measured via
+# NOT the whole workspace: 1427 mutants at a66e1f2, measured via
 #
 #     cargo mutants --list --no-config
 #
 # At the ~6.2s/mutant marginal cost measured in DECISIONS.md #17 that is ~2.5h,
 # and #216 lists "blocking PRs on a full mutation run" as a non-goal. This is a
-# scheduled job over a bounded set, by design.
+# scheduled job over a bounded set, by design. 351 of 1427 is 24.6%.
+#
+# ---------------------------------------------------------------------------
+# sqlite/src/store.rs — THE U-540 TRANCHE, and why this file and not another
+# ---------------------------------------------------------------------------
+# #216 step 1 scopes the oracle to "receipt/log/lineage emission, the publish
+# path, visibility filtering". Receipt, log and the publish path were already
+# here. This file is the other two: `lineage` and `events_for_lineage`, and the
+# visibility filtering -- `visible_ctx_ids`, `list_contexts`, and the
+# `LIST_VISIBILITY_SQLITE` / `SEARCH_VISIBILITY_SQLITE` predicates.
+#
+# It is also the DEFAULT backend (`default = ["storage-sqlite"]` in
+# acdp-registry-server), which matters more than it looks: `test_workspace`
+# makes every mutant's verdict come from `cargo test --workspace`, so a file
+# only reachable under a non-default feature would report survivors for code
+# the command never compiled. This one is reached.
+#
+# TWO CANDIDATES WERE REJECTED ON MEASUREMENT, and both rejections are worth
+# keeping because the next person will reach for them in this order:
+#
+#   acdp-registry-pg/src/store.rs (136) -- DISQUALIFIED. Its tests skip to
+#   SUCCESS when ACDP_REGISTRY_TEST_PG_URL is unset (`pg_url_or_skip`, in
+#   crates/acdp-registry-pg/tests/parity.rs), and nothing here provides a
+#   database. All 136 would come back MISSED. A survivor list that is entirely
+#   false positives is what the `test_workspace` block above calls worse than no
+#   baseline at all -- the same failure, arriving by a different door.
+#
+#   acdp-registry-store/src/parity.rs (89) -- STRUCTURALLY MEANINGLESS. It is
+#   `test-support` harness code that never ships. Mutating a test's own
+#   assertion weakens the test, the weakened test still passes, so the mutant
+#   survives BY CONSTRUCTION and no survivor has a remedy. Mutation testing asks
+#   whether tests catch defects in production code; pointing it at the tests
+#   inverts the question.
+#
+# DEFERRED, not rejected: acdp-registry-store/src/lib.rs (38) holds
+# `retrieve_visible`, the authoritative RFC-ACDP-0008 §4.5 predicate. Worth
+# covering -- but ~30 of its 38 mutants target DEFAULT trait method bodies that
+# both real backends override, so they are unreachable and would arrive as
+# budgeted survivors sharing one repetitive excuse. That deserves its own unit
+# and a real answer, not a bulk exemption.
 #
 # ---------------------------------------------------------------------------
 # handlers/context.rs — THE EXCLUSION THAT WAS, AND WHY IT IS NOW AN INCLUSION
@@ -159,7 +199,28 @@ examine_globs = [
     "crates/acdp-registry-core/src/receipt.rs",
     "crates/acdp-registry-core/src/handlers/log.rs",
     "crates/acdp-registry-core/src/handlers/context.rs",
+    "crates/acdp-registry-sqlite/src/store.rs",
 ]
+
+# ---------------------------------------------------------------------------
+# EDITING THE LIST ABOVE BREAKS CI UNTIL YOU RE-MEASURE. That is deliberate.
+# ---------------------------------------------------------------------------
+# So does editing any `src/` file NAMED in it. `MUTANTS_EXPECTED_SCOPE` in
+# .github/workflows/mutants.yml is an EQUALITY, not a floor, so adding or
+# deleting a single mutable expression in any scoped file fails the scheduled
+# run until BOTH the figures above and that variable are updated. A floor would
+# tolerate silent shrinkage, which is the exact failure the pin exists to
+# prevent -- so this is the intended behaviour and not a defect to soften.
+#
+# The remedy, wherever you hit it:
+#
+#     cargo mutants --list | wc -l                      # the new total
+#     cargo mutants --list | sed 's/:[0-9]*:[0-9]*:.*//' | sort | uniq -c
+#                                                       # the new per-file split
+#
+# then update the block above AND `MUTANTS_EXPECTED_SCOPE`. The workflow's
+# scope-check step prints these same two commands when it fails, because that
+# red log is where a reader actually meets this, not here.
 
 # A floor under the auto-set per-mutant timeout. cargo-mutants derives the timeout
 # from the baseline `cargo test`, which is the right default; this only stops a
