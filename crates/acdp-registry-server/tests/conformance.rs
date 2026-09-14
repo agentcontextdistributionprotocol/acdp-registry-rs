@@ -3036,6 +3036,395 @@ fn require_conformance() -> bool {
     std::env::var("ACDP_REQUIRE_CONFORMANCE").is_ok()
 }
 
+// ---------------------------------------------------------------------------
+// The spec pin (U-536): one declarative source, and a harness that refuses a
+// tree which is not at it.
+//
+// `spec_root()` used to accept whatever `ACDP_SPEC_DIR` named, without a word.
+// Three spec trees exist on a developer machine here and they disagree in BOTH
+// directions -- 143, 144 (the pin) and 145 fixtures -- with the directory
+// *named* `-pinned` being the one that is not at the pin. Each wrong tree
+// produces a PLAUSIBLE count that fails `TOTAL_FIXTURES_AT_PIN`, which sends
+// the reader to debug the fixture ratchet instead of their checkout. Two false
+// alarms and one wasted audit were spent that way before this guard existed.
+//
+// THE VERDICT COMES FROM CONTENT, NEVER FROM GIT, and that is forced rather
+// than chosen: the way to materialise an exact revision locally is
+// `git archive | tar x`, whose output has NO git metadata at all. The tree that
+// must PASS is therefore precisely the one `git rev-parse` cannot identify. Git
+// is used only to NAME the revision found, so the message is actionable -- and
+// even that needs care, because `rev-parse HEAD` in a directory that is not its
+// own repository resolves an ENCLOSING repository's HEAD: a wrong answer,
+// confidently. See `git_revision_of`.
+//
+// ABSENT AND WRONG ARE DIFFERENT CONDITIONS, and only the second is a failure.
+// `ACDP_SPEC_DIR` unset, or naming a path that does not exist, keeps its
+// existing skip-or-require-panic behaviour untouched. Set-and-wrong is wrong in
+// BOTH modes: a skip reports PASS identically to a real pass, so a drifted tree
+// must not be allowed to report one.
+// ---------------------------------------------------------------------------
+
+/// The single declarative source for the spec pin, relative to the workspace
+/// root. Read here, by `.github/workflows/ci.yml`, and by
+/// `.github/workflows/mutants.yml`; its shape is asserted by
+/// `spec_pin_violations` in `conformance_gate.rs`.
+const SPEC_PIN_FILE: &str = ".spec-pin";
+
+/// The only digest algorithm label `.spec-pin` may carry. Named in the value
+/// rather than implied, so changing the construction cannot silently reuse a
+/// value computed by the old one.
+const SPEC_DIGEST_ALGORITHM: &str = "rfc6962-sha256";
+
+/// Workspace root: `crates/<crate>/` is two levels below it.
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf()
+}
+
+/// The pinned revision and the digest of its fixtures.
+struct SpecPin {
+    sha: String,
+    digest: String,
+}
+
+/// Extract the single `<key>: <value>` line from `.spec-pin`, refusing zero and
+/// refusing more than one. A pin file that does not say exactly one thing is a
+/// failure, never a default: every consumer of this value would otherwise pick
+/// arbitrarily, and they would not all pick the same way.
+fn spec_pin_field(text: &str, key: &str, path: &Path) -> String {
+    let prefix = format!("{key}: ");
+    let hits: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix(prefix.as_str()))
+        .map(str::trim_end)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "{}: expected exactly one line starting `{prefix}`, found {}. Every consumer \
+         of the spec pin reads this file by that key, so zero means they find nothing \
+         and more than one means they may not all choose the same value.",
+        path.display(),
+        hits.len(),
+    );
+    hits[0].to_string()
+}
+
+/// Parse `.spec-pin`. Panics, by name, on anything it cannot read: this file is
+/// the contract, so an unreadable one is a failure and not a skip.
+fn read_spec_pin() -> SpecPin {
+    let path = workspace_root().join(SPEC_PIN_FILE);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read the spec pin at {}: {e}. It is the single declarative source \
+             for the pinned ACDP spec revision, read by this harness and by both spec \
+             checkouts in .github/workflows/.",
+            path.display()
+        )
+    });
+
+    let sha = spec_pin_field(&text, "ref", &path);
+    assert!(
+        sha.len() == 40
+            && sha
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "{}: `ref: {sha}` is not a 40-character lowercase hex sha. A branch, tag or \
+         abbreviated sha is not accepted -- an abbreviation can become ambiguous as the \
+         spec repository grows, and a branch would let a spec-repo push change this \
+         repository's result with no commit here, which is the whole reason the pin exists.",
+        path.display(),
+    );
+
+    let digest = spec_pin_field(&text, "conformance-digest", &path);
+    let hex_part = digest
+        .strip_prefix(&format!("{SPEC_DIGEST_ALGORITHM}:"))
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: `conformance-digest: {digest}` does not start `{SPEC_DIGEST_ALGORITHM}:`. \
+             The algorithm is named in the value on purpose: changing the construction \
+             must not be able to silently reuse a digest computed by the old one.",
+                path.display()
+            )
+        });
+    assert!(
+        hex_part.len() == 64
+            && hex_part
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "{}: `conformance-digest`'s value `{hex_part}` is not 64 lowercase hex characters.",
+        path.display(),
+    );
+
+    SpecPin { sha, digest }
+}
+
+/// The digest of a resolved fixture directory:
+///
+/// ```text
+/// leaf_i = leaf_hash(<file name> ‖ 0x00 ‖ <file bytes>)   for each *.json, name asc
+/// digest = "rfc6962-sha256:" ‖ hex(merkle_tree_hash([leaf_0 … leaf_{n-1}]))
+/// ```
+///
+/// `leaf_hash`/`merkle_tree_hash` are `acdp::crypto::merkle`'s RFC 6962
+/// functions -- already a normal dependency of this crate, so this guard costs
+/// no new dependency, and it is a specified, reviewed construction rather than
+/// a hand-rolled one. (`std`'s `DefaultHasher` would have been wrong for a
+/// value committed to a file: `std` does not promise its output is stable
+/// across releases. `acdp::crypto::canonical_preimage` would also have been
+/// wrong: it strips an RFC-ACDP-0001 §5.7 EXCLUDE-set key by NAME, and fixtures
+/// legitimately contain `signature` and `ctx_id` at top level.)
+///
+/// The `0x00` between name and bytes is what binds them: without a separator,
+/// a rename that moved characters between the two fields would not change the
+/// leaf. File names cannot contain a NUL, so the framing is unambiguous.
+///
+/// **`*.json` only, and no recursion.** A spec checkout can carry junk -- one on
+/// this machine carries a `.DS_Store` -- and a whole-tree digest would then fail
+/// a tree that IS at the pin, which is a worse failure than the one this guard
+/// exists to catch.
+fn spec_fixture_digest(fixtures: &Path) -> String {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in std::fs::read_dir(fixtures)
+        .unwrap_or_else(|e| panic!("read_dir({}) failed: {e}", fixtures.display()))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("read_dir({}) entry: {e}", fixtures.display()));
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_str().unwrap_or_else(|| {
+            panic!(
+                "{}: file name {:?} is not valid UTF-8. Refusing to hash it lossily -- two \
+                 different names could then produce the same leaf.",
+                fixtures.display(),
+                entry.file_name()
+            )
+        });
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|e| panic!("read({}) failed: {e}", path.display()));
+        files.push((name.to_string(), bytes));
+    }
+    // `merkle_tree_hash(&[])` is `SHA-256("")` -- a real, confident-looking digest
+    // for "no files at all". Assert the count rather than inherit the invariant
+    // from `resolve_fixture_dir`, which is a different function that a later edit
+    // could relax without ever looking at this one.
+    assert!(
+        !files.is_empty(),
+        "{} contains no *.json files, so there is nothing to digest. An empty Merkle \
+         tree hashes to SHA-256(\"\"), which would be a confident answer to a question \
+         this directory cannot answer.",
+        fixtures.display()
+    );
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let leaves: Vec<[u8; 32]> = files
+        .iter()
+        .map(|(name, bytes)| {
+            let mut leaf = Vec::with_capacity(name.len() + 1 + bytes.len());
+            leaf.extend_from_slice(name.as_bytes());
+            leaf.push(0x00);
+            leaf.extend_from_slice(bytes);
+            acdp::crypto::merkle::leaf_hash(&leaf)
+        })
+        .collect();
+    format!(
+        "{SPEC_DIGEST_ALGORITHM}:{}",
+        hex::encode(acdp::crypto::merkle::merkle_tree_hash(&leaves))
+    )
+}
+
+/// The revision `dir` is checked out at, or `None` when that cannot be
+/// determined **soundly**.
+///
+/// Three ways this returns `None`, and the third is the one that matters:
+/// `git` is not installed; `dir` is not in a work tree at all (a
+/// `git archive` extract, the correct way to materialise an exact revision);
+/// or `dir` is inside SOME OTHER repository's work tree, where `rev-parse HEAD`
+/// would happily return that repository's HEAD as though it were the spec's.
+/// So the toplevel is compared against `dir` itself, canonicalized -- `~/code`
+/// here is a symlink, and an uncanonicalized compare would report a false
+/// mismatch. Note also that a `.git` **directory** test would be wrong: one
+/// spec checkout on this machine is a linked worktree whose `.git` is a 127-byte
+/// FILE.
+///
+/// This function never decides anything. It only makes the message name the
+/// revision it found; the verdict is the digest's.
+fn git_revision_of(dir: &Path) -> Option<String> {
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8(out.stdout).ok()?.trim().to_string())
+    };
+    let toplevel = run(&["rev-parse", "--show-toplevel"])?;
+    let same = std::fs::canonicalize(&toplevel).ok()? == std::fs::canonicalize(dir).ok()?;
+    if !same {
+        return None;
+    }
+    run(&["rev-parse", "HEAD"])
+}
+
+/// `Ok(())` when the tree at `root` carries the pinned revision's fixtures.
+fn spec_tree_pin_verdict(root: &Path) -> Result<(), String> {
+    let pin = read_spec_pin();
+    let Some(fixtures) = resolve_fixture_dir(&root.to_string_lossy()) else {
+        // No fixture directory at all is ABSENT, not WRONG: `spec_fixtures()`
+        // already skips (or panics under require-mode) on exactly this, by name.
+        // Failing here too would replace a message about a missing fixture
+        // directory with one about a revision, which is not what the reader
+        // needs to know.
+        return Ok(());
+    };
+    let found = spec_fixture_digest(&fixtures);
+    if found == pin.digest {
+        return Ok(());
+    }
+
+    let count = std::fs::read_dir(&fixtures)
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+                .count()
+        })
+        .unwrap_or(0);
+    let found_rev = git_revision_of(root);
+    let recompute = "ACDP_SPEC_DIR=<tree> cargo test -p acdp-registry-server \
+                     --features storage-sqlite,playground --test conformance \
+                     prints_the_spec_fixture_digest -- --ignored --nocapture";
+
+    // Right revision, wrong content is a DIFFERENT problem with an opposite
+    // fix, so it gets its own message. One generic "not at the pin" would send
+    // both readers to the wrong place.
+    if found_rev.as_deref() == Some(pin.sha.as_str()) {
+        return Err(format!(
+            "ACDP_SPEC_DIR is at the pinned ACDP spec revision, but its fixtures are not \
+             the ones pinned.\n\n  \
+             revision        : {sha}  (matches .spec-pin)\n  \
+             ACDP_SPEC_DIR   : {root}\n  \
+             fixture dir     : {fx}  ({count} *.json files)\n  \
+             wanted digest   : {want}\n  \
+             found digest    : {found}\n\n\
+             Exactly two things cause this and they need OPPOSITE fixes:\n  \
+             * the checkout is DIRTY -- a fixture was edited locally. Check with\n      \
+             git -C {root} status --porcelain -- {fx}\n  \
+             * `.spec-pin`'s `conformance-digest:` is STALE -- it was not updated when\n    \
+             `ref:` was bumped. The `bump spec` bot rewrites `ref:` ONLY, by design, so a\n    \
+             bump PR arrives in exactly this state: replace the digest with the found one\n    \
+             above (and check TOTAL_FIXTURES_AT_PIN) as part of adopting the revision.\n\n\
+             Recompute a tree's digest with:\n    {recompute}",
+            sha = pin.sha,
+            root = root.display(),
+            fx = fixtures.display(),
+            want = pin.digest,
+        ));
+    }
+
+    let revision_line = match &found_rev {
+        Some(sha) => format!("found revision  : {sha}"),
+        None => "found revision  : <not nameable -- that tree has no git metadata OF ITS OWN. \
+                 Either it is an extract with no `.git` (normal, and the reason the verdict \
+                 below comes from content rather than from git), or it sits inside some OTHER \
+                 repository's work tree, whose HEAD is deliberately NOT reported here: it \
+                 would be a confident wrong answer>"
+            .to_string(),
+    };
+    Err(format!(
+        "ACDP_SPEC_DIR does not carry the pinned ACDP spec revision's fixtures.\n\n  \
+         wanted revision : {want_sha}  (.spec-pin)\n  \
+         {revision_line}\n  \
+         ACDP_SPEC_DIR   : {root}\n  \
+         fixture dir     : {fx}  ({count} *.json files)\n  \
+         wanted digest   : {want_digest}\n  \
+         found digest    : {found}\n\n\
+         THIS IS NOT A FIXTURE-COUNT FAILURE. The tree is a different spec revision, so \
+         every count, family partition and replay in this suite would be measured against \
+         fixtures nobody pinned -- and a wrong tree yields a PLAUSIBLE count, which is why \
+         this is checked by revision rather than left to `TOTAL_FIXTURES_AT_PIN`. Beware in \
+         particular a directory NAMED for the pin: the one on this repository's own machine \
+         was two revisions behind it.\n\n\
+         Materialise the pinned revision:\n    \
+         git -C <spec checkout> worktree add <dir> {want_sha}\n  \
+         or, with no git metadata needed in the result:\n    \
+         mkdir <dir> && git -C <spec checkout> archive {want_sha} | tar x -C <dir>\n\n\
+         To adopt the tree you handed me INSTEAD, bump the pin deliberately: `.spec-pin`'s \
+         `ref:` and `conformance-digest:`, plus `TOTAL_FIXTURES_AT_PIN` here. Print any \
+         tree's digest with:\n    {recompute}",
+        want_sha = pin.sha,
+        root = root.display(),
+        fx = fixtures.display(),
+        want_digest = pin.digest,
+    ))
+}
+
+/// Panic unless the tree at `root` is at the pin. Memoized per root: ~65 tests
+/// resolve `spec_root()`, and the digest reads every fixture file. Keyed by the
+/// path rather than cached once globally, so this cannot serve a verdict
+/// computed for a different directory.
+fn assert_spec_tree_is_at_pin(root: &Path) {
+    static VERDICTS: std::sync::Mutex<
+        Option<std::collections::BTreeMap<PathBuf, Result<(), String>>>,
+    > = std::sync::Mutex::new(None);
+    let verdict = {
+        let mut guard = VERDICTS.lock().expect("spec-pin verdict cache poisoned");
+        let map = guard.get_or_insert_with(std::collections::BTreeMap::new);
+        if let Some(v) = map.get(root) {
+            v.clone()
+        } else {
+            let v = spec_tree_pin_verdict(root);
+            map.insert(root.to_path_buf(), v.clone());
+            v
+        }
+    };
+    if let Err(message) = verdict {
+        panic!("{message}");
+    }
+}
+
+/// Prints the digest of whatever `ACDP_SPEC_DIR` names. A TOOL, not a check --
+/// hence `#[ignore]` -- and deliberately the SAME code the guard runs, so the
+/// value a reader pastes into `.spec-pin` cannot have been computed by a second
+/// implementation that drifted from the first.
+///
+/// It reads the environment directly instead of calling `spec_root()`, because
+/// `spec_root()` now refuses a drifted tree: routing this through it would make
+/// the tool unable to tell you the digest of precisely the tree you need it for.
+#[test]
+#[ignore = "a tool, not a check: prints the digest of ACDP_SPEC_DIR for .spec-pin"]
+fn prints_the_spec_fixture_digest() {
+    let dir = std::env::var("ACDP_SPEC_DIR")
+        .expect("set ACDP_SPEC_DIR to the spec tree whose digest you want");
+    let fixtures = resolve_fixture_dir(&dir)
+        .unwrap_or_else(|| panic!("no fixture directory resolvable under ACDP_SPEC_DIR '{dir}'"));
+    let count = std::fs::read_dir(&fixtures)
+        .expect("read fixture dir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .count();
+    let revision = git_revision_of(Path::new(&dir))
+        .unwrap_or_else(|| "<not nameable: no git metadata of its own>".to_string());
+    println!("ACDP_SPEC_DIR       : {dir}");
+    println!(
+        "fixture dir         : {}  ({count} *.json files)",
+        fixtures.display()
+    );
+    println!("revision            : {revision}");
+    println!("conformance-digest: {}", spec_fixture_digest(&fixtures));
+}
+
 /// Spec checkout root from `ACDP_SPEC_DIR`, or `None` (skip) when unset.
 ///
 /// Under `ACDP_REQUIRE_CONFORMANCE`, every `None`-return path below panics
@@ -3055,6 +3444,12 @@ fn spec_root() -> Option<PathBuf> {
     };
     let p = PathBuf::from(dir);
     if p.exists() {
+        // U-536: set-and-wrong is WRONG, in require mode and in default mode
+        // alike. The two `assert!(!require, ...)` paths around this one are the
+        // ABSENT conditions and keep their skip-unless-required behaviour; this
+        // one is a different condition and fails either way, because a skip
+        // reports PASS identically to a real pass.
+        assert_spec_tree_is_at_pin(&p);
         return Some(p);
     }
     assert!(

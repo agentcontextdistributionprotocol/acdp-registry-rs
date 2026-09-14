@@ -1,0 +1,58 @@
+# The ACDP spec revision this repository is pinned to. THE SINGLE SOURCE OF TRUTH.
+#
+# The pin exists so that a push to the spec repository cannot change this repository's
+# CI result without a commit here. Adopt a new revision deliberately, in its own PR --
+# the `bump spec` workflow opens one for review and never auto-merges it.
+#
+# Three consumers read this file, and none of them may restate the sha:
+#   * .github/workflows/ci.yml       -- the `conformance` job's spec checkout
+#   * .github/workflows/mutants.yml  -- the scheduled mutation run's spec checkout
+#   * crates/acdp-registry-server/tests/conformance.rs -- refuses an ACDP_SPEC_DIR
+#     tree whose fixtures are not this revision's, instead of silently measuring
+#     against whatever the operator happened to have checked out
+#
+# `spec_pin_violations` in tests/conformance_gate.rs asserts that shape on every PR.
+# Each of those couplings is invisible from any one file alone, and one of them is
+# enforced by a bot in another repository -- a comment cannot reach either.
+#
+# ---------------------------------------------------------------------------------
+# THE FORMAT IS LOAD-BEARING, and not for tidiness.
+#
+# `bump-spec.yml` delegates to acdp-ci's reusable bump-spec-ref workflow. That
+# workflow locates the pin by finding a line that names the spec repository, then the
+# FIRST 40-hex value on a later `ref:` line -- and it REFUSES TO BUMP AT ALL when it
+# counts more than one such anchor line, rather than rewrite one and leave the rest
+# stale. Measured by running its own awk and perl against this file, not assumed.
+# Therefore:
+#
+#   * EXACTLY ONE line may name the spec repository in `<key>: <owner>/<name>` form.
+#   * `ref:` MUST come BEFORE `conformance-digest:`. A 64-hex digest contains a 40-hex
+#     run: with the lines swapped, that awk returns the digest's first 40 characters
+#     as the current pin. Falsified, not theorised.
+#   * No comment here may SPELL either anchor form, which is why the paragraph above
+#     describes them instead of quoting them. Spelling one makes it a second anchor.
+#
+# ---------------------------------------------------------------------------------
+# ADOPTING A NEW REVISION CHANGES THREE VALUES, and the bumper rewrites only the first:
+#
+#   1. `ref:` below                                     (rewritten by the bumper)
+#   2. `conformance-digest:` below                       (by hand)
+#   3. `TOTAL_FIXTURES_AT_PIN` in tests/conformance.rs   (by hand)
+#
+# So a `bump spec` PR ARRIVES RED on the `conformance` job until 2 and 3 are updated.
+# That is a real cost, stated here rather than discovered: 3 already had this property,
+# so such a PR was never green on arrival, and the failure message names the exact
+# command that prints the replacement digest.
+#
+# `conformance-digest` is an RFC 6962 Merkle root over the fixture directory --
+# leaf_hash(<file name> 0x00 <file bytes>) per `*.json` file, ordered by name, combined
+# by merkle_tree_hash (acdp::crypto::merkle, so no dependency exists for this). It
+# attests something NARROWER than "this directory is that git tree": the fixture
+# content the harness reads is byte-identical to the pinned revision's. A revision that
+# changes only files OUTSIDE the fixture directory yields the same digest. It covers
+# `*.json` only and does not recurse -- deliberately, because a spec checkout can carry
+# junk (a real one here carries a `.DS_Store`) and a whole-tree digest would then fail a
+# tree that IS at the pin.
+repository: agentcontextdistributionprotocol/agentcontextdistributionprotocol
+ref: 16211e64cf54973526a7af71adc8aed8996c3ae1
+conformance-digest: rfc6962-sha256:03644a90cc643fd5bd5fe3c762389c16def704a874f94716619f7a949b965f85
