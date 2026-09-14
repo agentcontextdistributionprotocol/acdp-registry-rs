@@ -6172,3 +6172,139 @@ via admin correction or data corruption". Rather than fabricate it with a store-
 would assert against a state no client can reach, the test **asserts the note still says so**, so the
 scenario becomes visibly owed if the spec changes its mind. `expired` proved producible via
 `expires_at`, so no `blocked` was needed in this unit.
+
+<!-- unit U-536 (lane-2) — the spec pin becomes one declarative source; three trees, one digest -->
+
+## U-536 — three spec trees disagreed, and the harness accepted whichever one it was handed
+
+`spec_root()` took whatever `ACDP_SPEC_DIR` named and said nothing about it. Three spec
+checkouts exist on this machine and they disagree **in both directions** — 143, 144 and 145
+conformance fixtures — and the directory named `-pinned` is the one two revisions *behind*
+the pin. Each wrong tree produces a plausible count that fails `TOTAL_FIXTURES_AT_PIN`, which
+sends the reader to debug the fixture ratchet instead of their own checkout. That cost two
+false alarms and one wasted audit before this unit.
+
+`.spec-pin` is now the single declarative source: `repository:`, `ref:`, and a
+`conformance-digest:` of the fixtures at that revision. `ci.yml`, `mutants.yml`, the spec
+bumper and the conformance harness all read it, and none of them restates the sha.
+
+### The verdict comes from content, and that is forced rather than preferred
+
+The way to materialise an exact revision locally is `git archive <sha> | tar x`, whose output
+carries **no git metadata at all**. So the tree that must PASS is precisely the one
+`git rev-parse` cannot identify, and any git-based check would reject the correct input. Git
+is used only to *name* a revision once one is found, never to decide.
+
+One digest covers both worlds, measured rather than assumed: an archive extract, an
+independent second extract, and a real `git clone` + `checkout` of the pin — what CI's
+`actions/checkout` produces — all hash to
+`rfc6962-sha256:03644a90cc643fd5bd5fe3c762389c16def704a874f94716619f7a949b965f85`. There are
+zero `.gitattributes` in the 253-file tree at the pin, so no filter can make checkout and
+archive content diverge; that grep was run against a known positive (the same scan finds 145
+`schemas/conformance` paths) before its zero was trusted.
+
+RFC 6962 via `acdp::crypto::merkle` rather than a hand-rolled hash, and specifically **not**
+`std`'s `DefaultHasher`, whose output `std` does not promise is stable across releases — fatal
+for a value committed to a file. No new dependency: `leaf_hash`/`merkle_tree_hash` were
+already reachable. `acdp::crypto::canonical_preimage` is unusable here because it strips an
+RFC-ACDP-0001 §5.7 EXCLUDE-set key by *name*, and fixtures legitimately carry `signature` and
+`ctx_id` at top level.
+
+### The two guards that had to be falsified at the guard itself
+
+**A tree inside another repository must report "not nameable", not the outer repo's HEAD.**
+With the `rev-parse --show-toplevel` comparison removed, the message confidently reports the
+enclosing repository's `63164d99` as the spec's revision. A `.git`-directory test would also
+be wrong: one spec checkout here is a linked worktree whose `.git` is a 127-byte **file**.
+
+**`merkle_tree_hash(&[])` is SHA-256("")** — a real, confident-looking digest for "no files".
+The fixture count is therefore asserted where the digest is computed rather than inherited
+from `resolve_fixture_dir`, and that path is reachable, not decorative: `has_json` accepts a
+**directory** named `*.json`, so a directory whose only `.json` entry is a subdirectory
+resolves as a fixture dir and hashes nothing.
+
+Ten mutations in all, each confirmed RED at its own assertion with its own message, then
+reverted and confirmed green. The decisive ones name `wanted 16211e64 / found d1f06d0` rather
+than failing on a fixture count — a count failure would have been the right outcome for the
+wrong reason. Renaming one fixture, with identical content and an identical file count,
+changes the digest and restoring the name restores it, which is what the `0x00` between name
+and bytes is for.
+
+### The bumper's anchor count, and an invariant that exists because a falsification failed
+
+`spec_pin_violations` (`tests/conformance_gate.rs`) was four invariants about the old
+derivation and is now ten about the new wiring. Invariant 2 counts column-0 `repository:`
+declarations — what the reader action parses. I wrote a falsification in which a **comment**
+spells the anchor form, expected invariant 2 to fire, and it stayed silent. The failure was
+correct: acdp-ci's `bump-spec-ref` counts anchors with
+
+```awk
+index($0, "repository: " SPEC) || index($0, "acdp-ci/actions/checkout-spec@")
+```
+
+a substring search over every line, comments included — and it then **refuses to bump the
+file at all** rather than rewrite one anchor and leave the rest stale. So a helpful comment
+freezes the pin with nothing going red, and invariant 2 was citing that external contract in
+its own failure message while being unable to enforce it. Invariant 4 counts the bumper's
+way, and is verified against the bumper's own awk rather than my reading of it: with a spelled
+anchor the test reports lines `[7, 57]` and that awk independently reports `ANCHOR_COUNT=2`;
+restored, both say 1. This is why `.spec-pin`'s comments *describe* the two anchor forms
+instead of quoting them.
+
+Line order is load-bearing for the same external reason. `conformance-digest:` must stay
+**below** `ref:`, because a 64-hex digest contains a 40-hex run and that awk would otherwise
+return the digest's first 40 characters as the current pin. Falsified against the real awk.
+
+All ten invariants are falsified **twice** — once on a synthetic fixture, then again by
+mutating the real `.spec-pin`/`ci.yml`/`mutants.yml`/`bump-spec.yml` and confirming the
+real-file test goes red with that invariant's number and no other. A synthetic pass alone is
+not enough: an invariant can hold on a fixture and be structurally unfireable on the shape
+the repository actually has.
+
+### What the move costs, in the direction it runs
+
+Adopting a revision now changes **three** values and the bumper rewrites only the first:
+`ref:`, `conformance-digest:`, and `TOTAL_FIXTURES_AT_PIN`. So a `bump spec` PR arrives RED on
+`conformance` until the other two are updated. `TOTAL_FIXTURES_AT_PIN` already had that
+property, the bump PR is held for review and never auto-merged, and the failure message names
+the exact command that prints the replacement digest — but it is a real added cost, stated in
+`.spec-pin` where the value lives rather than in a footnote. `CONTRIBUTING.md` carries the
+three-step procedure.
+
+### The lint gap this unit created, and closed
+
+`.github/actions/read-spec-pin/` is this repo's first composite action, and **neither existing
+linter covered it**: actionlint enumerates `.github/workflows/*` and cannot parse an
+`action.yml` at all — pointed at one it reports `"jobs" section is missing` and exits 1,
+measured. The `actionlint` step's own comment claimed every `run:` block was covered, so this
+unit would have made that comment false. `lint.yml` now extracts each composite-action `run:`
+block and shellchecks it, with `${{ … }}` replaced by a placeholder (the substitution
+actionlint performs internally; a quoting defect *inside* an expression is therefore not
+visible — a stated limit). Falsified by unquoting one variable in the action, which turns the
+step RED with SC2086 at the right line.
+
+**The extractor asserts its own yield, and it earned that.** The first version was an awk
+one-liner whose indentation was off by two: it extracted **zero** lines, and all six of its
+negative cases reported PASS. An extraction expression that matches nothing fails to a
+confident zero, so the step now refuses a run that extracts 0 blocks from a non-zero number of
+actions — and that guard fired for real during development, when `git ls-files` correctly
+reported 0 because the action was not yet staged. The step's embedded heredoc was also
+verified to survive YAML round-tripping, by parsing the `run:` block back out of `lint.yml`
+with a YAML parser and executing it: the Python body must land at column 0, and an
+IndentationError there would have been visible only in CI.
+
+### Two references this unit made stale, outside its path grant
+
+- `ASSUMPTIONS.md:2872` — entry 9, "`mutants.yml` derives the spec pin from `ci.yml` instead
+  of restating it". The derivation is gone; both files now read `.spec-pin`.
+- `ASSUMPTIONS.md:315` — records that `bump-spec-ref.yml` requests `permission-workflows:
+  write` **because** the pin lives under `.github/workflows/`. That *because* no longer holds:
+  the bump PR now touches a root-level data file, so the scope is no longer load-bearing for
+  the spec bump. The scope is still requested by the shared workflow in acdp-ci, and the
+  installation grants it, so nothing breaks — the reasoning is what went stale, and it moved
+  in the safe direction.
+
+Earlier entries in this log describe the retired derivation as current — including the U-521
+baseline note at line 5301, which explains why a mutation baseline had to be re-measured
+across a pin move. That reasoning was true when written; the mechanism it names was replaced
+here.

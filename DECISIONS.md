@@ -3491,3 +3491,66 @@ outsider pins, and both are covered by the table across all six perspectives.
 **Status:** applied. Test-only; no wire, schema or behaviour change. `retrieve_visible` was **not**
 modified — changing what a visibility predicate decides is a security change and is out of scope for
 test hardening.
+
+## U-536 — the spec pin becomes one declarative source (lane-2, 2026-09-13)
+
+Three decisions, all reversible, all settled by Opus inside the unit; none reached the human.
+One supersedes a prior CONFIRMED decision in this file.
+
+### 1. The pin moves out of `ci.yml` into `.spec-pin` — SUPERSEDES decision 9 above (line 2535)
+
+- **Prior decision:** "`mutants.yml` derives the spec pin rather than duplicating it —
+  CONFIRMED (Opus)" (line 2535). A `pin` step in `mutants.yml` grepped the 40-hex `ref:` out of
+  `ci.yml` so the two jobs could not drift apart. That was the right call against the
+  alternative it was compared to — a pasted second copy, which the bumper would never rewrite.
+- **Why it is superseded, not reversed:** the derivation preserved the property but paid for it
+  with a coupling that is invisible from either file. Nothing in `ci.yml` said another workflow
+  parsed it, and a perfectly valid reindentation of its spec step broke the derivation
+  *silently* — surfacing on the following Monday's cron, because `mutants.yml` has no
+  `pull_request` trigger, in a job whose failure reads as "the ratchet is broken" rather than
+  "someone moved a line in a different file".
+- **Chosen implementation:** `.spec-pin` at the repo root as the single declarative source,
+  read by both workflows through one composite action (`.github/actions/read-spec-pin`), by the
+  bumper (`bump-spec.yml` now passes it `.spec-pin`), and by the conformance harness itself.
+- **Rejected — the same ~15 lines of shell pasted into both workflows, plus a test that the two
+  copies stay identical.** That test guards the *spelling*: it breaks on a reindentation and
+  passes on a semantic change. `spec_pin_violations` instead asserts the property — nobody
+  restates the pin, everybody uses the reader — which a human can check by inspection.
+- **Status:** applied (`e21375b`, `67a4cac`). Decision 9's property is preserved and now has ten
+  falsified invariants behind it instead of four.
+
+### 2. The pin verdict is decided by CONTENT, never by git
+
+- **Assumption:** a harness could identify "is this tree at the pin?" with `git rev-parse HEAD`.
+- **Why that is wrong, and not a preference:** the way to materialise an exact revision locally
+  is `git archive <sha> | tar x`, whose output carries no git metadata at all. The tree that
+  must PASS is therefore precisely the one `git rev-parse` cannot identify, so a git-based check
+  rejects the correct input. Git is used only to *name* a revision once found.
+- **Evidence:** one digest covers an archive extract, an independent second extract, and a real
+  `clone` + `checkout` of the pin (what `actions/checkout` produces) — all
+  `rfc6962-sha256:03644a90…`. Zero `.gitattributes` in the 253-file tree at the pin rules out a
+  filter making the two diverge; that grep was validated against a known positive first.
+- **Rejected — `std::collections::hash_map::DefaultHasher`:** `std` does not promise its output
+  is stable across releases, which is fatal for a value committed to a file. RFC 6962 via
+  `acdp::crypto::merkle` was already reachable, so this added no dependency.
+- **Status:** applied. Ten mutations, each RED at its own assertion with its own message.
+
+### 3. Adopting a revision now costs three edits, and that cost is accepted
+
+- **The cost:** `ref:`, `conformance-digest:` and `TOTAL_FIXTURES_AT_PIN` all change, and the
+  bumper rewrites only the first. A `bump spec` PR therefore arrives RED on `conformance`.
+- **Why accepted:** `TOTAL_FIXTURES_AT_PIN` already had that property, so such a PR was never
+  green on arrival; the PR is held for review and never auto-merged; and the failure message
+  names the exact command that prints the replacement digest. The alternative — deriving the
+  digest at test time from whatever tree is present — is the hole this unit exists to close.
+- **Rejected — auto-updating the digest in the bump PR.** That would make the bot's PR
+  self-certifying: it would rewrite the value that proves the tree is what the bot says it is.
+- **Status:** applied, stated in `.spec-pin` beside the value rather than in a footnote, with
+  the procedure in `CONTRIBUTING.md`.
+
+**Two references this unit made stale, both outside its path grant and neither edited here:**
+`ASSUMPTIONS.md:2872` (entry 9 describes the retired derivation) and `ASSUMPTIONS.md:315`
+(records that the bumper needs `permission-workflows: write` *because* the pin lives under
+`.github/workflows/` — that reasoning no longer holds; the pin is now a root-level data file, so
+the scope is no longer load-bearing for the spec bump, and the change moved in the safe
+direction). Reported to the leader rather than edited.

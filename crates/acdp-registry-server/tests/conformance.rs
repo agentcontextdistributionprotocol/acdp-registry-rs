@@ -11057,8 +11057,8 @@ async fn no_excused_family_is_required_by_our_profile() {
         mirror, spec_derived,
         "CORE_INEXCUSABLE_FAMILIES has rotted against the pinned spec's acdp-registry-core \
          required_fixtures/conditional_fixtures family set -- update the const in \
-         tests/conformance.rs to match, and only because the spec pin (ci.yml) moved and \
-         changed which families those two keys bucket into"
+         tests/conformance.rs to match, and only because the spec pin (`.spec-pin`) moved \
+         and changed which families those two keys bucket into"
     );
 }
 
