@@ -27,10 +27,12 @@ use acdp::producer::Producer;
 use acdp::registry::store::{
     PendingIdempotencyCommit, PublishCommit, PublishCommitOutcome, RegistryStore,
 };
-use acdp::types::primitives::{AgentDid, ContextType, Visibility};
+use acdp::types::primitives::{AgentDid, ContextType, CtxId, Visibility};
 use acdp::types::publish::{PublishRequest, PublishResponse};
+use acdp::types::search::SearchParams;
 use acdp_registry_sqlite::SqliteStore;
 use acdp_registry_store::ExtendedRegistryStore;
+use chrono::{Duration, Utc};
 
 const THREADS: usize = 16;
 const AUTHORITY: &str = "reg.test";
@@ -105,6 +107,63 @@ fn commit(
             predecessor_admission: None,
         })
     })
+}
+
+/// Publish one context through the real commit path and hand back its `ctx_id`.
+fn publish(
+    store: &Arc<SqliteStore>,
+    req: PublishRequest,
+) -> impl std::future::Future<Output = CtxId> + use<> {
+    let store = Arc::clone(store);
+    async move {
+        let outcome = commit(store, req, None)
+            .await
+            .expect("join")
+            .expect("commit ok");
+        response(&outcome).ctx_id.clone()
+    }
+}
+
+fn tagged(p: &Producer, title: &str, tags: Vec<&str>) -> PublishRequest {
+    p.publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .tags(tags)
+        .build()
+        .expect("valid publish request")
+}
+
+fn typed(p: &Producer, title: &str, t: ContextType) -> PublishRequest {
+    p.publish_request()
+        .title(title)
+        .context_type(t)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid publish request")
+}
+
+fn expiring(p: &Producer, title: &str, at: chrono::DateTime<Utc>) -> PublishRequest {
+    p.publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .expires_at(at)
+        .build()
+        .expect("valid publish request")
+}
+
+/// Run a search as an anonymous reader with the public arm open, and return the
+/// matched `ctx_id`s as a set. Every U-550 assertion is on an EXACT set, because
+/// several of the mutants WIDEN the result rather than emptying it.
+fn search_ids(store: &Arc<SqliteStore>, params: SearchParams) -> std::collections::HashSet<String> {
+    store
+        .search(&params, None, true)
+        .expect("search ok")
+        .matches
+        .iter()
+        .map(|m| m.ctx_id.as_str().to_string())
+        .collect()
 }
 
 fn response(outcome: &PublishCommitOutcome) -> &PublishResponse {
@@ -339,6 +398,50 @@ async fn a_contributor_may_supersede_but_an_unrelated_signer_may_not() {
         response(&v2).lineage_id,
         response(&v1).lineage_id,
         "the contributor's v2 continues v1's lineage"
+    );
+}
+
+/// `connect` must create a missing parent directory chain.
+///
+/// `store.rs:49` is `if !parent.as_os_str().is_empty()`, guarding
+/// `create_dir_all(parent)`. U-540 measured `delete !` surviving the whole
+/// suite, and the reason is that every other test hands `connect` a path whose
+/// parent ALREADY EXISTS — `tempfile::tempdir()` creates it. When the directory
+/// is already there, `create_dir_all` is a no-op, so skipping it changes
+/// nothing and the mutant is invisible.
+///
+/// Inverted, the guard means "create the parent only when there ISN'T one",
+/// so a real deployment pointed at `/var/lib/acdp/registry.sqlite` before that
+/// directory exists fails to start, while the no-parent case calls
+/// `create_dir_all("")`.
+///
+/// The precondition is asserted explicitly: without it this test would pass
+/// against the mutant the moment someone changed the fixture to a directory
+/// that happens to exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_creates_a_missing_parent_directory_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("a").join("b").join(DB_FILE_NAME);
+    let parent = nested
+        .parent()
+        .expect("nested path has a parent")
+        .to_path_buf();
+
+    assert!(
+        !parent.exists(),
+        "precondition: the parent chain must be ABSENT, or this test passes \
+         without exercising create_dir_all at all"
+    );
+
+    let store = SqliteStore::connect(&nested, 2)
+        .await
+        .expect("connect must create the missing parent chain, not fail on it");
+    store.migrate().await.expect("migrate");
+
+    assert!(parent.is_dir(), "the parent chain was created");
+    assert!(
+        nested.is_file(),
+        "the database exists at the requested path"
     );
 }
 
@@ -1646,4 +1749,277 @@ mod visibility_sql {
             "pagination drains exactly the visible public set"
         );
     }
+}
+
+// ── U-550: the four survivor clusters from the full-138 mutation run ─────────
+//
+// U-549 ran all 138 mutants of `store.rs` under a valid harness and found 19
+// survivors, 11 of which had never been judged. Those 11 are four test-shaped
+// clusters, not eleven problems. Each test below names the mutants it kills and
+// was falsified against every one of them by hand-application before the oracle
+// was consulted -- two instruments, because U-548 is the standing argument
+// against trusting one.
+
+/// The tag filter is post-SQL (tags are stored as JSON), and nothing exercised
+/// it. Three mutants lived here.
+///
+/// - `1585:37` deletes the `!` in `.filter(|s| !s.is_empty())`. `want` then
+///   keeps only the EMPTY segments. For `tags=alpha` that leaves `want` empty,
+///   `all()` over an empty iterator is `true`, the `!` makes it `false`, the
+///   early return never fires and **every context passes the tag filter**.
+/// - `1588:24` deletes the `!` in `if !want.iter().all(...)`, inverting the
+///   test so contexts that DO carry every tag are the ones rejected.
+/// - `1588:74` flips `bt == w` to `bt != w`, so "has any tag other than this
+///   one" stands in for "has this one".
+///
+/// Asserting an EXACT set is what kills all three: each mutant changes WHICH
+/// contexts come back, and two of them widen the result rather than emptying
+/// it, so a `contains` assertion would pass against them.
+///
+/// The second query pins the trimming specifically. `"alpha, ,beta"` has an
+/// empty middle segment, which the filter drops; under `1585:37` `want` becomes
+/// `[""]`, no context carries an empty tag, and the result is empty instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tag_filter_admits_only_contexts_carrying_every_requested_tag() {
+    let (store, _dir) = store().await;
+    let p = producer(60);
+
+    let alpha_beta = publish(&store, tagged(&p, "alpha-beta", vec!["alpha", "beta"])).await;
+    let beta_only = publish(&store, tagged(&p, "beta-only", vec!["beta"])).await;
+    let untagged = publish(&store, tagged(&p, "untagged", vec![])).await;
+
+    // Precondition: without three distinct contexts the widening mutants
+    // (1585:37, 1588:74) would have nothing extra to wrongly admit.
+    assert_eq!(
+        [&alpha_beta, &beta_only, &untagged]
+            .iter()
+            .map(|c| c.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3,
+        "precondition: three distinct contexts"
+    );
+
+    assert_eq!(
+        search_ids(
+            &store,
+            SearchParams {
+                tags: Some("alpha".into()),
+                ..Default::default()
+            }
+        ),
+        std::collections::HashSet::from([alpha_beta.as_str().to_string()]),
+        "tags=alpha must admit exactly the context carrying alpha -- not every \
+         context (1585:37), not the complement (1588:24), not 'has some other \
+         tag' (1588:74)"
+    );
+
+    assert_eq!(
+        search_ids(
+            &store,
+            SearchParams {
+                tags: Some("alpha, ,beta".into()),
+                ..Default::default()
+            }
+        ),
+        std::collections::HashSet::from([alpha_beta.as_str().to_string()]),
+        "empty segments are trimmed away, and the remaining tags are ANDed"
+    );
+
+    assert_eq!(
+        search_ids(
+            &store,
+            SearchParams {
+                tags: Some("beta".into()),
+                ..Default::default()
+            }
+        ),
+        std::collections::HashSet::from([
+            alpha_beta.as_str().to_string(),
+            beta_only.as_str().to_string()
+        ]),
+        "tags=beta admits BOTH carriers -- pins the AND semantics as a subset \
+         relation rather than equality of tag lists"
+    );
+}
+
+/// `1596:86` flips `c.as_str() == df` to `!=` in the `derived_from` filter, so
+/// "derives from this context" becomes "derives from something else".
+///
+/// The mutant EMPTIES the result rather than widening it: the only element of
+/// the child's `derived_from` equals the query, so `any(|c| c != df)` is false,
+/// `is_none_or` yields false, and the child is rejected. The unrelated context
+/// has an empty `derived_from`, and `any()` over empty is also false, so it
+/// stays out too. An assertion that merely required the child to be absent
+/// would therefore pass against the mutant -- the exact-set form is load-bearing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_derived_from_filter_admits_only_direct_descendants() {
+    let (store, _dir) = store().await;
+    let p = producer(61);
+
+    let parent = publish(&store, tagged(&p, "parent", vec![])).await;
+    let child = publish(
+        &store,
+        p.publish_request()
+            .title("child")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .derived_from(vec![parent.clone()])
+            .build()
+            .expect("valid publish request"),
+    )
+    .await;
+    let unrelated = publish(&store, tagged(&p, "unrelated", vec![])).await;
+
+    let got = search_ids(
+        &store,
+        SearchParams {
+            derived_from: Some(parent.as_str().to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        got,
+        std::collections::HashSet::from([child.as_str().to_string()]),
+        "derived_from=<parent> admits exactly the child; got {got:?}"
+    );
+    assert!(
+        !got.contains(unrelated.as_str()),
+        "an unrelated context never derives from the parent"
+    );
+}
+
+/// `1632:9` and `1644:9` both replace an idempotency-eviction body with
+/// `Ok(())`. `evict_idempotency` is a thin public wrapper over
+/// `idempotency_evict_inner`, so ONE test kills both: stubbing either leaves the
+/// row in place.
+///
+/// Both directions are asserted. Evicting at a moment BEFORE the TTL must keep
+/// the record -- that half passes against the mutants and is not claimed to kill
+/// them; it is here so the test asserts the mechanism (`expires_at_ms <= now`)
+/// rather than merely "the table got smaller". Evicting AFTER the TTL is the
+/// half that reddens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evicting_idempotency_drops_expired_records_and_spares_live_ones() {
+    let (store, _dir) = store().await;
+    let p = producer(62);
+
+    let before = Utc::now();
+    commit(
+        Arc::clone(&store),
+        request(&p, "keyed"),
+        Some("evict-key".into()),
+    )
+    .await
+    .expect("join")
+    .expect("commit ok");
+
+    assert_eq!(
+        store.count_idempotency_records().await.unwrap(),
+        Some(1),
+        "precondition: the keyed publish stored exactly one record"
+    );
+
+    // The record's TTL is one hour (see `commit`). Evicting now must spare it.
+    store.evict_idempotency(before).await.expect("evict ok");
+    assert_eq!(
+        store.count_idempotency_records().await.unwrap(),
+        Some(1),
+        "a record whose expires_at is still in the future must survive eviction"
+    );
+
+    store
+        .evict_idempotency(before + Duration::hours(2))
+        .await
+        .expect("evict ok");
+    assert_eq!(
+        store.count_idempotency_records().await.unwrap(),
+        Some(0),
+        "past its TTL the record must actually be DELETED -- stubbing either \
+         evict_idempotency (1644:9) or idempotency_evict_inner (1632:9) to \
+         Ok(()) leaves it behind"
+    );
+}
+
+/// `1869:5` replaces the whole of `context_type_str` with a constant, twice:
+/// `String::new()` and `"xyzzy".into()`. Every context then lands in the
+/// `context_type` COLUMN under the same string.
+///
+/// The seam is the FILTER, not a read-back. `SearchResult.context_type` is
+/// rebuilt from the stored body JSON (`store.rs:1615`), so asserting on a
+/// returned context's type passes against both mutants and proves nothing.
+/// Search filters on the column instead (`store.rs:1416`,
+/// `AND context_type = ?`), which is the only place the mutated value is read.
+/// Two types are published and each is queried, so a constant cannot satisfy
+/// both: collapsing them makes each query return the wrong set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_context_type_column_keeps_each_type_distinguishable() {
+    let (store, _dir) = store().await;
+    let p = producer(63);
+
+    let snapshot = publish(&store, typed(&p, "a-snapshot", ContextType::DataSnapshot)).await;
+    let analysis = publish(&store, typed(&p, "an-analysis", ContextType::Analysis)).await;
+
+    assert_eq!(
+        search_ids(
+            &store,
+            SearchParams {
+                context_type: Some("data_snapshot".into()),
+                ..Default::default()
+            }
+        ),
+        std::collections::HashSet::from([snapshot.as_str().to_string()]),
+        "type=data_snapshot must select exactly the snapshot; a constant \
+         context_type_str stores both rows under one string and breaks this"
+    );
+    assert_eq!(
+        search_ids(
+            &store,
+            SearchParams {
+                context_type: Some("analysis".into()),
+                ..Default::default()
+            }
+        ),
+        std::collections::HashSet::from([analysis.as_str().to_string()]),
+        "and type=analysis must select exactly the analysis"
+    );
+}
+
+/// `project_status_inline` decides whether an Active context reads as Expired,
+/// and three mutants lived in its one guard, `Some(exp) if exp <= now`:
+/// `1897:26` replacing the guard with `true` and with `false`, and `1897:30`
+/// flipping `<=` to `>`.
+///
+/// Search projects status and then filters on it, defaulting to `active`, so a
+/// past-deadline context must DROP OUT of a default search while a
+/// future-deadline one must remain. Both directions are required and neither
+/// alone suffices:
+///
+/// - `true` (always expired) is caught only by the future-deadline context
+///   disappearing.
+/// - `false` (never expired) is caught only by the past-deadline context
+///   appearing.
+/// - `>` inverts both, so either half catches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_projection_expires_a_context_only_once_its_deadline_has_passed() {
+    let (store, _dir) = store().await;
+    let p = producer(64);
+    let now = Utc::now();
+
+    let lapsed = publish(&store, expiring(&p, "lapsed", now - Duration::hours(1))).await;
+    let live = publish(&store, expiring(&p, "live", now + Duration::hours(24))).await;
+
+    let active = search_ids(&store, SearchParams::default());
+
+    assert!(
+        active.contains(live.as_str()),
+        "a context whose deadline is 24h away is still ACTIVE -- the `true` \
+         guard (1897:26) and the flipped `>` (1897:30) both expire it wrongly"
+    );
+    assert!(
+        !active.contains(lapsed.as_str()),
+        "a context whose deadline passed an hour ago must project to EXPIRED \
+         and drop out of a default (active) search -- the `false` guard \
+         (1897:26) and the flipped `>` (1897:30) both keep it active"
+    );
 }

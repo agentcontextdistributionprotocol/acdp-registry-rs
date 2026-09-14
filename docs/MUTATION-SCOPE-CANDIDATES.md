@@ -24,7 +24,7 @@ not its value.
 | mutants | **138** (`cargo mutants --list --no-config --file <path>`) |
 | verdicts obtained | **95 of 138 (69%)** |
 | caught | 47 |
-| **missed (survivors)** | **14** — **5 killed** (U-543 ×4, U-544 ×1), **3 equivalent**, **1 needs a seam**, **5 open** |
+| **missed (survivors)** | **14** — **6 killed**, **7 equivalent**, **1 needs a seam**, **0 open** |
 | unviable | 34 |
 | **survivor rate among viable** | **14 / 61 = 23%** |
 | extrapolated survivors at 138 | **~20**, against a budget of **5** |
@@ -44,15 +44,15 @@ pay them down, and is deliberately not pre-judged here.
 
 | site | mutation | status |
 |---|---|---|
-| `store.rs:49:16` | `delete !` in `SqliteStore::connect` | open |
+| `store.rs:49:16` | `delete !` in `SqliteStore::connect` | **KILLED (U-547)** |
 | `store.rs:154:9` | `count_idempotency_records` → `Ok(Some(0))` | **KILLED (U-543)** |
 | `store.rs:342:26` | `+` → `*` in `list_contexts` | **KILLED (U-543)** |
 | `store.rs:342:26` | `+` → `-` in `list_contexts` | **KILLED (U-543)** |
 | `store.rs:380:9` | `lifecycle_events_of_ctx` → `Ok(vec![])` | **KILLED (U-543)** |
-| `store.rs:568:9` | `put` → `Ok(())` | open |
-| `store.rs:821:9` | `mark_superseded` → `Ok(())` | open |
-| `store.rs:832:9` | `first_version_ctx_id` → `Ok(None)` | open |
-| `store.rs:923:9` | `idempotency_evict_expired` → `Ok(())` | open |
+| `store.rs:568:9` | `put` → `Ok(())` | **EQUIVALENT (U-546)** |
+| `store.rs:821:9` | `mark_superseded` → `Ok(())` | **EQUIVALENT (U-546)** |
+| `store.rs:832:9` | `first_version_ctx_id` → `Ok(None)` | **EQUIVALENT (U-546)** |
+| `store.rs:923:9` | `idempotency_evict_expired` → `Ok(())` | **EQUIVALENT (U-546)** |
 | `store.rs:994:35` | `>` → `<` in `commit_publish` | **EQUIVALENT (U-544)** |
 | `store.rs:994:35` | `>` → `==` in `commit_publish` | **EQUIVALENT (U-544)** |
 | `store.rs:994:35` | `>` → `>=` in `commit_publish` | **EQUIVALENT (U-544)** |
@@ -247,3 +247,268 @@ other than them — the lineage takeover the comment at that site says the check
 **Consequence for sizing this issue:** the 14 known survivors are not 14 units of work. At least
 3 are equivalent and 1 needs infrastructure. Expect that ratio to hold for the 43 unjudged
 mutants too.
+
+### U-546: the whole `-> Ok(())` write-path family is dead trait surface
+
+Slice 3 killed **nothing**, and that is the correct outcome. All four are `RegistryStore` trait
+methods that `SqliteStore` must implement because the trait requires them, and that **nothing in
+this workspace ever calls**.
+
+**Resolved by TYPE, because the name is ambiguous.** A bare `.put(` count is meaningless here:
+`ChallengeStore::put(ChallengeRecord) -> Result<(), AuthError>` owns 12 of the call sites, all in
+`acdp-registry-auth`, and is a different trait entirely.
+`RegistryStore::put(Body) -> Result<(), AcdpError>` has exactly **three**, and all three are
+*delegating wrapper impls* that forward to another implementation:
+
+| method | call sites | all delegating? |
+|---|---|---|
+| `put` | `parity.rs:772`, `http_integration.rs:8665`, `memory_ext.rs:38` | yes |
+| `mark_superseded` | `parity.rs:793`, `http_integration.rs:8692`, `memory_ext.rs:50` | yes |
+| `first_version_ctx_id` | `parity.rs:799`, `http_integration.rs:8698`, `memory_ext.rs:53` | yes |
+| `idempotency_evict_expired` | `parity.rs:828`, `http_integration.rs:8730`, `memory_ext.rs:74` | yes |
+
+No originating caller exists. The UFCS form (`RegistryStore::put(&x, …)`) that a dot-grep would
+miss returns nothing either.
+
+**One near-miss worth keeping.** The upstream `acdp` crate *does* call
+`self.idempotency_evict_expired(...)` in non-test code — `acdp-0.1.0/src/registry/store.rs:405`.
+That is inside `impl RegistryStore for **InMemoryStore**` (line 308), a different type, so it says
+nothing about `SqliteStore`'s implementation. `SqliteStore::idempotency_lookup` deliberately does
+**not** evict at lookup — its comment says the background task `evict_idempotency` keeps the table
+bounded instead. A workspace-only grep would have missed that call entirely, and a
+type-blind reading of it would have wrongly promoted this one to "reachable".
+
+**Confirmed empirically, with a control.** `panic!` armed in all four methods, full
+`cargo test --workspace` with `ACDP_SPEC_DIR` set and `ACDP_REQUIRE_CONFORMANCE=1`:
+**0 runtime panics, 0 failed binaries.** The same probe placed in `get()` — a method that *is*
+called — produced 9 panic lines, so the detector demonstrably works and the zero is a real zero
+rather than a broken check.
+
+**Revisit trigger:** this equivalence expires the moment any of the four gains an originating
+caller. It is a property of the current call graph, not of the methods.
+
+**Running classification: 5 killed, 7 equivalent, 1 needs a seam, 1 open** — out of 14 known
+survivors, from 95 of 138 mutants judged. The one still open is `49:16` `delete !` in
+`SqliteStore::connect`.
+
+### U-547: the last known survivor, and what the whole exercise showed
+
+`store.rs:49:16` is `if !parent.as_os_str().is_empty()`, guarding `create_dir_all(parent)`.
+Deleting the `!` inverts it to "create the parent only when there isn't one".
+
+It survived because **every existing test hands `connect` a path whose parent already exists** —
+`tempfile::tempdir()` creates it — so `create_dir_all` is a no-op and skipping it changes nothing.
+A real deployment pointed at `/var/lib/acdp/registry.sqlite` before that directory exists would
+fail to start. Killed by `connect_creates_a_missing_parent_directory_chain`, which asserts the
+parent is **absent** as an explicit precondition, so the test cannot silently stop exercising the
+branch if someone changes the fixture.
+
+### The known list is now fully resolved
+
+| | |
+|---|---|
+| killed | **6** |
+| equivalent | **7** |
+| needs a seam | **1** (`1306:35`, race-only) |
+| open | **0** *(true only of the KNOWN list; U-549 measured all 138 and found 11 more — see below)* |
+
+**Half the known survivors were not coverage gaps.** Seven of fourteen were equivalent — code whose
+mutation cannot change observable behaviour — and an eighth needs a test seam rather than a test.
+That ratio is the single most useful number here for anyone sizing this work: **a survivor list is
+not a work list**, and #307 should never have been sized by its survivor count.
+
+### U-548: the disk block is lifted, and the judged/unjudged split was lost
+
+**Both halves of the sentence that used to close this section were wrong, and they are corrected
+here rather than quietly deleted.** It read: *"the only remaining work on this file is the 43
+mutants that have never been judged — 95 of 138 have verdicts. That is blocked on disk headroom
+for a sharded run."*
+
+**"43 unjudged" can no longer be resolved to a list.** The per-mutant verdict files for the 95
+judged mutants lived only in a session scratchpad and were deleted during an ENOSPC cleanup that
+freed 59 MiB. Every surviving `outcomes.json` on the machine was parsed to look for them — with a
+control confirming the parser finds the pattern when it is present — and none contains a
+`sqlite/src/store.rs` verdict. **The remaining work on this file is therefore all 138, not 43.**
+The per-run ledger is committed under `docs/mutation-runs/` from now on precisely so this cannot
+recur; a 40-minute measurement must not live somewhere a cleanup can reach.
+
+**"Blocked on disk headroom" is disproven.** `--copy-target=false` removes the block outright:
+
+| measurement | value |
+|---|---|
+| command | `cargo mutants --no-config --file crates/acdp-registry-sqlite/src/store.rs --shard 1/8 --copy-target=false --test-workspace=true --minimum-test-timeout=300 -j1` |
+| wall clock, 18 mutants | **97 s** |
+| peak consumption below the post-clean baseline | **2547 MiB** (free 4770 → 2223) |
+| peak temp tree observed | **2649 MiB** |
+| **residual after exit** | **0** — free returned 4770 → 4770, temp trees 0 |
+| sidecar `.sqlite` files created by the run | **0** |
+
+Two caveats that keep those numbers honest. The temp tree was sampled at 30 s and the last in-run
+sample landed 26 s before exit, so the true peak is **≥ 2649 MiB**, not exactly it. And the residual
+figure is a **net-zero equality**, not a rate: 97 s spans too few steps to support a MiB/min claim,
+and the tree grew monotonically throughout so there was never a flat phase to measure a rate
+against. What is established is that a complete shard leaves nothing behind.
+
+The `0 sidecar files` line is a direct count under `$TMPDIR`, date-bounded to the run window with
+`TZ=UTC`, with two controls: a probe file created in the same root was visible to the same `find`,
+and an unbounded `-newermt` returned the full 312 900 pre-existing files. Those 312 900 are the
+known pre-existing backlog, untouched by this run — **the leak fix holds.**
+
+**Projected cost for the full 138 in one pass**, from this shard's measured per-class means
+(unviable 2.2 s, caught 9.0 s, baseline 16.3 s once) against the ≆33 % viable rate seen here:
+**≈ 10.5 minutes.** Treat that as a **floor, not an estimate** — a *caught* mutant fails fast, while
+a *missed* one runs the entire workspace suite to green, so any shard containing survivors costs
+more per mutant than this one did.
+
+**A note on a non-finding, kept because the error is instructive.** The ~30 s cold build initially
+looked anomalous and was nearly written up as unexplained. It is not. An independent
+`cargo test -p acdp-registry-server --test conformance_gate` from a cleaned `target/` compiled the
+workspace in **25.77 s** — this machine simply builds this workspace that fast. The recorded budget
+I was measuring against, `cargo test --locked --workspace --no-run` ≈ **2.0 GiB cold**, is a *disk*
+figure; the "several minutes" I was implicitly comparing against was never recorded anywhere and was
+my own addition. **A fabricated premise had produced a real-looking anomaly**, and it would have
+shipped inside a paragraph whose every other sentence was measured.
+
+### RETRACTED — U-548's re-run proved nothing (see U-549)
+
+> **The section that stood here claimed U-543's kills were confirmed by cargo-mutants.
+> That run was void.** It was invoked with `--no-config`, which discards the whole of
+> `.cargo/mutants.toml`; the settings restored by hand omitted `copy_vcs = true`, so `.git`
+> was absent from the mutant tree and three git-dependent conformance tests panicked in
+> **every** mutant tree, marking every mutant caught for a reason unrelated to the mutation.
+> The pre-registered prediction matched **for the wrong reason**. Full mechanism in
+> `docs/mutation-runs/README.md`; the ledger is kept as `VOID-u548-...json`.
+>
+> **What was never retracted:** U-543's three mutants *were* killed by hand-application with
+> a red observed each time. That evidence never depended on this harness. And U-549's valid
+> run has since confirmed all three as `CaughtMutant` — so the claim is now true on evidence
+> that actually supports it.
+
+## U-549 — the full 138 under a valid harness, and D-W5-182 re-tested
+
+Eight shards, one uniform method: `--config docs/mutation-runs/u549-sqlite-tranche.toml`,
+`--copy-target=false`, `-j1`. Every ledger is committed beside this file.
+
+| shard | caught | missed | unviable | n |
+|---|---|---|---|---|
+| 0/8 | 11 | 0 | 7 | 18 |
+| 1/8 | 6 | 0 | 12 | 18 |
+| 2/8 | 12 | 1 | 5 | 18 |
+| 3/8 | 11 | 2 | 5 | 18 |
+| 4/8 | 13 | 4 | 1 | 18 |
+| 5/8 | 6 | 7 | 5 | 18 |
+| 6/8 | 4 | 4 | 10 | 18 |
+| 7/8 | 5 | 1 | 6 | 12 |
+| **total** | **68** | **19** | **51** | **138** |
+
+**Validity checks, all passed:** `end_time` present on all eight (a null `end_time` is the
+in-flight tell, and a grep for the *key* rather than its *value* is a false positive);
+mutant rows match every header; **zero** logs containing `not a git repository`; sizes sum
+to 138 **and** the ledgers carry 138 distinct mutants with 0 duplicates — sizes alone miss a
+duplicated shard, the union alone misses a dropped one.
+
+**`--shard k/N` is ZERO-INDEXED.** Valid shards are `0/8`–`7/8`; `8/8` is empty. An ordinal
+range of "2/8 through 8/8" covers 120 of 138 and silently drops shard 0/8 while producing a
+confident eight ledgers.
+
+### The answer: D-W5-182's 50%-of-viable does NOT survive
+
+Both rates, each with its denominator on the same line as the number, because a rate whose
+denominator lives in a footnote gets quoted without it:
+
+- **RAW: 19 survivors / 87 viable = 21.8% of viable.**
+- **UNJUDGED: 11 previously-unjudged survivors / 87 viable = 12.6% of viable.**
+
+**12.6% is the figure comparable to D-W5-182's 50%**, which was `3 missed / 6 viable` from
+shard 1/8 and was a pure-gap rate — its numerator contained no known-equivalents, because
+nothing in that shard had been judged yet. So the comparable measured figure is **about one
+quarter of the ruling's premise**, and the ruling was extrapolated from a single 18-mutant
+shard whose three survivors were all subsequently killed.
+
+All **8** already-judged non-gaps (7 equivalent + 1 needs-a-seam) came back `MissedMutant`,
+exactly as recorded — so the exclusion set was computed from observed verdicts, not assumed
+from the prior count. That distinction is load-bearing: a judged-equivalent that had been
+*caught* would never appear in `missed` at all, and subtracting a fixed 8 would have removed
+a survivor that was never counted.
+
+### The 11 previously-unjudged survivors
+
+| site | mutation | area |
+|---|---|---|
+| `1585:37` | `delete !` | tag filter in `list_contexts` |
+| `1588:24` | `delete !` | tag filter in `list_contexts` |
+| `1588:74` | `!=` | tag filter in `list_contexts` |
+| `1596:86` | `!=` | `derived_from` filter |
+| `1632:9` | `Ok(())` | `idempotency_evict_inner` |
+| `1644:9` | `Ok(())` | `evict_idempotency` |
+| `1869:5` | `String::new()` | `context_type_str` |
+| `1869:5` | `"xyzzy".into()` | `context_type_str` |
+| `1897:26` | `true` | status/expiry computation |
+| `1897:26` | `false` | status/expiry computation |
+| `1897:30` | `>` | status/expiry computation |
+
+All are production code — `#[cfg(test)]` begins at line 1987. **Not paid down in this unit
+by instruction:** measure, report, stop. Whether to widen scope or pay these down is a
+scoping decision, not a lane call.
+
+### What the correction did NOT void: the disk findings
+
+U-548's verdicts were void; its **disk** measurements were not, and they have now been
+re-confirmed under the corrected configuration. Across all eight valid shards free space
+stayed flat — **4617 → 4587 MiB**, a −30 MiB drift that includes the committed ledgers
+themselves — with **0 temp trees** and **0 sidecar `.sqlite` files** left behind. Residual
+is still zero, now with `.git` actually present in the mutant tree.
+
+The one figure that needs a caveat rather than a retraction: U-548's **peak** of 2547 MiB
+was measured on a run that did *not* copy `.git`, so it **understates** the corrected
+configuration by roughly the size of the repository history. The conclusion it supported —
+that the tranche fits comfortably and disk is not the constraint — is unaffected, and the
+whole 138 completed here in about 24 minutes of wall clock.
+
+**`rc=2` from `cargo mutants` means survivors were found, not that the run failed.** Shards
+0/8 and 1/8 exited 0 (no survivors); the other six exited 2. Treating a non-zero exit as a
+failed run would have discarded six valid shards.
+
+## U-550 — the 11 unjudged survivors, paid down
+
+Five tests in `crates/acdp-registry-sqlite/tests/store_contract.rs` kill all **11**
+previously-unjudged survivors. Confirmed by **two independent instruments**, because
+U-548 is the standing argument against trusting one.
+
+**Instrument 1 — hand-application.** Each of the 11 mutants applied to `src/store.rs` by
+hand, the named test run, and the mutant reverted. **All 11 reddened.** Each anchor was
+verified to match exactly once on clean source first, so a silently-unapplied mutation
+could not masquerade as a kill.
+
+**Instrument 2 — the oracle**, re-run under `docs/mutation-runs/u549-sqlite-tranche.toml`
+against a committed baseline. Ledgers committed beside this file.
+
+| shard | missed before (U-549) | missed after | outcome |
+|---|---|---|---|
+| 5/8 | 7 | **1** | six killed; `1306:35` survives, as predicted |
+| 6/8 | 4 | **0** | all four killed |
+| 7/8 | 1 | **0** | killed |
+
+All 11 came back `CaughtMutant`. **`1306:35` remains `MissedMutant`** — U-544 proved that
+branch unreachable at this API, and this unit deliberately did **not** manufacture a test
+to force a kill on it. Had it flipped to caught, that would have *refuted* U-544's seam
+verdict and been reported as such; it did not.
+
+**Tranche status: 19 survivors → 8, and all 8 are already judged** (7 equivalent, 1 needs a
+seam). There are now **zero unjudged survivors** in `sqlite/src/store.rs`.
+
+### Two seams worth recording, because the obvious test would have passed vacuously
+
+**`context_type_str` is observable only through the FILTER, never a read-back.**
+`SearchResult.context_type` is rebuilt from the stored body JSON (`store.rs:1615`), so
+asserting on a returned context's type passes against both constant mutants and proves
+nothing. The mutated value is read in exactly one place: `store.rs:1416`,
+`AND context_type = ?`. The test therefore publishes two types and queries each, since no
+single constant can satisfy both queries.
+
+**Several of these mutants WIDEN the result rather than emptying it.** `1585:37` makes every
+context pass the tag filter; `1588:74` admits any context carrying some *other* tag. A
+`contains`-style assertion passes against both. Every U-550 assertion is on an **exact set**
+for that reason — and `1596:86` is the mirror case, emptying the result, so an
+assertion that merely required the child to be *absent* would also have passed. The two
+directions need opposite assertion shapes, and a set equality covers both.
