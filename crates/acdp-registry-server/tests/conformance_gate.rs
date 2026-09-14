@@ -20,6 +20,101 @@ fn require_mode_implies_the_conformance_suite_is_compiled_in() {
     }
 }
 
+/// Wire codes the two producing functions in `acdp-registry-types/src/error.rs`
+/// can emit, extracted from TEXT so that the guard over them is falsifiable here.
+///
+/// Scans ONLY the two functions that produce wire codes, taking every string
+/// literal inside them. Scanning `=> "..."` alone was the first attempt and it was
+/// wrong: a long match pattern uses a block body, so
+/// `SchemaViolation | InvalidBody | MissingField => { "schema_violation" }` has no
+/// `=> "`. The count guard at the call site is what caught that.
+fn wire_codes_in(src: &str, origin: &str) -> Vec<String> {
+    let mut codes: Vec<String> = Vec::new();
+    for fn_name in ["fn wire_code", "fn acdp_wire_code"] {
+        let start = src
+            .find(fn_name)
+            .unwrap_or_else(|| panic!("{fn_name} not found in {origin}"));
+        // Function bodies in this file end at a closing brace in column 0.
+        let body_end = src[start..]
+            .find("\n}\n")
+            .map(|e| start + e)
+            .unwrap_or(src.len());
+        let body = &src[start..body_end];
+        let mut rest = body;
+        while let Some(q) = rest.find('"') {
+            rest = &rest[q + 1..];
+            let Some(end) = rest.find('"') else { break };
+            let c = &rest[..end];
+            rest = &rest[end + 1..];
+            if c.len() >= 4
+                && c.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_')
+                && !codes.iter().any(|e| e == c)
+            {
+                codes.push(c.to_string());
+            }
+        }
+    }
+    codes
+}
+
+/// Wire codes `acdp-registry-types/src/error.rs` emits today. A ratchet, not a
+/// floor -- see the assertion that reads it for why an exact number is affordable
+/// here, and for what the floor it replaced let through.
+const EXPECTED_WIRE_CODES: usize = 24;
+
+/// The exact wire-code count must FAIL when the scanner loses a code — otherwise it
+/// is a number nobody has shown to do anything.
+///
+/// Falsified against SYNTHETIC source rather than the real `error.rs`, which is in
+/// another crate and outside this unit's path grant. That is also why
+/// `wire_codes_in` takes text: a guard you cannot falsify without editing someone
+/// else's file is a guard that never gets falsified.
+#[test]
+fn the_wire_code_scanner_is_pinned_exactly_and_falsifiable() {
+    const SRC: &str = r#"
+fn wire_code(&self) -> &'static str {
+    match self {
+        Self::NotFound => "not_found",
+        Self::Schema | Self::InvalidBody => { "schema_violation" }
+        Self::Rate => "rate_limited",
+    }
+}
+fn acdp_wire_code(err: &AcdpError) -> &'static str {
+    match err {
+        AcdpError::Sig => "invalid_signature",
+    }
+}
+"#;
+    let found = wire_codes_in(SRC, "<synthetic>");
+    assert_eq!(
+        found.len(),
+        4,
+        "the extractor must find all four codes, including the BLOCK-bodied arm \
+         that has no `=> \"`: {found:?}"
+    );
+
+    // Lose one code, the way a refactor does. An exact count sees it; the floor this
+    // replaced did not -- 3 of 4 satisfies any threshold the full set satisfies,
+    // which is the entire defect this unit is about.
+    let one_gone = SRC.replace("        Self::Rate => \"rate_limited\",\n", "");
+    let fewer = wire_codes_in(&one_gone, "<synthetic>");
+    assert_eq!(
+        fewer.len(),
+        3,
+        "removing one arm must change the extracted count: {fewer:?}"
+    );
+    assert!(
+        !fewer.contains(&"rate_limited".to_string()),
+        "and the code lost must be the one removed: {fewer:?}"
+    );
+    assert_ne!(
+        fewer.len(),
+        found.len(),
+        "so an exact assertion against the full count goes RED on this input, \
+         which is precisely what `codes.len() >= 15` did not do"
+    );
+}
+
 /// CHARTER Rule 48: a documentation artifact no command can check is a defect
 /// even while it is currently correct.
 ///
@@ -58,41 +153,32 @@ fn every_wire_code_the_code_emits_is_documented() {
     // attempt and it was wrong: a long match pattern uses a block body, so
     // `SchemaViolation | InvalidBody | MissingField => { "schema_violation" }`
     // has no `=> "`. The guard below is what caught that.
-    let mut codes: Vec<String> = Vec::new();
-    for fn_name in ["fn wire_code", "fn acdp_wire_code"] {
-        let start = src
-            .find(fn_name)
-            .unwrap_or_else(|| panic!("{fn_name} not found in {}", error_rs.display()));
-        // Function bodies in this file end at a closing brace in column 0.
-        let body_end = src[start..]
-            .find("\n}\n")
-            .map(|e| start + e)
-            .unwrap_or(src.len());
-        let body = &src[start..body_end];
-        let mut rest = body;
-        while let Some(q) = rest.find('"') {
-            rest = &rest[q + 1..];
-            let Some(end) = rest.find('"') else { break };
-            let c = &rest[..end];
-            rest = &rest[end + 1..];
-            if c.len() >= 4
-                && c.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_')
-                && !codes.iter().any(|e| e == c)
-            {
-                codes.push(c.to_string());
-            }
-        }
-    }
+    let mut codes = wire_codes_in(&src, &error_rs.display().to_string());
     codes.sort();
 
-    // Guard the GENERATOR, not just its output: a scanner that silently
-    // matched nothing would make the assertion below vacuously true, which is
-    // precisely the failure mode this test exists to remove. Pin a floor and
-    // two members that must always be present.
-    assert!(
-        codes.len() >= 15,
-        "wire-code extraction found only {} codes in {} — the scanner is \
-         broken, so the documentation check below would pass vacuously: {codes:?}",
+    // Guard the GENERATOR, not just its output: a scanner that silently matched
+    // nothing would make the assertion below vacuously true, which is precisely the
+    // failure mode this test exists to remove.
+    //
+    // WAS `codes.len() >= 15` against 24 actual -- it tolerated the scanner losing
+    // NINE codes, and each lost code is one whose documentation silently stops being
+    // checked. No independent derivation of this set exists at the string level:
+    // `http_status()` matches on enum variants, and several variants share a single
+    // code (`SchemaViolation | InvalidBody | MissingField => "schema_violation"`),
+    // so variants cannot be counted against codes. The exact count is therefore a
+    // deliberate ratchet, and not an extra tax: adding a wire code ALREADY requires
+    // an edit to docs/HTTP-API.md, and this test is the thing that enforces it.
+    // `wire_codes_in` is a pure function over text precisely so this number can be
+    // falsified without editing another crate's source.
+    assert_eq!(
+        codes.len(),
+        EXPECTED_WIRE_CODES,
+        "wire-code extraction found {} codes in {}, expected exactly \
+         {EXPECTED_WIRE_CODES}. If you ADDED a wire code: update this constant and \
+         add the code to the status table in docs/HTTP-API.md -- enforcing that \
+         pairing is what this test is for. If you did not, the scanner is broken and \
+         the documentation check below would pass for every code it can no longer \
+         see: {codes:?}",
         codes.len(),
         error_rs.display()
     );
@@ -296,6 +382,10 @@ fn documented_search_refill_cap_matches_the_constant() {
     let cap: usize = digits.parse().unwrap_or_else(|e| {
         panic!("could not parse SEARCH_REFILL_MAX_PAGES value from {digits:?}: {e}")
     });
+    // NOT a floor standing in for a count: `cap` is one parsed configuration value
+    // and `> 0` is its actual semantic requirement -- zero disables the refill loop.
+    // The exact value is pinned against the document two assertions below, which is
+    // where an equality belongs. Left deliberately unchanged by U-538.
     assert!(cap > 0, "a zero refill cap would disable the loop entirely");
 
     let doc_path = root.join("docs/MULTI-TENANCY.md");
@@ -478,12 +568,34 @@ fn authentication_doc_cites_symbols_that_exist_and_never_line_numbers() {
             None => break,
         }
     }
-    assert!(
-        spans.len() > 100,
-        "only {} backticked spans found in {} — the scanner is broken, so every \
-         check below would pass vacuously",
-        spans.len(),
+    // WAS `spans.len() > 100` against 263 actual: the tokenizer could drop 163 of
+    // its spans and still pass, while every check below silently stopped covering
+    // them. Replaced by an EQUALITY that does not rot as the document is edited --
+    // the loop above consumes exactly two backticks per span, so the span count
+    // must equal half the backtick characters in the file. Counting characters is a
+    // different operation from scanning for pairs, so a loop that breaks early
+    // (its `None => break`), or skips a span, diverges from it immediately. This is
+    // the guard the floor was pretending to be, and unlike an exact count of spans
+    // it needs no edit when someone adds a sentence.
+    let backticks = doc.matches('`').count();
+    assert_eq!(
+        backticks % 2,
+        0,
+        "{} contains an ODD number of backtick characters ({backticks}), so at \
+         least one inline span is unterminated. The scanner below silently drops \
+         the tail, and every check that reads its output would then cover less \
+         than the document says.",
         doc_path.display()
+    );
+    assert_eq!(
+        spans.len(),
+        backticks / 2,
+        "the span scanner found {} spans in {} but the file holds {backticks} \
+         backtick characters, i.e. {} pairs. The scanner is dropping spans, and \
+         every check below would then pass for the spans it never saw.",
+        spans.len(),
+        doc_path.display(),
+        backticks / 2
     );
 
     // 1. No line-number pins, in any form, anywhere in the document. This is the
@@ -510,10 +622,24 @@ fn authentication_doc_cites_symbols_that_exist_and_never_line_numbers() {
         .iter()
         .filter(|s| s.starts_with("crates/") && s.ends_with(".rs"))
         .collect();
+    // DELIBERATELY A LOWER BOUND, and what it does not catch is stated rather than
+    // left to be discovered. The exact number (10 today) is a property of the
+    // DOCUMENT, not an invariant of the code: pinning it would redden this gate on
+    // any edit that cites one more file, and a guard that fails on correct input is
+    // one someone deletes rather than fixes. So this cannot detect the filter
+    // silently matching 8 of 10 citations.
+    //
+    // What made the floor dangerous was that it was ALSO standing in as the
+    // tokenizer's vacuity guard, and that job has moved: `spans.len()` is now
+    // pinned exactly against the file's backtick count above, so a broken scanner
+    // fails there, by name, instead of being tolerated here. This floor now guards
+    // only the one thing left -- the `crates/`-prefix filter matching nothing at
+    // all -- which is why a coarse threshold is adequate for it.
     assert!(
         cited_paths.len() >= 8,
-        "only {} crate source paths cited — expected the document to reference at \
-         least 8; the scanner or the document changed shape: {cited_paths:?}",
+        "only {} crate source paths cited — expected at least 8. The span scanner \
+         is pinned exactly above, so this is the `crates/…rs` FILTER, or the \
+         document genuinely stopped citing source: {cited_paths:?}",
         cited_paths.len()
     );
     let gone: Vec<&&&str> = cited_paths
@@ -528,6 +654,14 @@ fn authentication_doc_cites_symbols_that_exist_and_never_line_numbers() {
     // 3. Every backticked snake_case identifier still exists in the workspace.
     let mut corpus = String::new();
     rust_source_corpus(&root.join("crates"), &mut corpus);
+    // A GENUINE lower bound, deliberately kept, and what it misses is stated rather
+    // than left to be found: a byte total has no exact expected value that would not
+    // rot on literally every commit. It therefore cannot detect the walk dropping a
+    // whole crate -- the remaining seven still exceed 100KB. What it does catch is
+    // the walk returning nothing or nearly nothing, which is the failure that would
+    // make check 3 below report every identifier as missing (or pass vacuously).
+    // The file-level completeness of a walk like this IS pinned exactly, by count,
+    // in `every_directly_read_env_var_is_documented`.
     assert!(
         corpus.len() > 100_000,
         "source corpus is only {} bytes — the walk is broken and check 3 would \
@@ -545,9 +679,16 @@ fn authentication_doc_cites_symbols_that_exist_and_never_line_numbers() {
             idents.push(s);
         }
     }
+    // Also deliberately a lower bound, for the same reason and with the same
+    // stated blind spot: the exact identifier count is a property of the prose. It
+    // cannot detect the ident filter dropping some of them. As above, the
+    // tokenizer's own completeness is pinned exactly earlier in this test, so what
+    // remains here is the filter, and the two named members below (`required`) pin
+    // specific results rather than a quantity.
     assert!(
         idents.len() >= 20,
-        "only {} backticked identifiers extracted — expected at least 20: \
+        "only {} backticked identifiers extracted — expected at least 20. The span \
+         scanner is pinned exactly above, so suspect the identifier filter: \
          {idents:?}",
         idents.len()
     );
@@ -681,10 +822,31 @@ fn root_changelog_stays_a_pointer() {
             stale.push(entry.file_name().to_string_lossy().into_owned());
         }
     }
+    // WAS `checked >= 8` against exactly 8 crates -- tight today, and blind in the
+    // direction that actually happens: a NINTH crate arrives, has no CHANGELOG.md,
+    // the `continue` above skips it, `checked` stays 8, and the floor is satisfied
+    // while that crate's release notes go unchecked forever. The expectation is
+    // therefore derived from the workspace's own declaration of what exists.
+    let members = workspace_member_crates(&root);
+    let mut without_changelog: Vec<&String> = members
+        .iter()
+        .filter(|m| !root.join("crates").join(m).join("CHANGELOG.md").exists())
+        .collect();
+    without_changelog.sort();
     assert!(
-        checked >= 8,
-        "found only {checked} per-crate changelogs — expected at least 8; the \
-         walk is broken and the staleness check below proves nothing"
+        without_changelog.is_empty(),
+        "these workspace members have no CHANGELOG.md, so the staleness check \
+         below cannot see them at all: {without_changelog:?}. release-plz writes \
+         one per released crate; a member without one is either unreleased (say so \
+         here) or was skipped."
+    );
+    assert_eq!(
+        checked,
+        members.len(),
+        "the crates/ walk read {checked} per-crate changelogs but the workspace \
+         declares {} members — the walk and Cargo.toml disagree about which crates \
+         exist, so the staleness check below covers an unknown subset",
+        members.len()
     );
     stale.sort();
     assert!(
@@ -692,6 +854,218 @@ fn root_changelog_stays_a_pointer() {
         "the workspace is at {version} but these crates' changelogs have no \
          `{heading}` section: {stale:?}. Release notes are delegated to these \
          files, so a gap here means the release is undocumented everywhere."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// U-538: retiring the floor-style guards.
+//
+// Several checks in this file guarded a scanner with `assert!(found.len() >= N)`.
+// A FLOOR CANNOT CATCH UNDERCOUNTING -- it is satisfied by the very walk that is
+// silently missing items, which is the failure it was written to detect. Measured
+// on this tree at the time of the change: `docs/*.md` was 10 against a floor of 8,
+// `crates/*/src/**.rs` was 40 against a floor of 20, and the per-crate changelog
+// walk was 8 against a floor of 8 -- tight today, and blind in the direction that
+// actually happens, a NINTH crate arriving with no changelog.
+//
+// What catches undercounting is a SECOND enumeration derived a different way,
+// asserted EQUAL. `git ls-files` and a filesystem walk share no code, so a walk
+// that swallows an error through `.flatten()` diverges from it; the root
+// `Cargo.toml`'s `members` list is a declarative third view of the same set.
+// Equality also catches the opposite direction a floor can never see: a file that
+// exists and is untracked, or is tracked and missing from disk.
+// ---------------------------------------------------------------------------
+
+/// Every path git tracks under `root`, as `/`-joined strings.
+///
+/// `-z` so paths containing spaces or newlines survive intact, and a failure to
+/// run git is FATAL rather than falling back to a glob -- a fallback scope is how
+/// a sweep silently narrows, and this helper exists to widen one.
+fn git_tracked_paths(root: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "could not run `git ls-files` in {}: {e}. These guards derive a                  SECOND enumeration from git on purpose and do not fall back to a                  glob: a single enumeration cannot detect its own omissions.",
+                root.display()
+            )
+        });
+    assert!(
+        out.status.success(),
+        "`git ls-files` failed in {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Discrepancies between two independent enumerations of what should be one set.
+/// Empty means they agree. Both directions are reported, because they are
+/// different bugs: only-in-`walked` is an untracked file, only-in-`reference` is a
+/// walk that dropped something.
+///
+/// `what_walked`/`what_reference` name the two methods in the output, so a failure
+/// says which enumeration to go and fix rather than just that they differ.
+fn enumeration_disagreements(
+    walked: &[String],
+    reference: &[String],
+    what_walked: &str,
+    what_reference: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for w in walked {
+        if !reference.contains(w) {
+            out.push(format!(
+                "{w}: found by {what_walked}, absent from {what_reference}"
+            ));
+        }
+    }
+    for r in reference {
+        if !walked.contains(r) {
+            out.push(format!(
+                "{r}: found by {what_reference}, absent from {what_walked}"
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The workspace's crates, from the root `Cargo.toml`'s `members` array.
+///
+/// A DECLARATIVE enumeration: it is what cargo itself builds, so it cannot drift
+/// from the workspace the way a directory walk can drift from either.
+fn workspace_member_crates(root: &std::path::Path) -> Vec<String> {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
+    let start = manifest.find("members = [").expect(
+        "root Cargo.toml has a `members = [` array; the parse below is worthless without it",
+    );
+    let rest = &manifest[start..];
+    let end = rest
+        .find(']')
+        .expect("unterminated `members` array in root Cargo.toml");
+    let members: Vec<String> = rest[..end]
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('"'))
+        .filter_map(|l| l.split('"').next())
+        .filter(|l| l.starts_with("crates/"))
+        .map(|l| l.trim_start_matches("crates/").to_string())
+        .collect();
+    assert!(
+        !members.is_empty(),
+        "parsed 0 crates from the root Cargo.toml `members` array -- the parse is          broken, and every check deriving its expectation from it would pass          vacuously, which is the exact defect this helper was written to remove"
+    );
+    members
+}
+
+/// The two-enumeration helper must FAIL on exactly the input a floor tolerates —
+/// otherwise this unit replaced one unfalsified assertion with another.
+///
+/// The decisive assertion here is not that the helper reports a disagreement; it is
+/// that **the floor it replaced does not**. Both are checked against the same input,
+/// in the same test, so the improvement is a property of the code rather than a
+/// claim in a commit message.
+#[test]
+fn the_two_enumeration_guard_catches_what_a_floor_tolerates() {
+    let ten: Vec<String> = (0..10).map(|i| format!("doc-{i}.md")).collect();
+
+    // Identical enumerations: silent.
+    assert!(
+        enumeration_disagreements(&ten, &ten, "walk", "git").is_empty(),
+        "two identical enumerations must not disagree"
+    );
+
+    // A walk that dropped ONE of ten -- the failure a scanner actually has.
+    let nine: Vec<String> = ten.iter().skip(1).cloned().collect();
+    let missed = enumeration_disagreements(&nine, &ten, "walk", "git");
+    assert_eq!(
+        missed.len(),
+        1,
+        "a walk missing one of ten must report exactly one disagreement: {missed:?}"
+    );
+    assert!(
+        missed[0].contains("doc-0.md") && missed[0].contains("absent from walk"),
+        "the disagreement must NAME the dropped item and say which method missed \
+         it, or a reader cannot tell which enumeration to fix: {missed:?}"
+    );
+
+    // THE POINT OF THE UNIT: the floor this replaced is satisfied by that same
+    // input. `9 >= 8` is true, so the old guard passed while a document went
+    // unchecked. A floor cannot catch undercounting because the count it accepts
+    // is the count the broken walk produces.
+    assert!(
+        nine.len() >= 8,
+        "sanity: the replaced floor really was satisfied by the 9-of-10 input, \
+         which is what made it useless"
+    );
+
+    // The opposite direction, which a floor can NEVER see at any threshold: an
+    // extra item on disk that the reference does not know about. `11 >= 8` holds.
+    let mut eleven = ten.clone();
+    eleven.push("untracked.md".to_string());
+    let extra = enumeration_disagreements(&eleven, &ten, "walk", "git");
+    assert_eq!(
+        extra.len(),
+        1,
+        "an untracked extra must be reported too: {extra:?}"
+    );
+    assert!(
+        extra[0].contains("untracked.md") && extra[0].contains("absent from git"),
+        "and it must be reported as the OTHER direction -- an untracked file is a \
+         different bug from a dropped one: {extra:?}"
+    );
+
+    // Both empty is agreement between two broken methods, which is why every
+    // caller asserts non-emptiness separately rather than trusting agreement.
+    assert!(
+        enumeration_disagreements(&[], &[], "walk", "git").is_empty(),
+        "two empty enumerations agree -- the callers must check emptiness \
+         themselves, and this asserts that the helper alone does NOT catch it"
+    );
+}
+
+/// `workspace_member_crates` must parse the real manifest, and must refuse rather
+/// than return an empty set — an empty expectation makes every check derived from
+/// it pass vacuously, which is the defect this whole unit is about.
+#[test]
+fn workspace_members_parse_to_the_real_crate_set() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let members = workspace_member_crates(&root);
+
+    // A second, independent derivation of the same set: the directories on disk.
+    // Asserted EQUAL, not "at least", for the reason this unit exists.
+    let mut dirs: Vec<String> = std::fs::read_dir(root.join("crates"))
+        .expect("read crates/")
+        .flatten()
+        .filter(|e| e.path().join("Cargo.toml").exists())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    dirs.sort();
+    let mut sorted = members.clone();
+    sorted.sort();
+    let disagreements =
+        enumeration_disagreements(&dirs, &sorted, "the crates/ walk", "Cargo.toml members");
+    assert!(
+        disagreements.is_empty(),
+        "the crates/ directory and the workspace `members` array disagree about \
+         which crates exist:\n  {}",
+        disagreements.join("\n  ")
+    );
+    assert!(
+        members.contains(&"acdp-registry-server".to_string()),
+        "the parse must find acdp-registry-server, which certainly is a member: \
+         {members:?}"
     );
 }
 
@@ -723,11 +1097,32 @@ fn every_docs_page_is_listed_in_the_docs_index() {
         .collect();
     pages.sort();
 
+    // WAS `pages.len() >= 8`, a floor over a set of 10 -- so the walk could drop
+    // two documents and the index check below would silently stop covering them.
+    // A floor is satisfied by the omission it is meant to detect. git is a second
+    // enumeration sharing no code with `read_dir`, and equality also catches the
+    // direction a floor never could: a document on disk that nobody tracked.
+    let tracked_pages: Vec<String> = git_tracked_paths(&root)
+        .into_iter()
+        .filter_map(|p| p.strip_prefix("docs/").map(str::to_string))
+        .filter(|p| p.ends_with(".md") && p != "README.md" && !p.contains('/'))
+        .collect();
+    let disagreements = enumeration_disagreements(
+        &pages,
+        &tracked_pages,
+        "the docs/ directory walk",
+        "git ls-files",
+    );
     assert!(
-        pages.len() >= 8,
-        "found only {} documents under docs/ — the walk is broken and the check \
-         below would pass vacuously: {pages:?}",
-        pages.len()
+        disagreements.is_empty(),
+        "the two enumerations of docs/*.md disagree, so one of them is missing \
+         documents and the index check below would not cover them:\n  {}",
+        disagreements.join("\n  ")
+    );
+    assert!(
+        !pages.is_empty(),
+        "both enumerations of docs/*.md are EMPTY, which they agree on and which \
+         is still wrong: two broken methods agree. docs/ has had pages since #220."
     );
 
     let unlisted: Vec<&String> = pages.iter().filter(|p| !index.contains(*p)).collect();
@@ -777,12 +1172,35 @@ fn every_directly_read_env_var_is_documented() {
             rust_source_file_texts(&src, &mut files);
         }
     }
+    // WAS `files.len() > 20` over a set of 40: the walk could drop HALF the
+    // workspace's source and still pass, which makes the env-var sweep below
+    // report "everything documented" while never reading 20 files. The walk
+    // collects file TEXTS, so it is counted against git rather than compared
+    // path-by-path -- the count equality is what a floor was standing in for.
+    let tracked_src = git_tracked_paths(&root)
+        .into_iter()
+        .filter(|p| p.starts_with("crates/") && p.ends_with(".rs") && p.contains("/src/"))
+        .count();
+    assert_eq!(
+        files.len(),
+        tracked_src,
+        "the crates/*/src walk found {} .rs files and git tracks {} -- one of the \
+         two enumerations is missing files, and the sweep below would then report \
+         no findings for the files it never read",
+        files.len(),
+        tracked_src
+    );
     assert!(
-        files.len() > 20,
-        "found only {} source files under crates/*/src — the walk is broken",
-        files.len()
+        tracked_src > 0,
+        "git tracks ZERO .rs files under crates/*/src, which the walk can agree \
+         with while both are broken"
     );
     let sources: String = files.concat();
+    // A GENUINE lower bound, kept alongside the exact file-count equality above.
+    // No exact byte total exists that survives the next commit, so this cannot see
+    // the concatenation losing a large file's CONTENTS while the file count stays
+    // right -- a failure the count equality above also cannot see. That gap is real
+    // and unguarded; it is written down rather than implied.
     assert!(
         sources.len() > 100_000,
         "src corpus is only {} bytes — the walk is broken",
@@ -1070,248 +1488,649 @@ fn no_tracked_file_contains_a_conflict_marker() {
 }
 
 // ---------------------------------------------------------------------------
-// U-504 AC-8: the spec pin coupling between the two workflows.
+// U-504 AC-8, re-pointed by U-536: the couplings around the spec pin.
 //
-// `.github/workflows/mutants.yml` does not declare which acdp-spec commit to
-// check out. It DERIVES it, by grepping the 40-hex `ref:` out of
-// `.github/workflows/ci.yml` so the mutation run replays fixtures against the
-// same spec CI pins. That coupling is invisible from either file alone: nothing
-// in `ci.yml` says another workflow parses it, and restructuring `ci.yml`'s spec
-// step in a way that is perfectly valid YAML breaks the derivation silently.
+// Until U-536 the pin lived in `.github/workflows/ci.yml` and `mutants.yml`
+// DERIVED it, by grepping the 40-hex `ref:` out of that file. This test guarded
+// that derivation. The derivation is gone: `.spec-pin` is now the single
+// declarative source and BOTH workflows read it through
+// `.github/actions/read-spec-pin`, so the invariants change shape -- from "the
+// grep still finds it" to "nobody restates the pin, and everybody reads the file".
 //
-// **Rule 48, exactly: a doc artifact no command can check is a defect while it
-// is still correct.** The coupling is correct today and nothing verifies it.
+// What has NOT changed is why this is a test and not a comment. **Rule 48,
+// exactly: a doc artifact no command can check is a defect while it is still
+// correct.** Four couplings here are invisible from any single file:
 //
-// The verification gap is what makes it worth a test rather than a comment.
-// `mutants.yml` is `schedule:` + `workflow_dispatch` with NO `pull_request`
-// trigger -- deliberately, a 23-minute mutation run has no business gating a
-// PR -- so a PR that restructures `ci.yml` cannot turn this red. The breakage
-// would surface on the following Monday's cron, detached from the change that
-// caused it, in a job whose failure reads as "the ratchet is broken" rather than
-// "someone moved a line in a different file". This test moves the signal back to
-// the PR that causes it.
+//   * `mutants.yml` and `ci.yml` must resolve the SAME spec revision. They are
+//     two files with no reference to each other; only the pin file joins them.
+//   * `bump-spec.yml` hands acdp-ci's reusable bumper exactly ONE filename. A
+//     pin restated anywhere else is never bumped -- it goes stale silently and
+//     the two jobs start measuring different spec versions.
+//   * That bumper is a bot IN ANOTHER REPOSITORY, so `.spec-pin`'s line order and
+//     anchor count are an external contract a comment cannot reach.
+//   * `tests/conformance.rs` refuses a spec tree that is not at the pin, reading
+//     the same file.
 //
-// Written as a pure function over both files' TEXT rather than as assertions
-// against the real paths, for two reasons. It is falsifiable -- each invariant
-// is shown to fail against a synthetic restructuring below, which is the whole
-// point -- and `.github/workflows/ci.yml` is outside this unit's path grant, so
-// falsifying by editing the real file was never an option.
+// The verification gap is what makes it worth a test. `mutants.yml` is
+// `schedule:` + `workflow_dispatch` with NO `pull_request` trigger -- deliberately,
+// a 23-minute mutation run has no business gating a PR -- so a PR that breaks its
+// wiring cannot turn it red. The breakage would surface on the following Monday's
+// cron, detached from the change that caused it, in a job whose failure reads as
+// "the ratchet is broken" rather than "someone edited a different file". This test
+// moves the signal back to the PR that causes it.
+//
+// Written as a pure function over the four files' TEXT rather than as assertions
+// against the real paths, for two reasons. It is falsifiable -- every invariant is
+// shown to fail against a synthetic restructuring below, which is the whole point
+// -- and a synthetic input can be made to break in one specific way, which the
+// real file cannot without breaking CI for everyone.
 // ---------------------------------------------------------------------------
 
-/// The four invariants `mutants.yml`'s `pin` step depends on. Returns one string
-/// per violation; empty means the derivation is sound.
-fn spec_pin_violations(ci_yml: &str, mutants_yml: &str) -> Vec<String> {
-    let mut out = Vec::new();
+/// A 40-hex run ANYWHERE in the line. This is what acdp-ci's bumper matches, so
+/// it is what the line-order invariant has to reason about: a 64-hex digest
+/// contains a 40-hex run, and the bumper would happily return its first 40
+/// characters as the current pin.
+fn has_hex40_run(line: &str) -> bool {
+    let b = line.as_bytes();
+    let is_hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c);
+    let mut run = 0usize;
+    for &c in b {
+        if is_hex(c) {
+            run += 1;
+            if run >= 40 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
 
-    // A `uses:` LINE, not a mention. `ci.yml` discusses `checkout-spec@` in
-    // three comments around the step itself; a substring search matches those
-    // and reports 4 usages where there is 1. That is not hypothetical -- it is
-    // the bug this extraction shipped with in U-502 and the reason the real
-    // `pin` step anchors on `uses:` too.
-    let uses_lines: Vec<usize> = ci_yml
-        .lines()
+/// Lines in `text` that DECLARE `key` with a value satisfying `pred`, 1-indexed.
+///
+/// A whole-line declaration at column 0, not an occurrence of a value anywhere.
+/// The distinction is load-bearing rather than pedantic: the pinned sha also
+/// appears in `docs/ENGINEERING-LOG.md` as narrative history, so any "appears
+/// exactly once in the repository" check over a value is a false positive waiting
+/// for someone to write a sentence. What every consumer parses -- the shell in
+/// `read-spec-pin`, the bumper's awk, `conformance.rs` -- is the LINE SHAPE.
+fn pin_declarations(text: &str, key: &str, pred: impl Fn(&str) -> bool) -> Vec<usize> {
+    text.lines()
         .enumerate()
         .filter(|(_, l)| {
-            let t = l.trim_start();
-            t.starts_with("uses:") || t.starts_with("- uses:")
+            l.strip_prefix(key)
+                .and_then(|r| r.strip_prefix(": "))
+                .map(&pred)
+                .unwrap_or(false)
         })
-        .filter(|(_, l)| l.contains("checkout-spec@"))
         .map(|(i, _)| i + 1)
-        .collect();
-    if uses_lines.len() != 1 {
-        out.push(format!(
-            "invariant 1: ci.yml has {} `uses: …checkout-spec@` lines {:?}, expected \
-             exactly 1. The pin step refuses to guess which spec checkout the ref \
-             belongs to.",
-            uses_lines.len(),
-            uses_lines
-        ));
-    }
+        .collect()
+}
 
-    // Exactly one 40-hex `ref:`. A second one makes "the pin" ambiguous.
-    let is_hex40_ref = |l: &str| -> bool {
-        l.trim_start()
-            .strip_prefix("ref:")
-            .map(|r| {
-                let r = r.trim();
-                r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit())
-            })
-            .unwrap_or(false)
+fn is_sha40(v: &str) -> bool {
+    v.len() == 40
+        && v.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
+fn is_owner_repo(v: &str) -> bool {
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
     };
-    let ref_lines: Vec<usize> = ci_yml
-        .lines()
+    let mut parts = v.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(o), Some(r), None) => ok(o) && ok(r),
+        _ => false,
+    }
+}
+
+/// `uses:` LINES, not mentions, whose value contains `needle`.
+///
+/// The line anchor is not decoration. `ci.yml` discusses `checkout-spec@` in
+/// three comments around the step itself; a substring search over the file
+/// matches those and reports 4 usages where there is 1. That is not hypothetical
+/// -- it is the bug the U-502 extraction shipped with.
+fn uses_lines(text: &str, needle: &str) -> Vec<usize> {
+    text.lines()
         .enumerate()
-        .filter(|(_, l)| is_hex40_ref(l))
+        .filter(|(_, l)| {
+            let t = l.trim_start().trim_start_matches("- ");
+            t.starts_with("uses:") && t.contains(needle)
+        })
         .map(|(i, _)| i + 1)
-        .collect();
-    if ref_lines.len() != 1 {
+        .collect()
+}
+
+/// A `ref:` line carrying a 40-hex literal, at any indentation. An action `uses:`
+/// pin is also a 40-hex sha and must NOT count: a guard that banned every 40-hex
+/// string would fail against the correct file, which is how a guard gets deleted.
+fn literal_ref_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            l.trim_start()
+                .strip_prefix("ref:")
+                .map(|r| is_sha40(r.trim()))
+                .unwrap_or(false)
+        })
+        .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+        .collect()
+}
+
+/// Every invariant the `.spec-pin` wiring depends on. One string per violation;
+/// empty means the single-source-of-truth shape is intact.
+fn spec_pin_violations(
+    spec_pin: &str,
+    ci_yml: &str,
+    mutants_yml: &str,
+    bump_yml: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // (1) Exactly one `ref:` declaration. Zero means no consumer can find the
+    //     pin; two means they need not all choose the same value, and two jobs
+    //     resolving different revisions is the exact failure this file exists to
+    //     prevent.
+    let refs = pin_declarations(spec_pin, "ref", is_sha40);
+    if refs.len() != 1 {
         out.push(format!(
-            "invariant 2: ci.yml has {} 40-hex `ref:` lines {:?}, expected exactly 1. \
-             The spec pin is derived from that line; zero means the derivation finds \
-             nothing, more than one means it picks arbitrarily.",
-            ref_lines.len(),
-            ref_lines
+            "invariant 1: .spec-pin has {} `ref: <40 hex>` declarations {:?}, expected \
+             exactly 1. Zero and two are different bugs with the same cure: one line.",
+            refs.len(),
+            refs
         ));
     }
 
-    // The ref must belong to that usage, i.e. sit below it. A `ref:` above the
-    // `uses:` is valid YAML for some OTHER step and would pin the spec checkout
-    // to an unrelated commit.
-    if let (Some(&u), Some(&r)) = (uses_lines.first(), ref_lines.first()) {
-        if r < u {
+    // (2) Exactly one `repository:` declaration -- and this one is an EXTERNAL
+    //     contract. acdp-ci's bumper locates the pin by finding a line naming the
+    //     spec repository and REFUSES TO BUMP AT ALL when it counts more than one,
+    //     rather than rewrite one and leave the rest stale. A second such line
+    //     therefore does not corrupt the pin; it silently stops the pin ever
+    //     moving again, which is worse because nothing goes red.
+    let repos = pin_declarations(spec_pin, "repository", is_owner_repo);
+    if repos.len() != 1 {
+        out.push(format!(
+            "invariant 2: .spec-pin has {} `repository: <owner>/<name>` declarations \
+             {:?}, expected exactly 1. acdp-ci's bump-spec-ref counts these as pin \
+             anchors and declines to bump a file with two, so the pin would freeze \
+             silently rather than fail loudly.",
+            repos.len(),
+            repos
+        ));
+    }
+
+    // (3) `ref:` must be the FIRST line carrying a 40-hex run. The bumper takes
+    //     the first 40-hex value on a `ref:`-ish line below its anchor, and
+    //     `conformance-digest:`'s 64 hex characters CONTAIN a 40-hex run -- so
+    //     with the two lines swapped it reads the digest's first 40 characters as
+    //     the current pin. Falsified against the bumper's own awk, not theorised.
+    let first_hex40 = spec_pin.lines().position(has_hex40_run).map(|i| i + 1);
+    match (first_hex40, refs.first()) {
+        (Some(first), Some(&r)) if first != r => out.push(format!(
+            "invariant 3: .spec-pin's first 40-hex run is on line {first}, but the \
+             `ref:` declaration is on line {r}. The bumper reads the first such value \
+             below its anchor; a 64-hex digest above `ref:` is a 40-hex run, so it \
+             would adopt the digest's first 40 characters as the pin."
+        )),
+        _ => {}
+    }
+
+    // (4) EXACTLY ONE BUMPER ANCHOR, counted THE WAY THE BUMPER COUNTS -- which is
+    //     not the way invariant 2 counts, and that difference is why both exist.
+    //     acdp-ci's bump-spec-ref runs, over every line of the file:
+    //
+    //       index($0, "repository: " SPEC) || index($0, "acdp-ci/actions/checkout-spec@")
+    //
+    //     A SUBSTRING search, anywhere in the line, COMMENTS INCLUDED. So a comment
+    //     that SPELLS either anchor form becomes a second anchor, and the bumper then
+    //     refuses to bump the file at all rather than rewrite one and leave the rest
+    //     stale: the pin freezes silently instead of failing loudly. That is why
+    //     `.spec-pin`'s comments describe the two forms instead of quoting them, and
+    //     this is the assertion that keeps that true -- a prose rule about prose,
+    //     which is exactly the kind nothing else in the build can check.
+    //
+    //     Invariant 2's column-0 declaration count CANNOT see a comment. Found by
+    //     falsification: the spelled-anchor case below was written against invariant
+    //     2, and invariant 2 stayed silent -- while citing this external contract in
+    //     its own failure message.
+    if let Some(&r) = repos.first() {
+        let spec = spec_pin
+            .lines()
+            .nth(r - 1)
+            .and_then(|l| l.strip_prefix("repository: "))
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let needle = format!("repository: {spec}");
+        let anchors: Vec<usize> = spec_pin
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(&needle) || l.contains("acdp-ci/actions/checkout-spec@"))
+            .map(|(i, _)| i + 1)
+            .collect();
+        if anchors.len() != 1 {
             out.push(format!(
-                "invariant 3: ci.yml's 40-hex `ref:` is at line {r}, ABOVE the \
-                 checkout-spec `uses:` at line {u}. A ref above the usage belongs to \
-                 a different step, so the derived pin would be some other action's \
-                 commit."
+                "invariant 4: .spec-pin has {} lines matching the BUMPER's anchor \
+                 patterns {:?}, expected exactly 1. It counts by substring over every \
+                 line -- `repository: {spec}` or `acdp-ci/actions/checkout-spec@`, \
+                 comments included -- and declines to bump a file with two anchors, so \
+                 the pin would stop moving with nothing going red. Describe an anchor \
+                 form in prose; never spell it.",
+                anchors.len(),
+                anchors
             ));
         }
     }
 
-    // mutants.yml must DERIVE the pin, never restate it. Note the narrowness:
-    // `uses:` action pins in mutants.yml are legitimately 40-hex SHAs (four of
-    // them) and must not be flagged. Only a literal on a `ref:` line is the
-    // defect -- that is the value which must stay an expression.
-    let pasted: Vec<String> = mutants_yml
+    // (5)-(9) apply to both workflows. The pair is the point: they are two files
+    // with no reference to each other that must resolve the SAME revision.
+    for (name, text) in [("ci.yml", ci_yml), ("mutants.yml", mutants_yml)] {
+        // (5) The pin is not restated. This is the repair that DEFEATS the whole
+        //     design: pasting a literal makes a wiring error go away locally and
+        //     decouples that job's spec from every other consumer. `bump-spec.yml`
+        //     passes the bumper exactly one filename, so a pasted copy is never
+        //     rewritten -- it goes stale in silence.
+        let pasted = literal_ref_lines(text);
+        if !pasted.is_empty() {
+            out.push(format!(
+                "invariant 5: {name} restates the spec pin literally instead of reading \
+                 .spec-pin: {pasted:?}. Only ONE file is bumped, so a second copy goes \
+                 stale silently and this job starts measuring a different spec revision \
+                 from the others. It must stay an expression."
+            ));
+        }
+
+        // (6) It reads the pin through the shared action -- exactly once. Two
+        //     reader steps would mean two `id:`s and no way for this test to know
+        //     which output the checkout consumes.
+        let readers = uses_lines(text, "./.github/actions/read-spec-pin");
+        if readers.len() != 1 {
+            out.push(format!(
+                "invariant 6: {name} has {} `uses: ./.github/actions/read-spec-pin` \
+                 lines {:?}, expected exactly 1. Zero means this job no longer reads the \
+                 single source and its spec revision came from somewhere unaudited.",
+                readers.len(),
+                readers
+            ));
+        }
+
+        // (7) Exactly one spec checkout, so "the pin" is unambiguous in this file.
+        let checkouts = uses_lines(text, "checkout-spec@");
+        if checkouts.len() != 1 {
+            out.push(format!(
+                "invariant 7: {name} has {} `uses: …checkout-spec@` lines {:?}, expected \
+                 exactly 1. A second spec checkout can be wired to a different ref, which \
+                 is the ambiguity the single source removes.",
+                checkouts.len(),
+                checkouts
+            ));
+        }
+
+        // (8) The reader must come BEFORE the checkout that consumes its outputs.
+        //     A step cannot reference a later step's outputs: the expression
+        //     resolves to the empty string and `checkout-spec` silently takes its
+        //     own default branch -- a green job measuring the wrong tree. That is
+        //     precisely the class U-536 exists to close, so it gets an assertion
+        //     rather than a convention.
+        if let (Some(&reader), Some(&checkout)) = (readers.first(), checkouts.first()) {
+            if reader > checkout {
+                out.push(format!(
+                    "invariant 8: {name} reads the pin at line {reader}, BELOW the spec \
+                     checkout at line {checkout}. A step cannot consume a later step's \
+                     outputs -- the expression resolves to empty and the checkout falls \
+                     back to its default branch, green and wrong."
+                ));
+            }
+        }
+
+        // (9) `repository:` is passed through from the pin rather than left to
+        //     `checkout-spec`'s own default, which it currently matches. If the two
+        //     ever diverged, the bumper would resolve a sha from the repository
+        //     `.spec-pin` names while this job checked out a different one -- a
+        //     silent wrong-tree pass, the failure mode this unit exists to close,
+        //     reappearing inside the fix for it.
+        let passthrough = text
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                t.starts_with("repository:") && t.contains(".outputs.repository")
+            })
+            .count();
+        if passthrough != 1 {
+            out.push(format!(
+                "invariant 9: {name} has {passthrough} `repository: <…outputs.repository>` \
+                 lines, expected exactly 1. Relying on checkout-spec's default lets the \
+                 bumper and the checkout disagree about WHICH repository the sha belongs \
+                 to, and a sha from the wrong repository either fails oddly or resolves."
+            ));
+        }
+    }
+
+    // (10) The bumper is pointed at the pin file, and at exactly one file. Pointing
+    //     it back at a workflow is not a no-op: `ci.yml` no longer has a 40-hex
+    //     `ref:` below a spec-repository anchor, so the bumper's matcher would walk
+    //     on and read an unrelated action pin -- `dtolnay/rust-toolchain`'s -- as
+    //     the current spec ref. Measured: the rewrite then lands nowhere and the
+    //     bumper fails its own post-rewrite assertion, so it is loud rather than
+    //     destructive. Still wrong, and cheap to assert.
+    let bump_files: Vec<&str> = bump_yml
         .lines()
-        .enumerate()
-        .filter(|(_, l)| is_hex40_ref(l))
-        .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+        .filter_map(|l| l.trim_start().strip_prefix("file: "))
+        .map(str::trim)
         .collect();
-    if !pasted.is_empty() {
+    if bump_files != [".spec-pin"] {
         out.push(format!(
-            "invariant 4: mutants.yml pins the spec ref literally instead of deriving \
-             it from ci.yml: {pasted:?}. This is the repair that DEFEATS the guard -- \
-             pasting the ref makes the pin step's error go away and silently decouples \
-             the mutation run's spec from CI's. It must stay \
-             `ref: ${{{{ steps.pin.outputs.ref }}}}`."
+            "invariant 10: bump-spec.yml passes {bump_files:?} to acdp-ci's bump-spec-ref, \
+             expected exactly [\".spec-pin\"]. It bumps ONE file; pointing it at a \
+             workflow again would have it read an unrelated action pin as the spec ref."
         ));
     }
 
     out
 }
 
-/// The real files must satisfy all four.
+/// The real four files must satisfy all ten.
 #[test]
-fn the_mutants_workflow_spec_pin_stays_derivable_from_ci() {
+fn the_spec_pin_stays_the_single_source_of_truth() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
         .expect("crates/<crate>/ is two levels below the workspace root")
         .to_path_buf();
-    let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
-    let mutants = std::fs::read_to_string(root.join(".github/workflows/mutants.yml"))
-        .expect("read mutants.yml");
+    let read =
+        |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("read {p}: {e}"));
 
-    let violations = spec_pin_violations(&ci, &mutants);
+    let violations = spec_pin_violations(
+        &read(".spec-pin"),
+        &read(".github/workflows/ci.yml"),
+        &read(".github/workflows/mutants.yml"),
+        &read(".github/workflows/bump-spec.yml"),
+    );
     assert!(
         violations.is_empty(),
-        "the mutation workflow derives its acdp-spec pin from ci.yml and that \
-         derivation is now broken:\n  {}\n\nmutants.yml is schedule-only, so this \
-         would otherwise have surfaced on the next Monday cron rather than on the \
-         change that caused it.",
+        "the .spec-pin wiring is broken:\n  {}\n\nEvery consumer -- both workflows, \
+         the spec bumper in another repository, and the conformance harness -- reads \
+         that one file, and none of those couplings is visible from any single file. \
+         mutants.yml is schedule-only, so without this test the damage would surface \
+         on the next Monday cron rather than on the change that caused it.",
         violations.join("\n  ")
     );
 }
 
-/// Each invariant must FAIL on its own restructuring — otherwise the test above
-/// is four assertions that have never been shown to do anything.
+/// Every invariant must FAIL on its own restructuring — otherwise the test above
+/// is ten assertions that have never been shown to do anything, and an earlier
+/// assertion masking a later one would be invisible.
 ///
 /// The inputs are deliberately VALID YAML that a reasonable person would write.
-/// None of these is a typo; each is a plausible edit that happens to break a
-/// coupling its author could not see.
+/// None is a typo; each is a plausible edit that happens to break a coupling its
+/// author could not see. Where an invariant applies to both workflows, BOTH are
+/// falsified: the loop is shared code, but the inputs are not, and "the other file
+/// is the same shape" is a hypothesis about a file nobody re-read.
 #[test]
 fn each_spec_pin_invariant_is_individually_falsified() {
+    const GOOD_PIN: &str = "\
+# A comment that DESCRIBES the anchor forms without spelling them.
+repository: org/spec
+ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
+conformance-digest: rfc6962-sha256:03644a90cc643fd5bd5fe3c762389c16def704a874f94716619f7a949b965f85
+";
     const GOOD_CI: &str = "\
 jobs:
   conformance:
     steps:
       # checkout-spec@ is mentioned here in a comment on purpose.
       - uses: actions/checkout@1111111111111111111111111111111111111111
+      - name: Read the pinned spec revision
+        id: pin
+        uses: ./.github/actions/read-spec-pin
       - uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
         with:
-          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
+          repository: ${{ steps.pin.outputs.repository }}
+          ref: ${{ steps.pin.outputs.ref }}
 ";
     const GOOD_MUTANTS: &str = "\
 jobs:
   mutants:
     steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+      - name: Read the pinned spec revision
+        id: pin
+        uses: ./.github/actions/read-spec-pin
       - uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
         with:
+          repository: ${{ steps.pin.outputs.repository }}
           ref: ${{ steps.pin.outputs.ref }}
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+";
+    const GOOD_BUMP: &str = "\
+jobs:
+  bump:
+    uses: org/acdp-ci/.github/workflows/bump-spec-ref.yml@4444444444444444444444444444444444444444
+    with:
+      file: .spec-pin
 ";
 
-    // Control: the good pair must pass, or every assertion below is vacuous.
+    let good =
+        |pin: &str, ci: &str, mut_: &str, bump: &str| spec_pin_violations(pin, ci, mut_, bump);
+
+    // Control: the good quartet must pass, or every assertion below is vacuous.
     assert!(
-        spec_pin_violations(GOOD_CI, GOOD_MUTANTS).is_empty(),
+        good(GOOD_PIN, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP).is_empty(),
         "the control fixture must be clean: {:?}",
-        spec_pin_violations(GOOD_CI, GOOD_MUTANTS)
+        good(GOOD_PIN, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP)
     );
 
-    // (1) A second spec checkout — e.g. a matrix job gaining its own.
-    let two_uses = GOOD_CI.replace(
-        "      - uses: actions/checkout@1111111111111111111111111111111111111111",
-        "      - uses: org/acdp-ci/actions/checkout-spec@3333333333333333333333333333333333333333",
-    );
-    let v = spec_pin_violations(&two_uses, GOOD_MUTANTS);
+    let fires = |v: &[String], n: &str| v.iter().any(|s| s.starts_with(n));
+
+    // (1) A second pin, e.g. someone adding a "previous" line for reference.
+    let two_refs = format!("{GOOD_PIN}ref: 0000000000000000000000000000000000000000\n");
+    let v = good(&two_refs, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
+    assert!(fires(&v, "invariant 1"), "two refs must trip 1, got {v:?}");
+    let no_ref = GOOD_PIN.replace("ref: d1f06d0", "reff: d1f06d0");
+    let v = good(&no_ref, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
+    assert!(fires(&v, "invariant 1"), "no ref must trip 1, got {v:?}");
+
+    // (2) The declaration renamed -- the line shape `read-spec-pin` parses, gone.
+    let no_repo = GOOD_PIN.replace("repository: org/spec", "spec-repository: org/spec");
+    let v = good(&no_repo, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
     assert!(
-        v.iter().any(|s| s.starts_with("invariant 1")),
-        "two checkout-spec usages must trip invariant 1, got {v:?}"
+        fires(&v, "invariant 2"),
+        "no repository declaration must trip 2, got {v:?}"
     );
 
-    // (2) The pin moved to a variable — the ref line stops being a literal.
-    let no_ref = GOOD_CI.replace(
-        "          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7",
-        "          ref: ${{ env.SPEC_REF }}",
+    // (4) A comment that SPELLS the anchor form instead of describing it -- the
+    //     single most likely way this file acquires a second anchor, and it makes
+    //     the pin UNBUMPABLE rather than wrong, which is worse: nothing goes red.
+    //     This case is why invariant 4 exists. It was written against invariant 2,
+    //     it failed, and the failure was CORRECT -- a column-0 declaration count
+    //     cannot see a comment, so the narrow check could not enforce the external
+    //     contract its own message cited.
+    let spelled = GOOD_PIN.replace(
+        "# A comment that DESCRIBES the anchor forms without spelling them.",
+        "# e.g. repository: org/spec",
     );
-    let v = spec_pin_violations(&no_ref, GOOD_MUTANTS);
+    let v = good(&spelled, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
     assert!(
-        v.iter().any(|s| s.starts_with("invariant 2")),
-        "no 40-hex ref must trip invariant 2, got {v:?}"
+        fires(&v, "invariant 4"),
+        "a spelled repository anchor in a comment must trip 4, got {v:?}"
+    );
+    assert!(
+        !fires(&v, "invariant 2"),
+        "and invariant 2 must stay SILENT on it -- if it fired too, the two are not \
+         measuring different things and one is redundant: {v:?}"
     );
 
-    // (3) The step reordered so `with:`/`ref:` precedes `uses:` — valid YAML,
-    //     since mapping key order is not significant.
-    const REORDERED_CI: &str = "\
+    // The other anchor form, and the one easier to write by accident: naming the
+    // composite action in a comment. `ci.yml` mentions it three times, which is
+    // precisely why the pin file must not mention it once.
+    let spelled_action = GOOD_PIN.replace(
+        "# A comment that DESCRIBES the anchor forms without spelling them.",
+        "# the acdp-ci/actions/checkout-spec@ step in ci.yml consumes this",
+    );
+    let v = good(&spelled_action, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
+    assert!(
+        fires(&v, "invariant 4"),
+        "a spelled checkout-spec anchor in a comment must trip 4, got {v:?}"
+    );
+
+    // (3) The digest moved above the ref -- a tidy-looking reordering.
+    const SWAPPED_PIN: &str = "\
+repository: org/spec
+conformance-digest: rfc6962-sha256:03644a90cc643fd5bd5fe3c762389c16def704a874f94716619f7a949b965f85
+ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
+";
+    let v = good(SWAPPED_PIN, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
+    assert!(
+        fires(&v, "invariant 3"),
+        "digest above ref must trip 3, got {v:?}"
+    );
+
+    // (5) The repair that defeats the design, in EACH workflow independently.
+    for (which, ci, mu) in [
+        (
+            "ci.yml",
+            GOOD_CI.replace(
+                "ref: ${{ steps.pin.outputs.ref }}",
+                "ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7",
+            ),
+            GOOD_MUTANTS.to_string(),
+        ),
+        (
+            "mutants.yml",
+            GOOD_CI.to_string(),
+            GOOD_MUTANTS.replace(
+                "ref: ${{ steps.pin.outputs.ref }}",
+                "ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7",
+            ),
+        ),
+    ] {
+        let v = good(GOOD_PIN, &ci, &mu, GOOD_BUMP);
+        assert!(
+            fires(&v, "invariant 5"),
+            "a pasted literal ref in {which} must trip 5, got {v:?}"
+        );
+        assert!(
+            v.iter().any(|s| s.contains(which)),
+            "invariant 5 must name {which}, got {v:?}"
+        );
+    }
+
+    // And its narrowness: `uses:` action pins ARE 40-hex shas -- GOOD_MUTANTS
+    // carries one -- and must never be mistaken for a pasted spec pin. A guard
+    // that banned every 40-hex string would fail against the correct file, which
+    // is how a guard gets deleted rather than fixed.
+    assert!(
+        !fires(
+            &good(GOOD_PIN, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP),
+            "invariant 5"
+        ),
+        "action `uses:` shas must not read as a pasted pin"
+    );
+
+    // (6) The reader step dropped, in each workflow.
+    for (which, ci, mu) in [
+        (
+            "ci.yml",
+            GOOD_CI.replace("        uses: ./.github/actions/read-spec-pin\n", ""),
+            GOOD_MUTANTS.to_string(),
+        ),
+        (
+            "mutants.yml",
+            GOOD_CI.to_string(),
+            GOOD_MUTANTS.replace("        uses: ./.github/actions/read-spec-pin\n", ""),
+        ),
+    ] {
+        let v = good(GOOD_PIN, &ci, &mu, GOOD_BUMP);
+        assert!(
+            fires(&v, "invariant 6"),
+            "a missing reader in {which} must trip 6, got {v:?}"
+        );
+    }
+
+    // (7) A second spec checkout, in each workflow.
+    for (which, ci, mu) in [
+        ("ci.yml", format!("{GOOD_CI}      - uses: org/acdp-ci/actions/checkout-spec@3333333333333333333333333333333333333333\n"), GOOD_MUTANTS.to_string()),
+        ("mutants.yml", GOOD_CI.to_string(), format!("{GOOD_MUTANTS}      - uses: org/acdp-ci/actions/checkout-spec@3333333333333333333333333333333333333333\n")),
+    ] {
+        let v = good(GOOD_PIN, &ci, &mu, GOOD_BUMP);
+        assert!(
+            fires(&v, "invariant 7"),
+            "two spec checkouts in {which} must trip 7, got {v:?}"
+        );
+    }
+
+    // (8) The reader moved below the checkout that consumes it -- valid YAML,
+    //     green job, wrong tree. Built by reordering rather than by editing text,
+    //     so the mutation cannot accidentally also break invariant 6.
+    const READER_LAST_CI: &str = "\
 jobs:
   conformance:
     steps:
-      - with:
-          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
-        uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
-";
-    let v = spec_pin_violations(REORDERED_CI, GOOD_MUTANTS);
-    assert!(
-        v.iter().any(|s| s.starts_with("invariant 3")),
-        "a ref above the usage must trip invariant 3, got {v:?}"
-    );
-
-    // (4) The repair that defeats the guard: paste the ref into mutants.yml so
-    //     the pin step stops complaining.
-    let pasted = GOOD_MUTANTS.replace(
-        "          ref: ${{ steps.pin.outputs.ref }}",
-        "          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7",
-    );
-    let v = spec_pin_violations(GOOD_CI, &pasted);
-    assert!(
-        v.iter().any(|s| s.starts_with("invariant 4")),
-        "a literal ref in mutants.yml must trip invariant 4, got {v:?}"
-    );
-
-    // And the narrowness of (4): mutants.yml's own ACTION pins are 40-hex SHAs
-    // and must NOT be flagged. A guard that banned every 40-hex string would
-    // fail against the correct file, which is how a guard gets deleted.
-    let action_pins_only = "\
-    steps:
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
         with:
+          repository: ${{ steps.pin.outputs.repository }}
           ref: ${{ steps.pin.outputs.ref }}
+      - name: Read the pinned spec revision
+        id: pin
+        uses: ./.github/actions/read-spec-pin
 ";
+    let v = good(GOOD_PIN, READER_LAST_CI, GOOD_MUTANTS, GOOD_BUMP);
     assert!(
-        !spec_pin_violations(GOOD_CI, action_pins_only)
-            .iter()
-            .any(|s| s.starts_with("invariant 4")),
-        "action `uses:` SHAs must not be mistaken for a pasted spec pin"
+        fires(&v, "invariant 8"),
+        "a reader below the checkout must trip 8, got {v:?}"
+    );
+    // ...and ONLY 7, which is what proves the ordering assertion is doing the
+    // work rather than inheriting a failure from a broken-in-two-ways fixture.
+    assert!(
+        !fires(&v, "invariant 6") && !fires(&v, "invariant 7"),
+        "the reordering fixture must break ONLY the ordering invariant, got {v:?}"
+    );
+
+    // (9) `repository:` left to checkout-spec's default, in each workflow.
+    for (which, ci, mu) in [
+        (
+            "ci.yml",
+            GOOD_CI.replace(
+                "          repository: ${{ steps.pin.outputs.repository }}\n",
+                "",
+            ),
+            GOOD_MUTANTS.to_string(),
+        ),
+        (
+            "mutants.yml",
+            GOOD_CI.to_string(),
+            GOOD_MUTANTS.replace(
+                "          repository: ${{ steps.pin.outputs.repository }}\n",
+                "",
+            ),
+        ),
+    ] {
+        let v = good(GOOD_PIN, &ci, &mu, GOOD_BUMP);
+        assert!(
+            fires(&v, "invariant 9"),
+            "a dropped repository pass-through in {which} must trip 9, got {v:?}"
+        );
+    }
+
+    // (10) The bumper pointed back at a workflow -- the regression U-536 undoes.
+    let bump_ci = GOOD_BUMP.replace("file: .spec-pin", "file: .github/workflows/ci.yml");
+    let v = good(GOOD_PIN, GOOD_CI, GOOD_MUTANTS, &bump_ci);
+    assert!(
+        fires(&v, "invariant 10"),
+        "bumping a workflow must trip 10, got {v:?}"
+    );
+    // Two `file:` inputs is the other shape: the bumper takes one, so the second
+    // is a copy nobody rewrites.
+    let bump_two = GOOD_BUMP.replace(
+        "      file: .spec-pin",
+        "      file: .spec-pin\n      file: .spec-pin.old",
+    );
+    let v = good(GOOD_PIN, GOOD_CI, GOOD_MUTANTS, &bump_two);
+    assert!(
+        fires(&v, "invariant 10"),
+        "two bump targets must trip 10, got {v:?}"
     );
 }

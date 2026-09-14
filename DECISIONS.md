@@ -3447,3 +3447,170 @@ fired. **Worth copying: an entry that specifies how its own resolution will be d
 - **Did not repair out-of-grant defects.** `crates/acdp-registry-core/src/handlers/context.rs:1262-1277`
   is stale — it cites a deleted test as machine-checking a residue and still calls landed work a
   requirement. Reported per U-505's precedent, not fixed.
+---
+
+## U-535 — the §4.5 parity seam anchors on a hand-transcribed spec table
+
+**Decision:** add `EXPECTED_BY_SPEC` to `crates/acdp-registry-store/src/parity.rs` — a literal,
+per-requester table of expected `ctx_id`s transcribed by hand from RFC-ACDP-0008 §4.5 — and compare
+**both** the backend's SQL predicate and the Rust `retrieve_visible` rule against it. Correct the
+harness's doc comments to claim only what is actually compared.
+
+**What was wrong, and it is worse than a weak test.** The harness documented a "three-way seam"
+(SQLite / Postgres / Rust default). Both of its differentials in fact bottomed out in one expression:
+the trait default body *is* `retrieve_visible` (`acdp-registry-store/src/lib.rs`), and the N-call
+reference `visible_by_n_calls` calls `retrieve_visible` too. Three comparisons, one anchor.
+
+The consequence is not merely lost sensitivity. If `retrieve_visible` were wrong, the default would
+agree with the reference perfectly, that leg would stay **green**, and the only implementation able to
+disagree would be the SQL — which was derived independently. **The suite would have named the SQL as
+the broken side.** A shared-centre differential *inverts the blame* onto the one implementation that
+is still correct.
+
+**Measured, not argued.** Breaking `retrieve_visible` (`None => false` → `None => true`) at baseline
+produced, from the old legs: `over-disclosure: []` plus four raw `ctx_id`s listed as
+"SEEN ONLY BY THE N-CALL REFERENCE (under-disclosure)" — i.e. the SQL accused of *under*-disclosing,
+when the SQL was right and the reference was over-disclosing. The new anchor named
+`the Rust retrieve_visible rule` 4 times and the SQL 0 times.
+
+**Why a literal table and not a computation.** Deriving the expectation from anything in this
+workspace reintroduces the defect. The table is written from the spec text, and failures report
+fixture role names rather than nonce-bearing `ctx_id`s.
+
+**Rejected: making the third leg independent by calling the upstream authority.** `can_retrieve`
+(`acdp-server` `src/registry/server.rs`) is `pub(crate)`; no test here can call it. That premise is
+**true** — it was verified against the resolved crate source, not assumed. So the upstream comparison
+is recorded as a standing **manual** check: hand-diffed against `acdp-server` **0.13.1** on
+**2026-09-13**, normalising only `caps.anonymous_public_reads` → `public_arm_open`, and the two match
+arms were **textually identical**. Uncompared, not covered — re-run when the pin moves.
+
+**Also closed:** `private_owner_only` and `restricted_with_audience` occurred exactly twice each
+(published, pushed into the id list) and were never asserted on. Both now carry named absolute
+outsider pins, and both are covered by the table across all six perspectives.
+
+**Status:** applied. Test-only; no wire, schema or behaviour change. `retrieve_visible` was **not**
+modified — changing what a visibility predicate decides is a security change and is out of scope for
+test hardening.
+
+## U-536 — the spec pin becomes one declarative source (lane-2, 2026-09-13)
+
+Three decisions, all reversible, all settled by Opus inside the unit; none reached the human.
+One supersedes a prior CONFIRMED decision in this file.
+
+### 1. The pin moves out of `ci.yml` into `.spec-pin` — SUPERSEDES decision 9 above (line 2535)
+
+- **Prior decision:** "`mutants.yml` derives the spec pin rather than duplicating it —
+  CONFIRMED (Opus)" (line 2535). A `pin` step in `mutants.yml` grepped the 40-hex `ref:` out of
+  `ci.yml` so the two jobs could not drift apart. That was the right call against the
+  alternative it was compared to — a pasted second copy, which the bumper would never rewrite.
+- **Why it is superseded, not reversed:** the derivation preserved the property but paid for it
+  with a coupling that is invisible from either file. Nothing in `ci.yml` said another workflow
+  parsed it, and a perfectly valid reindentation of its spec step broke the derivation
+  *silently* — surfacing on the following Monday's cron, because `mutants.yml` has no
+  `pull_request` trigger, in a job whose failure reads as "the ratchet is broken" rather than
+  "someone moved a line in a different file".
+- **Chosen implementation:** `.spec-pin` at the repo root as the single declarative source,
+  read by both workflows through one composite action (`.github/actions/read-spec-pin`), by the
+  bumper (`bump-spec.yml` now passes it `.spec-pin`), and by the conformance harness itself.
+- **Rejected — the same ~15 lines of shell pasted into both workflows, plus a test that the two
+  copies stay identical.** That test guards the *spelling*: it breaks on a reindentation and
+  passes on a semantic change. `spec_pin_violations` instead asserts the property — nobody
+  restates the pin, everybody uses the reader — which a human can check by inspection.
+- **Status:** applied (`e21375b`, `67a4cac`). Decision 9's property is preserved and now has ten
+  falsified invariants behind it instead of four.
+
+### 2. The pin verdict is decided by CONTENT, never by git
+
+- **Assumption:** a harness could identify "is this tree at the pin?" with `git rev-parse HEAD`.
+- **Why that is wrong, and not a preference:** the way to materialise an exact revision locally
+  is `git archive <sha> | tar x`, whose output carries no git metadata at all. The tree that
+  must PASS is therefore precisely the one `git rev-parse` cannot identify, so a git-based check
+  rejects the correct input. Git is used only to *name* a revision once found.
+- **Evidence:** one digest covers an archive extract, an independent second extract, and a real
+  `clone` + `checkout` of the pin (what `actions/checkout` produces) — all
+  `rfc6962-sha256:03644a90…`. Zero `.gitattributes` in the 253-file tree at the pin rules out a
+  filter making the two diverge; that grep was validated against a known positive first.
+- **Rejected — `std::collections::hash_map::DefaultHasher`:** `std` does not promise its output
+  is stable across releases, which is fatal for a value committed to a file. RFC 6962 via
+  `acdp::crypto::merkle` was already reachable, so this added no dependency.
+- **Status:** applied. Ten mutations, each RED at its own assertion with its own message.
+
+### 3. Adopting a revision now costs three edits, and that cost is accepted
+
+- **The cost:** `ref:`, `conformance-digest:` and `TOTAL_FIXTURES_AT_PIN` all change, and the
+  bumper rewrites only the first. A `bump spec` PR therefore arrives RED on `conformance`.
+- **Why accepted:** `TOTAL_FIXTURES_AT_PIN` already had that property, so such a PR was never
+  green on arrival; the PR is held for review and never auto-merged; and the failure message
+  itself carries the replacement digest, computed from the tree in front of it, so the fix is a
+  copy rather than a second command to look up. The alternative — deriving the
+  digest at test time from whatever tree is present — is the hole this unit exists to close.
+- **Rejected — auto-updating the digest in the bump PR.** That would make the bot's PR
+  self-certifying: it would rewrite the value that proves the tree is what the bot says it is.
+- **Status:** applied, stated in `.spec-pin` beside the value rather than in a footnote, with
+  the procedure in `CONTRIBUTING.md`.
+
+**Two references this unit made stale, both outside its path grant and neither edited here:**
+`ASSUMPTIONS.md:2872` (entry 9 describes the retired derivation) and `ASSUMPTIONS.md:315`
+(records that the bumper needs `permission-workflows: write` *because* the pin lives under
+`.github/workflows/` — that reasoning no longer holds; the pin is now a root-level data file, so
+the scope is no longer load-bearing for the spec bump, and the change moved in the safe
+direction). Reported to the leader rather than edited.
+
+---
+
+## U-539 — #216 item 4: the anti-vacuity guards are KEPT, and the config's prose is corrected
+
+**Two decisions, both reversible, both settled by Opus and recorded rather than escalated.**
+
+### 1. `.cargo/mutants.toml`'s prose vs its own configuration
+
+The file claimed a **74-mutant** scope and argued at length for excluding
+`handlers/context.rs`, while `examine_globs` has included that file since U-504 and
+`mutants.yml` pins `MUTANTS_EXPECTED_SCOPE: "213"`. The comment outlived the decision it
+explained.
+
+**Measured at `60b08b7`, command recorded in the file:** `cargo mutants --list` →
+**213** = `context.rs` 139 + `handlers/log.rs` 65 + `receipt.rs` 9. Workspace under
+`--no-config` → **1427** (prose said 1398).
+
+Two things worth keeping about how this was resolved. **The stale figure was not wrong when
+written** — removing the `context.rs` glob reproduces exactly **74**, so it described a
+configuration that no longer exists; each number now names the command that reproduces it.
+And **inheriting the arithmetic would have been wrong**: 74 + the file's own stale 134 gives
+208, not 213, because `context.rs` had grown 134 → 139 while nothing noticed.
+
+`mutants.yml` needed **no change**: its check is already `-ne` (a true equality, not a
+floor) and its pinned 213 equals the measurement.
+
+### 2. #216 item 4 — keep or retire the two substring guards
+
+**KEPT.** The question was whether they survive as a cheap first line or are retired as
+misleading now that a real oracle exists. Three measured reasons:
+
+* **Reach.** The oracle covers 213 of 1427 workspace mutants across three files. The guards
+  pin 41 functions spanning did resolution, signatures, canonicalisation, lineage,
+  capabilities, idempotency, rate limiting, anchors, witness, schema and status — mostly
+  outside that scope, where a gutted test body would be noticed by nothing.
+* **Cadence.** The oracle is a weekly cron, deliberately not a `pull_request` trigger. The
+  guards run every PR; retiring them widens the gutting-detection window to up to 7 days.
+* **`partial_direct_test_functions_are_present` is not only a substring guard.** It enforces
+  `PARTIAL_DIRECT ⊆ DEFERRED ∪ EXCUSED` and `PARTIAL_DIRECT ∩ COVERED = ∅` — table
+  invariants **no mutation oracle can ever check**, since the oracle mutates `src/`, not this
+  file's tables. Retiring the test to retire the substring check would have taken these too.
+
+**Measured in both directions rather than argued.** Over a 65-mutant run of `handlers/log.rs`
+against the pinned spec (40 caught / 1 missed / 0 timeout / 24 unviable, `end_time` present):
+
+| | substring guards | rest of the suite |
+|---|---|---|
+| failed on a `src/` mutation | **0** (across 41 runs where they provably ran and passed) | **17** distinct tests reddened |
+| failed on a gutted test body | **yes** — 3 falsifications, all red | no `src/` mutation can produce this |
+
+The 41 is exactly `40 caught + 1 missed`; the 24 unviable never compile, so no test runs.
+The guards' zero is therefore a result, not a test that never executed.
+
+**Revisit trigger, written down:** if the oracle's scope grows to cover the families these 41
+tests exercise, the reach argument expires and this should be re-taken.
+
+**Not claimed:** that the substring component is strong. All six of #216's defeats still
+reproduce; the `assert`-in-a-comment defeat was re-confirmed in this unit.
