@@ -12903,10 +12903,30 @@ async fn did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets() {
                 mixed_sets.push((h, ans));
             }
         }
+        // `mixed_sets.len() >= 2` conflated two different properties and was weaker
+        // than it looked in BOTH directions. It could not see the loop above dropping
+        // additional cases (5 declared, 1 captured, still `>= 2`), and had
+        // `additional_test_cases` been absent entirely it would have been the only
+        // thing failing -- so the two properties are now asserted separately, each
+        // against a value derived from the fixture itself rather than a threshold.
+        let declared_additional = fx["input"]["additional_test_cases"]
+            .as_array()
+            .map_or(0, |a| a.len());
         assert!(
-            mixed_sets.len() >= 2,
-            "did-ssrf-004 self-check: expected the primary dns_mock plus at least one \
-             additional_test_cases entry: {fx}"
+            declared_additional >= 1,
+            "did-ssrf-004 self-check: the fixture declares no `additional_test_cases`, \
+             so this test would exercise only the primary dns_mock and the mixed-answer \
+             property it exists for would go unmeasured: {fx}"
+        );
+        assert_eq!(
+            mixed_sets.len(),
+            1 + declared_additional,
+            "did-ssrf-004 self-check: the fixture declares 1 primary dns_mock plus {} \
+             additional case(s), but only {} set(s) were captured -- the loop above is \
+             dropping cases, and each dropped case is an SSRF answer set never checked \
+             against the policy: {fx}",
+            declared_additional,
+            mixed_sets.len()
         );
         for (host, answers) in &mixed_sets {
             let candidates: Vec<std::net::SocketAddr> = answers

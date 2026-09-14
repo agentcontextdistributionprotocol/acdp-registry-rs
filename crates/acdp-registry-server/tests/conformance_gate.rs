@@ -20,6 +20,101 @@ fn require_mode_implies_the_conformance_suite_is_compiled_in() {
     }
 }
 
+/// Wire codes the two producing functions in `acdp-registry-types/src/error.rs`
+/// can emit, extracted from TEXT so that the guard over them is falsifiable here.
+///
+/// Scans ONLY the two functions that produce wire codes, taking every string
+/// literal inside them. Scanning `=> "..."` alone was the first attempt and it was
+/// wrong: a long match pattern uses a block body, so
+/// `SchemaViolation | InvalidBody | MissingField => { "schema_violation" }` has no
+/// `=> "`. The count guard at the call site is what caught that.
+fn wire_codes_in(src: &str, origin: &str) -> Vec<String> {
+    let mut codes: Vec<String> = Vec::new();
+    for fn_name in ["fn wire_code", "fn acdp_wire_code"] {
+        let start = src
+            .find(fn_name)
+            .unwrap_or_else(|| panic!("{fn_name} not found in {origin}"));
+        // Function bodies in this file end at a closing brace in column 0.
+        let body_end = src[start..]
+            .find("\n}\n")
+            .map(|e| start + e)
+            .unwrap_or(src.len());
+        let body = &src[start..body_end];
+        let mut rest = body;
+        while let Some(q) = rest.find('"') {
+            rest = &rest[q + 1..];
+            let Some(end) = rest.find('"') else { break };
+            let c = &rest[..end];
+            rest = &rest[end + 1..];
+            if c.len() >= 4
+                && c.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_')
+                && !codes.iter().any(|e| e == c)
+            {
+                codes.push(c.to_string());
+            }
+        }
+    }
+    codes
+}
+
+/// Wire codes `acdp-registry-types/src/error.rs` emits today. A ratchet, not a
+/// floor -- see the assertion that reads it for why an exact number is affordable
+/// here, and for what the floor it replaced let through.
+const EXPECTED_WIRE_CODES: usize = 24;
+
+/// The exact wire-code count must FAIL when the scanner loses a code — otherwise it
+/// is a number nobody has shown to do anything.
+///
+/// Falsified against SYNTHETIC source rather than the real `error.rs`, which is in
+/// another crate and outside this unit's path grant. That is also why
+/// `wire_codes_in` takes text: a guard you cannot falsify without editing someone
+/// else's file is a guard that never gets falsified.
+#[test]
+fn the_wire_code_scanner_is_pinned_exactly_and_falsifiable() {
+    const SRC: &str = r#"
+fn wire_code(&self) -> &'static str {
+    match self {
+        Self::NotFound => "not_found",
+        Self::Schema | Self::InvalidBody => { "schema_violation" }
+        Self::Rate => "rate_limited",
+    }
+}
+fn acdp_wire_code(err: &AcdpError) -> &'static str {
+    match err {
+        AcdpError::Sig => "invalid_signature",
+    }
+}
+"#;
+    let found = wire_codes_in(SRC, "<synthetic>");
+    assert_eq!(
+        found.len(),
+        4,
+        "the extractor must find all four codes, including the BLOCK-bodied arm \
+         that has no `=> \"`: {found:?}"
+    );
+
+    // Lose one code, the way a refactor does. An exact count sees it; the floor this
+    // replaced did not -- 3 of 4 satisfies any threshold the full set satisfies,
+    // which is the entire defect this unit is about.
+    let one_gone = SRC.replace("        Self::Rate => \"rate_limited\",\n", "");
+    let fewer = wire_codes_in(&one_gone, "<synthetic>");
+    assert_eq!(
+        fewer.len(),
+        3,
+        "removing one arm must change the extracted count: {fewer:?}"
+    );
+    assert!(
+        !fewer.contains(&"rate_limited".to_string()),
+        "and the code lost must be the one removed: {fewer:?}"
+    );
+    assert_ne!(
+        fewer.len(),
+        found.len(),
+        "so an exact assertion against the full count goes RED on this input, \
+         which is precisely what `codes.len() >= 15` did not do"
+    );
+}
+
 /// CHARTER Rule 48: a documentation artifact no command can check is a defect
 /// even while it is currently correct.
 ///
@@ -58,41 +153,32 @@ fn every_wire_code_the_code_emits_is_documented() {
     // attempt and it was wrong: a long match pattern uses a block body, so
     // `SchemaViolation | InvalidBody | MissingField => { "schema_violation" }`
     // has no `=> "`. The guard below is what caught that.
-    let mut codes: Vec<String> = Vec::new();
-    for fn_name in ["fn wire_code", "fn acdp_wire_code"] {
-        let start = src
-            .find(fn_name)
-            .unwrap_or_else(|| panic!("{fn_name} not found in {}", error_rs.display()));
-        // Function bodies in this file end at a closing brace in column 0.
-        let body_end = src[start..]
-            .find("\n}\n")
-            .map(|e| start + e)
-            .unwrap_or(src.len());
-        let body = &src[start..body_end];
-        let mut rest = body;
-        while let Some(q) = rest.find('"') {
-            rest = &rest[q + 1..];
-            let Some(end) = rest.find('"') else { break };
-            let c = &rest[..end];
-            rest = &rest[end + 1..];
-            if c.len() >= 4
-                && c.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_')
-                && !codes.iter().any(|e| e == c)
-            {
-                codes.push(c.to_string());
-            }
-        }
-    }
+    let mut codes = wire_codes_in(&src, &error_rs.display().to_string());
     codes.sort();
 
-    // Guard the GENERATOR, not just its output: a scanner that silently
-    // matched nothing would make the assertion below vacuously true, which is
-    // precisely the failure mode this test exists to remove. Pin a floor and
-    // two members that must always be present.
-    assert!(
-        codes.len() >= 15,
-        "wire-code extraction found only {} codes in {} — the scanner is \
-         broken, so the documentation check below would pass vacuously: {codes:?}",
+    // Guard the GENERATOR, not just its output: a scanner that silently matched
+    // nothing would make the assertion below vacuously true, which is precisely the
+    // failure mode this test exists to remove.
+    //
+    // WAS `codes.len() >= 15` against 24 actual -- it tolerated the scanner losing
+    // NINE codes, and each lost code is one whose documentation silently stops being
+    // checked. No independent derivation of this set exists at the string level:
+    // `http_status()` matches on enum variants, and several variants share a single
+    // code (`SchemaViolation | InvalidBody | MissingField => "schema_violation"`),
+    // so variants cannot be counted against codes. The exact count is therefore a
+    // deliberate ratchet, and not an extra tax: adding a wire code ALREADY requires
+    // an edit to docs/HTTP-API.md, and this test is the thing that enforces it.
+    // `wire_codes_in` is a pure function over text precisely so this number can be
+    // falsified without editing another crate's source.
+    assert_eq!(
+        codes.len(),
+        EXPECTED_WIRE_CODES,
+        "wire-code extraction found {} codes in {}, expected exactly \
+         {EXPECTED_WIRE_CODES}. If you ADDED a wire code: update this constant and \
+         add the code to the status table in docs/HTTP-API.md -- enforcing that \
+         pairing is what this test is for. If you did not, the scanner is broken and \
+         the documentation check below would pass for every code it can no longer \
+         see: {codes:?}",
         codes.len(),
         error_rs.display()
     );
@@ -296,6 +382,10 @@ fn documented_search_refill_cap_matches_the_constant() {
     let cap: usize = digits.parse().unwrap_or_else(|e| {
         panic!("could not parse SEARCH_REFILL_MAX_PAGES value from {digits:?}: {e}")
     });
+    // NOT a floor standing in for a count: `cap` is one parsed configuration value
+    // and `> 0` is its actual semantic requirement -- zero disables the refill loop.
+    // The exact value is pinned against the document two assertions below, which is
+    // where an equality belongs. Left deliberately unchanged by U-538.
     assert!(cap > 0, "a zero refill cap would disable the loop entirely");
 
     let doc_path = root.join("docs/MULTI-TENANCY.md");
@@ -478,12 +568,34 @@ fn authentication_doc_cites_symbols_that_exist_and_never_line_numbers() {
             None => break,
         }
     }
-    assert!(
-        spans.len() > 100,
-        "only {} backticked spans found in {} — the scanner is broken, so every \
-         check below would pass vacuously",
-        spans.len(),
+    // WAS `spans.len() > 100` against 263 actual: the tokenizer could drop 163 of
+    // its spans and still pass, while every check below silently stopped covering
+    // them. Replaced by an EQUALITY that does not rot as the document is edited --
+    // the loop above consumes exactly two backticks per span, so the span count
+    // must equal half the backtick characters in the file. Counting characters is a
+    // different operation from scanning for pairs, so a loop that breaks early
+    // (its `None => break`), or skips a span, diverges from it immediately. This is
+    // the guard the floor was pretending to be, and unlike an exact count of spans
+    // it needs no edit when someone adds a sentence.
+    let backticks = doc.matches('`').count();
+    assert_eq!(
+        backticks % 2,
+        0,
+        "{} contains an ODD number of backtick characters ({backticks}), so at \
+         least one inline span is unterminated. The scanner below silently drops \
+         the tail, and every check that reads its output would then cover less \
+         than the document says.",
         doc_path.display()
+    );
+    assert_eq!(
+        spans.len(),
+        backticks / 2,
+        "the span scanner found {} spans in {} but the file holds {backticks} \
+         backtick characters, i.e. {} pairs. The scanner is dropping spans, and \
+         every check below would then pass for the spans it never saw.",
+        spans.len(),
+        doc_path.display(),
+        backticks / 2
     );
 
     // 1. No line-number pins, in any form, anywhere in the document. This is the
@@ -510,10 +622,24 @@ fn authentication_doc_cites_symbols_that_exist_and_never_line_numbers() {
         .iter()
         .filter(|s| s.starts_with("crates/") && s.ends_with(".rs"))
         .collect();
+    // DELIBERATELY A LOWER BOUND, and what it does not catch is stated rather than
+    // left to be discovered. The exact number (10 today) is a property of the
+    // DOCUMENT, not an invariant of the code: pinning it would redden this gate on
+    // any edit that cites one more file, and a guard that fails on correct input is
+    // one someone deletes rather than fixes. So this cannot detect the filter
+    // silently matching 8 of 10 citations.
+    //
+    // What made the floor dangerous was that it was ALSO standing in as the
+    // tokenizer's vacuity guard, and that job has moved: `spans.len()` is now
+    // pinned exactly against the file's backtick count above, so a broken scanner
+    // fails there, by name, instead of being tolerated here. This floor now guards
+    // only the one thing left -- the `crates/`-prefix filter matching nothing at
+    // all -- which is why a coarse threshold is adequate for it.
     assert!(
         cited_paths.len() >= 8,
-        "only {} crate source paths cited — expected the document to reference at \
-         least 8; the scanner or the document changed shape: {cited_paths:?}",
+        "only {} crate source paths cited — expected at least 8. The span scanner \
+         is pinned exactly above, so this is the `crates/…rs` FILTER, or the \
+         document genuinely stopped citing source: {cited_paths:?}",
         cited_paths.len()
     );
     let gone: Vec<&&&str> = cited_paths
@@ -528,6 +654,14 @@ fn authentication_doc_cites_symbols_that_exist_and_never_line_numbers() {
     // 3. Every backticked snake_case identifier still exists in the workspace.
     let mut corpus = String::new();
     rust_source_corpus(&root.join("crates"), &mut corpus);
+    // A GENUINE lower bound, deliberately kept, and what it misses is stated rather
+    // than left to be found: a byte total has no exact expected value that would not
+    // rot on literally every commit. It therefore cannot detect the walk dropping a
+    // whole crate -- the remaining seven still exceed 100KB. What it does catch is
+    // the walk returning nothing or nearly nothing, which is the failure that would
+    // make check 3 below report every identifier as missing (or pass vacuously).
+    // The file-level completeness of a walk like this IS pinned exactly, by count,
+    // in `every_directly_read_env_var_is_documented`.
     assert!(
         corpus.len() > 100_000,
         "source corpus is only {} bytes — the walk is broken and check 3 would \
@@ -545,9 +679,16 @@ fn authentication_doc_cites_symbols_that_exist_and_never_line_numbers() {
             idents.push(s);
         }
     }
+    // Also deliberately a lower bound, for the same reason and with the same
+    // stated blind spot: the exact identifier count is a property of the prose. It
+    // cannot detect the ident filter dropping some of them. As above, the
+    // tokenizer's own completeness is pinned exactly earlier in this test, so what
+    // remains here is the filter, and the two named members below (`required`) pin
+    // specific results rather than a quantity.
     assert!(
         idents.len() >= 20,
-        "only {} backticked identifiers extracted — expected at least 20: \
+        "only {} backticked identifiers extracted — expected at least 20. The span \
+         scanner is pinned exactly above, so suspect the identifier filter: \
          {idents:?}",
         idents.len()
     );
@@ -681,10 +822,31 @@ fn root_changelog_stays_a_pointer() {
             stale.push(entry.file_name().to_string_lossy().into_owned());
         }
     }
+    // WAS `checked >= 8` against exactly 8 crates -- tight today, and blind in the
+    // direction that actually happens: a NINTH crate arrives, has no CHANGELOG.md,
+    // the `continue` above skips it, `checked` stays 8, and the floor is satisfied
+    // while that crate's release notes go unchecked forever. The expectation is
+    // therefore derived from the workspace's own declaration of what exists.
+    let members = workspace_member_crates(&root);
+    let mut without_changelog: Vec<&String> = members
+        .iter()
+        .filter(|m| !root.join("crates").join(m).join("CHANGELOG.md").exists())
+        .collect();
+    without_changelog.sort();
     assert!(
-        checked >= 8,
-        "found only {checked} per-crate changelogs — expected at least 8; the \
-         walk is broken and the staleness check below proves nothing"
+        without_changelog.is_empty(),
+        "these workspace members have no CHANGELOG.md, so the staleness check \
+         below cannot see them at all: {without_changelog:?}. release-plz writes \
+         one per released crate; a member without one is either unreleased (say so \
+         here) or was skipped."
+    );
+    assert_eq!(
+        checked,
+        members.len(),
+        "the crates/ walk read {checked} per-crate changelogs but the workspace \
+         declares {} members — the walk and Cargo.toml disagree about which crates \
+         exist, so the staleness check below covers an unknown subset",
+        members.len()
     );
     stale.sort();
     assert!(
@@ -692,6 +854,218 @@ fn root_changelog_stays_a_pointer() {
         "the workspace is at {version} but these crates' changelogs have no \
          `{heading}` section: {stale:?}. Release notes are delegated to these \
          files, so a gap here means the release is undocumented everywhere."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// U-538: retiring the floor-style guards.
+//
+// Several checks in this file guarded a scanner with `assert!(found.len() >= N)`.
+// A FLOOR CANNOT CATCH UNDERCOUNTING -- it is satisfied by the very walk that is
+// silently missing items, which is the failure it was written to detect. Measured
+// on this tree at the time of the change: `docs/*.md` was 10 against a floor of 8,
+// `crates/*/src/**.rs` was 40 against a floor of 20, and the per-crate changelog
+// walk was 8 against a floor of 8 -- tight today, and blind in the direction that
+// actually happens, a NINTH crate arriving with no changelog.
+//
+// What catches undercounting is a SECOND enumeration derived a different way,
+// asserted EQUAL. `git ls-files` and a filesystem walk share no code, so a walk
+// that swallows an error through `.flatten()` diverges from it; the root
+// `Cargo.toml`'s `members` list is a declarative third view of the same set.
+// Equality also catches the opposite direction a floor can never see: a file that
+// exists and is untracked, or is tracked and missing from disk.
+// ---------------------------------------------------------------------------
+
+/// Every path git tracks under `root`, as `/`-joined strings.
+///
+/// `-z` so paths containing spaces or newlines survive intact, and a failure to
+/// run git is FATAL rather than falling back to a glob -- a fallback scope is how
+/// a sweep silently narrows, and this helper exists to widen one.
+fn git_tracked_paths(root: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "could not run `git ls-files` in {}: {e}. These guards derive a                  SECOND enumeration from git on purpose and do not fall back to a                  glob: a single enumeration cannot detect its own omissions.",
+                root.display()
+            )
+        });
+    assert!(
+        out.status.success(),
+        "`git ls-files` failed in {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Discrepancies between two independent enumerations of what should be one set.
+/// Empty means they agree. Both directions are reported, because they are
+/// different bugs: only-in-`walked` is an untracked file, only-in-`reference` is a
+/// walk that dropped something.
+///
+/// `what_walked`/`what_reference` name the two methods in the output, so a failure
+/// says which enumeration to go and fix rather than just that they differ.
+fn enumeration_disagreements(
+    walked: &[String],
+    reference: &[String],
+    what_walked: &str,
+    what_reference: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for w in walked {
+        if !reference.contains(w) {
+            out.push(format!(
+                "{w}: found by {what_walked}, absent from {what_reference}"
+            ));
+        }
+    }
+    for r in reference {
+        if !walked.contains(r) {
+            out.push(format!(
+                "{r}: found by {what_reference}, absent from {what_walked}"
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The workspace's crates, from the root `Cargo.toml`'s `members` array.
+///
+/// A DECLARATIVE enumeration: it is what cargo itself builds, so it cannot drift
+/// from the workspace the way a directory walk can drift from either.
+fn workspace_member_crates(root: &std::path::Path) -> Vec<String> {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
+    let start = manifest.find("members = [").expect(
+        "root Cargo.toml has a `members = [` array; the parse below is worthless without it",
+    );
+    let rest = &manifest[start..];
+    let end = rest
+        .find(']')
+        .expect("unterminated `members` array in root Cargo.toml");
+    let members: Vec<String> = rest[..end]
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('"'))
+        .filter_map(|l| l.split('"').next())
+        .filter(|l| l.starts_with("crates/"))
+        .map(|l| l.trim_start_matches("crates/").to_string())
+        .collect();
+    assert!(
+        !members.is_empty(),
+        "parsed 0 crates from the root Cargo.toml `members` array -- the parse is          broken, and every check deriving its expectation from it would pass          vacuously, which is the exact defect this helper was written to remove"
+    );
+    members
+}
+
+/// The two-enumeration helper must FAIL on exactly the input a floor tolerates —
+/// otherwise this unit replaced one unfalsified assertion with another.
+///
+/// The decisive assertion here is not that the helper reports a disagreement; it is
+/// that **the floor it replaced does not**. Both are checked against the same input,
+/// in the same test, so the improvement is a property of the code rather than a
+/// claim in a commit message.
+#[test]
+fn the_two_enumeration_guard_catches_what_a_floor_tolerates() {
+    let ten: Vec<String> = (0..10).map(|i| format!("doc-{i}.md")).collect();
+
+    // Identical enumerations: silent.
+    assert!(
+        enumeration_disagreements(&ten, &ten, "walk", "git").is_empty(),
+        "two identical enumerations must not disagree"
+    );
+
+    // A walk that dropped ONE of ten -- the failure a scanner actually has.
+    let nine: Vec<String> = ten.iter().skip(1).cloned().collect();
+    let missed = enumeration_disagreements(&nine, &ten, "walk", "git");
+    assert_eq!(
+        missed.len(),
+        1,
+        "a walk missing one of ten must report exactly one disagreement: {missed:?}"
+    );
+    assert!(
+        missed[0].contains("doc-0.md") && missed[0].contains("absent from walk"),
+        "the disagreement must NAME the dropped item and say which method missed \
+         it, or a reader cannot tell which enumeration to fix: {missed:?}"
+    );
+
+    // THE POINT OF THE UNIT: the floor this replaced is satisfied by that same
+    // input. `9 >= 8` is true, so the old guard passed while a document went
+    // unchecked. A floor cannot catch undercounting because the count it accepts
+    // is the count the broken walk produces.
+    assert!(
+        nine.len() >= 8,
+        "sanity: the replaced floor really was satisfied by the 9-of-10 input, \
+         which is what made it useless"
+    );
+
+    // The opposite direction, which a floor can NEVER see at any threshold: an
+    // extra item on disk that the reference does not know about. `11 >= 8` holds.
+    let mut eleven = ten.clone();
+    eleven.push("untracked.md".to_string());
+    let extra = enumeration_disagreements(&eleven, &ten, "walk", "git");
+    assert_eq!(
+        extra.len(),
+        1,
+        "an untracked extra must be reported too: {extra:?}"
+    );
+    assert!(
+        extra[0].contains("untracked.md") && extra[0].contains("absent from git"),
+        "and it must be reported as the OTHER direction -- an untracked file is a \
+         different bug from a dropped one: {extra:?}"
+    );
+
+    // Both empty is agreement between two broken methods, which is why every
+    // caller asserts non-emptiness separately rather than trusting agreement.
+    assert!(
+        enumeration_disagreements(&[], &[], "walk", "git").is_empty(),
+        "two empty enumerations agree -- the callers must check emptiness \
+         themselves, and this asserts that the helper alone does NOT catch it"
+    );
+}
+
+/// `workspace_member_crates` must parse the real manifest, and must refuse rather
+/// than return an empty set — an empty expectation makes every check derived from
+/// it pass vacuously, which is the defect this whole unit is about.
+#[test]
+fn workspace_members_parse_to_the_real_crate_set() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let members = workspace_member_crates(&root);
+
+    // A second, independent derivation of the same set: the directories on disk.
+    // Asserted EQUAL, not "at least", for the reason this unit exists.
+    let mut dirs: Vec<String> = std::fs::read_dir(root.join("crates"))
+        .expect("read crates/")
+        .flatten()
+        .filter(|e| e.path().join("Cargo.toml").exists())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    dirs.sort();
+    let mut sorted = members.clone();
+    sorted.sort();
+    let disagreements =
+        enumeration_disagreements(&dirs, &sorted, "the crates/ walk", "Cargo.toml members");
+    assert!(
+        disagreements.is_empty(),
+        "the crates/ directory and the workspace `members` array disagree about \
+         which crates exist:\n  {}",
+        disagreements.join("\n  ")
+    );
+    assert!(
+        members.contains(&"acdp-registry-server".to_string()),
+        "the parse must find acdp-registry-server, which certainly is a member: \
+         {members:?}"
     );
 }
 
@@ -723,11 +1097,32 @@ fn every_docs_page_is_listed_in_the_docs_index() {
         .collect();
     pages.sort();
 
+    // WAS `pages.len() >= 8`, a floor over a set of 10 -- so the walk could drop
+    // two documents and the index check below would silently stop covering them.
+    // A floor is satisfied by the omission it is meant to detect. git is a second
+    // enumeration sharing no code with `read_dir`, and equality also catches the
+    // direction a floor never could: a document on disk that nobody tracked.
+    let tracked_pages: Vec<String> = git_tracked_paths(&root)
+        .into_iter()
+        .filter_map(|p| p.strip_prefix("docs/").map(str::to_string))
+        .filter(|p| p.ends_with(".md") && p != "README.md" && !p.contains('/'))
+        .collect();
+    let disagreements = enumeration_disagreements(
+        &pages,
+        &tracked_pages,
+        "the docs/ directory walk",
+        "git ls-files",
+    );
     assert!(
-        pages.len() >= 8,
-        "found only {} documents under docs/ — the walk is broken and the check \
-         below would pass vacuously: {pages:?}",
-        pages.len()
+        disagreements.is_empty(),
+        "the two enumerations of docs/*.md disagree, so one of them is missing \
+         documents and the index check below would not cover them:\n  {}",
+        disagreements.join("\n  ")
+    );
+    assert!(
+        !pages.is_empty(),
+        "both enumerations of docs/*.md are EMPTY, which they agree on and which \
+         is still wrong: two broken methods agree. docs/ has had pages since #220."
     );
 
     let unlisted: Vec<&String> = pages.iter().filter(|p| !index.contains(*p)).collect();
@@ -777,12 +1172,35 @@ fn every_directly_read_env_var_is_documented() {
             rust_source_file_texts(&src, &mut files);
         }
     }
+    // WAS `files.len() > 20` over a set of 40: the walk could drop HALF the
+    // workspace's source and still pass, which makes the env-var sweep below
+    // report "everything documented" while never reading 20 files. The walk
+    // collects file TEXTS, so it is counted against git rather than compared
+    // path-by-path -- the count equality is what a floor was standing in for.
+    let tracked_src = git_tracked_paths(&root)
+        .into_iter()
+        .filter(|p| p.starts_with("crates/") && p.ends_with(".rs") && p.contains("/src/"))
+        .count();
+    assert_eq!(
+        files.len(),
+        tracked_src,
+        "the crates/*/src walk found {} .rs files and git tracks {} -- one of the \
+         two enumerations is missing files, and the sweep below would then report \
+         no findings for the files it never read",
+        files.len(),
+        tracked_src
+    );
     assert!(
-        files.len() > 20,
-        "found only {} source files under crates/*/src — the walk is broken",
-        files.len()
+        tracked_src > 0,
+        "git tracks ZERO .rs files under crates/*/src, which the walk can agree \
+         with while both are broken"
     );
     let sources: String = files.concat();
+    // A GENUINE lower bound, kept alongside the exact file-count equality above.
+    // No exact byte total exists that survives the next commit, so this cannot see
+    // the concatenation losing a large file's CONTENTS while the file count stays
+    // right -- a failure the count equality above also cannot see. That gap is real
+    // and unguarded; it is written down rather than implied.
     assert!(
         sources.len() > 100_000,
         "src corpus is only {} bytes — the walk is broken",

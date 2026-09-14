@@ -334,6 +334,15 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   rewrite, or any `git push` — nothing reaches `main` and no PR opens. The fix would be an
   org App-settings grant, not a code change here.
 - **Status:** CONFIRMED (2026-08-31)
+- **The REASON went stale (2026-09-14, U-536, PR #304); the answer did not.** The question above
+  turns on the pin living in `.github/workflows/ci.yml`, which is why App pushes needed
+  `workflows: write` at all. The pin now lives in `.spec-pin` at the repository root, so a spec
+  bump PR touches a plain data file and no longer needs that scope for this repo's pin. Nothing
+  breaks and nothing needs changing: `bump-spec-ref.yml`'s token-mint step still REQUESTS
+  `permission-workflows: write` (it is shared with repos whose pin is still in a workflow), and
+  the `acdp-deps-bot` installation still grants it — verified unchanged. Recorded because the
+  entry reads as a live dependency on a file layout that no longer holds, and the next person
+  to narrow that scope would look here to decide whether it is safe. It now is, for this repo.
 
 ### `conformance (spec fixtures)` should join the required branch-protection contexts (Phase 11)
 - **Plan:** plans/reg10-conformance-and-ci-hygiene.md
@@ -2890,6 +2899,20 @@ file it silently declines to bump is worse than one never pointed at). Duplicate
 deriving is less work).
 **Blast radius.** Low, and the extraction fails loudly: it asserts exactly one 40-hex `ref:`, exactly
 one `checkout-spec@` `uses:` line, and that the ref follows it.
+**SUPERSEDED (2026-09-14, U-536, PR #304).** The derivation described above no longer exists.
+The pin moved OUT of `.github/workflows/ci.yml` into `.spec-pin` at the repository root, and
+`ci.yml`, `mutants.yml`, the bumper and the conformance harness now all read that one file
+through `.github/actions/read-spec-pin`. `bump-spec.yml` is pointed at `.spec-pin`, so the
+one-filename constraint that forced the derivation is satisfied by the file the pin lives in.
+The decision above is not reversed — its property ("a copy would never be bumped, so derive
+rather than duplicate") is what made a single declarative source the next step. What it could
+not see is that deriving coupled two workflows through the TEXT of one of them: nothing in
+`ci.yml` said another workflow parsed it, so a valid reindentation of its spec step broke the
+derivation silently, on the following Monday's cron, since `mutants.yml` has no `pull_request`
+trigger. The "fails loudly" claim in the line above described the old `pin` step's three
+assertions; the equivalent guarantees now live in `spec_pin_violations`
+(`crates/acdp-registry-server/tests/conformance_gate.rs`), which asserts ten invariants and
+falsifies each one.
 
 ## U-510 — the msrv job's `cargo check` steps stay `check` rather than becoming builds
 
