@@ -391,9 +391,14 @@ mod tests {
 
     /// A log-enabled SQLite store with `n` real leaves appended through
     /// the atomic publish path — a genuine tree with a genuine root.
-    async fn store_with_size(n: u8) -> (SqliteStore, tempfile::NamedTempFile) {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let store = SqliteStore::connect(tmp.path(), 4)
+    /// Returns the owning [`tempfile::TempDir`], not a file guard: SQLite
+    /// writes `-wal` and `-shm` *beside* the database, and a guard that owns
+    /// only the database file orphans both on every call (U-545). Owning the
+    /// directory makes cleanup cover everything SQLite puts in it. Enforced
+    /// workspace-wide by `no_sqlite_database_is_backed_by_a_file_guard`.
+    async fn store_with_size(n: u8) -> (SqliteStore, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::connect(&tmp.path().join("witness.sqlite"), 4)
             .await
             .unwrap()
             .with_transparency_log();
