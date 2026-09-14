@@ -175,3 +175,147 @@ async fn file_backed_harness_leaves_no_sqlite_files_behind() {
         leaked.join(", ")
     );
 }
+
+// ---------------------------------------------------------------------------
+// U-545: the class, not this crate.
+// ---------------------------------------------------------------------------
+
+/// No SQLite database anywhere in the workspace may be opened on a path owned
+/// by a *file* guard.
+///
+/// ## Why a source scan, when the test above is a real runtime check
+///
+/// The runtime test proves that *this crate's harness* cleans up. It cannot
+/// prove anything about a site it does not call, and an integration test
+/// cannot reach a `#[cfg(test)]` module inside `src/` at all — that is a
+/// different binary. Both gaps were real: #309 fixed
+/// `acdp-registry-server` and, by existing, made the class look closed, while
+/// `acdp-registry-sqlite` kept leaking from `tests/` *and* from 13 sites inside
+/// `src/store.rs`, and `acdp-registry-core` kept leaking from
+/// `src/witness.rs`'s `#[cfg(test)]` module — a crate that appeared on nobody's
+/// list of candidates.
+///
+/// ## Why it keys on the call shape rather than on file names
+///
+/// The obvious check — count `acdp-*` files in `$TMPDIR` — is what let this
+/// survive. Those sites call `NamedTempFile::new()` with **no prefix**, so they
+/// land as `.tmpXXXXXX`: 17,538 `-wal` + 17,538 `-shm` that an `acdp-*` census
+/// could not see. A census is only as wide as its filter, and a no-prefix call
+/// is the *default* shape, so it is the most likely form the next instance
+/// takes. This scan therefore looks at what the code does, not at what it names
+/// its files.
+///
+/// ## What this does NOT catch — read before trusting it
+///
+/// 1. **A guard that travels.** The pattern matched is a file guard bound and
+///    connected within a short window. A `NamedTempFile` returned from a
+///    helper, stored in a struct, or passed across a function boundary and
+///    connected elsewhere is invisible here.
+/// 2. **Other sidecar-writing libraries.** It knows SQLite. A different library
+///    that writes siblings next to a path it is given has the same defect and is
+///    not checked.
+/// 3. **Non-Rust callers**, and any crate outside `crates/`.
+/// 4. It is a **source scan**: it fails on the pattern being present, never on
+///    a correct-but-absent test. Deleting a fixture entirely leaves it green.
+#[test]
+fn no_sqlite_database_is_backed_by_a_file_guard() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
+
+    let crates_dir = root.join("crates");
+    assert!(
+        crates_dir.is_dir(),
+        "expected a crates/ directory at {} — the scan resolved the workspace \
+         root wrongly and would otherwise pass by finding nothing",
+        crates_dir.display()
+    );
+
+    let mut rs_files = Vec::new();
+    collect_rs(&crates_dir, &mut rs_files);
+
+    // Guard the guard: if the walk found no files the assertion below is
+    // vacuous, and a refactor that moves the tree would silently disable it.
+    assert!(
+        rs_files.len() > 50,
+        "only {} .rs files found under {} — the walk is broken, and an empty \
+         walk makes this test pass by construction",
+        rs_files.len(),
+        crates_dir.display()
+    );
+
+    let mut offenders = Vec::new();
+    for path in &rs_files {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(binding) = file_guard_binding(line) else {
+                continue;
+            };
+            // The database connect follows the guard closely in every real
+            // instance. Ten lines covers the multi-line builder form.
+            let end = (i + 10).min(lines.len());
+            for probe in &lines[i + 1..end] {
+                if probe.contains("::connect(") && probe.contains(&format!("{binding}.path()")) {
+                    offenders.push(format!(
+                        "{}:{} — `{}` is a file guard, and its path is opened as a SQLite \
+                         database. SQLite writes `-wal` and `-shm` beside it, which the guard \
+                         does not own. Use `tempfile::tempdir()` and put the database inside it.",
+                        path.strip_prefix(&root).unwrap_or(path).display(),
+                        i + 1,
+                        binding,
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        offenders.len(),
+        0,
+        "{} site(s) open a SQLite database on a file-guarded path:\n  {}",
+        offenders.len(),
+        offenders.join("\n  "),
+    );
+}
+
+/// The name bound by a `tempfile` **file** guard on this line, if any.
+///
+/// `tempfile::tempdir()` and `TempDir` are deliberately not matched: owning the
+/// directory is the fix, not the defect.
+fn file_guard_binding(line: &str) -> Option<String> {
+    if !(line.contains("NamedTempFile::new(") || line.contains(".tempfile()")) {
+        return None;
+    }
+    let after_let = line.trim().strip_prefix("let ")?;
+    let name: String = after_let
+        .trim_start_matches("mut ")
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+fn collect_rs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            // `target/` holds generated and vendored sources; scanning it is
+            // slow and its contents are not ours to fix.
+            if p.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            collect_rs(&p, out);
+        } else if p.extension().is_some_and(|e| e == "rs") {
+            out.push(p);
+        }
+    }
+}

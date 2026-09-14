@@ -6398,3 +6398,51 @@ purely a text search. It enforces table invariants an oracle structurally cannot
 Independent confirmation worth recording: the run's single survivor was exactly the
 `log.rs:131:18 == -> !=` mutant the workflow already enumerates as equivalent — a budgeted
 entry re-derived rather than re-read.
+
+## U-545 — a guard is only as wide as the filter that sized it
+
+U-542 (#309) stopped the SQLite sidecar leak in `acdp-registry-server` and, by existing, made the
+class look closed. It was not. Two crates were still leaking, and the reason the second one was
+invisible is the part worth keeping.
+
+**The census that sized U-542 used an `acdp-*` filename filter.** The surviving sites call
+`tempfile::NamedTempFile::new()` with no prefix, so their files land as `.tmpXXXXXX` and that filter
+could never have counted them: 17,538 `-wal` + 17,538 `-shm` = **35,076 files**, against 174,003
+`*-wal` in the directory in total. The filter was not wrong about what it measured; it was silently
+narrower than the question being asked of it. **A tool default is a filter you never typed** — and so
+re-reading your own pipeline cannot reveal the omission, because the omission is not in anything you
+wrote. The same failure arrived from the opposite direction moments later, when an `ls -1` reading
+omitted dotfiles and returned a clean-looking 0. What settled it was arithmetic over two independent
+enumerations: 156,465 + 17,538 = 174,003, exactly.
+
+**The other crate was invisible for a structural reason.** `acdp-registry-core` leaked from a
+`#[cfg(test)]` module inside `src/`. No integration test can reach that — it is a different
+compilation target — and the crate had no `tests/` directory at all, so there was nowhere the defect
+could have been caught and nobody listed it as a candidate. Meanwhile the starting list *included*
+`acdp-registry-pg`, which has zero `tempfile` references and is Postgres-backed. The list was wrong
+in both directions, which is the argument for re-deriving a class from the tree rather than
+inheriting it.
+
+**Two mechanisms, because neither closes the class alone.** The source scan keys on the call shape —
+a file guard bound and connected within ten lines — and contains no prefix anywhere, since a
+no-prefix call is the *default* form and therefore the most likely shape of the next instance. The
+runtime guard proves that shape actually cleans up, in the crate that had never had a test target.
+
+**Both were falsified separately, and that is the lesson that cost the most.** The scan went red on
+the real defect reintroduced in `witness.rs`, naming the exact `file:line`. On the strength of that
+red I described both guards as working. The core guard did not compile — `store.migrate()` is a
+trait method and its trait was not in scope — and had never executed once. `cargo test -p <pkg>
+--test <name>` compiles that package's target and nothing else, so a red from one guard is **zero
+evidence** about a guard beside it in the same commit. It does not feel that way: a clean
+falsification reads as "the unit is in good shape" rather than "this one assertion in this one binary
+fires". A brand-new test file in a crate with no prior `tests/` directory is the worst case, because
+nothing in that package had ever proven its dev-dependencies or trait imports. `cargo test
+--workspace --no-run` costs one command and would have caught it.
+
+The runtime falsification left exactly **two** files behind, `-wal` and `-shm` — not three. The guard
+cleaned the parent and orphaned both siblings, reproducing on demand the 14-parents-vs-286,894-
+sidecars signature that identified the defect in the first place. The leaked names were
+`.tmpFXt9XC-*`: the blind spot, caught by name in the failure output.
+
+Both guards carry their limits in their own doc comments, including that a source scan fails on a
+pattern being present and never on a correct-but-absent test.
