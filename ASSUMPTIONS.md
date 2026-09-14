@@ -3725,3 +3725,114 @@ are impossible.
 surviving `.tempfile()` in the granted tree after this unit.
 
 **Status:** CONFIRMED (2026-09-14).
+
+### U-545-A1 — the leak class is `{server, sqlite, core}`, and the starting set was wrong in both directions
+
+**Plan:** plans/u-545-hygiene-guard-spans-the-class.md
+
+**Assumed:** the class of crates that open SQLite on a `tempfile`-guarded *file* path is exactly
+`acdp-registry-server` (fixed by #309), `acdp-registry-sqlite` (lane-1, U-544) and
+`acdp-registry-core` (fixed here).
+
+**Chose:** re-deriving the class from the filesystem rather than accepting the handed-over list.
+
+**Evidence, and it corrects the starting set in BOTH directions:**
+
+- **Omitted:** `acdp-registry-core` carried a *live* leak at `src/witness.rs`'s `store_with_size`,
+  inside a `#[cfg(test)]` module in `src/`. No `tests/` binary can observe that module — it is a
+  different compilation target — and the crate had no `tests/` directory at all, so it appeared on
+  nobody's candidate list.
+- **Included wrongly:** `acdp-registry-pg` has zero `tempfile` references and is Postgres-backed.
+  It is not in the class.
+
+**Residual file-guard sites, both ARGUED as not leaking** (grep over all of `crates/`, run after a
+positive control proved the pattern fires — the first attempt returned a false "none found" because
+zsh glob-expanded an unquoted `--include=*.rs` and the grep never ran):
+
+- `crates/acdp-registry-core/src/receipt.rs:194` — writes a base64 signing-key seed. Not a database;
+  nothing creates siblings beside it. `NamedTempFile` is the correct tool here.
+- `crates/acdp-registry-server/tests/http_integration.rs:3687` (`write_temp_config`) — writes a
+  `.toml`. Same argument, and already CONFIRMED as U-542-A3.
+
+**Blast radius:** low. A crate wrongly excluded keeps leaking; the scan in this unit is what makes
+that detectable rather than a matter of who remembered which crate.
+
+**Status:** CONFIRMED (2026-09-14) — derived from the tree, not from the list.
+
+### U-545-A2 — the guard must key on the CALL SHAPE, never on a filename prefix
+
+**Plan:** plans/u-545-hygiene-guard-spans-the-class.md
+
+**Assumed:** a guard keyed on `acdp-*` filenames inherits the exact blind spot that let this class
+survive #309, so the scan must look at what the code *does*.
+
+**Evidence — this is a correction to my own #309 scope, not a hypothetical.** The `acdp-*` census
+that sized U-542 could not see these sites *by construction*: they call `NamedTempFile::new()` with
+**no prefix**, so the files land as `.tmpXXXXXX`. Measured: **17,538 `-wal` + 17,538 `-shm` =
+35,076 files** invisible to that filter, against 174,003 `*-wal` in total. So #309 covered one crate
+**and one prefix**.
+
+Reproduced live during falsification: the deliberately-defective core fixture leaked
+`.tmpFXt9XC-wal` and `.tmpFXt9XC-shm` — the no-prefix form, caught by name in the failure output.
+
+**A tool default is a filter you never typed.** Re-reading my own pipeline could not reveal this,
+because the omission was not in anything I wrote. The same shape nearly refuted the number from the
+other side: an `ls -1` reading of the directory omitted dotfiles and returned a clean-looking 0.
+Arithmetic settled it — 156,465 + 17,538 = 174,003, exactly.
+
+**Consequence:** the scan matches a file-guard binding followed within 10 lines by `::connect(` on
+that binding's `.path()`. No prefix appears anywhere in it. A no-prefix call is the *default* shape,
+so it is the most likely form the next instance takes.
+
+**Status:** CONFIRMED (2026-09-14).
+
+### U-545-A3 — two mechanisms, because neither closes the class alone
+
+**Plan:** plans/u-545-hygiene-guard-spans-the-class.md
+
+**Assumed:** a workspace-wide source scan and a runtime guard answer different questions, and
+shipping only one leaves a real hole.
+
+**Chose:** both. The scan proves *every site takes the shape*; the runtime guard proves *the shape is
+correct*. A runtime test can only exercise sites it calls, and an integration test cannot reach a
+`#[cfg(test)]` module inside `src/` at all — which is precisely where core's leak lived. Conversely
+a source scan fails on a pattern being *present* and can never fail on correct-but-absent behaviour.
+
+**Both falsified independently, and that mattered:**
+
+- Scan RED on the real defect reintroduced in core → `rc=101`, naming `witness.rs:400`.
+- Runtime guard RED on a defective fixture → `rc=101`, leaking exactly **2** files, `-wal` and
+  `-shm`. Two, not three: the guard cleaned the parent and orphaned both siblings — the
+  14-parents-vs-286,894-sidecars signature reproduced on demand.
+
+**Why separately:** the scan's red was **zero evidence** about the core guard, which at that moment
+did not compile (`store.migrate()` is a trait method; `ExtendedRegistryStore` was not in scope). A
+targeted `cargo test -p <pkg> --test <name>` builds only that package's target. I had described both
+guards as working on the strength of one red. See U-545-A4.
+
+**Status:** CONFIRMED (2026-09-14).
+
+### U-545-A4 — what the guards do NOT catch, recorded so the next reader does not over-trust them
+
+**Plan:** plans/u-545-hygiene-guard-spans-the-class.md
+
+**Assumed:** a guard whose limits are undocumented will be read as covering the whole class, and
+"this used to be broken and is now proven fixed" is exactly the sentence that stops people looking.
+
+**The four blind spots, carried in the scan's own doc comment:**
+
+1. **A guard that travels.** The pattern is a file guard bound and connected within ten lines. A
+   `NamedTempFile` returned from a helper, stored in a struct, or passed across a function boundary
+   is invisible. `write_temp_config` is a live example of the shape (benign here).
+2. **Other sidecar-writing libraries.** It knows SQLite. Any library that writes siblings beside a
+   path it is handed has the identical defect and is unchecked.
+3. **Non-Rust callers, and anything outside `crates/`.**
+4. **It is a source scan.** It fails on the pattern being present, never on a correct-but-absent
+   test. Deleting a fixture outright leaves it green.
+
+Guard-the-guard assertions are in both files so a broken walk fails loudly instead of passing
+vacuously: the scan asserts `crates/` resolves to a directory and that the walk found > 50 `.rs`
+files; the runtime guard asserts the database **and both sidecars exist while the store is open**,
+before any claim is made about their removal.
+
+**Status:** CONFIRMED (2026-09-14).
