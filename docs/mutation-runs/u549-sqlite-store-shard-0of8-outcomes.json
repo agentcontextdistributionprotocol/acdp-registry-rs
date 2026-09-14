@@ -1,0 +1,1137 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 16.214428708,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=acdp-registry-sqlite@0.1.3"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 3.038930791,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=acdp-registry-sqlite@0.1.3"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:48:9: replace SqliteStore::connect -> Result<Self, AcdpError> with Ok(Default::default())",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "SqliteStore::connect",
+            "return_type": "-> Result<Self, AcdpError>",
+            "span": {
+              "start": {
+                "line": 46,
+                "column": 5
+              },
+              "end": {
+                "line": 85,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 48,
+              "column": 9
+            },
+            "end": {
+              "line": 84,
+              "column": 11
+            }
+          },
+          "replacement": "Ok(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_48_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_48_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 18.73420325,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:49:16: delete ! in SqliteStore::connect",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "SqliteStore::connect",
+            "return_type": "-> Result<Self, AcdpError>",
+            "span": {
+              "start": {
+                "line": 46,
+                "column": 5
+              },
+              "end": {
+                "line": 85,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 16
+            },
+            "end": {
+              "line": 49,
+              "column": 17
+            }
+          },
+          "replacement": "",
+          "genre": "UnaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_49_col_16.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_49_col_16.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 7.625416084,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.6765609999999995,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:95:9: replace SqliteStore::connect_in_memory -> Result<Self, AcdpError> with Ok(Default::default())",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "SqliteStore::connect_in_memory",
+            "return_type": "-> Result<Self, AcdpError>",
+            "span": {
+              "start": {
+                "line": 87,
+                "column": 5
+              },
+              "end": {
+                "line": 107,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 95,
+              "column": 9
+            },
+            "end": {
+              "line": 106,
+              "column": 11
+            }
+          },
+          "replacement": "Ok(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_95_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_95_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.739102625,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:115:9: replace SqliteStore::with_transparency_log -> Self with Default::default()",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "SqliteStore::with_transparency_log",
+            "return_type": "-> Self",
+            "span": {
+              "start": {
+                "line": 109,
+                "column": 5
+              },
+              "end": {
+                "line": 117,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 115,
+              "column": 9
+            },
+            "end": {
+              "line": 116,
+              "column": 13
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_115_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_115_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.703476875,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:120:9: replace SqliteStore::block_on -> T with Default::default()",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "SqliteStore::block_on",
+            "return_type": "-> T",
+            "span": {
+              "start": {
+                "line": 119,
+                "column": 5
+              },
+              "end": {
+                "line": 121,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 120,
+              "column": 9
+            },
+            "end": {
+              "line": 120,
+              "column": 88
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_120_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_120_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.675293084,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:129:9: replace SqliteStore::pool -> &sqlx::SqlitePool with Box::leak(Box::new(Default::default()))",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "SqliteStore::pool",
+            "return_type": "-> &sqlx::SqlitePool",
+            "span": {
+              "start": {
+                "line": 123,
+                "column": 5
+              },
+              "end": {
+                "line": 130,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 129,
+              "column": 9
+            },
+            "end": {
+              "line": 129,
+              "column": 19
+            }
+          },
+          "replacement": "Box::leak(Box::new(Default::default()))",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_129_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_129_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.743054625,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:138:9: replace <impl ExtendedRegistryStore for SqliteStore>::migrate -> Result<(), AcdpError> with Ok(())",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::migrate",
+            "return_type": "-> Result<(), AcdpError>",
+            "span": {
+              "start": {
+                "line": 137,
+                "column": 5
+              },
+              "end": {
+                "line": 143,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 138,
+              "column": 9
+            },
+            "end": {
+              "line": 142,
+              "column": 15
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_138_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_138_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.530874292,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.62776525,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:146:9: replace <impl ExtendedRegistryStore for SqliteStore>::health -> Result<(), AcdpError> with Ok(())",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::health",
+            "return_type": "-> Result<(), AcdpError>",
+            "span": {
+              "start": {
+                "line": 145,
+                "column": 5
+              },
+              "end": {
+                "line": 151,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 146,
+              "column": 9
+            },
+            "end": {
+              "line": 150,
+              "column": 78
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_146_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_146_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.501934792,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.913067083,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:154:9: replace <impl ExtendedRegistryStore for SqliteStore>::count_idempotency_records -> Result<Option<u64>, AcdpError> with Ok(None)",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::count_idempotency_records",
+            "return_type": "-> Result<Option<u64>, AcdpError>",
+            "span": {
+              "start": {
+                "line": 153,
+                "column": 5
+              },
+              "end": {
+                "line": 159,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 154,
+              "column": 9
+            },
+            "end": {
+              "line": 158,
+              "column": 34
+            }
+          },
+          "replacement": "Ok(None)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_154_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_154_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.653012458,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.751077167,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:154:9: replace <impl ExtendedRegistryStore for SqliteStore>::count_idempotency_records -> Result<Option<u64>, AcdpError> with Ok(Some(0))",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::count_idempotency_records",
+            "return_type": "-> Result<Option<u64>, AcdpError>",
+            "span": {
+              "start": {
+                "line": 153,
+                "column": 5
+              },
+              "end": {
+                "line": 159,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 154,
+              "column": 9
+            },
+            "end": {
+              "line": 158,
+              "column": 34
+            }
+          },
+          "replacement": "Ok(Some(0))",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_154_col_9_001.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_154_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.537833792,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.773319667,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:154:9: replace <impl ExtendedRegistryStore for SqliteStore>::count_idempotency_records -> Result<Option<u64>, AcdpError> with Ok(Some(1))",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::count_idempotency_records",
+            "return_type": "-> Result<Option<u64>, AcdpError>",
+            "span": {
+              "start": {
+                "line": 153,
+                "column": 5
+              },
+              "end": {
+                "line": 159,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 154,
+              "column": 9
+            },
+            "end": {
+              "line": 158,
+              "column": 34
+            }
+          },
+          "replacement": "Ok(Some(1))",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_154_col_9_002.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_154_col_9_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.585707542,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.656064959,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:171:9: replace <impl ExtendedRegistryStore for SqliteStore>::search_in_tenant -> Result<SearchResponse, AcdpError> with Ok(Default::default())",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::search_in_tenant",
+            "return_type": "-> Result<SearchResponse, AcdpError>",
+            "span": {
+              "start": {
+                "line": 161,
+                "column": 5
+              },
+              "end": {
+                "line": 173,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 171,
+              "column": 9
+            },
+            "end": {
+              "line": 172,
+              "column": 19
+            }
+          },
+          "replacement": "Ok(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_171_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_171_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.7052815,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:176:9: replace <impl ExtendedRegistryStore for SqliteStore>::tenant_of_ctx -> Result<Option<String>, AcdpError> with Ok(None)",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::tenant_of_ctx",
+            "return_type": "-> Result<Option<String>, AcdpError>",
+            "span": {
+              "start": {
+                "line": 175,
+                "column": 5
+              },
+              "end": {
+                "line": 183,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 176,
+              "column": 9
+            },
+            "end": {
+              "line": 182,
+              "column": 30
+            }
+          },
+          "replacement": "Ok(None)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_176_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_176_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.702275167,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.981148083,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:176:9: replace <impl ExtendedRegistryStore for SqliteStore>::tenant_of_ctx -> Result<Option<String>, AcdpError> with Ok(Some(String::new()))",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::tenant_of_ctx",
+            "return_type": "-> Result<Option<String>, AcdpError>",
+            "span": {
+              "start": {
+                "line": 175,
+                "column": 5
+              },
+              "end": {
+                "line": 183,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 176,
+              "column": 9
+            },
+            "end": {
+              "line": 182,
+              "column": 30
+            }
+          },
+          "replacement": "Ok(Some(String::new()))",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_176_col_9_001.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_176_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.503170542,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.956988375,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:176:9: replace <impl ExtendedRegistryStore for SqliteStore>::tenant_of_ctx -> Result<Option<String>, AcdpError> with Ok(Some(\"xyzzy\".into()))",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::tenant_of_ctx",
+            "return_type": "-> Result<Option<String>, AcdpError>",
+            "span": {
+              "start": {
+                "line": 175,
+                "column": 5
+              },
+              "end": {
+                "line": 183,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 176,
+              "column": 9
+            },
+            "end": {
+              "line": 182,
+              "column": 30
+            }
+          },
+          "replacement": "Ok(Some(\"xyzzy\".into()))",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_176_col_9_002.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_176_col_9_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.464645,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.8732407909999997,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:186:9: replace <impl ExtendedRegistryStore for SqliteStore>::set_tenant_of_ctx -> Result<(), AcdpError> with Ok(())",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::set_tenant_of_ctx",
+            "return_type": "-> Result<(), AcdpError>",
+            "span": {
+              "start": {
+                "line": 185,
+                "column": 5
+              },
+              "end": {
+                "line": 196,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 186,
+              "column": 9
+            },
+            "end": {
+              "line": 195,
+              "column": 15
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_186_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_186_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.562123916,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.890387792,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:186:22: replace == with != in <impl ExtendedRegistryStore for SqliteStore>::set_tenant_of_ctx",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::set_tenant_of_ctx",
+            "return_type": "-> Result<(), AcdpError>",
+            "span": {
+              "start": {
+                "line": 185,
+                "column": 5
+              },
+              "end": {
+                "line": 196,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 186,
+              "column": 22
+            },
+            "end": {
+              "line": 186,
+              "column": 24
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_186_col_22.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_186_col_22.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.483783542,
+          "process_status": "Success",
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.93446075,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acdp-registry-sqlite/src/store.rs:202:9: replace <impl ExtendedRegistryStore for SqliteStore>::tenants_of_ctxs -> Result<std::collections::HashMap<String, String>, AcdpError> with Ok(HashMap::new())",
+          "package": "acdp-registry-sqlite",
+          "file": "crates/acdp-registry-sqlite/src/store.rs",
+          "function": {
+            "function_name": "<impl ExtendedRegistryStore for SqliteStore>::tenants_of_ctxs",
+            "return_type": "-> Result<std::collections::HashMap<String, String>, AcdpError>",
+            "span": {
+              "start": {
+                "line": 198,
+                "column": 5
+              },
+              "end": {
+                "line": 222,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 202,
+              "column": 9
+            },
+            "end": {
+              "line": 221,
+              "column": 39
+            }
+          },
+          "replacement": "Ok(HashMap::new())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__acdp-registry-sqlite__src__store.rs_line_202_col_9.log",
+      "diff_path": "diff/crates__acdp-registry-sqlite__src__store.rs_line_202_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.699480625,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/ajitk/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 18,
+  "missed": 0,
+  "caught": 11,
+  "timeout": 0,
+  "unviable": 7,
+  "success": 0,
+  "start_time": "2026-09-14T13:00:14.745898Z",
+  "end_time": "2026-09-14T13:02:42.924131Z",
+  "cargo_mutants_version": "27.1.0"
+}
