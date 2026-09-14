@@ -310,7 +310,7 @@ branch if someone changes the fixture.
 | killed | **6** |
 | equivalent | **7** |
 | needs a seam | **1** (`1306:35`, race-only) |
-| open | **0** |
+| open | **0** *(true only of the KNOWN list; U-549 measured all 138 and found 11 more — see below)* |
 
 **Half the known survivors were not coverage gaps.** Seven of fourteen were equivalent — code whose
 mutation cannot change observable behaviour — and an eighth needs a test seam rather than a test.
@@ -369,7 +369,20 @@ figure; the "several minutes" I was implicitly comparing against was never recor
 my own addition. **A fabricated premise had produced a real-looking anomaly**, and it would have
 shipped inside a paragraph whose every other sentence was measured.
 
-### U-548: what the re-run proved about U-543's kills
+### RETRACTED — U-548's re-run proved nothing (see U-549)
+
+> **The section that stood here claimed U-543's kills were confirmed by cargo-mutants.
+> That run was void.** It was invoked with `--no-config`, which discards the whole of
+> `.cargo/mutants.toml`; the settings restored by hand omitted `copy_vcs = true`, so `.git`
+> was absent from the mutant tree and three git-dependent conformance tests panicked in
+> **every** mutant tree, marking every mutant caught for a reason unrelated to the mutation.
+> The pre-registered prediction matched **for the wrong reason**. Full mechanism in
+> `docs/mutation-runs/README.md`; the ledger is kept as `VOID-u548-...json`.
+>
+> **What was never retracted:** U-543's three mutants *were* killed by hand-application with
+> a red observed each time. That evidence never depended on this harness. And U-549's valid
+> run has since confirmed all three as `CaughtMutant` — so the claim is now true on evidence
+> that actually supports it.
 
 Shard 1/8 was chosen over an unrun shard because it is the only shard whose expected result is on
 record: `DECISIONS.md` fixes it at **3 caught / 3 missed / 12 unviable**. A **prediction of 6 caught
@@ -392,3 +405,71 @@ claim "the control's 3 missed were `342:26`×2 and `380:9`" rested on three coun
 is strictly weaker than the sets coinciding. The re-run settles it by elimination: the other three
 caught mutants are `386:9`×2 (`log_tree_size`) and `394:9` (`log_leaf_hashes`), which U-543 never
 touched and which must therefore have been the control's original 3 caught.
+
+
+## U-549 — the full 138 under a valid harness, and D-W5-182 re-tested
+
+Eight shards, one uniform method: `--config docs/mutation-runs/u549-sqlite-tranche.toml`,
+`--copy-target=false`, `-j1`. Every ledger is committed beside this file.
+
+| shard | caught | missed | unviable | n |
+|---|---|---|---|---|
+| 0/8 | 11 | 0 | 7 | 18 |
+| 1/8 | 6 | 0 | 12 | 18 |
+| 2/8 | 12 | 1 | 5 | 18 |
+| 3/8 | 11 | 2 | 5 | 18 |
+| 4/8 | 13 | 4 | 1 | 18 |
+| 5/8 | 6 | 7 | 5 | 18 |
+| 6/8 | 4 | 4 | 10 | 18 |
+| 7/8 | 5 | 1 | 6 | 12 |
+| **total** | **68** | **19** | **51** | **138** |
+
+**Validity checks, all passed:** `end_time` present on all eight (a null `end_time` is the
+in-flight tell, and a grep for the *key* rather than its *value* is a false positive);
+mutant rows match every header; **zero** logs containing `not a git repository`; sizes sum
+to 138 **and** the ledgers carry 138 distinct mutants with 0 duplicates — sizes alone miss a
+duplicated shard, the union alone misses a dropped one.
+
+**`--shard k/N` is ZERO-INDEXED.** Valid shards are `0/8`–`7/8`; `8/8` is empty. An ordinal
+range of "2/8 through 8/8" covers 120 of 138 and silently drops shard 0/8 while producing a
+confident eight ledgers.
+
+### The answer: D-W5-182's 50%-of-viable does NOT survive
+
+Both rates, each with its denominator on the same line as the number, because a rate whose
+denominator lives in a footnote gets quoted without it:
+
+- **RAW: 19 survivors / 87 viable = 21.8% of viable.**
+- **UNJUDGED: 11 previously-unjudged survivors / 87 viable = 12.6% of viable.**
+
+**12.6% is the figure comparable to D-W5-182's 50%**, which was `3 missed / 6 viable` from
+shard 1/8 and was a pure-gap rate — its numerator contained no known-equivalents, because
+nothing in that shard had been judged yet. So the comparable measured figure is **about one
+quarter of the ruling's premise**, and the ruling was extrapolated from a single 18-mutant
+shard whose three survivors were all subsequently killed.
+
+All **8** already-judged non-gaps (7 equivalent + 1 needs-a-seam) came back `MissedMutant`,
+exactly as recorded — so the exclusion set was computed from observed verdicts, not assumed
+from the prior count. That distinction is load-bearing: a judged-equivalent that had been
+*caught* would never appear in `missed` at all, and subtracting a fixed 8 would have removed
+a survivor that was never counted.
+
+### The 11 previously-unjudged survivors
+
+| site | mutation | area |
+|---|---|---|
+| `1585:37` | `delete !` | tag filter in `list_contexts` |
+| `1588:24` | `delete !` | tag filter in `list_contexts` |
+| `1588:74` | `!=` | tag filter in `list_contexts` |
+| `1596:86` | `!=` | `derived_from` filter |
+| `1632:9` | `Ok(())` | `idempotency_evict_inner` |
+| `1644:9` | `Ok(())` | `evict_idempotency` |
+| `1869:5` | `String::new()` | `context_type_str` |
+| `1869:5` | `"xyzzy".into()` | `context_type_str` |
+| `1897:26` | `true` | status/expiry computation |
+| `1897:26` | `false` | status/expiry computation |
+| `1897:30` | `>` | status/expiry computation |
+
+All are production code — `#[cfg(test)]` begins at line 1987. **Not paid down in this unit
+by instruction:** measure, report, stop. Whether to widen scope or pay these down is a
+scoping decision, not a lane call.
