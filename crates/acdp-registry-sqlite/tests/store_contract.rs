@@ -72,6 +72,12 @@ fn producer(seed: u8) -> Producer {
     )
 }
 
+/// The DID `producer(seed)` signs as. Mirrors the construction in `producer`
+/// above — kept beside it so the two cannot drift.
+fn did(seed: u8) -> AgentDid {
+    AgentDid::new(format!("did:web:agents.test:contract-{seed}"))
+}
+
 fn request(p: &Producer, title: &str) -> PublishRequest {
     p.publish_request()
         .title(title)
@@ -105,6 +111,235 @@ fn response(outcome: &PublishCommitOutcome) -> &PublishResponse {
     match outcome {
         PublishCommitOutcome::Inserted(r) | PublishCommitOutcome::IdempotentReplay(r) => r,
     }
+}
+
+/// An UNEXPIRED idempotency record must REPLAY, and the TTL comparison is what
+/// decides that.
+///
+/// `store.rs:994` is `if expires_at > now`. U-540 measured `<`, `==` and `>=`
+/// all surviving there, and U-544 established WHY, which is not a coverage gap:
+/// **all three are outcome-equivalent, because the branch is redundant.**
+///
+/// Probed rather than argued. With `<` applied, this test still passes, and an
+/// `eprintln!` at the step-7 conflict gate fires exactly once: skipping the TTL
+/// branch lets the publish proceed to
+/// `INSERT … ON CONFLICT(agent_id, key) DO NOTHING`, which collides with the
+/// live record, reports zero rows, rolls the new context back and replays the
+/// stored response — the SAME `IdempotentReplay`, with the SAME `ctx_id`, by a
+/// second route. The idempotency contract is enforced twice over, so breaking
+/// the first enforcement is invisible at this API.
+///
+/// So this test does NOT kill those three mutants and is not claimed to. It
+/// pins the contract itself, which was otherwise asserted nowhere at this
+/// layer: a repeated keyed publish returns the original context rather than
+/// minting a second one.
+///
+/// The assertion is on `ctx_id` EQUALITY across the two calls, not merely on
+/// the `IdempotentReplay` variant: a replay that returned a different context
+/// would satisfy the variant while breaking the guarantee.
+///
+/// `>` → `>=` carries a second, independent equivalence argument on top of the
+/// redundancy above: `now` is `Utc::now()` taken inside `commit_publish` while
+/// `expires_at` is rebuilt from stored MILLISECONDS, so the two differ only
+/// when the clock lands exactly on a stored millisecond boundary — not
+/// reachable deterministically, and a test that waited for it would be a flake
+/// generator. Same argument the repo already accepts for
+/// `handlers/context.rs:642:39`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unexpired_idempotency_record_replays_rather_than_minting_again() {
+    let (store, _tmp) = store().await;
+    let p = producer(65);
+    let key = "ttl-replay-key".to_string();
+
+    let first = commit(
+        Arc::clone(&store),
+        request(&p, "ttl replay row"),
+        Some(key.clone()),
+    )
+    .await
+    .unwrap()
+    .expect("first publish ok");
+    assert!(
+        matches!(first, PublishCommitOutcome::Inserted(_)),
+        "the first publish under a fresh key must INSERT"
+    );
+    let first_ctx = response(&first).ctx_id.clone();
+
+    // Same key, same content, well inside the 1h TTL the helper sets.
+    let second = commit(
+        Arc::clone(&store),
+        request(&p, "ttl replay row"),
+        Some(key.clone()),
+    )
+    .await
+    .unwrap()
+    .expect("second publish ok");
+    assert!(
+        matches!(second, PublishCommitOutcome::IdempotentReplay(_)),
+        "an unexpired record must replay; `expires_at < now` or `== now` skips          the liveness branch entirely and mints a second context"
+    );
+    assert_eq!(
+        response(&second).ctx_id,
+        first_ctx,
+        "the replay must return the ORIGINAL context; a different ctx_id is a          duplicate publish wearing a replay's variant"
+    );
+
+    // Exactly one context was minted, which is the property the key sells.
+    assert_eq!(
+        store.count_idempotency_records().await.expect("count ok"),
+        Some(1),
+        "one key, one retained record"
+    );
+}
+
+/// Racing publishes that share one idempotency key but carry DIFFERENT content
+/// must yield exactly one winner and reject every loser as a duplicate.
+///
+/// `store.rs:1306` (`if prior_hash != req.content_hash.0`, where U-540 measured
+/// `!=` → `==` surviving) sits behind this path. **This test does not reach it,
+/// and does not claim to.** Probed: an `eprintln!` at `inserted == 0` fires
+/// ZERO times across the whole suite, this test included. SQLite's
+/// `BEGIN IMMEDIATE` serialises the racers, so every loser finds the committed
+/// record at the step-1 read and is refused there (`store.rs:1003`) instead.
+///
+/// That leaves :1306 reachable only under interleaving this harness does not
+/// produce — recorded in #307 as needing a seam, not as a coverage gap a test
+/// can close by trying harder.
+///
+/// It has to be a real race. The obvious deterministic route — pre-expire the
+/// record so the `ON CONFLICT DO NOTHING` collides — does not work: step 1
+/// DELETEs an expired record for this key (`store.rs:964`) precisely so the
+/// claim in step 7 cannot collide with a stale row. Tried, and it published
+/// cleanly. So :1306 is reachable only when a record is absent at the read and
+/// present at the insert, which is the race window itself.
+///
+/// The existing `concurrent_identical_idempotency_key_mints_exactly_one_ctx_id`
+/// races the SAME content, where the hashes match and this comparison is never
+/// the deciding branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_publishes_sharing_a_key_with_different_content_reject_the_losers() {
+    let (store, _tmp) = store().await;
+    let p = producer(66);
+    let key = "race-different-content".to_string();
+
+    let handles: Vec<_> = (0..THREADS)
+        .map(|i| {
+            commit(
+                Arc::clone(&store),
+                request(&p, &format!("racer content {i}")),
+                Some(key.clone()),
+            )
+        })
+        .collect();
+
+    let mut inserted = 0usize;
+    let mut duplicates = 0usize;
+    let mut other: Vec<String> = Vec::new();
+    for h in handles {
+        match h.await.unwrap() {
+            Ok(PublishCommitOutcome::Inserted(_)) => inserted += 1,
+            Err(AcdpError::DuplicatePublish(_)) => duplicates += 1,
+            Ok(o) => other.push(format!("unexpected Ok: {o:?}")),
+            Err(e) => other.push(format!("unexpected Err: {e:?}")),
+        }
+    }
+
+    assert!(
+        other.is_empty(),
+        "every racer must either win outright or be refused as a duplicate;          got {other:?}. An `IdempotentReplay` here is the `==` inversion: the          loser's DIFFERENT content was matched against the winner's hash and          accepted, handing it the winner's ctx_id"
+    );
+    assert_eq!(inserted, 1, "exactly one racer may mint a context");
+    assert_eq!(
+        duplicates,
+        THREADS - 1,
+        "every other racer carries different content under the same key and          must be refused"
+    );
+    assert_eq!(
+        store.count_idempotency_records().await.expect("count ok"),
+        Some(1),
+        "one key, one retained record"
+    );
+}
+
+/// A CONTRIBUTOR on v1 may supersede it — and that is what the `==` at
+/// `store.rs:1090` decides.
+///
+/// Ownership for supersession is `prev_agent == req.agent_id
+/// || prev_contributors.iter().any(|c| c == req.agent_id)`. U-540 measured the
+/// contributor arm's `==` → `!=` surviving the whole suite, because every
+/// existing supersession test supersedes as the ORIGINAL PRODUCER, where the
+/// first arm already returns true and the second is never consulted.
+///
+/// Inverted, the arm means "any contributor who is NOT you", so:
+///   * a genuine contributor is refused (this test fails), and
+///   * worse, any signer is admitted whenever v1 lists at least one
+///     contributor other than them — the lineage takeover the comment at that
+///     site says the check exists to prevent (RFC-ACDP-0001 §5.9).
+///
+/// Both directions are asserted below, because the refusal alone would also be
+/// produced by a broken lookup, while the pair pins the comparison itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contributor_may_supersede_but_an_unrelated_signer_may_not() {
+    let (store, _tmp) = store().await;
+    let owner = producer(67);
+    let contributor = producer(68);
+    let stranger = producer(69);
+
+    // v1 is owned by `owner` and lists `contributor` — and NOT `stranger`.
+    let v1_req = owner
+        .publish_request()
+        .title("contributor supersession v1")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .contributors(vec![did(68)])
+        .build()
+        .expect("valid v1 request");
+    let v1 = commit(Arc::clone(&store), v1_req, None)
+        .await
+        .unwrap()
+        .expect("v1 publish");
+    let v1_body = store
+        .get(&response(&v1).ctx_id)
+        .expect("retrieve ok")
+        .expect("v1 present")
+        .body;
+
+    // A signer who is neither the producer nor a contributor is refused, and
+    // is told only "not found" — no existence oracle.
+    let stranger_req = stranger
+        .supersede_body(&v1_body)
+        .title("takeover attempt")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid request");
+    let err = commit(Arc::clone(&store), stranger_req, None)
+        .await
+        .unwrap()
+        .expect_err("a non-owner, non-contributor must not supersede");
+    assert!(
+        matches!(err, AcdpError::SupersededTarget { .. }),
+        "expected SupersededTarget for an unrelated signer, got {err:?}. With          the contributor arm inverted this signer is ADMITTED whenever v1          lists any contributor other than them — a lineage takeover"
+    );
+
+    // The listed contributor succeeds. This is the half no existing test
+    // covers, because every other supersession runs as the original producer.
+    let contrib_req = contributor
+        .supersede_body(&v1_body)
+        .title("contributor supersession v2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid request");
+    let v2 = commit(Arc::clone(&store), contrib_req, None)
+        .await
+        .unwrap()
+        .expect("a listed contributor MUST be allowed to supersede");
+    assert_eq!(
+        response(&v2).lineage_id,
+        response(&v1).lineage_id,
+        "the contributor's v2 continues v1's lineage"
+    );
 }
 
 /// `count_idempotency_records` must count the rows that exist.
