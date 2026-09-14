@@ -135,9 +135,15 @@ copy_vcs = true
 #   acdp-registry-pg/src/store.rs (136) -- DISQUALIFIED. Its tests skip to
 #   SUCCESS when ACDP_REGISTRY_TEST_PG_URL is unset (`pg_url_or_skip`, in
 #   crates/acdp-registry-pg/tests/parity.rs), and nothing here provides a
-#   database. All 136 would come back MISSED. A survivor list that is entirely
-#   false positives is what the `test_workspace` block above calls worse than no
-#   baseline at all -- the same failure, arriving by a different door.
+#   database. Every VIABLE one would therefore come back MISSED -- stated that
+#   way on purpose: the unviable ones never compile, so they have no verdict to
+#   be wrong about, and "all 136" would be an overstatement in the alarming
+#   direction. The point stands either way, because a survivor list that is
+#   entirely false positives is what the `test_workspace` block above calls
+#   worse than no baseline at all -- the same failure, arriving by a different
+#   door. This is a prediction from the gating code, not a measured run; it was
+#   not measured because doing so costs a 136-mutant run to confirm a skip that
+#   `pg_url_or_skip` states in four lines.
 #
 #   acdp-registry-store/src/parity.rs (89) -- STRUCTURALLY MEANINGLESS. It is
 #   `test-support` harness code that never ships. Mutating a test's own
