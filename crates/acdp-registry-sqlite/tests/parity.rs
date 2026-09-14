@@ -11,11 +11,16 @@ use std::sync::Arc;
 use acdp_registry_sqlite::SqliteStore;
 use acdp_registry_store::{parity, ExtendedRegistryStore};
 
-async fn store() -> (Arc<SqliteStore>, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-    let store = SqliteStore::connect(tmp.path(), 4).await.expect("connect");
+/// Own the temp DIRECTORY, not the temp FILE — SQLite's `-wal`/`-shm`
+/// sidecars are not the path a `NamedTempFile` owns, so they outlive the test.
+/// Same fix as #309 applied to the server harness; see `store_contract.rs`.
+async fn store() -> (Arc<SqliteStore>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("registry.sqlite"), 4)
+        .await
+        .expect("connect");
     store.migrate().await.expect("migrate");
-    (Arc::new(store), tmp)
+    (Arc::new(store), dir)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
