@@ -384,29 +384,6 @@ shipped inside a paragraph whose every other sentence was measured.
 > run has since confirmed all three as `CaughtMutant` — so the claim is now true on evidence
 > that actually supports it.
 
-Shard 1/8 was chosen over an unrun shard because it is the only shard whose expected result is on
-record: `DECISIONS.md` fixes it at **3 caught / 3 missed / 12 unviable**. A **prediction of 6 caught
-/ 0 missed / 12 unviable was written down before the run** and is reproduced in the PR. The run
-returned exactly that.
-
-**This is the first time U-543's kills were checked by cargo-mutants at all.** They were originally
-falsified by hand-applying each mutant and observing the suite redden — never by the oracle that
-actually gates CI. `342:26` (`+`→`*`), `342:26` (`+`→`-`) and `380:9` (`Ok(vec![])`) all came back
-**CaughtMutant**. The kills hold under the real harness.
-
-**The prediction turned on a line-range check, not on the kill set, and that distinction matters.**
-U-543's kill set is **four** mutants, not three — it also includes `154:9
-count_idempotency_records → Ok(Some(0))`. The prediction survives only because shard 1/8 spans
-lines 202–394 and therefore excludes `154:9`. Anyone re-deriving this from "U-543 killed three"
-will get the right answer for the wrong reason.
-
-**A set identity that was previously only an inference is now established.** Before the run, the
-claim "the control's 3 missed were `342:26`×2 and `380:9`" rested on three counts coinciding, which
-is strictly weaker than the sets coinciding. The re-run settles it by elimination: the other three
-caught mutants are `386:9`×2 (`log_tree_size`) and `394:9` (`log_leaf_hashes`), which U-543 never
-touched and which must therefore have been the control's original 3 caught.
-
-
 ## U-549 — the full 138 under a valid harness, and D-W5-182 re-tested
 
 Eight shards, one uniform method: `--config docs/mutation-runs/u549-sqlite-tranche.toml`,
@@ -473,3 +450,21 @@ a survivor that was never counted.
 All are production code — `#[cfg(test)]` begins at line 1987. **Not paid down in this unit
 by instruction:** measure, report, stop. Whether to widen scope or pay these down is a
 scoping decision, not a lane call.
+
+### What the correction did NOT void: the disk findings
+
+U-548's verdicts were void; its **disk** measurements were not, and they have now been
+re-confirmed under the corrected configuration. Across all eight valid shards free space
+stayed flat — **4617 → 4587 MiB**, a −30 MiB drift that includes the committed ledgers
+themselves — with **0 temp trees** and **0 sidecar `.sqlite` files** left behind. Residual
+is still zero, now with `.git` actually present in the mutant tree.
+
+The one figure that needs a caveat rather than a retraction: U-548's **peak** of 2547 MiB
+was measured on a run that did *not* copy `.git`, so it **understates** the corrected
+configuration by roughly the size of the repository history. The conclusion it supported —
+that the tranche fits comfortably and disk is not the constraint — is unaffected, and the
+whole 138 completed here in about 24 minutes of wall clock.
+
+**`rc=2` from `cargo mutants` means survivors were found, not that the run failed.** Shards
+0/8 and 1/8 exited 0 (no survivors); the other six exited 2. Treating a non-zero exit as a
+failed run would have discarded six valid shards.
