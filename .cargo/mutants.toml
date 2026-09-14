@@ -89,18 +89,17 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 351 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 213 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
 # MEASURED AT a66e1f2 (unit U-540), with the command that reproduces it:
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
 #     crates/acdp-registry-core/src/handlers/context.rs   139
-#     crates/acdp-registry-sqlite/src/store.rs            138
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs              9
 #     ----------------------------------------------------------
-#     total                                               351
+#     total                                               213
 #
 # `MUTANTS_EXPECTED_SCOPE` in .github/workflows/mutants.yml pins exactly this
 # number, as an EQUALITY rather than a floor, and the two are checked against
@@ -112,11 +111,39 @@ copy_vcs = true
 #
 # At the ~6.2s/mutant marginal cost measured in DECISIONS.md #17 that is ~2.5h,
 # and #216 lists "blocking PRs on a full mutation run" as a non-goal. This is a
-# scheduled job over a bounded set, by design. 351 of 1427 is 24.6%.
+# scheduled job over a bounded set, by design. 213 of 1427 is 14.9%.
 #
 # ---------------------------------------------------------------------------
-# sqlite/src/store.rs — THE U-540 TRANCHE, and why this file and not another
+# sqlite/src/store.rs — EVALUATED BY U-540, MEASURED, AND DEFERRED (#307)
 # ---------------------------------------------------------------------------
+#
+# WHY IT IS NOT IN THE GLOB LIST, EVEN THOUGH THE CASE FOR IT IS GOOD. Widening
+# to include it would take the scope to 351 and the SURVIVOR COUNT PAST THE
+# BUDGET. Measured over 95 of its 138 mutants: 47 caught / 14 missed / 34
+# unviable -- a 23% survivor rate among viable mutants, extrapolating to roughly
+# 20 survivors against a budget of 5.
+#
+# That is precisely the failure this file already warns about twelve lines
+# above: "a red check nobody can explain gets disabled, after which the real
+# regression walks through." Raising 5 -> 20 to admit a file is not a ratchet in
+# the direction mutants.yml defines ("it ratchets DOWN as survivors are killed
+# and must never be raised without a reason recorded in the same commit"), and
+# "these are real untested paths" is an argument for writing tests, not for
+# raising a budget.
+#
+# SO THE ORDER IS: PAY FIRST, WIDEN LAST. The survivors are paid down in their
+# own units, each PR killing a slice with tests; the LAST of them adds this glob
+# with the budget unchanged. The scope pin then only ever admits code that is
+# already covered, which is the invariant that keeps the check explicable.
+#
+# You do NOT need this glob to work on those survivors: `--file` UNIONS with
+# this list (demonstrated below), so a local run can target the file while the
+# committed scope stays at 213.
+#
+# THE INVENTORY IS NOT LOST WITH THIS DEFERRAL -- it is in docs/MUTATION-SCOPE-
+# CANDIDATES.md and issue #307, so the 14 known survivors are visible without a
+# red check standing in for them.
+#
 # #216 step 1 scopes the oracle to "receipt/log/lineage emission, the publish
 # path, visibility filtering". Receipt, log and the publish path were already
 # here. This file is the other two: `lineage` and `events_for_lineage`, and the
@@ -205,7 +232,6 @@ examine_globs = [
     "crates/acdp-registry-core/src/receipt.rs",
     "crates/acdp-registry-core/src/handlers/log.rs",
     "crates/acdp-registry-core/src/handlers/context.rs",
-    "crates/acdp-registry-sqlite/src/store.rs",
 ]
 
 # ---------------------------------------------------------------------------
