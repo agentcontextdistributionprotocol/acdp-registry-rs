@@ -129,8 +129,77 @@ jobs:
           # thing `-r` was protecting against cannot reach here.
           xargs shellcheck --format=gcc < scripts.txt
 
-      # actionlint covers workflow syntax, expression typing, and — via
-      # shellcheck above — every `run:` block, including this file's own.
+      # COMPOSITE ACTIONS ARE COVERED BY NEITHER STEP ABOVE, and U-536 made that
+      # matter: `.github/actions/read-spec-pin/` is this repo's first local action
+      # and its `run:` block is shell that gates every spec checkout. actionlint
+      # cannot read an `action.yml` at all -- pointed at one it reports `"jobs"
+      # section is missing` and exits 1, measured -- and its own enumeration is
+      # `.github/workflows/*`. So that shell would have been unlinted while the
+      # next step's comment claimed every `run:` block was covered.
+      #
+      # `${{ … }}` becomes a placeholder before linting, the same substitution
+      # actionlint performs internally, because shellcheck cannot parse expression
+      # syntax. A quoting defect INSIDE an expression is therefore not visible
+      # here: a stated limit, not an oversight.
+      #
+      # `!cancelled()` for the same reason as the step below -- one shell nit in a
+      # workflow must not hide a finding in an action.
+      - name: shellcheck composite actions
+        if: '!cancelled()'
+        run: |
+          set -euo pipefail
+          git ls-files '.github/actions/*/action.yml' | sort > actions.txt
+          n=$(grep -c . actions.txt || true)
+          echo "composite actions found: ${n}"
+          sed 's/^/  /' actions.txt
+          if [ "${n}" -eq 0 ]; then
+            echo "::error::no composite actions found. This repo has had one since U-536, so the enumeration is broken, not the tree."
+            exit 1
+          fi
+
+          cat > extract-action-shell.py <<'PY'
+          import io, os, re, sys
+
+          import yaml
+
+          out_dir = sys.argv[1]
+          count = 0
+          for path in sys.argv[2:]:
+              doc = yaml.safe_load(io.open(path, encoding="utf-8")) or {}
+              steps = (doc.get("runs") or {}).get("steps") or []
+              for i, step in enumerate(steps):
+                  body = (step or {}).get("run")
+                  if not body:
+                      continue
+                  body = re.sub(r"\$\{\{.*?\}\}", "GH_EXPR", body, flags=re.S)
+                  slug = re.sub(r"[^A-Za-z0-9]+", "-", path).strip("-")
+                  dest = os.path.join(out_dir, "%s-%d.sh" % (slug, i))
+                  io.open(dest, "w", encoding="utf-8").write("#!/usr/bin/env bash\n" + body)
+                  print(dest)
+                  count += 1
+          sys.stderr.write("extracted %d run: block(s) from %d file(s)\n" % (count, len(sys.argv) - 2))
+          PY
+
+          rm -rf action-shell && mkdir action-shell
+          xargs python3 extract-action-shell.py action-shell < actions.txt > blocks.txt
+          blocks=$(grep -c . blocks.txt || true)
+          echo "run: blocks extracted: ${blocks}"
+          sed 's/^/  /' blocks.txt
+          # THE EXTRACTOR IS THE LEAST-TESTED CODE IN THIS JOB. An extraction that
+          # matches nothing fails to a confident zero and every file it was meant to
+          # lint passes vacuously -- which happened while this step was being written,
+          # with an awk one-liner whose indentation was off by two, and all six of its
+          # negative cases "passed". So the count is asserted, not printed and trusted.
+          if [ "${blocks}" -eq 0 ]; then
+            echo "::error::extracted 0 run: blocks from ${n} composite action(s). read-spec-pin has one, so the extractor is broken: a scanner that finds nothing reports success identically to a scanner that finds nothing wrong."
+            exit 1
+          fi
+          xargs shellcheck --format=gcc -s bash < blocks.txt
+
+      # actionlint covers workflow syntax, expression typing, and — via shellcheck
+      # above — every `run:` block under `.github/workflows/`. Composite actions
+      # under `.github/actions/` are covered by the step above instead, because
+      # actionlint cannot parse an `action.yml`.
       #
       # `!cancelled()` so this still runs when the shellcheck step failed. Steps
       # default to `if: success()`, which meant a single shell nit hid every

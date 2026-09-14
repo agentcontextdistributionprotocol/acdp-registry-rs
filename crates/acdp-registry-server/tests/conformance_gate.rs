@@ -1070,248 +1070,649 @@ fn no_tracked_file_contains_a_conflict_marker() {
 }
 
 // ---------------------------------------------------------------------------
-// U-504 AC-8: the spec pin coupling between the two workflows.
+// U-504 AC-8, re-pointed by U-536: the couplings around the spec pin.
 //
-// `.github/workflows/mutants.yml` does not declare which acdp-spec commit to
-// check out. It DERIVES it, by grepping the 40-hex `ref:` out of
-// `.github/workflows/ci.yml` so the mutation run replays fixtures against the
-// same spec CI pins. That coupling is invisible from either file alone: nothing
-// in `ci.yml` says another workflow parses it, and restructuring `ci.yml`'s spec
-// step in a way that is perfectly valid YAML breaks the derivation silently.
+// Until U-536 the pin lived in `.github/workflows/ci.yml` and `mutants.yml`
+// DERIVED it, by grepping the 40-hex `ref:` out of that file. This test guarded
+// that derivation. The derivation is gone: `.spec-pin` is now the single
+// declarative source and BOTH workflows read it through
+// `.github/actions/read-spec-pin`, so the invariants change shape -- from "the
+// grep still finds it" to "nobody restates the pin, and everybody reads the file".
 //
-// **Rule 48, exactly: a doc artifact no command can check is a defect while it
-// is still correct.** The coupling is correct today and nothing verifies it.
+// What has NOT changed is why this is a test and not a comment. **Rule 48,
+// exactly: a doc artifact no command can check is a defect while it is still
+// correct.** Four couplings here are invisible from any single file:
 //
-// The verification gap is what makes it worth a test rather than a comment.
-// `mutants.yml` is `schedule:` + `workflow_dispatch` with NO `pull_request`
-// trigger -- deliberately, a 23-minute mutation run has no business gating a
-// PR -- so a PR that restructures `ci.yml` cannot turn this red. The breakage
-// would surface on the following Monday's cron, detached from the change that
-// caused it, in a job whose failure reads as "the ratchet is broken" rather than
-// "someone moved a line in a different file". This test moves the signal back to
-// the PR that causes it.
+//   * `mutants.yml` and `ci.yml` must resolve the SAME spec revision. They are
+//     two files with no reference to each other; only the pin file joins them.
+//   * `bump-spec.yml` hands acdp-ci's reusable bumper exactly ONE filename. A
+//     pin restated anywhere else is never bumped -- it goes stale silently and
+//     the two jobs start measuring different spec versions.
+//   * That bumper is a bot IN ANOTHER REPOSITORY, so `.spec-pin`'s line order and
+//     anchor count are an external contract a comment cannot reach.
+//   * `tests/conformance.rs` refuses a spec tree that is not at the pin, reading
+//     the same file.
 //
-// Written as a pure function over both files' TEXT rather than as assertions
-// against the real paths, for two reasons. It is falsifiable -- each invariant
-// is shown to fail against a synthetic restructuring below, which is the whole
-// point -- and `.github/workflows/ci.yml` is outside this unit's path grant, so
-// falsifying by editing the real file was never an option.
+// The verification gap is what makes it worth a test. `mutants.yml` is
+// `schedule:` + `workflow_dispatch` with NO `pull_request` trigger -- deliberately,
+// a 23-minute mutation run has no business gating a PR -- so a PR that breaks its
+// wiring cannot turn it red. The breakage would surface on the following Monday's
+// cron, detached from the change that caused it, in a job whose failure reads as
+// "the ratchet is broken" rather than "someone edited a different file". This test
+// moves the signal back to the PR that causes it.
+//
+// Written as a pure function over the four files' TEXT rather than as assertions
+// against the real paths, for two reasons. It is falsifiable -- every invariant is
+// shown to fail against a synthetic restructuring below, which is the whole point
+// -- and a synthetic input can be made to break in one specific way, which the
+// real file cannot without breaking CI for everyone.
 // ---------------------------------------------------------------------------
 
-/// The four invariants `mutants.yml`'s `pin` step depends on. Returns one string
-/// per violation; empty means the derivation is sound.
-fn spec_pin_violations(ci_yml: &str, mutants_yml: &str) -> Vec<String> {
-    let mut out = Vec::new();
+/// A 40-hex run ANYWHERE in the line. This is what acdp-ci's bumper matches, so
+/// it is what the line-order invariant has to reason about: a 64-hex digest
+/// contains a 40-hex run, and the bumper would happily return its first 40
+/// characters as the current pin.
+fn has_hex40_run(line: &str) -> bool {
+    let b = line.as_bytes();
+    let is_hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c);
+    let mut run = 0usize;
+    for &c in b {
+        if is_hex(c) {
+            run += 1;
+            if run >= 40 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
 
-    // A `uses:` LINE, not a mention. `ci.yml` discusses `checkout-spec@` in
-    // three comments around the step itself; a substring search matches those
-    // and reports 4 usages where there is 1. That is not hypothetical -- it is
-    // the bug this extraction shipped with in U-502 and the reason the real
-    // `pin` step anchors on `uses:` too.
-    let uses_lines: Vec<usize> = ci_yml
-        .lines()
+/// Lines in `text` that DECLARE `key` with a value satisfying `pred`, 1-indexed.
+///
+/// A whole-line declaration at column 0, not an occurrence of a value anywhere.
+/// The distinction is load-bearing rather than pedantic: the pinned sha also
+/// appears in `docs/ENGINEERING-LOG.md` as narrative history, so any "appears
+/// exactly once in the repository" check over a value is a false positive waiting
+/// for someone to write a sentence. What every consumer parses -- the shell in
+/// `read-spec-pin`, the bumper's awk, `conformance.rs` -- is the LINE SHAPE.
+fn pin_declarations(text: &str, key: &str, pred: impl Fn(&str) -> bool) -> Vec<usize> {
+    text.lines()
         .enumerate()
         .filter(|(_, l)| {
-            let t = l.trim_start();
-            t.starts_with("uses:") || t.starts_with("- uses:")
+            l.strip_prefix(key)
+                .and_then(|r| r.strip_prefix(": "))
+                .map(&pred)
+                .unwrap_or(false)
         })
-        .filter(|(_, l)| l.contains("checkout-spec@"))
         .map(|(i, _)| i + 1)
-        .collect();
-    if uses_lines.len() != 1 {
-        out.push(format!(
-            "invariant 1: ci.yml has {} `uses: …checkout-spec@` lines {:?}, expected \
-             exactly 1. The pin step refuses to guess which spec checkout the ref \
-             belongs to.",
-            uses_lines.len(),
-            uses_lines
-        ));
-    }
+        .collect()
+}
 
-    // Exactly one 40-hex `ref:`. A second one makes "the pin" ambiguous.
-    let is_hex40_ref = |l: &str| -> bool {
-        l.trim_start()
-            .strip_prefix("ref:")
-            .map(|r| {
-                let r = r.trim();
-                r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit())
-            })
-            .unwrap_or(false)
+fn is_sha40(v: &str) -> bool {
+    v.len() == 40
+        && v.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
+fn is_owner_repo(v: &str) -> bool {
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
     };
-    let ref_lines: Vec<usize> = ci_yml
-        .lines()
+    let mut parts = v.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(o), Some(r), None) => ok(o) && ok(r),
+        _ => false,
+    }
+}
+
+/// `uses:` LINES, not mentions, whose value contains `needle`.
+///
+/// The line anchor is not decoration. `ci.yml` discusses `checkout-spec@` in
+/// three comments around the step itself; a substring search over the file
+/// matches those and reports 4 usages where there is 1. That is not hypothetical
+/// -- it is the bug the U-502 extraction shipped with.
+fn uses_lines(text: &str, needle: &str) -> Vec<usize> {
+    text.lines()
         .enumerate()
-        .filter(|(_, l)| is_hex40_ref(l))
+        .filter(|(_, l)| {
+            let t = l.trim_start().trim_start_matches("- ");
+            t.starts_with("uses:") && t.contains(needle)
+        })
         .map(|(i, _)| i + 1)
-        .collect();
-    if ref_lines.len() != 1 {
+        .collect()
+}
+
+/// A `ref:` line carrying a 40-hex literal, at any indentation. An action `uses:`
+/// pin is also a 40-hex sha and must NOT count: a guard that banned every 40-hex
+/// string would fail against the correct file, which is how a guard gets deleted.
+fn literal_ref_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            l.trim_start()
+                .strip_prefix("ref:")
+                .map(|r| is_sha40(r.trim()))
+                .unwrap_or(false)
+        })
+        .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+        .collect()
+}
+
+/// Every invariant the `.spec-pin` wiring depends on. One string per violation;
+/// empty means the single-source-of-truth shape is intact.
+fn spec_pin_violations(
+    spec_pin: &str,
+    ci_yml: &str,
+    mutants_yml: &str,
+    bump_yml: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // (1) Exactly one `ref:` declaration. Zero means no consumer can find the
+    //     pin; two means they need not all choose the same value, and two jobs
+    //     resolving different revisions is the exact failure this file exists to
+    //     prevent.
+    let refs = pin_declarations(spec_pin, "ref", is_sha40);
+    if refs.len() != 1 {
         out.push(format!(
-            "invariant 2: ci.yml has {} 40-hex `ref:` lines {:?}, expected exactly 1. \
-             The spec pin is derived from that line; zero means the derivation finds \
-             nothing, more than one means it picks arbitrarily.",
-            ref_lines.len(),
-            ref_lines
+            "invariant 1: .spec-pin has {} `ref: <40 hex>` declarations {:?}, expected \
+             exactly 1. Zero and two are different bugs with the same cure: one line.",
+            refs.len(),
+            refs
         ));
     }
 
-    // The ref must belong to that usage, i.e. sit below it. A `ref:` above the
-    // `uses:` is valid YAML for some OTHER step and would pin the spec checkout
-    // to an unrelated commit.
-    if let (Some(&u), Some(&r)) = (uses_lines.first(), ref_lines.first()) {
-        if r < u {
+    // (2) Exactly one `repository:` declaration -- and this one is an EXTERNAL
+    //     contract. acdp-ci's bumper locates the pin by finding a line naming the
+    //     spec repository and REFUSES TO BUMP AT ALL when it counts more than one,
+    //     rather than rewrite one and leave the rest stale. A second such line
+    //     therefore does not corrupt the pin; it silently stops the pin ever
+    //     moving again, which is worse because nothing goes red.
+    let repos = pin_declarations(spec_pin, "repository", is_owner_repo);
+    if repos.len() != 1 {
+        out.push(format!(
+            "invariant 2: .spec-pin has {} `repository: <owner>/<name>` declarations \
+             {:?}, expected exactly 1. acdp-ci's bump-spec-ref counts these as pin \
+             anchors and declines to bump a file with two, so the pin would freeze \
+             silently rather than fail loudly.",
+            repos.len(),
+            repos
+        ));
+    }
+
+    // (3) `ref:` must be the FIRST line carrying a 40-hex run. The bumper takes
+    //     the first 40-hex value on a `ref:`-ish line below its anchor, and
+    //     `conformance-digest:`'s 64 hex characters CONTAIN a 40-hex run -- so
+    //     with the two lines swapped it reads the digest's first 40 characters as
+    //     the current pin. Falsified against the bumper's own awk, not theorised.
+    let first_hex40 = spec_pin.lines().position(has_hex40_run).map(|i| i + 1);
+    match (first_hex40, refs.first()) {
+        (Some(first), Some(&r)) if first != r => out.push(format!(
+            "invariant 3: .spec-pin's first 40-hex run is on line {first}, but the \
+             `ref:` declaration is on line {r}. The bumper reads the first such value \
+             below its anchor; a 64-hex digest above `ref:` is a 40-hex run, so it \
+             would adopt the digest's first 40 characters as the pin."
+        )),
+        _ => {}
+    }
+
+    // (4) EXACTLY ONE BUMPER ANCHOR, counted THE WAY THE BUMPER COUNTS -- which is
+    //     not the way invariant 2 counts, and that difference is why both exist.
+    //     acdp-ci's bump-spec-ref runs, over every line of the file:
+    //
+    //       index($0, "repository: " SPEC) || index($0, "acdp-ci/actions/checkout-spec@")
+    //
+    //     A SUBSTRING search, anywhere in the line, COMMENTS INCLUDED. So a comment
+    //     that SPELLS either anchor form becomes a second anchor, and the bumper then
+    //     refuses to bump the file at all rather than rewrite one and leave the rest
+    //     stale: the pin freezes silently instead of failing loudly. That is why
+    //     `.spec-pin`'s comments describe the two forms instead of quoting them, and
+    //     this is the assertion that keeps that true -- a prose rule about prose,
+    //     which is exactly the kind nothing else in the build can check.
+    //
+    //     Invariant 2's column-0 declaration count CANNOT see a comment. Found by
+    //     falsification: the spelled-anchor case below was written against invariant
+    //     2, and invariant 2 stayed silent -- while citing this external contract in
+    //     its own failure message.
+    if let Some(&r) = repos.first() {
+        let spec = spec_pin
+            .lines()
+            .nth(r - 1)
+            .and_then(|l| l.strip_prefix("repository: "))
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let needle = format!("repository: {spec}");
+        let anchors: Vec<usize> = spec_pin
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(&needle) || l.contains("acdp-ci/actions/checkout-spec@"))
+            .map(|(i, _)| i + 1)
+            .collect();
+        if anchors.len() != 1 {
             out.push(format!(
-                "invariant 3: ci.yml's 40-hex `ref:` is at line {r}, ABOVE the \
-                 checkout-spec `uses:` at line {u}. A ref above the usage belongs to \
-                 a different step, so the derived pin would be some other action's \
-                 commit."
+                "invariant 4: .spec-pin has {} lines matching the BUMPER's anchor \
+                 patterns {:?}, expected exactly 1. It counts by substring over every \
+                 line -- `repository: {spec}` or `acdp-ci/actions/checkout-spec@`, \
+                 comments included -- and declines to bump a file with two anchors, so \
+                 the pin would stop moving with nothing going red. Describe an anchor \
+                 form in prose; never spell it.",
+                anchors.len(),
+                anchors
             ));
         }
     }
 
-    // mutants.yml must DERIVE the pin, never restate it. Note the narrowness:
-    // `uses:` action pins in mutants.yml are legitimately 40-hex SHAs (four of
-    // them) and must not be flagged. Only a literal on a `ref:` line is the
-    // defect -- that is the value which must stay an expression.
-    let pasted: Vec<String> = mutants_yml
+    // (5)-(9) apply to both workflows. The pair is the point: they are two files
+    // with no reference to each other that must resolve the SAME revision.
+    for (name, text) in [("ci.yml", ci_yml), ("mutants.yml", mutants_yml)] {
+        // (5) The pin is not restated. This is the repair that DEFEATS the whole
+        //     design: pasting a literal makes a wiring error go away locally and
+        //     decouples that job's spec from every other consumer. `bump-spec.yml`
+        //     passes the bumper exactly one filename, so a pasted copy is never
+        //     rewritten -- it goes stale in silence.
+        let pasted = literal_ref_lines(text);
+        if !pasted.is_empty() {
+            out.push(format!(
+                "invariant 5: {name} restates the spec pin literally instead of reading \
+                 .spec-pin: {pasted:?}. Only ONE file is bumped, so a second copy goes \
+                 stale silently and this job starts measuring a different spec revision \
+                 from the others. It must stay an expression."
+            ));
+        }
+
+        // (6) It reads the pin through the shared action -- exactly once. Two
+        //     reader steps would mean two `id:`s and no way for this test to know
+        //     which output the checkout consumes.
+        let readers = uses_lines(text, "./.github/actions/read-spec-pin");
+        if readers.len() != 1 {
+            out.push(format!(
+                "invariant 6: {name} has {} `uses: ./.github/actions/read-spec-pin` \
+                 lines {:?}, expected exactly 1. Zero means this job no longer reads the \
+                 single source and its spec revision came from somewhere unaudited.",
+                readers.len(),
+                readers
+            ));
+        }
+
+        // (7) Exactly one spec checkout, so "the pin" is unambiguous in this file.
+        let checkouts = uses_lines(text, "checkout-spec@");
+        if checkouts.len() != 1 {
+            out.push(format!(
+                "invariant 7: {name} has {} `uses: …checkout-spec@` lines {:?}, expected \
+                 exactly 1. A second spec checkout can be wired to a different ref, which \
+                 is the ambiguity the single source removes.",
+                checkouts.len(),
+                checkouts
+            ));
+        }
+
+        // (8) The reader must come BEFORE the checkout that consumes its outputs.
+        //     A step cannot reference a later step's outputs: the expression
+        //     resolves to the empty string and `checkout-spec` silently takes its
+        //     own default branch -- a green job measuring the wrong tree. That is
+        //     precisely the class U-536 exists to close, so it gets an assertion
+        //     rather than a convention.
+        if let (Some(&reader), Some(&checkout)) = (readers.first(), checkouts.first()) {
+            if reader > checkout {
+                out.push(format!(
+                    "invariant 8: {name} reads the pin at line {reader}, BELOW the spec \
+                     checkout at line {checkout}. A step cannot consume a later step's \
+                     outputs -- the expression resolves to empty and the checkout falls \
+                     back to its default branch, green and wrong."
+                ));
+            }
+        }
+
+        // (9) `repository:` is passed through from the pin rather than left to
+        //     `checkout-spec`'s own default, which it currently matches. If the two
+        //     ever diverged, the bumper would resolve a sha from the repository
+        //     `.spec-pin` names while this job checked out a different one -- a
+        //     silent wrong-tree pass, the failure mode this unit exists to close,
+        //     reappearing inside the fix for it.
+        let passthrough = text
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                t.starts_with("repository:") && t.contains(".outputs.repository")
+            })
+            .count();
+        if passthrough != 1 {
+            out.push(format!(
+                "invariant 9: {name} has {passthrough} `repository: <…outputs.repository>` \
+                 lines, expected exactly 1. Relying on checkout-spec's default lets the \
+                 bumper and the checkout disagree about WHICH repository the sha belongs \
+                 to, and a sha from the wrong repository either fails oddly or resolves."
+            ));
+        }
+    }
+
+    // (10) The bumper is pointed at the pin file, and at exactly one file. Pointing
+    //     it back at a workflow is not a no-op: `ci.yml` no longer has a 40-hex
+    //     `ref:` below a spec-repository anchor, so the bumper's matcher would walk
+    //     on and read an unrelated action pin -- `dtolnay/rust-toolchain`'s -- as
+    //     the current spec ref. Measured: the rewrite then lands nowhere and the
+    //     bumper fails its own post-rewrite assertion, so it is loud rather than
+    //     destructive. Still wrong, and cheap to assert.
+    let bump_files: Vec<&str> = bump_yml
         .lines()
-        .enumerate()
-        .filter(|(_, l)| is_hex40_ref(l))
-        .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+        .filter_map(|l| l.trim_start().strip_prefix("file: "))
+        .map(str::trim)
         .collect();
-    if !pasted.is_empty() {
+    if bump_files != [".spec-pin"] {
         out.push(format!(
-            "invariant 4: mutants.yml pins the spec ref literally instead of deriving \
-             it from ci.yml: {pasted:?}. This is the repair that DEFEATS the guard -- \
-             pasting the ref makes the pin step's error go away and silently decouples \
-             the mutation run's spec from CI's. It must stay \
-             `ref: ${{{{ steps.pin.outputs.ref }}}}`."
+            "invariant 10: bump-spec.yml passes {bump_files:?} to acdp-ci's bump-spec-ref, \
+             expected exactly [\".spec-pin\"]. It bumps ONE file; pointing it at a \
+             workflow again would have it read an unrelated action pin as the spec ref."
         ));
     }
 
     out
 }
 
-/// The real files must satisfy all four.
+/// The real four files must satisfy all ten.
 #[test]
-fn the_mutants_workflow_spec_pin_stays_derivable_from_ci() {
+fn the_spec_pin_stays_the_single_source_of_truth() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
         .expect("crates/<crate>/ is two levels below the workspace root")
         .to_path_buf();
-    let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
-    let mutants = std::fs::read_to_string(root.join(".github/workflows/mutants.yml"))
-        .expect("read mutants.yml");
+    let read =
+        |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("read {p}: {e}"));
 
-    let violations = spec_pin_violations(&ci, &mutants);
+    let violations = spec_pin_violations(
+        &read(".spec-pin"),
+        &read(".github/workflows/ci.yml"),
+        &read(".github/workflows/mutants.yml"),
+        &read(".github/workflows/bump-spec.yml"),
+    );
     assert!(
         violations.is_empty(),
-        "the mutation workflow derives its acdp-spec pin from ci.yml and that \
-         derivation is now broken:\n  {}\n\nmutants.yml is schedule-only, so this \
-         would otherwise have surfaced on the next Monday cron rather than on the \
-         change that caused it.",
+        "the .spec-pin wiring is broken:\n  {}\n\nEvery consumer -- both workflows, \
+         the spec bumper in another repository, and the conformance harness -- reads \
+         that one file, and none of those couplings is visible from any single file. \
+         mutants.yml is schedule-only, so without this test the damage would surface \
+         on the next Monday cron rather than on the change that caused it.",
         violations.join("\n  ")
     );
 }
 
-/// Each invariant must FAIL on its own restructuring — otherwise the test above
-/// is four assertions that have never been shown to do anything.
+/// Every invariant must FAIL on its own restructuring — otherwise the test above
+/// is ten assertions that have never been shown to do anything, and an earlier
+/// assertion masking a later one would be invisible.
 ///
 /// The inputs are deliberately VALID YAML that a reasonable person would write.
-/// None of these is a typo; each is a plausible edit that happens to break a
-/// coupling its author could not see.
+/// None is a typo; each is a plausible edit that happens to break a coupling its
+/// author could not see. Where an invariant applies to both workflows, BOTH are
+/// falsified: the loop is shared code, but the inputs are not, and "the other file
+/// is the same shape" is a hypothesis about a file nobody re-read.
 #[test]
 fn each_spec_pin_invariant_is_individually_falsified() {
+    const GOOD_PIN: &str = "\
+# A comment that DESCRIBES the anchor forms without spelling them.
+repository: org/spec
+ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
+conformance-digest: rfc6962-sha256:03644a90cc643fd5bd5fe3c762389c16def704a874f94716619f7a949b965f85
+";
     const GOOD_CI: &str = "\
 jobs:
   conformance:
     steps:
       # checkout-spec@ is mentioned here in a comment on purpose.
       - uses: actions/checkout@1111111111111111111111111111111111111111
+      - name: Read the pinned spec revision
+        id: pin
+        uses: ./.github/actions/read-spec-pin
       - uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
         with:
-          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
+          repository: ${{ steps.pin.outputs.repository }}
+          ref: ${{ steps.pin.outputs.ref }}
 ";
     const GOOD_MUTANTS: &str = "\
 jobs:
   mutants:
     steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+      - name: Read the pinned spec revision
+        id: pin
+        uses: ./.github/actions/read-spec-pin
       - uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
         with:
+          repository: ${{ steps.pin.outputs.repository }}
           ref: ${{ steps.pin.outputs.ref }}
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+";
+    const GOOD_BUMP: &str = "\
+jobs:
+  bump:
+    uses: org/acdp-ci/.github/workflows/bump-spec-ref.yml@4444444444444444444444444444444444444444
+    with:
+      file: .spec-pin
 ";
 
-    // Control: the good pair must pass, or every assertion below is vacuous.
+    let good =
+        |pin: &str, ci: &str, mut_: &str, bump: &str| spec_pin_violations(pin, ci, mut_, bump);
+
+    // Control: the good quartet must pass, or every assertion below is vacuous.
     assert!(
-        spec_pin_violations(GOOD_CI, GOOD_MUTANTS).is_empty(),
+        good(GOOD_PIN, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP).is_empty(),
         "the control fixture must be clean: {:?}",
-        spec_pin_violations(GOOD_CI, GOOD_MUTANTS)
+        good(GOOD_PIN, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP)
     );
 
-    // (1) A second spec checkout — e.g. a matrix job gaining its own.
-    let two_uses = GOOD_CI.replace(
-        "      - uses: actions/checkout@1111111111111111111111111111111111111111",
-        "      - uses: org/acdp-ci/actions/checkout-spec@3333333333333333333333333333333333333333",
-    );
-    let v = spec_pin_violations(&two_uses, GOOD_MUTANTS);
+    let fires = |v: &[String], n: &str| v.iter().any(|s| s.starts_with(n));
+
+    // (1) A second pin, e.g. someone adding a "previous" line for reference.
+    let two_refs = format!("{GOOD_PIN}ref: 0000000000000000000000000000000000000000\n");
+    let v = good(&two_refs, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
+    assert!(fires(&v, "invariant 1"), "two refs must trip 1, got {v:?}");
+    let no_ref = GOOD_PIN.replace("ref: d1f06d0", "reff: d1f06d0");
+    let v = good(&no_ref, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
+    assert!(fires(&v, "invariant 1"), "no ref must trip 1, got {v:?}");
+
+    // (2) The declaration renamed -- the line shape `read-spec-pin` parses, gone.
+    let no_repo = GOOD_PIN.replace("repository: org/spec", "spec-repository: org/spec");
+    let v = good(&no_repo, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
     assert!(
-        v.iter().any(|s| s.starts_with("invariant 1")),
-        "two checkout-spec usages must trip invariant 1, got {v:?}"
+        fires(&v, "invariant 2"),
+        "no repository declaration must trip 2, got {v:?}"
     );
 
-    // (2) The pin moved to a variable — the ref line stops being a literal.
-    let no_ref = GOOD_CI.replace(
-        "          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7",
-        "          ref: ${{ env.SPEC_REF }}",
+    // (4) A comment that SPELLS the anchor form instead of describing it -- the
+    //     single most likely way this file acquires a second anchor, and it makes
+    //     the pin UNBUMPABLE rather than wrong, which is worse: nothing goes red.
+    //     This case is why invariant 4 exists. It was written against invariant 2,
+    //     it failed, and the failure was CORRECT -- a column-0 declaration count
+    //     cannot see a comment, so the narrow check could not enforce the external
+    //     contract its own message cited.
+    let spelled = GOOD_PIN.replace(
+        "# A comment that DESCRIBES the anchor forms without spelling them.",
+        "# e.g. repository: org/spec",
     );
-    let v = spec_pin_violations(&no_ref, GOOD_MUTANTS);
+    let v = good(&spelled, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
     assert!(
-        v.iter().any(|s| s.starts_with("invariant 2")),
-        "no 40-hex ref must trip invariant 2, got {v:?}"
+        fires(&v, "invariant 4"),
+        "a spelled repository anchor in a comment must trip 4, got {v:?}"
+    );
+    assert!(
+        !fires(&v, "invariant 2"),
+        "and invariant 2 must stay SILENT on it -- if it fired too, the two are not \
+         measuring different things and one is redundant: {v:?}"
     );
 
-    // (3) The step reordered so `with:`/`ref:` precedes `uses:` — valid YAML,
-    //     since mapping key order is not significant.
-    const REORDERED_CI: &str = "\
+    // The other anchor form, and the one easier to write by accident: naming the
+    // composite action in a comment. `ci.yml` mentions it three times, which is
+    // precisely why the pin file must not mention it once.
+    let spelled_action = GOOD_PIN.replace(
+        "# A comment that DESCRIBES the anchor forms without spelling them.",
+        "# the acdp-ci/actions/checkout-spec@ step in ci.yml consumes this",
+    );
+    let v = good(&spelled_action, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
+    assert!(
+        fires(&v, "invariant 4"),
+        "a spelled checkout-spec anchor in a comment must trip 4, got {v:?}"
+    );
+
+    // (3) The digest moved above the ref -- a tidy-looking reordering.
+    const SWAPPED_PIN: &str = "\
+repository: org/spec
+conformance-digest: rfc6962-sha256:03644a90cc643fd5bd5fe3c762389c16def704a874f94716619f7a949b965f85
+ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
+";
+    let v = good(SWAPPED_PIN, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP);
+    assert!(
+        fires(&v, "invariant 3"),
+        "digest above ref must trip 3, got {v:?}"
+    );
+
+    // (5) The repair that defeats the design, in EACH workflow independently.
+    for (which, ci, mu) in [
+        (
+            "ci.yml",
+            GOOD_CI.replace(
+                "ref: ${{ steps.pin.outputs.ref }}",
+                "ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7",
+            ),
+            GOOD_MUTANTS.to_string(),
+        ),
+        (
+            "mutants.yml",
+            GOOD_CI.to_string(),
+            GOOD_MUTANTS.replace(
+                "ref: ${{ steps.pin.outputs.ref }}",
+                "ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7",
+            ),
+        ),
+    ] {
+        let v = good(GOOD_PIN, &ci, &mu, GOOD_BUMP);
+        assert!(
+            fires(&v, "invariant 5"),
+            "a pasted literal ref in {which} must trip 5, got {v:?}"
+        );
+        assert!(
+            v.iter().any(|s| s.contains(which)),
+            "invariant 5 must name {which}, got {v:?}"
+        );
+    }
+
+    // And its narrowness: `uses:` action pins ARE 40-hex shas -- GOOD_MUTANTS
+    // carries one -- and must never be mistaken for a pasted spec pin. A guard
+    // that banned every 40-hex string would fail against the correct file, which
+    // is how a guard gets deleted rather than fixed.
+    assert!(
+        !fires(
+            &good(GOOD_PIN, GOOD_CI, GOOD_MUTANTS, GOOD_BUMP),
+            "invariant 5"
+        ),
+        "action `uses:` shas must not read as a pasted pin"
+    );
+
+    // (6) The reader step dropped, in each workflow.
+    for (which, ci, mu) in [
+        (
+            "ci.yml",
+            GOOD_CI.replace("        uses: ./.github/actions/read-spec-pin\n", ""),
+            GOOD_MUTANTS.to_string(),
+        ),
+        (
+            "mutants.yml",
+            GOOD_CI.to_string(),
+            GOOD_MUTANTS.replace("        uses: ./.github/actions/read-spec-pin\n", ""),
+        ),
+    ] {
+        let v = good(GOOD_PIN, &ci, &mu, GOOD_BUMP);
+        assert!(
+            fires(&v, "invariant 6"),
+            "a missing reader in {which} must trip 6, got {v:?}"
+        );
+    }
+
+    // (7) A second spec checkout, in each workflow.
+    for (which, ci, mu) in [
+        ("ci.yml", format!("{GOOD_CI}      - uses: org/acdp-ci/actions/checkout-spec@3333333333333333333333333333333333333333\n"), GOOD_MUTANTS.to_string()),
+        ("mutants.yml", GOOD_CI.to_string(), format!("{GOOD_MUTANTS}      - uses: org/acdp-ci/actions/checkout-spec@3333333333333333333333333333333333333333\n")),
+    ] {
+        let v = good(GOOD_PIN, &ci, &mu, GOOD_BUMP);
+        assert!(
+            fires(&v, "invariant 7"),
+            "two spec checkouts in {which} must trip 7, got {v:?}"
+        );
+    }
+
+    // (8) The reader moved below the checkout that consumes it -- valid YAML,
+    //     green job, wrong tree. Built by reordering rather than by editing text,
+    //     so the mutation cannot accidentally also break invariant 6.
+    const READER_LAST_CI: &str = "\
 jobs:
   conformance:
     steps:
-      - with:
-          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7
-        uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
-";
-    let v = spec_pin_violations(REORDERED_CI, GOOD_MUTANTS);
-    assert!(
-        v.iter().any(|s| s.starts_with("invariant 3")),
-        "a ref above the usage must trip invariant 3, got {v:?}"
-    );
-
-    // (4) The repair that defeats the guard: paste the ref into mutants.yml so
-    //     the pin step stops complaining.
-    let pasted = GOOD_MUTANTS.replace(
-        "          ref: ${{ steps.pin.outputs.ref }}",
-        "          ref: d1f06d0d49b73d411a3983d3877321ccaccd38e7",
-    );
-    let v = spec_pin_violations(GOOD_CI, &pasted);
-    assert!(
-        v.iter().any(|s| s.starts_with("invariant 4")),
-        "a literal ref in mutants.yml must trip invariant 4, got {v:?}"
-    );
-
-    // And the narrowness of (4): mutants.yml's own ACTION pins are 40-hex SHAs
-    // and must NOT be flagged. A guard that banned every 40-hex string would
-    // fail against the correct file, which is how a guard gets deleted.
-    let action_pins_only = "\
-    steps:
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: org/acdp-ci/actions/checkout-spec@2222222222222222222222222222222222222222 # v1
         with:
+          repository: ${{ steps.pin.outputs.repository }}
           ref: ${{ steps.pin.outputs.ref }}
+      - name: Read the pinned spec revision
+        id: pin
+        uses: ./.github/actions/read-spec-pin
 ";
+    let v = good(GOOD_PIN, READER_LAST_CI, GOOD_MUTANTS, GOOD_BUMP);
     assert!(
-        !spec_pin_violations(GOOD_CI, action_pins_only)
-            .iter()
-            .any(|s| s.starts_with("invariant 4")),
-        "action `uses:` SHAs must not be mistaken for a pasted spec pin"
+        fires(&v, "invariant 8"),
+        "a reader below the checkout must trip 8, got {v:?}"
+    );
+    // ...and ONLY 7, which is what proves the ordering assertion is doing the
+    // work rather than inheriting a failure from a broken-in-two-ways fixture.
+    assert!(
+        !fires(&v, "invariant 6") && !fires(&v, "invariant 7"),
+        "the reordering fixture must break ONLY the ordering invariant, got {v:?}"
+    );
+
+    // (9) `repository:` left to checkout-spec's default, in each workflow.
+    for (which, ci, mu) in [
+        (
+            "ci.yml",
+            GOOD_CI.replace(
+                "          repository: ${{ steps.pin.outputs.repository }}\n",
+                "",
+            ),
+            GOOD_MUTANTS.to_string(),
+        ),
+        (
+            "mutants.yml",
+            GOOD_CI.to_string(),
+            GOOD_MUTANTS.replace(
+                "          repository: ${{ steps.pin.outputs.repository }}\n",
+                "",
+            ),
+        ),
+    ] {
+        let v = good(GOOD_PIN, &ci, &mu, GOOD_BUMP);
+        assert!(
+            fires(&v, "invariant 9"),
+            "a dropped repository pass-through in {which} must trip 9, got {v:?}"
+        );
+    }
+
+    // (10) The bumper pointed back at a workflow -- the regression U-536 undoes.
+    let bump_ci = GOOD_BUMP.replace("file: .spec-pin", "file: .github/workflows/ci.yml");
+    let v = good(GOOD_PIN, GOOD_CI, GOOD_MUTANTS, &bump_ci);
+    assert!(
+        fires(&v, "invariant 10"),
+        "bumping a workflow must trip 10, got {v:?}"
+    );
+    // Two `file:` inputs is the other shape: the bumper takes one, so the second
+    // is a copy nobody rewrites.
+    let bump_two = GOOD_BUMP.replace(
+        "      file: .spec-pin",
+        "      file: .spec-pin\n      file: .spec-pin.old",
+    );
+    let v = good(GOOD_PIN, GOOD_CI, GOOD_MUTANTS, &bump_two);
+    assert!(
+        fires(&v, "invariant 10"),
+        "two bump targets must trip 10, got {v:?}"
     );
 }
