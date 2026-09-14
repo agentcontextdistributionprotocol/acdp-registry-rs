@@ -6308,3 +6308,39 @@ Earlier entries in this log describe the retired derivation as current — inclu
 baseline note at line 5301, which explains why a mutation baseline had to be re-measured
 across a pin move. That reasoning was true when written; the mechanism it names was replaced
 here.
+
+## U-539 — a comment that outlived its decision, and #216's last open question
+
+`.cargo/mutants.toml` spent a paragraph explaining why `handlers/context.rs` was excluded
+from the mutation scope. The glob list three lines below it had included that file since
+U-504. The prose also pinned the scope at 74 mutants while the workflow that consumes it
+pinned 213.
+
+**Measured, not inferred** (`cargo mutants --list`, at `60b08b7`): 213 = context.rs 139 +
+log.rs 65 + receipt.rs 9; workspace 1427 under `--no-config`; and `--file` unions with the
+globs rather than replacing them (213 + admin.rs 49 = 262 exactly).
+
+The instructive part: **the stale number was correct for a configuration that no longer
+existed.** Deleting the `context.rs` glob reproduces exactly 74. So the failure was not a
+miscount but a comment that kept describing a tree it no longer matched — and the arithmetic
+that looked like it would recover the truth (74 + 134) gives 208, because `context.rs` had
+grown to 139 in the meantime. Every figure in that file now carries the command that
+reproduces it.
+
+**#216 item 4 — keep the substring guards or retire them — is settled: KEPT.** The reasoning
+and the three measured grounds are in `DECISIONS.md`. The measurement that decided it:
+
+* over 65 `handlers/log.rs` mutants run against the pinned spec, **17 distinct tests**
+  reddened and the two substring guards reddened **zero** times — while provably running in
+  41 of those runs (= 40 caught + 1 missed; the 24 unviable never compile);
+* conversely, three falsifications turned them red on things no `src/` mutation can express:
+  a body gutted to `{}`, a golden gutted to `assert!(true)`, and a `PARTIAL_DIRECT` family
+  also listed in `COVERED`.
+
+That third one is the load-bearing find: `partial_direct_test_functions_are_present` is not
+purely a text search. It enforces table invariants an oracle structurally cannot see, so
+"retire the substring guard" would have silently retired those as well.
+
+Independent confirmation worth recording: the run's single survivor was exactly the
+`log.rs:131:18 == -> !=` mutant the workflow already enumerates as equivalent — a budgeted
+entry re-derived rather than re-read.
