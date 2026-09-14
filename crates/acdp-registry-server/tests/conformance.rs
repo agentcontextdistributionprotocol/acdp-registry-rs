@@ -502,22 +502,53 @@
 //! regex.
 //!
 //! **THAT ORACLE NOW EXISTS** (#216, unit U-502). `.cargo/mutants.toml` configures
-//! `cargo-mutants` over `acdp-registry-core`'s `receipt.rs` and `handlers/log.rs`, and
-//! `.github/workflows/mutants.yml` runs it on a schedule against a committed survivor
-//! budget that fails the job when it is exceeded. The baseline is in
-//! `docs/ENGINEERING-LOG.md`: 74 mutants, 48 viable, **46 caught, 2 survivors**. So do not
-//! reach for `cargo-mutants` as a thing someone should do one day -- run `cargo mutants`.
+//! `cargo-mutants` over `acdp-registry-core`'s `receipt.rs`, `handlers/log.rs` and
+//! `handlers/context.rs`, and `.github/workflows/mutants.yml` runs it on a schedule against
+//! a committed survivor budget that fails the job when it is exceeded. Re-measured at
+//! 60b08b7 (U-539): **213 mutants**, of which 134 caught / 5 missed / 73 unviable /
+//! 1 timeout. So do not reach for `cargo-mutants` as a thing someone should do one day --
+//! run `cargo mutants`.
 //!
 //! Two limits on that, because a reader who over-trusts this is worse off than one who
-//! ignores it. The scope is two files, NOT this file and NOT the workspace (1398 mutants),
-//! so a mutation of code outside those two is still unoracled. And the oracle exercises
-//! the tests in THIS file only in require mode: 42 of the 70 tests here return early
-//! without `ACDP_SPEC_DIR`, so the scheduled job sets it and a bare local
-//! `cargo test --workspace` does not.
+//! ignores it. The scope is THREE FILES, not this file and not the workspace (1427 mutants
+//! at 60b08b7), so a mutation of code outside those three is still unoracled -- and that is
+//! most of what the tests below exercise. And the oracle runs the tests in THIS file only
+//! in require mode: 42 of the 70 tests here return early without `ACDP_SPEC_DIR`, so the
+//! scheduled job sets it and a bare local `cargo test --workspace` does not.
 //!
-//! #216 stays open for the remaining scope, split out of #130 when that issue closed so
-//! this thread keeps an open anchor of its own; #130 was the uncovered-family ratchet and
-//! never really this.
+//! **#216 item 4 is settled (U-539): the two anti-vacuity guards below are KEPT.** The
+//! question it posed was whether they survive as a cheap first line or are retired as
+//! misleading now that a real oracle exists. Retired would have been wrong, for three
+//! measured reasons rather than sentiment:
+//!
+//!   * **Reach.** The oracle covers 213 of 1427 workspace mutants, in three files. The 41
+//!     functions these guards pin span did resolution, signatures, canonicalisation,
+//!     lineage, capabilities, idempotency, rate limiting, anchors, witness, schema and
+//!     status -- almost all of it outside the oracle's scope, where a gutted test body
+//!     would be noticed by nothing at all.
+//!   * **Cadence.** The oracle is a weekly cron, deliberately not a `pull_request` trigger
+//!     (#216 lists blocking PRs on a mutation run as a non-goal). These guards run on every
+//!     PR. Retiring them widens the detection window for wholesale gutting from minutes to
+//!     up to seven days.
+//!   * **`partial_direct_test_functions_are_present` is not only a substring guard.** It
+//!     also enforces `PARTIAL_DIRECT` ⊆ `DEFERRED` ∪ `EXCUSED` and `PARTIAL_DIRECT` ∩
+//!     `COVERED` = ∅. Those are table invariants, not text searches, and **no mutation
+//!     oracle can ever check them** -- the oracle mutates `src/`, not this file's tables.
+//!     Retiring the test to retire the substring check would have taken those with it.
+//!
+//! What is NOT claimed: that the substring component is strong. It is not, and all six of
+//! #216's listed defeats were measured against a registered test in unit H-F and still
+//! stand (see `DIRECT_FNS`). The guards catch wholesale gutting and deletion; that is the
+//! ceiling, and it is stated again at each assertion rather than assumed remembered.
+//!
+//! **Revisit trigger, written down so it is not a matter of taste:** if the oracle's scope
+//! grows to cover the families these 41 tests exercise, the reach argument above expires
+//! and this decision should be re-taken. Until then, the three layers are complementary --
+//! `DIRECT_FNS` for delete/rename/comment-out at compile time, these guards for gutting on
+//! every PR, the oracle for asserts-nothing once a week.
+//!
+//! #216 was split out of #130 when that issue closed so this thread kept an open anchor of
+//! its own; #130 was the uncovered-family ratchet and never really this.
 //! Do not read a passing ratchet as evidence that the tests it names prove
 //! anything; read it as evidence they have not been deleted.
 //!
@@ -9956,14 +9987,19 @@ const PARTIAL_DIRECT: &[(&str, &[&str])] = &[
 /// WHAT THIS STILL DOES NOT CATCH, stated because a guard whose reach is left
 /// unstated gets trusted past it: a test that exists, compiles, runs, and
 /// asserts nothing -- the first four rows. No text or symbol oracle can; that
-/// needs a mutation oracle, which is why #216 was narrowed here and not closed.
+/// needs a mutation oracle, which is why #216 was narrowed here rather than closed at the
+/// time. That oracle now exists and #216 item 4 is settled in U-539: these guards are KEPT
+/// as a per-PR layer the weekly oracle does not replace (module docs give the three
+/// measured reasons).
 ///
 /// **That oracle now exists** (#216, unit U-502): `.cargo/mutants.toml` plus the
 /// scheduled `.github/workflows/mutants.yml`, baseline and limits in
 /// `docs/ENGINEERING-LOG.md`. So this table is no longer the last word on the
 /// first four rows -- run `cargo mutants`. It remains the right mechanism for the
 /// deletion/rename/comment-out class, which it turns into a compile error for
-/// free, and #216 stays open only for the scope the oracle does not yet cover.
+/// free. #216 item 4 -- keep the substring guards or retire them -- is settled in U-539:
+/// KEPT, because the oracle reaches only 213 of 1427 workspace mutants in three files,
+/// runs weekly rather than per-PR, and cannot check this file's table invariants at all.
 /// `#[ignore]` above `#[test]` is also not caught by this table (the function is
 /// still a real function); the CI step added by this unit catches that instead.
 macro_rules! direct_fn {
@@ -10120,9 +10156,10 @@ fn source_has_present_test_fn(name: &str) -> bool {
 /// in a const that an assertion reads, and was re-measured by re-running the
 /// mutation rather than by trusting the prior sentence.
 ///
-/// #216 stays open for the scope the oracle does not yet cover, rather than being
-/// patched a fourth time here (it was on #130 until that issue closed; the mutation
-/// oracle was always a separate concern riding on the same number).
+/// #216 item 4 was settled in U-539 rather than being patched a fourth time here: the
+/// guards are KEPT, with their ceiling restated at each assertion instead of assumed
+/// remembered (it was on #130 until that issue closed; the mutation oracle was always a
+/// separate concern riding on the same number).
 fn source_test_fn_body(name: &str) -> Option<&'static str> {
     let def_needle = format!("fn {name}(");
     let start = OWN_SOURCE.find(&def_needle)?;
