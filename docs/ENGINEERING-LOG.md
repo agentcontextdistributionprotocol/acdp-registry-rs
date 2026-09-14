@@ -31,6 +31,60 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-542 (lane-3) — the sqlite sidecar leak: owning the file is not owning the directory -->
+
+### U-542 — 89.3 GiB of orphaned SQLite sidecars, and the shape that caused it
+
+`tempfile::NamedTempFile` deletes exactly the path it owns. SQLite creates `-wal` and `-shm`
+**beside** that path, so every file-backed test orphaned two files. One `$TMPDIR` held **312,898
+`acdp-*` sqlite files / 89.3 GiB**: 143,466 `-wal` + 143,428 `-shm` against **14** surviving bare
+`.sqlite`. Fourteen parents against 286,894 orphans is the whole diagnosis — the guard was working
+on one of the three files it needed to.
+
+**Fix:** own the directory. `Harness.db` is now a `tempfile::TempDir` containing `registry.sqlite`,
+so the drop removes everything SQLite put in the tree — including whatever a future SQLite version
+decides to add. `tls_startup.rs:145` already had this shape; it was the model.
+
+**How it was found, which is the transferable part.** The disk decline that led here was chased for
+hours across three sessions and every candidate was eliminated correctly — Colima's images (flat,
+by allocated size and mtime), swap (no new swapfile), the lane worktrees. The consumer was in
+`/private/var/folders`, and **every search had been rooted at `$HOME` or the workspace**, neither of
+which contains it. Three empty results in a row read as "we have looked everywhere" when they meant
+"we have looked in the same place three times". An empty search result is only as wide as its root;
+publish the roots beside the negative.
+
+**Two measurement notes worth keeping.**
+- `du` reported 117,162 MB for that directory and was **distrusted** on the strength of a real prior
+  incident where it over-reported a 208k-entry directory by 20x. An independent `stat -f '%b'` sum
+  over all 347,827 loose files returned 114,355 MB against a children-sum of 3,211 MB — **`du` was
+  right and the suspicion was wrong**. A prior that survives contact with a control is worth more
+  than one quietly dropped.
+- Prefix counting needs care: `find -name 'acdp-pin-*'` reports 8,294 because it substring-matches
+  `acdp-pin-cell-`; the true figure is 7,924. Deriving the prefix list *from the filesystem* rather
+  than from a hand-written table is also what surfaced `acdp-rev-e2e-`, which the hand list missed.
+
+**The guard, and why it is not a `$TMPDIR` count.** `tests/tmpdir_hygiene.rs` builds a file-backed
+harness, drops it, and asserts `== 0` of `{db}`, `{db}-wal`, `{db}-shm` remain — an equality, since
+a `<=` bound would be satisfied by the very leak it exists to catch. It is scoped to one harness's
+own paths because several test binaries share one `$TMPDIR` on a developer machine, and a
+process-wide count would fail randomly, which is how a guard gets ignored.
+
+**It was demonstrated in both directions on the same binary**, which is the acceptance evidence:
+RED before the fix, naming `acdp-test-lI6bJ5.sqlite-{wal,shm}`; GREEN after. The whole-`$TMPDIR`
+criterion was additionally satisfied as a measurement — 260 tests produced a delta of **0**, against
+a pre-fix control of 1 test producing **+2**. A delta of zero means nothing without that control:
+it is also what you would see if no file-backed test had run.
+
+**Reclaiming the 89.3 GiB was deliberately left out of scope.** `/private/var/folders` is shared
+machine state, a live test may hold an open WAL, and a 287k-file removal is an explicit human
+decision. Fixing first is what makes reclaiming worth doing at all — space returned to a suite that
+recreates it buys hours, not a solution.
+
+**The latent class.** Any `NamedTempFile` whose path is handed to something that may write siblings
+— SQLite, a lockfile, a `.journal` — has this defect waiting. Owning the directory is the general
+answer.
+
+
 <!-- unit U-507 (lane-3) — reconciling ASSUMPTIONS.md's open entries; the census, and what it caught -->
 
 ### U-507 — `ASSUMPTIONS.md`'s open entries, reconciled against the tree

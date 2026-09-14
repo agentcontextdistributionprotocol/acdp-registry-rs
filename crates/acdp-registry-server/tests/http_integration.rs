@@ -632,10 +632,11 @@ async fn jwks_publishes_eddsa_public_key_in_eddsa_mode() {
     // Mint a fresh keypair and build a harness whose signer is EdDSA.
     let db = tempfile::Builder::new()
         .prefix("acdp-test-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
@@ -2689,10 +2690,11 @@ async fn livez_is_always_200_and_never_cacheable_even_when_storage_is_down() {
     // entirely leaves it green.
     let db = tempfile::Builder::new()
         .prefix("acdp-livez-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     store.pool().close().await; // storage is now dead
 
@@ -2791,10 +2793,11 @@ async fn health_503_when_storage_pool_closed() {
     // under the running server.
     let db = tempfile::Builder::new()
         .prefix("acdp-degraded-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     // Close the pool: subsequent health() calls will fail.
     store.pool().close().await;
@@ -2858,10 +2861,11 @@ async fn health_503_when_storage_pool_closed() {
 async fn health_503_still_reports_the_build_version() {
     let db = tempfile::Builder::new()
         .prefix("acdp-degraded-version-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     store.pool().close().await;
 
@@ -2908,10 +2912,11 @@ async fn revoke_returns_503_when_revocations_not_configured() {
     // `AuthService::with_revocations`.
     let db = tempfile::Builder::new()
         .prefix("acdp-no-rev-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
@@ -3259,10 +3264,11 @@ async fn publish_payload_above_limit_rejected() {
     // for non-publish routes that share the same limit.
     let db = tempfile::Builder::new()
         .prefix("acdp-payload-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
@@ -3595,10 +3601,11 @@ async fn playground_pinned_agent_with_wrong_key_rejected() {
 async fn harness_with_playground(playground: PlaygroundConfig) -> Harness {
     let db = tempfile::Builder::new()
         .prefix("acdp-pin-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
@@ -3615,10 +3622,7 @@ async fn harness_with_playground(playground: PlaygroundConfig) -> Harness {
     let mut cfg = config(true);
     cfg.playground = playground;
     let state = AppStateInner::new(server, auth, None, cfg, None);
-    Harness {
-        router: build_router(state),
-        db: Some(db),
-    }
+    Harness::with_db_dir(build_router(state), db)
 }
 
 /// W3-U1 (#192): like `harness_with_playground`, but also hands back a handle
@@ -3646,10 +3650,11 @@ async fn harness_with_playground_cell_and_receipt(
 ) -> (Harness, Arc<std::sync::RwLock<PlaygroundConfig>>) {
     let db = tempfile::Builder::new()
         .prefix("acdp-pin-cell-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
@@ -3671,13 +3676,7 @@ async fn harness_with_playground_cell_and_receipt(
     }
     let state = AppStateInner::new(server, auth, None, cfg, None);
     let cell = Arc::clone(&state.playground);
-    (
-        Harness {
-            router: build_router(state),
-            db: Some(db),
-        },
-        cell,
-    )
+    (Harness::with_db_dir(build_router(state), db), cell)
 }
 
 /// W3-U1 (#192): `RegistryConfig::load(None)` has no injection seam — it reads
@@ -4223,10 +4222,11 @@ async fn revoke_endpoint_revokes_bearer_end_to_end() {
     // accepted → 204 revoke → rejected.
     let db = tempfile::Builder::new()
         .prefix("acdp-rev-e2e-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
@@ -8886,14 +8886,13 @@ async fn counting_log_harness() -> (Harness, Arc<StoreCalls>) {
 
     let db = tempfile::Builder::new()
         .prefix("acdp-counting-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
     // Mirror `common::build_harness_with_webhook` exactly: an enabled [log]
     // makes every commit_publish append its leaf atomically, and a configured
     // receipt key attaches the signer. Skipping either turns /log/entries into
     // a 400 that has nothing to do with what this test measures.
-    let inner = SqliteStore::connect(db.path(), 1)
+    let inner = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
         .await
         .unwrap()
         .with_transparency_log();
@@ -8925,13 +8924,7 @@ async fn counting_log_harness() -> (Harness, Arc<StoreCalls>) {
         AUTHORITY.into(),
     ));
     let state = AppStateInner::new(server, auth, None, cfg, None);
-    (
-        Harness {
-            router: build_router(state),
-            db: Some(db),
-        },
-        calls,
-    )
+    (Harness::with_db_dir(build_router(state), db), calls)
 }
 
 /// A4: `/log/entries` answers the whole page with ONE visibility query.
@@ -11144,10 +11137,11 @@ async fn didweb_lifecycle_harness(resolver: Arc<WebResolver>) -> Harness {
 
     let db = tempfile::Builder::new()
         .prefix("acdp-didweb-")
-        .suffix(".sqlite")
-        .tempfile()
+        .tempdir()
         .unwrap();
-    let store = SqliteStore::connect(db.path(), 1).await.unwrap();
+    let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+        .await
+        .unwrap();
     store.migrate().await.unwrap();
     let server = RegistryServer::try_new(store, caps_030(), AUTHORITY)
         .unwrap()
@@ -11166,10 +11160,7 @@ async fn didweb_lifecycle_harness(resolver: Arc<WebResolver>) -> Harness {
         AUTHORITY.into(),
     ));
     let state = AppStateInner::new(server, auth, None, cfg, None);
-    Harness {
-        router: build_router(state),
-        db: Some(db),
-    }
+    Harness::with_db_dir(build_router(state), db)
 }
 
 /// A lifecycle event signed by the **did:web** producer for `seed` — the

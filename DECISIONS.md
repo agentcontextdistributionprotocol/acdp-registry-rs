@@ -3614,3 +3614,36 @@ tests exercise, the reach argument expires and this should be re-taken.
 
 **Not claimed:** that the substring component is strong. All six of #216's defeats still
 reproduce; the `assert`-in-a-comment defeat was re-confirmed in this unit.
+
+## U-542 — sqlite sidecar leak (2026-09-14, decided by Opus under `/drive`)
+
+**The defect.** `tempfile::NamedTempFile` deletes exactly the path it owns. SQLite creates `-wal`
+and `-shm` *beside* that path, so a file-owning guard orphans two files per file-backed test.
+Measured in one `$TMPDIR` before the fix: **312,898 `acdp-*` sqlite files / 89.3 GiB**, split
+143,466 `-wal` + 143,428 `-shm` against **14** surviving bare `.sqlite`. Fourteen parents against
+286,894 orphans is the signature — the guard was working on one of the three files it needed to.
+
+**Decided:** own the *directory*. `Harness.db` becomes a `tempfile::TempDir` holding
+`registry.sqlite`, so dropping it removes everything SQLite put in the tree — including files a
+future SQLite version might add. `tls_startup.rs:145` already had this shape and was the model.
+
+**Enumeration, and a correction to the assigning table.** Prefixes derived from the filesystem
+rather than from a hand list: 9 sqlite prefixes reconciling to 312,898, plus 7 unrelated
+`acdp-u511-*.toml` = **312,905**, matching the leader's independent count exactly. The assign's
+table listed 8 prefixes and **missed `acdp-rev-e2e-` (1,984 files, `http_integration.rs:4224`)**.
+Separately, a naive `find -name 'acdp-pin-*'` reports 8,294 because it substring-matches
+`acdp-pin-cell-`; the true `acdp-pin-` figure is 7,924.
+
+**All 14 `.tempfile()` sites accounted for:** 13 databases converted (10 that leaked, plus 3 that
+self-cleaned via `pool().close()` — converted anyway, see U-542-A2), 1 `.toml` config left alone
+(U-542-A3).
+
+**Deviation from the stated acceptance criterion, made deliberately and reported:** the guard
+asserts a delta equality scoped to one harness's own paths rather than a `$TMPDIR`-wide count,
+because concurrent lanes share that directory (U-542-A1). The criterion was still satisfied as a
+measurement: 260 tests → `DELTA=0`, against a pre-fix control of 1 test → `+2`.
+
+**Not in scope, by standing constraint:** deleting the 89 GiB of already-leaked files.
+`/private/var/folders` is shared machine state, a live test may hold an open WAL, and a 287k-file
+removal is an explicit human decision. Fixing first is what makes reclaiming worth doing — space
+returned to a suite that recreates it buys hours, not a solution.
