@@ -192,73 +192,41 @@ jobs:
       # artefact wearing a number.
       #
       # Our own checkout MUST stay ahead of checkout-spec -- actions/checkout
-      # cleans its destination, so running it second wipes the spec tree. Same
-      # ordering and the same pinned ref as ci.yml's conformance job; a spec-repo
-      # push cannot change this job's result without a commit here.
-      # THE SPEC REF IS DERIVED FROM ci.yml, NOT RESTATED HERE, and that is a
-      # correctness decision rather than DRY tidiness.
+      # cleans its destination, so running it second wipes the spec tree. It must
+      # also stay ahead of the LOCAL action below, which reads a file out of this
+      # repository. Same ordering and the same pinned ref as ci.yml's conformance
+      # job; a spec-repo push cannot change this job's result without a commit here.
       #
-      # `bump-spec.yml:24` passes the bumper exactly ONE filename --
-      # `file: .github/workflows/ci.yml`, singular. A second hardcoded copy of the
-      # pin in this file would therefore never be bumped: `ci.yml` would move to
-      # the new spec and the scheduled mutation job would stay behind forever, with
+      # THE SPEC REF IS NOT RESTATED HERE, and that is a correctness decision
+      # rather than DRY tidiness. `bump-spec.yml` passes the bumper exactly ONE
+      # filename, so a second hardcoded copy of the pin would never be bumped:
+      # the pin would move and this scheduled job would stay behind forever, with
       # the per-PR conformance job and this job silently measuring DIFFERENT spec
       # versions. A comment saying "keep these in sync" cannot fix that, because
       # the thing that has to act on it is a bot whose input is a single filename.
       # A machine-read signal needs a machine-read fix.
       #
-      # The property the pin exists for is preserved, not weakened: `ci.yml:400-402`
-      # wants "a spec-repo push cannot change this repo's CI result without a commit
-      # here", and a commit here is still required -- in one place instead of two.
-      - name: read the spec pin out of ci.yml
+      # Until U-536 this job DERIVED the ref by grepping ci.yml, in 44 lines of
+      # shell with three assertions of its own. That worked but coupled two
+      # workflows through the text of one of them: nothing in ci.yml said another
+      # workflow parsed it, and a valid reindentation of its spec step broke the
+      # derivation silently -- on the following Monday's cron, detached from the
+      # change that caused it. Both files now read `.spec-pin`, the single
+      # declarative source, through one shared reader. `spec_pin_violations`
+      # (tests/conformance_gate.rs) asserts that on every PR, which is where the
+      # signal belongs: this workflow has no `pull_request` trigger.
+      - name: Read the pinned spec revision
         id: pin
-        run: |
-          set -euo pipefail
-          f=.github/workflows/ci.yml
-
-          # Assert the COUNT, not just that a match exists. If ci.yml ever grows a
-          # second 40-hex `ref:`, this must fail rather than silently pick whichever
-          # line grep happened to reach first -- picking the wrong pin would make
-          # this job measure a spec nobody chose.
-          n=$(grep -cE '^[[:space:]]*ref: [0-9a-f]{40}[[:space:]]*$' "$f" || true)
-          if [ "$n" -ne 1 ]; then
-            echo "::error::expected exactly one 40-hex \`ref:\` in $f, found $n." \
-                 "The spec pin is derived from that line, so this job refuses to" \
-                 "guess which one is meant. Fix the extraction here in the same" \
-                 "commit that adds or removes a ref."
-            exit 1
-          fi
-
-          # And assert it belongs to the checkout-spec step, so this cannot silently
-          # start reading some unrelated action's ref.
-          #
-          # Anchored on `uses:` deliberately. A bare `checkout-spec@` matches TWO
-          # lines in ci.yml -- the real usage and a COMMENT at :407 that discusses
-          # it -- and the first version of this check counted both and failed the
-          # job on its own first run. Found by falsifying the extraction against the
-          # real ci.yml rather than by reading it.
-          spec_uses='^[[:space:]]*uses:[[:space:]]*.*checkout-spec@'
-          if [ "$(grep -cE "$spec_uses" "$f" || true)" -ne 1 ]; then
-            echo "::error::expected exactly one checkout-spec@ \`uses:\` line in $f."
-            exit 1
-          fi
-          spec_ln=$(grep -nE "$spec_uses" "$f" | cut -d: -f1)
-          ref_ln=$(grep -nE '^[[:space:]]*ref: [0-9a-f]{40}[[:space:]]*$' "$f" | cut -d: -f1)
-          if [ "$ref_ln" -le "$spec_ln" ]; then
-            echo "::error::the 40-hex ref: at $f:$ref_ln precedes the checkout-spec@" \
-                 "usage at :$spec_ln, so it is probably not the spec pin."
-            exit 1
-          fi
-
-          line=$(grep -E '^[[:space:]]*ref: [0-9a-f]{40}[[:space:]]*$' "$f")
-          ref=${line##*: }
-          echo "spec pin derived from $f:$ref_ln -> $ref"
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/read-spec-pin
 
       - name: Check out the ACDP spec
         id: spec
         uses: agentcontextdistributionprotocol/acdp-ci/actions/checkout-spec@015910153b61c32abbe018afe85d44868897bf3b # v1
         with:
+          # From the pin file, not this action's default, for the same reason as
+          # ci.yml: if the two ever diverged, the bumper would resolve a sha from
+          # one repository while this job checked out another.
+          repository: ${{ steps.pin.outputs.repository }}
           ref: ${{ steps.pin.outputs.ref }}
       - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
         with:

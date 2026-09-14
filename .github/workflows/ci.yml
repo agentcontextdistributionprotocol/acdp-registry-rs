@@ -503,23 +503,40 @@ jobs:
     steps:
       # Our own checkout MUST stay ahead of checkout-spec: actions/checkout
       # cleans its destination, so running it second would wipe the spec tree.
+      # It must also stay ahead of the LOCAL action below, which reads a file
+      # out of this repository.
       - uses: actions/checkout@v7
+      # THE PIN IS NOT DECLARED HERE. It lives in `.spec-pin` at the repo root,
+      # the single declarative source, which `mutants.yml` and the conformance
+      # harness itself also read -- `spec_root()` in
+      # crates/acdp-registry-server/tests/conformance.rs now REFUSES an
+      # ACDP_SPEC_DIR tree that is not at the pin, instead of silently measuring
+      # against whatever the operator happened to have checked out (U-536).
+      #
+      # `bump-spec.yml` points the spec bumper at `.spec-pin`, so this file no
+      # longer needs to hold a bumpable sha. Do NOT re-point that bumper here:
+      # its matcher would find no `ref:`+sha below the `checkout-spec@` anchor
+      # and would read `dtolnay/rust-toolchain`'s own action pin as the current
+      # spec ref. Measured -- the rewrite then lands nowhere and the bumper
+      # fails on its own post-rewrite assertion, so it is loud rather than
+      # destructive, but it is still wrong.
+      #
+      # `spec_pin_violations` (tests/conformance_gate.rs) asserts on every PR
+      # that this file restates no spec sha and does use the shared reader.
+      - name: Read the pinned spec revision
+        id: pin
+        uses: ./.github/actions/read-spec-pin
       - name: Check out the ACDP spec
         id: spec
         uses: agentcontextdistributionprotocol/acdp-ci/actions/checkout-spec@015910153b61c32abbe018afe85d44868897bf3b # v1
         with:
-          # Pinned so a spec-repo push cannot change this repo's CI result
-          # without a commit here. Bump deliberately when adopting new
-          # fixtures; bump-spec.yml rewrites this line in place.
-          #
-          # Deliberately no `repository:` override, even though it would
-          # only restate the action's own default: bump-spec-ref.yml counts a
-          # `repository: <spec>` line as a SECOND pin anchor alongside the
-          # `checkout-spec@` line above, and then refuses to bump the file at
-          # all rather than rewrite only the first. `path:` is NOT counted by
-          # that matcher and would be harmless here; it is omitted only
-          # because it restates the default.
-          ref: 16211e64cf54973526a7af71adc8aed8996c3ae1
+          # `repository:` is passed through from the pin file rather than left
+          # to this action's own default, which it currently matches. If the two
+          # ever diverged, the bumper would resolve a sha from the repository
+          # `.spec-pin` names while this job checked out a different one -- a
+          # silent wrong-tree pass. One source feeding both closes that.
+          repository: ${{ steps.pin.outputs.repository }}
+          ref: ${{ steps.pin.outputs.ref }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
