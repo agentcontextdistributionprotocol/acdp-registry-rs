@@ -468,3 +468,47 @@ whole 138 completed here in about 24 minutes of wall clock.
 **`rc=2` from `cargo mutants` means survivors were found, not that the run failed.** Shards
 0/8 and 1/8 exited 0 (no survivors); the other six exited 2. Treating a non-zero exit as a
 failed run would have discarded six valid shards.
+
+## U-550 — the 11 unjudged survivors, paid down
+
+Five tests in `crates/acdp-registry-sqlite/tests/store_contract.rs` kill all **11**
+previously-unjudged survivors. Confirmed by **two independent instruments**, because
+U-548 is the standing argument against trusting one.
+
+**Instrument 1 — hand-application.** Each of the 11 mutants applied to `src/store.rs` by
+hand, the named test run, and the mutant reverted. **All 11 reddened.** Each anchor was
+verified to match exactly once on clean source first, so a silently-unapplied mutation
+could not masquerade as a kill.
+
+**Instrument 2 — the oracle**, re-run under `docs/mutation-runs/u549-sqlite-tranche.toml`
+against a committed baseline. Ledgers committed beside this file.
+
+| shard | missed before (U-549) | missed after | outcome |
+|---|---|---|---|
+| 5/8 | 7 | **1** | six killed; `1306:35` survives, as predicted |
+| 6/8 | 4 | **0** | all four killed |
+| 7/8 | 1 | **0** | killed |
+
+All 11 came back `CaughtMutant`. **`1306:35` remains `MissedMutant`** — U-544 proved that
+branch unreachable at this API, and this unit deliberately did **not** manufacture a test
+to force a kill on it. Had it flipped to caught, that would have *refuted* U-544's seam
+verdict and been reported as such; it did not.
+
+**Tranche status: 19 survivors → 8, and all 8 are already judged** (7 equivalent, 1 needs a
+seam). There are now **zero unjudged survivors** in `sqlite/src/store.rs`.
+
+### Two seams worth recording, because the obvious test would have passed vacuously
+
+**`context_type_str` is observable only through the FILTER, never a read-back.**
+`SearchResult.context_type` is rebuilt from the stored body JSON (`store.rs:1615`), so
+asserting on a returned context's type passes against both constant mutants and proves
+nothing. The mutated value is read in exactly one place: `store.rs:1416`,
+`AND context_type = ?`. The test therefore publishes two types and queries each, since no
+single constant can satisfy both queries.
+
+**Several of these mutants WIDEN the result rather than emptying it.** `1585:37` makes every
+context pass the tag filter; `1588:74` admits any context carrying some *other* tag. A
+`contains`-style assertion passes against both. Every U-550 assertion is on an **exact set**
+for that reason — and `1596:86` is the mirror case, emptying the result, so an
+assertion that merely required the child to be *absent* would also have passed. The two
+directions need opposite assertion shapes, and a set equality covers both.
