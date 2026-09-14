@@ -24,7 +24,7 @@ not its value.
 | mutants | **138** (`cargo mutants --list --no-config --file <path>`) |
 | verdicts obtained | **95 of 138 (69%)** |
 | caught | 47 |
-| **missed (survivors)** | **14** — of which **4 killed by U-543**, 10 open |
+| **missed (survivors)** | **14** — **5 killed** (U-543 ×4, U-544 ×1), **3 equivalent**, **1 needs a seam**, **5 open** |
 | unviable | 34 |
 | **survivor rate among viable** | **14 / 61 = 23%** |
 | extrapolated survivors at 138 | **~20**, against a budget of **5** |
@@ -53,11 +53,11 @@ pay them down, and is deliberately not pre-judged here.
 | `store.rs:821:9` | `mark_superseded` → `Ok(())` | open |
 | `store.rs:832:9` | `first_version_ctx_id` → `Ok(None)` | open |
 | `store.rs:923:9` | `idempotency_evict_expired` → `Ok(())` | open |
-| `store.rs:994:35` | `>` → `<` in `commit_publish` | open |
-| `store.rs:994:35` | `>` → `==` in `commit_publish` | open |
-| `store.rs:994:35` | `>` → `>=` in `commit_publish` | open |
-| `store.rs:1090:59` | `==` → `!=` in `commit_publish` | open |
-| `store.rs:1306:35` | `!=` → `==` in `commit_publish` | open |
+| `store.rs:994:35` | `>` → `<` in `commit_publish` | **EQUIVALENT (U-544)** |
+| `store.rs:994:35` | `>` → `==` in `commit_publish` | **EQUIVALENT (U-544)** |
+| `store.rs:994:35` | `>` → `>=` in `commit_publish` | **EQUIVALENT (U-544)** |
+| `store.rs:1090:59` | `==` → `!=` in `commit_publish` | **KILLED (U-544)** |
+| `store.rs:1306:35` | `!=` → `==` in `commit_publish` | **NEEDS A SEAM (U-544)** |
 
 ### The one survivor that was run to ground
 
@@ -212,3 +212,38 @@ scope and not covered above:
 `main.rs` carries the same hazard as `pg`: it is heavily feature-gated
 (`storage-pg`, `storage-memory`, `playground`), so survivors there would include code the
 default-feature workspace suite never compiles.
+
+### U-544: four of the five `commit_publish` comparison survivors are not coverage gaps
+
+Slice 2 set out to kill five comparison mutants and killed **one**. The other four were run to
+ground, and the result matters more than the kill: **a survivor is not automatically a missing
+test.**
+
+**`store.rs:994:35` (`if expires_at > now`, ×3) — OUTCOME-EQUIVALENT, probed not argued.** With
+`<` applied, an `eprintln!` at the step-7 conflict gate fires exactly once and the suite stays
+green. Skipping the TTL branch lets the publish proceed to
+`INSERT … ON CONFLICT(agent_id, key) DO NOTHING`, which collides with the live record, reports
+zero rows affected, rolls the new context back, and replays the stored response — the **same
+`IdempotentReplay`, the same `ctx_id`**, by a second route. The idempotency contract is enforced
+twice, so breaking the first enforcement is invisible at this API. `>=` carries a second,
+independent argument: `now` is `Utc::now()` while `expires_at` is rebuilt from stored
+milliseconds, so the two differ only on an exact millisecond boundary.
+
+**`store.rs:1306:35` (`prior_hash != content_hash`) — NEEDS A SEAM, not a test.** An `eprintln!`
+at `inserted == 0` fires **zero** times across the entire suite, including both racing tests.
+SQLite's `BEGIN IMMEDIATE` serialises the racers, so every loser finds the committed record at
+the step-1 read and is refused at `store.rs:1003` instead. The obvious deterministic route —
+pre-expire the record so the claim collides — does not work either: step 1 DELETEs an expired
+record for that key (`store.rs:964`) precisely so the claim cannot collide with a stale row.
+Tried, and it published cleanly. Reaching :1306 needs interleaving this harness cannot produce.
+
+**`store.rs:1090:59` — a genuine gap, now KILLED.** Every existing supersession test supersedes
+as the *original producer*, where the first arm of
+`prev_agent == req.agent_id || prev_contributors.iter().any(…)` short-circuits and the
+contributor arm is never consulted. Inverted, the arm reads "any contributor who is NOT you",
+which both refuses genuine contributors and admits any signer whenever v1 lists a contributor
+other than them — the lineage takeover the comment at that site says the check prevents.
+
+**Consequence for sizing this issue:** the 14 known survivors are not 14 units of work. At least
+3 are equivalent and 1 needs infrastructure. Expect that ratio to hold for the 43 unjudged
+mutants too.
