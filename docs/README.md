@@ -34,6 +34,7 @@ go deeper.
 | [OPERATIONS.md](OPERATIONS.md) | Deploying, observability, backup/restore, key rotation, federation ops. |
 | [UPGRADING.md](UPGRADING.md) | **Read before upgrading a deployment.** Operator-visible changes per version — ordering requirements, moved defaults, config whose meaning changed. |
 | [ENGINEERING-LOG.md](ENGINEERING-LOG.md) | The narrative record of what changed and why — reasoning, rejected alternatives, evidence. Was the root `CHANGELOG.md` until #220; per-release notes live in `crates/*/CHANGELOG.md`. |
+| [MUTATION-SCOPE-CANDIDATES.md](MUTATION-SCOPE-CANDIDATES.md) | Which files the mutation oracle should cover next, and the measured survivor bill for each — the companion to `.cargo/mutants.toml` for #216 item 1. |
 
 ## Where the protocol ends and this registry begins
 
