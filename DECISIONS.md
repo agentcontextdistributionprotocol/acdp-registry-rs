@@ -3555,3 +3555,62 @@ One supersedes a prior CONFIRMED decision in this file.
 `.github/workflows/` — that reasoning no longer holds; the pin is now a root-level data file, so
 the scope is no longer load-bearing for the spec bump, and the change moved in the safe
 direction). Reported to the leader rather than edited.
+
+---
+
+## U-539 — #216 item 4: the anti-vacuity guards are KEPT, and the config's prose is corrected
+
+**Two decisions, both reversible, both settled by Opus and recorded rather than escalated.**
+
+### 1. `.cargo/mutants.toml`'s prose vs its own configuration
+
+The file claimed a **74-mutant** scope and argued at length for excluding
+`handlers/context.rs`, while `examine_globs` has included that file since U-504 and
+`mutants.yml` pins `MUTANTS_EXPECTED_SCOPE: "213"`. The comment outlived the decision it
+explained.
+
+**Measured at `60b08b7`, command recorded in the file:** `cargo mutants --list` →
+**213** = `context.rs` 139 + `handlers/log.rs` 65 + `receipt.rs` 9. Workspace under
+`--no-config` → **1427** (prose said 1398).
+
+Two things worth keeping about how this was resolved. **The stale figure was not wrong when
+written** — removing the `context.rs` glob reproduces exactly **74**, so it described a
+configuration that no longer exists; each number now names the command that reproduces it.
+And **inheriting the arithmetic would have been wrong**: 74 + the file's own stale 134 gives
+208, not 213, because `context.rs` had grown 134 → 139 while nothing noticed.
+
+`mutants.yml` needed **no change**: its check is already `-ne` (a true equality, not a
+floor) and its pinned 213 equals the measurement.
+
+### 2. #216 item 4 — keep or retire the two substring guards
+
+**KEPT.** The question was whether they survive as a cheap first line or are retired as
+misleading now that a real oracle exists. Three measured reasons:
+
+* **Reach.** The oracle covers 213 of 1427 workspace mutants across three files. The guards
+  pin 41 functions spanning did resolution, signatures, canonicalisation, lineage,
+  capabilities, idempotency, rate limiting, anchors, witness, schema and status — mostly
+  outside that scope, where a gutted test body would be noticed by nothing.
+* **Cadence.** The oracle is a weekly cron, deliberately not a `pull_request` trigger. The
+  guards run every PR; retiring them widens the gutting-detection window to up to 7 days.
+* **`partial_direct_test_functions_are_present` is not only a substring guard.** It enforces
+  `PARTIAL_DIRECT ⊆ DEFERRED ∪ EXCUSED` and `PARTIAL_DIRECT ∩ COVERED = ∅` — table
+  invariants **no mutation oracle can ever check**, since the oracle mutates `src/`, not this
+  file's tables. Retiring the test to retire the substring check would have taken these too.
+
+**Measured in both directions rather than argued.** Over a 65-mutant run of `handlers/log.rs`
+against the pinned spec (40 caught / 1 missed / 0 timeout / 24 unviable, `end_time` present):
+
+| | substring guards | rest of the suite |
+|---|---|---|
+| failed on a `src/` mutation | **0** (across 41 runs where they provably ran and passed) | **17** distinct tests reddened |
+| failed on a gutted test body | **yes** — 3 falsifications, all red | no `src/` mutation can produce this |
+
+The 41 is exactly `40 caught + 1 missed`; the 24 unviable never compile, so no test runs.
+The guards' zero is therefore a result, not a test that never executed.
+
+**Revisit trigger, written down:** if the oracle's scope grows to cover the families these 41
+tests exercise, the reach argument expires and this should be re-taken.
+
+**Not claimed:** that the substring component is strong. All six of #216's defeats still
+reproduce; the `assert`-in-a-comment defeat was re-confirmed in this unit.
