@@ -133,7 +133,61 @@ env:
   # 8 missed that is exactly +3 caught / -3 missed, with unviable (73), timeout (1)
   # and total (213) all unchanged -- which is the arithmetic this retirement should
   # produce and is why the three kills are the only thing that moved.
-  MUTANTS_SURVIVOR_BUDGET: "5"
+  # THE COMMITTED SURVIVOR SET -- the machine-readable half of the list above,
+  # and now actually compared against reality.
+  #
+  # THIS REPLACED A FLOOR, AND THE FLOOR WAS THE DEFECT. The check below used to
+  # be `missed > MUTANTS_SURVIVOR_BUDGET`, while the prose above described the
+  # survivors as "enumerated with its own written reason" and called the count
+  # "the machine-readable half of that list". Nothing compared the list to
+  # reality. Kill one survivor, gain a different one, and the count is unchanged,
+  # CI is green, and the named list is silently wrong -- the precise failure the
+  # scope check one block up rejects in its own words ("a floor would tolerate
+  # silent shrinkage"). Two adjacent checks, opposite postures, same file.
+  #
+  # Granularity is site + REPLACEMENT, not site: one site can hold several
+  # mutants with different verdicts, and this scope contains that case --
+  # `run_search_with_refill` has a `delete !` that is MISSED (:1238:16) and
+  # another that TIMES OUT (:1292:12). A site-level list cannot tell them apart.
+  #
+  # FORMAT: one `cargo mutants --list` line per survivor, verbatim. `#` lines and
+  # blank lines are stripped before comparison, so each identifier carries its
+  # reason HERE rather than only in the prose above -- an identifier and its
+  # justification that live in two places drift apart, and the drift is invisible.
+  #
+  # MEASURED, not transcribed: a full 213-mutant run at this commit's tree with
+  # the CI-equivalent environment (ACDP_SPEC_DIR at the pinned spec revision and
+  # ACDP_REQUIRE_CONFORMANCE=1 -- without those, 42 fixture-replay tests skip and
+  # the survivor set is wider than CI's). Result 213/134/5/73/1, `end_time`
+  # present, and `missed.txt`'s line count cross-checked against outcomes.json's
+  # `missed`. Re-measure with: cargo mutants -j1 && cat mutants.out/missed.txt
+  MUTANTS_SURVIVORS: |
+    # log.rs:131:18 -- guards only `log.cache_root(...)`; `root_for` returns the
+    # same root either way and append-only makes any (size -> root) pair
+    # immutable. Only WHICH sizes get cached changes.
+    crates/acdp-registry-core/src/handlers/log.rs:131:18: replace == with != in root_for
+    # context.rs:1238:16 -- every row reaching this retain already belongs to the
+    # caller's tenant (H-H-w moved the predicate into the SQL), so skipping the
+    # block removes nothing. The retain's OWN `t == tenant` was CAUGHT at the
+    # same site: two mutations, opposite verdicts, the signature of a redundant
+    # guard. Its sibling `delete !` at :1292:12 is the budgeted TIMEOUT.
+    crates/acdp-registry-core/src/handlers/context.rs:1238:16: delete ! in run_search_with_refill
+    # context.rs:81:9 and :82:9 -- search returns only PUBLIC rows to every
+    # requester (probed with an anonymous caller, an audience member and the
+    # row's own producer), so `?visibility=public` selects everything already
+    # visible and `?visibility=restricted` selects nothing, for anyone. The same
+    # site's `"private"` arm was CAUGHT -- the tell again. BOTH BECOME REAL
+    # COVERAGE GAPS the moment search serves restricted rows to entitled
+    # requesters; at that point delete these two lines rather than raising a
+    # number, and the set check will require exactly that.
+    crates/acdp-registry-core/src/handlers/context.rs:81:9: delete match arm "public" in parse_visibility
+    crates/acdp-registry-core/src/handlers/context.rs:82:9: delete match arm "restricted" in parse_visibility
+    # context.rs:642:39 -- `>` vs `>=` differ only when a stored expiry equals the
+    # clock to the nanosecond. `expired_idempotency_key_is_not_matched` already
+    # pins behaviour either side of the boundary; the boundary itself is not
+    # reachable deterministically and a test that waited for it would be a flake
+    # generator.
+    crates/acdp-registry-core/src/handlers/context.rs:642:39: replace > with >= in publish_inner
 
   # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
   # unconditional `timeout != 0` until U-504, on the stated reasoning that "a
@@ -375,8 +429,20 @@ jobs:
           set -- $vals
           total=$1 missed=$2 caught=$3 timeout=$4 unviable=$5
 
+          # The committed survivor set, normalised: trailing whitespace stripped,
+          # `#` reason lines and blanks dropped. sed rather than `grep -v`, because
+          # grep returns non-zero when nothing matches and this script would then
+          # have to special-case an exit status at every use.
+          survivors_expected="$(printf '%s\n' "$MUTANTS_SURVIVORS" \
+            | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^$/d')"
+
+          # DERIVED, never written down twice. The budget IS the list's length, so
+          # the two cannot drift -- which is the same reason the scope pin and its
+          # check live in one file.
+          MUTANTS_SURVIVOR_BUDGET="$(printf '%s\n' "$survivors_expected" | awk 'NF{n++} END{print n+0}')"
+
           echo "scope=$total caught=$caught missed=$missed timeout=$timeout unviable=$unviable"
-          echo "expected scope=$MUTANTS_EXPECTED_SCOPE  survivor budget=$MUTANTS_SURVIVOR_BUDGET"
+          echo "expected scope=$MUTANTS_EXPECTED_SCOPE  survivor budget=$MUTANTS_SURVIVOR_BUDGET (derived from MUTANTS_SURVIVORS)"
 
           rc=0
 
@@ -407,14 +473,69 @@ jobs:
             rc=1
           fi
 
-          # (3) The budget.
-          if [ "$missed" -gt "$MUTANTS_SURVIVOR_BUDGET" ]; then
-            echo "::error::$missed mutants survived, budget is" \
-                 "$MUTANTS_SURVIVOR_BUDGET. A surviving mutant is a change to src/" \
-                 "that no test noticed. Kill it with a test, or -- if it is genuinely" \
-                 "unreachable -- raise the budget IN THE SAME COMMIT with a written" \
-                 "reason. Survivors are listed in mutants.out/missed.txt."
+          # (3) The survivor SET, at site+replacement granularity -- not its size.
+          #     A count cannot see a SWAP: kill one survivor, gain another, and the
+          #     number is unchanged while the named list is silently wrong. That is
+          #     the same failure the scope check above refuses one block up.
+          missed_file="$OUT/missed.txt"
+          if [ ! -f "$missed_file" ]; then
+            echo "::error::$missed_file does not exist, so the surviving SET cannot be" \
+                 "compared. outcomes.json reports missed=$missed, but a count is not a" \
+                 "substitute for the list and is not accepted as one here."
             rc=1
+          else
+            survivors_actual="$(sed -e 's/[[:space:]]*$//' -e '/^$/d' "$missed_file")"
+            n_actual="$(printf '%s\n' "$survivors_actual" | awk 'NF{n++} END{print n+0}')"
+
+            # TWO INDEPENDENT ENUMERATIONS of one fact -- outcomes.json counts,
+            # missed.txt lists. If they disagree the report is internally broken and
+            # neither may stand in for the other.
+            if [ "$n_actual" -ne "$missed" ]; then
+              echo "::error::missed.txt has $n_actual lines but outcomes.json reports" \
+                   "missed=$missed. The report contradicts itself; fix the run rather" \
+                   "than choosing whichever number is smaller."
+              rc=1
+            fi
+
+            # Written OUTSIDE $OUT: that whole directory is uploaded as the run
+            # artifact, and a scratch file in it would be read by the next person as
+            # part of the report. $RUNNER_TEMP is per-job, so two jobs sharing a
+            # self-hosted runner cannot read each other's list.
+            tmp="${RUNNER_TEMP:-/tmp}"
+            printf '%s\n' "$survivors_expected" | sort -u > "$tmp/survivors_expected.txt"
+            printf '%s\n' "$survivors_actual"   | sort -u > "$tmp/survivors_actual.txt"
+            # `grep -Fxv -f A B` = lines of B absent from A. -F so a mutant's own
+            # punctuation is never read as a pattern, -x so a substring cannot pass
+            # as a match. `|| true` because grep exits 1 on no output, which here
+            # means "no difference" and is the success case.
+            added="$(grep -Fxv -f "$tmp/survivors_expected.txt" "$tmp/survivors_actual.txt" || true)"
+            removed="$(grep -Fxv -f "$tmp/survivors_actual.txt" "$tmp/survivors_expected.txt" || true)"
+
+            if [ -n "$added" ] || [ -n "$removed" ]; then
+              echo "::error::the surviving mutant SET does not match MUTANTS_SURVIVORS" \
+                   "in this file. The count alone would not have caught this: one" \
+                   "survivor killed and a different one gained leaves the count" \
+                   "unchanged and the committed list silently wrong."
+              if [ -n "$added" ]; then
+                echo "::error::SURVIVED but absent from the committed list:"
+                printf '%s\n' "$added" | sed 's/^/::error::  + /'
+                echo "::error::Each is a change to src/ that no test noticed. Kill it" \
+                     "with a test, or -- if genuinely unreachable -- add the exact" \
+                     "\`cargo mutants --list\` line to MUTANTS_SURVIVORS IN THE SAME" \
+                     "COMMIT, with its reason on a # line beside it."
+              fi
+              if [ -n "$removed" ]; then
+                echo "::error::listed as surviving but NO LONGER survives:"
+                printf '%s\n' "$removed" | sed 's/^/::error::  - /'
+                echo "::error::Usually GOOD NEWS -- a test now kills it. Delete the line" \
+                     "AND its # reason from MUTANTS_SURVIVORS so the ratchet tightens." \
+                     "This fails rather than passing quietly because a list nobody" \
+                     "prunes stops describing anything, and because a line number that" \
+                     "merely DRIFTED looks exactly like a kill -- check which it is" \
+                     "before deleting."
+              fi
+              rc=1
+            fi
           fi
 
           # (4) A TIMEOUT is an unresolved verdict, not a kill. Folding it into
