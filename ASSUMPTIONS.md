@@ -3836,3 +3836,103 @@ files; the runtime guard asserts the database **and both sidecars exist while th
 before any claim is made about their removal.
 
 **Status:** CONFIRMED (2026-09-14).
+
+### U-554-A1 — the release PR breaks CI because three rules contradict, not because of version pinning
+
+**Plan:** plans/u-554-release-pr-breaks-three-checks.md
+
+**Assumed:** `tests`, `coverage` and `conformance (spec fixtures)` all fail on #286 for a single
+reason, and that reason is structural rather than a stale pin.
+
+**Evidence, read from each job's own log separately rather than inferred from matching symptoms:**
+all three report `13 passed; 1 failed`, and the one failure is `root_changelog_stays_a_pointer`
+(`conformance_gate.rs:852`) in every case. `coverage` has no threshold failure — llvm-cov died on the
+test run before reaching that step. Each job emits exactly one `##[error]`.
+
+**The hypothesis I was given, and refuted three ways:** hard-coded version strings such as
+`--package=acdp-registry-sqlite@0.1.3`. (1) No `@0.1.x` or `=0.1.x` package spec exists anywhere in
+`.github/workflows/**` or `release-plz.toml`. (2) The `mutants.yml` line cited is
+`--package=acdp-registry-core` **inside a comment**, carrying no version at all — the `@0.1.3` came
+from a log line, not from source. (3) No failing check involves a version-pinned command.
+
+**The actual cause — three rules, any two compatible, all three not:**
+1. Every crate is `version = { workspace = true }`, so a release bumps all 8.
+2. release-plz writes a changelog section only for crates with commits in their own directory —
+   confirmed from its documentation, and **no configuration option exists to change this**
+   (`changelog_update` only toggles updating; `changelog_include` pulls *other* packages' commits in,
+   which is the wrong semantics and would fill one crate's notes with another's).
+3. `root_changelog_stays_a_pointer` requires every crate to carry the workspace version's heading.
+
+The three failing crates are **exactly** the three with zero commits since `v0.1.3`.
+
+**Status:** CONFIRMED (2026-09-14) — reproduced locally at the PR head: `rc=101`, same message, same
+three crates.
+
+### U-554-A2 — it recurs on every release with an unchanged crate, and that is measured
+
+**Plan:** plans/u-554-release-pr-breaks-three-checks.md
+
+**Assumed:** this is a release-process defect, not a one-off.
+
+**Evidence — per-crate commit counts, anchored on real tags.** Note `git tag -l 'v*'` matches
+**nothing** here: `git_tag_name = "{{ package }}/v{{ version }}"`, so tags are `<package>/v<version>`.
+Anchoring on a bare `v*` glob produces a degenerate range and confident zeros for every crate.
+
+| window | counts | result |
+|---|---|---|
+| `v0.1.2..v0.1.3` | all 8 crates ≥ 2 (auth 3, webhook 2, types 3, …) | every crate got a section; guard passed |
+| `v0.1.3..ce1ce77` | auth **0**, pg **0**, webhook **0**; core 5, sqlite 4, server 20 | three gaps; guard fails |
+
+Cross-checked two ways: anchored on `acdp-registry-server/v0.1.x` (36 commits in the previous
+window, so non-degenerate) **and** on each crate's own tag. All eight `v0.1.3` tags point at the same
+commit `f8b6d9e`, so the two methods are equivalent and they agree.
+
+**Conclusion:** the guard has never been exercised against "a crate did not change". It fires on every
+release where at least one crate is unchanged, and that becomes more likely as the workspace grows.
+
+**Status:** CONFIRMED (2026-09-14).
+
+### U-554-A3 — document the non-change rather than weaken the guard
+
+**Plan:** plans/u-554-release-pr-breaks-three-checks.md
+
+**Assumed:** the right fix adds information rather than removing a check.
+
+**Chose:** a step in `.github/workflows/release-plz.yml` that writes an explicit "no changes" section
+for any crate the release bumped but did not change. **Rejected:** relaxing
+`root_changelog_stays_a_pointer` to skip unchanged crates.
+
+**Why.** Under the rejected option a consumer upgrading `acdp-registry-auth` 0.1.3 → 0.1.4 finds **no
+record at all** and cannot distinguish "nothing changed" from "someone forgot to write it up". The
+chosen option answers the question the version bump raises. It also makes the guard's stated
+invariant *true* rather than narrowing it — and that file was hardened in this exact area by U-538
+("A FLOOR CANNOT CATCH UNDERCOUNTING"), so softening it now would undo a fix for the very case the
+hardening anticipated.
+
+**Status:** CONFIRMED (2026-09-14) — approved in principle by the leader, both its constraints met.
+
+### U-554-A4 — release-plz abandons its branch rather than force-pushing, so the fix must land on main first
+
+**Plan:** plans/u-554-release-pr-breaks-three-checks.md
+
+**Assumed:** a hand-edit on the release PR branch would be destroyed by the next release-plz run.
+
+**Evidence from this repo's own history, not from documentation:** release-plz opens a **new
+timestamped branch and a new PR** each run and abandons the previous one.
+
+| PR | branch | version | state |
+|---|---|---|---|
+| #213 | `release-plz-2026-09-11T03-47-15Z` | v0.1.1 | MERGED |
+| #225 | `release-plz-2026-09-11T20-33-01Z` | v0.1.2 | MERGED |
+| #230 | `release-plz-2026-09-12T01-54-09Z` | v0.1.3 | MERGED |
+| **#278** | `release-plz-2026-09-13T16-15-07Z` | **v0.1.4** | **CLOSED — superseded** |
+| **#286** | `release-plz-2026-09-13T17-44-55Z` | **v0.1.4** | OPEN |
+
+**#278 and #286 are two PRs for the same version**, the first closed in favour of the second. That is
+an observed regeneration event, not a hypothetical one.
+
+**Consequence:** editing the three changelogs on `1854b2f` would strand the fix on a branch that gets
+abandoned, and the replacement PR would be red again with nobody watching. The fix therefore lands on
+`main` first and release-plz regenerates the release PR with the sections already present.
+
+**Status:** CONFIRMED (2026-09-14).

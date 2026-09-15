@@ -3678,3 +3678,33 @@ is an explicit human decision. This unit stops growth; it reclaims nothing.
 is outside this grant and untouched by this diff. I did not establish the cause — the command that
 would have read the full error is the one that first hit `ENOSPC` — so it is reported as an
 unexplained environmental failure, not attributed to disk.
+
+## U-554 — the v0.1.4 release PR breaks three checks (2026-09-14, decided by Opus)
+
+**Decision: document the non-change; do not weaken the guard.** A step in
+`.github/workflows/release-plz.yml` writes an explicit "no changes" section for any crate the release
+bumped but did not change. Rationale in U-554-A3: the alternative leaves a consumer unable to tell
+"nothing changed" from "someone forgot", and `conformance_gate.rs` was hardened in this exact area by
+U-538 — softening it would undo that for the case the hardening anticipated.
+
+**Decision: land on main first, do not edit the release PR branch.** release-plz opens a new
+timestamped branch and PR each run rather than force-pushing; #278 and #286 are two PRs for the same
+v0.1.4, the first closed in favour of the second (U-554-A4). A hand-edit on `1854b2f` would be
+stranded on an abandoned branch. This is the ordering that survives regeneration, not the one that
+turns #286 green fastest.
+
+**Correction logged against the assignment's own hypothesis.** Hard-coded version strings were
+proposed as the likely cause and are refuted three independent ways (U-554-A1). The cited
+`--package=acdp-registry-sqlite@0.1.3` came from a *log line*, not from any file; no version-pinned
+package spec exists in the workflows or the release config.
+
+**What this change does NOT prove, stated because green CI would otherwise imply it.** At `0.1.3`
+every crate already carries its section, so this PR's own CI exercises none of the new step. The
+proof is elsewhere and was run: the guard reproduced RED at the real PR head (`rc=101`, naming auth,
+pg and webhook), the generator was applied to that tree, and the guard then returned `rc=0`. The
+YAML-embedded copy of the script was extracted from the parsed workflow and tested separately from
+the standalone version, because escaping can differ between them — and it did: an unescaped backtick
+pair inside a double-quoted string would have run the `pr` command by substitution.
+
+**Not done:** #286 is neither merged nor approved. Merging a release PR, publishing a tag, a Release
+or a public image is the human's call without exception.
