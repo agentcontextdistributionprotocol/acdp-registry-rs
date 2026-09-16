@@ -205,24 +205,26 @@ pub async fn spawn_didweb_server() -> SocketAddr {
 /// fixture) and `ring` via `hyper-rustls` <- `reqwest` <- `acdp-client` (the
 /// resolver side). With both enabled and no explicit choice, rustls's
 /// process-global default is never set and **every** handshake fails -- the
-/// server's `RustlsConfig::from_pem` and the resolver's request alike. Nothing
-/// in `crates/` calls `install_default`, so without this the fixture cannot
-/// work, which is why the dev-dependency exists at all.
+/// server's `RustlsConfig::from_pem` and the resolver's request alike.
+///
+/// **This fixture needs its own install, and not because nothing else installs
+/// one.** `main.rs` does -- `install_crypto_provider()` there runs
+/// unconditionally at startup. But that is the `acdp-registry-server` **binary**,
+/// and a binary is not linked into the integration-test binary this module is
+/// compiled into, so its call cannot run here. The install below is what makes
+/// the fixture work. Do not delete it on the grounds that `main.rs` covers it:
+/// it does not.
 ///
 /// `install_default` is process-global and fallible-once. `Once` makes the call
 /// site idempotent across the several tests that spawn a server, and `.ok()`
 /// absorbs the residual race where something else won -- in that case a provider
 /// IS installed, which is all this function is for.
 ///
-/// **The production binary has the same gap and this does not fix it.** `main.rs`
-/// reaches `axum_server::bind_rustls` whenever `tls.cert_path`/`key_path` are
-/// set, with no provider installed; every test in the repo sets `tls:
-/// Default::default()`, so nothing enters that branch. The shipped
-/// `docker/config.docker.toml` disables in-process TLS deliberately (an edge
-/// terminates) and `config/registry.example.toml` ships those two keys commented
-/// out, so no current deployment reaches it -- it is latent on a documented
-/// configuration path, not a live outage. Filed as U-530; `main.rs` is not this
-/// unit's to edit.
+/// **The production gap this comment used to describe is closed.** It said
+/// `main.rs` reached `axum_server::bind_rustls` with no provider installed, and
+/// filed that as U-530. U-530 landed: `main.rs` now installs a provider
+/// unconditionally in `main()`, before any TLS work, and fails loudly if one was
+/// already installed. Nothing here is latent any more.
 fn install_crypto_provider() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
