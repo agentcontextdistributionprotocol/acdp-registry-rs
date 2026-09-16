@@ -1,5 +1,38 @@
 
 
+## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.1.3...acdp-registry-server/v0.1.4) - 2026-09-16
+
+### Added
+
+- *(spec-pin)* one declarative source, and a harness that refuses a drifted tree (U-536) ([#304](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/304))
+
+### Fixed
+
+- *(tls)* install a rustls crypto provider before claiming to listen ([#299](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/299))
+- gate the last two ungated body routes, and pin the two accept predicates ([#295](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/295))
+- *(auth,admin)* let the wire code decide the HTTP status ([#293](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/293))
+- *(publish)* reject an unaccepted Content-Type with 415, not 400 ([#290](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/290))
+- *(config)* treat an empty env override as absent, not as an override ([#271](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/271)) ([#275](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/275))
+- *(rate-limit)* charge publishes that fail late where the signer is proven ([#242](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/242)) ([#263](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/263))
+
+### Other
+
+- *(conformance)* exercise the three conditional fixtures, unexercised 4 → 1 (U-553) ([#318](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/318))
+- *(hygiene)* U-545 — close the sqlite sidecar leak across the class, not one crate ([#312](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/312))
+- own the temp directory, not the file, so SQLite sidecars are cleaned up ([#309](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/309))
+- *(mutants)* reconcile the scope prose with the tree, and settle #216 item 4 ([#306](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/306))
+- *(gate)* retire the floor-style guards as a class (U-538) ([#305](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/305))
+- *(conformance)* required-but-unexercised 6 -> 1, and make a retirement unfakeable ([#303](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/303))
+- *(mutants)* retire three survivors, drop the floor 8 -> 5 ([#300](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/300))
+- *(conformance)* teach the template gate the other placeholder notation, and sweep ([#298](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/298))
+- *(conformance)* make the replayer able to check a signature, then make it notice ([#297](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/297))
+- *(conformance)* parse the fixture spelling 65 of 144 fixtures actually use ([#296](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/296))
+- *(conformance)* make the coverage tables name what actually guards each family ([#294](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/294))
+- *(conformance)* count fixtures, not families — 57 are exercised by nothing ([#292](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/292))
+- *(mutants)* extend the ratchet to handlers/context.rs — 20 survivors killed, 8 argued ([#289](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/289))
+- *(conformance)* a mutation oracle that ratchets, and the zero-coverage branch it found (U-502, #216) ([#274](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/274))
+
+
 ## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.1.2...acdp-registry-server/v0.1.3) - 2026-09-13
 
 ### Added
