@@ -4,6 +4,45 @@ One committed `outcomes.json` per cargo-mutants run over a scoped tranche. These
 because a 40-minute measurement must not live anywhere a disk cleanup can reach: the
 per-mutant verdicts for 95 of this file's 138 mutants were lost exactly that way.
 
+## Index — which ledgers are CURRENT
+
+**A reader summing the `u549-*` set gets 19 survivors, and that has not been the tranche's
+state since U-550.** Three of those shards were re-run; the table below is which file to
+believe for each shard.
+
+### `acdp-registry-sqlite/src/store.rs` — 138 mutants, shards 0/8–7/8
+
+| shard | current ledger | missed | superseded |
+|---|---|---|---|
+| 0/8 | `u549-sqlite-store-shard-0of8` | 0 | — |
+| 1/8 | `u549-sqlite-store-shard-1of8` | 0 | — |
+| 2/8 | `u549-sqlite-store-shard-2of8` | 1 | — |
+| 3/8 | `u549-sqlite-store-shard-3of8` | 2 | — |
+| 4/8 | `u549-sqlite-store-shard-4of8` | 4 | — |
+| 5/8 | `u550-sqlite-store-shard-5of8` | 1 | `u549-…-5of8` (was 7) |
+| 6/8 | `u550-sqlite-store-shard-6of8` | 0 | `u549-…-6of8` (was 4) |
+| 7/8 | `u550-sqlite-store-shard-7of8` | 0 | `u549-…-7of8` (was 1) |
+| **total** | | **8** | |
+
+**The `u549` 5/6/7 ledgers are SUPERSEDED, not VOID, and the distinction is load-bearing.**
+They were correct measurements of the tree as it stood; U-550 then added tests that killed
+11 of the survivors, so a later run of the same shards returns different verdicts. Nothing
+about how they were taken is in question. Contrast `VOID-u548-*`, whose verdicts were wrong
+when they were written — see below. **Conflating the two discards a good measurement along
+with a bad one.**
+
+### `acdp-registry-core` — the 213-mutant CI scope
+
+| ledger | scope | result |
+|---|---|---|
+| `u551-core-scope-213-outcomes.json` | 213 (the three `examine_globs` files) | 134 caught / **5 missed** / 73 unviable / 1 timeout |
+
+This is the measured basis for `MUTANTS_SURVIVORS` in `.github/workflows/mutants.yml` — the
+committed survivor set the ratchet now compares against, rather than a count. Taken with
+the CI-equivalent environment (`ACDP_SPEC_DIR` at the pinned spec revision,
+`ACDP_REQUIRE_CONFORMANCE=1`); without those, 42 fixture-replay tests skip and the survivor
+set comes out wider than CI's.
+
 ## Read this before trusting any file here
 
 **A file whose name begins with `VOID-` is the record of a run whose verdicts are wrong.**
