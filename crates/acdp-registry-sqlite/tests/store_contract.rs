@@ -176,34 +176,43 @@ fn response(outcome: &PublishCommitOutcome) -> &PublishResponse {
 /// decides that.
 ///
 /// `store.rs:994` is `if expires_at > now`. U-540 measured `<`, `==` and `>=`
-/// all surviving there, and U-544 established WHY, which is not a coverage gap:
-/// **all three are outcome-equivalent, because the branch is redundant.**
+/// all surviving there, and U-544 concluded all three were outcome-equivalent.
 ///
-/// Probed rather than argued. With `<` applied, this test still passes, and an
-/// `eprintln!` at the step-7 conflict gate fires exactly once: skipping the TTL
-/// branch lets the publish proceed to
-/// `INSERT … ON CONFLICT(agent_id, key) DO NOTHING`, which collides with the
-/// live record, reports zero rows, rolls the new context back and replays the
-/// stored response — the SAME `IdempotentReplay`, with the SAME `ctx_id`, by a
-/// second route. The idempotency contract is enforced twice over, so breaking
-/// the first enforcement is invisible at this API.
+/// **U-552 corrected that: `<` and `==` are KILLABLE and are now killed** — by
+/// `a_keyed_superseding_publish_replays_instead_of_failing_as_already_superseded`
+/// below, not by this test. Both come back `CaughtMutant` under
+/// `cargo mutants -F '^…$'`, with that test the sole failure.
 ///
-/// So this test does NOT kill those three mutants and is not claimed to. It
-/// pins the contract itself, which was otherwise asserted nowhere at this
+/// The probe that produced the old label was CORRECT, and its generalisation was
+/// not. With `<` applied, *this* test still passes: skipping the TTL branch lets
+/// the publish proceed to `INSERT … ON CONFLICT(agent_id, key) DO NOTHING`, which
+/// collides with the live record, reports zero rows, rolls the new context back
+/// and replays the stored response — the SAME `IdempotentReplay`, with the SAME
+/// `ctx_id`, by a second route.
+///
+/// That holds **only because this request does not supersede.** The second
+/// enforcement lives at `store.rs:1284-1318`, which is reached only AFTER step 2;
+/// a superseding replay hits step 2's coherence check at `store.rs:1118-1125`
+/// first and returns `Err(SupersededTarget { AlreadySuperseded })`. So the
+/// redundancy this docstring describes is real but partial, and "the branch is
+/// redundant" was true of the case probed rather than of the branch.
+///
+/// This test therefore still does NOT kill any of the three, and is not claimed
+/// to. It pins the contract itself, which was otherwise asserted nowhere at this
 /// layer: a repeated keyed publish returns the original context rather than
 /// minting a second one.
 ///
-/// The assertion is on `ctx_id` EQUALITY across the two calls, not merely on
-/// the `IdempotentReplay` variant: a replay that returned a different context
-/// would satisfy the variant while breaking the guarantee.
+/// The assertion is on `ctx_id` EQUALITY across the two calls, not merely on the
+/// `IdempotentReplay` variant: a replay that returned a different context would
+/// satisfy the variant while breaking the guarantee.
 ///
-/// `>` → `>=` carries a second, independent equivalence argument on top of the
-/// redundancy above: `now` is `Utc::now()` taken inside `commit_publish` while
-/// `expires_at` is rebuilt from stored MILLISECONDS, so the two differ only
-/// when the clock lands exactly on a stored millisecond boundary — not
-/// reachable deterministically, and a test that waited for it would be a flake
-/// generator. Same argument the repo already accepts for
-/// `handlers/context.rs:642:39`.
+/// `>` → `>=` IS genuinely equivalent and remains a budgeted survivor. The reason
+/// is stronger than the millisecond-boundary argument previously given here: step
+/// 1 first runs `DELETE … WHERE expires_at_ms <= ?` bound to `now`
+/// (`store.rs:963-966`), so any surviving row has `expires_at_ms >= now_ms + 1`
+/// and `expires_at > now` is unconditionally TRUE for it. `>=` is true on exactly
+/// the same inputs — no claim about clock resolution needed, because the DELETE
+/// makes the boundary case unreachable outright.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unexpired_idempotency_record_replays_rather_than_minting_again() {
     let (store, _tmp) = store().await;
@@ -235,7 +244,11 @@ async fn an_unexpired_idempotency_record_replays_rather_than_minting_again() {
     .expect("second publish ok");
     assert!(
         matches!(second, PublishCommitOutcome::IdempotentReplay(_)),
-        "an unexpired record must replay; `expires_at < now` or `== now` skips          the liveness branch entirely and mints a second context"
+        "an unexpired record must replay, returning the original context. NOTE: \
+         `< now` / `== now` do NOT fail here -- step 7's ON CONFLICT fallback \
+         replays by a second route for a NON-superseding request, which is why \
+         those two mutants are killed by the superseding test below and not by \
+         this one. A failure here is a break in the idempotency contract itself"
     );
     assert_eq!(
         response(&second).ctx_id,
@@ -2021,5 +2034,343 @@ async fn status_projection_expires_a_context_only_once_its_deadline_has_passed()
         "a context whose deadline passed an hour ago must project to EXPIRED \
          and drop out of a default (active) search -- the `false` guard \
          (1897:26) and the flipped `>` (1897:30) both keep it active"
+    );
+}
+
+/// The step-1 TTL comparison at `store.rs:994` (`if expires_at > now`) is NOT
+/// redundant, and `>` → `<` and `>` → `==` are NOT equivalent mutants.
+///
+/// **This contradicts what the repo currently says**, so it is settled by
+/// running the mutants rather than by argument. `docs/MUTATION-SCOPE-CANDIDATES.md`
+/// labels all three `994:35` mutants EQUIVALENT (U-544), and the docstring on
+/// `an_unexpired_idempotency_record_replays_rather_than_minting_again` above
+/// explains why: with `<` applied, skipping the TTL branch lets the publish fall
+/// through to step 7's `INSERT … ON CONFLICT(agent_id, key) DO NOTHING`, which
+/// collides, rolls back and replays the stored response by a second route.
+///
+/// That probe is CORRECT — and it is correct only for a request that does not
+/// supersede. The generalisation from it to "all three are outcome-equivalent"
+/// is what fails, because the second enforcement lives at `store.rs:1284-1318`,
+/// which is reached only AFTER step 2.
+///
+/// Step 2's supersession-coherence check sits at `store.rs:1118-1125`:
+///
+/// ```text
+///   if prev_status == "superseded" {
+///       return Err(AcdpError::SupersededTarget { AlreadySuperseded, … })
+/// ```
+///
+/// and step 6 (`store.rs:1241`) marks the predecessor superseded inside the same
+/// transaction. So for a keyed publish that SUPERSEDES:
+///
+/// * unmutated — step 1 matches the live record and returns `IdempotentReplay`
+///   before step 2 ever runs;
+/// * `<` or `==` — step 1 is skipped, step 2 reads v1 (now `superseded`) and the
+///   call returns `Err(SupersededTarget { AlreadySuperseded })`.
+///
+/// `Ok(IdempotentReplay)` vs `Err(…)` is trivially observable and needs no clock
+/// boundary. Why `<` and `==` make step 1 unconditionally false: step 1 first
+/// runs `DELETE … WHERE expires_at_ms <= ?` bound to `now` (`store.rs:963-966`),
+/// so any row that survives has `expires_at_ms >= now_ms + 1`, making
+/// `expires_at > now` unconditionally TRUE for a surviving row — and its inverses
+/// unconditionally false.
+///
+/// `>` → `>=` remains genuinely equivalent by that same arithmetic, and is still
+/// carried in `MUTANTS_SURVIVORS` with that reason. This test is not claimed to
+/// kill it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_keyed_superseding_publish_replays_instead_of_failing_as_already_superseded() {
+    let (store, _tmp) = store().await;
+    let p = producer(73);
+    let key = "supersede-replay-key".to_string();
+
+    // v1, unkeyed: the predecessor that step 6 will mark superseded.
+    let v1 = commit(Arc::clone(&store), request(&p, "supersede replay v1"), None)
+        .await
+        .unwrap()
+        .expect("v1 publish ok");
+    let v1_ctx = response(&v1).ctx_id.clone();
+    let v1_body = store
+        .get(&v1_ctx)
+        .expect("retrieve ok")
+        .expect("v1 present")
+        .body;
+
+    // v2 supersedes v1 AND carries an idempotency key. This is the combination
+    // the existing replay test does not exercise: its request has no
+    // `supersedes`, which is exactly why these two mutants survived it.
+    let v2_req = || {
+        p.supersede_body(&v1_body)
+            .title("supersede replay v2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid superseding request")
+    };
+
+    let first = commit(Arc::clone(&store), v2_req(), Some(key.clone()))
+        .await
+        .unwrap()
+        .expect("the first keyed superseding publish must succeed");
+    assert!(
+        matches!(first, PublishCommitOutcome::Inserted(_)),
+        "the first publish under a fresh key must INSERT, got {first:?}"
+    );
+    let v2_ctx = response(&first).ctx_id.clone();
+
+    // v1 is now superseded -- the precondition that makes step 2 fatal on replay.
+    assert!(
+        matches!(
+            store
+                .get(&v1_ctx)
+                .expect("retrieve ok")
+                .expect("v1 present")
+                .registry_state
+                .status,
+            acdp::types::primitives::Status::Superseded
+        ),
+        "step 6 must have marked v1 superseded, or this test proves nothing about \
+         step 2 and would pass for the wrong reason"
+    );
+
+    // The replay. Byte-identical request, same key, well inside the 1h TTL.
+    let second = commit(Arc::clone(&store), v2_req(), Some(key.clone()))
+        .await
+        .unwrap();
+
+    let second = second.unwrap_or_else(|e| {
+        panic!(
+            "the replay must return Ok(IdempotentReplay), got Err({e:?}). \
+             SupersededTarget{{ AlreadySuperseded }} here means step 1's TTL branch \
+             was SKIPPED and control reached step 2's supersession-coherence check \
+             at store.rs:1118 -- which is exactly what `expires_at < now` and \
+             `expires_at == now` do at store.rs:994. Step 7's ON CONFLICT fallback \
+             cannot rescue this case because it lives after step 2."
+        )
+    });
+    assert!(
+        matches!(second, PublishCommitOutcome::IdempotentReplay(_)),
+        "an unexpired record must REPLAY, got {second:?}"
+    );
+    assert_eq!(
+        response(&second).ctx_id,
+        v2_ctx,
+        "the replay must return the ORIGINAL v2 context, not a newly minted one"
+    );
+
+    // And no third context was minted into the lineage.
+    assert_eq!(
+        store.count_idempotency_records().await.expect("count ok"),
+        Some(1),
+        "one key, one retained record"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The four `RegistryStore` methods with NO ORIGINATING PRODUCTION CALLER.
+//
+// `568:9 put`, `821:9 mark_superseded`, `832:9 first_version_ctx_id` and
+// `923:9 idempotency_evict_expired` survived every prior run, and U-546
+// correctly established WHY: each has exactly three call sites, all delegating
+// wrapper impls that forward to another implementation
+// (`acdp-registry-store/src/parity.rs`, `acdp-registry-server/src/memory_ext.rs`,
+// `acdp-registry-server/tests/http_integration.rs`). No originating caller
+// exists, and the UFCS form returns nothing either. The twelve-odd `.put(` hits
+// in `acdp-registry-auth` are `ChallengeStore::put(ChallengeRecord)`, a
+// different trait — the census has to be resolved by TYPE, not by name.
+//
+// U-552 first proposed carrying them as budgeted survivors under a new label,
+// on the argument that a test whose only purpose is to call an uncalled method
+// converts a true finding into a permanently green line. **That was reversed,
+// and the reason is worth recording rather than quietly dropping.**
+//
+//   1. `.cargo/mutants.toml`'s governing rule is "PAY FIRST, WIDEN LAST": a
+//      survivor a test CAN kill gets the test.
+//   2. The repo had already made the opposite call for the identical shape.
+//      `store.rs:380:9 lifecycle_events_of_ctx -> Ok(vec![])` is KILLED (U-543)
+//      by a direct-call test — and that method has no originating production
+//      caller either (three impls, one delegating wrapper, plus U-543's own two
+//      calls). Carrying these four while counting that one a win would leave the
+//      documentation asserting both positions at once.
+//   3. These are backend CONTRACT surface, not dead code:
+//      `acdp-registry-pg/src/store.rs` implements all four, and `parity.rs`
+//      exists to compare backends. Pinning sqlite's side is real contract
+//      coverage, not an invented caller.
+//
+// The finding is NOT lost by killing them: it stays in
+// `docs/MUTATION-SCOPE-CANDIDATES.md`'s U-546 section and in this comment. What
+// changes is that the behaviour is now also pinned, so a future originating
+// caller inherits a tested contract instead of an untested one.
+// ---------------------------------------------------------------------------
+
+/// `568:9` replaces `<SqliteStore as RegistryStore>::put` with `Ok(())`.
+///
+/// `put` inserts a body as an ACTIVE context (`store.rs:567-578`), so stubbing it
+/// reports success while storing nothing. Asserted through `get`, which reads the
+/// real row back: the mutant leaves `get` returning `None`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registry_store_put_actually_stores_a_retrievable_context() {
+    let (source, _src_dir) = store().await;
+    let p = producer(81);
+
+    // Publish through the real commit path, then lift the stored body out.
+    let ctx_id = publish(&source, request(&p, "put round-trip")).await;
+    let body = source
+        .get(&ctx_id)
+        .expect("retrieve ok")
+        .expect("published context present")
+        .body;
+
+    // A SEPARATE store, so this exercises `put` rather than the commit path that
+    // already populated `source`.
+    let (target, _tgt_dir) = store().await;
+    assert!(
+        target.get(&ctx_id).expect("retrieve ok").is_none(),
+        "precondition: the target store must not already hold this context, or \
+         the assertion below would pass without `put` doing anything"
+    );
+
+    target.put(body).expect("put must succeed");
+
+    let got = target
+        .get(&ctx_id)
+        .expect("retrieve ok")
+        .expect("put must make the context retrievable; `put -> Ok(())` stores nothing");
+    assert_eq!(
+        got.body.ctx_id, ctx_id,
+        "put must store the body it was given, under its own ctx_id"
+    );
+}
+
+/// `821:9` replaces `mark_superseded` with `Ok(())`.
+///
+/// The body is `UPDATE contexts SET status = 'superseded' WHERE ctx_id = ?`
+/// (`store.rs:820-828`), so the mutant reports success and leaves the row ACTIVE.
+/// Both directions are asserted: the status must be Active BEFORE the call, or a
+/// context that was already superseded would satisfy the assertion after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registry_store_mark_superseded_actually_changes_the_status() {
+    let (store, _dir) = store().await;
+    let p = producer(82);
+    let ctx_id = publish(&store, request(&p, "to be superseded")).await;
+
+    assert!(
+        matches!(
+            store
+                .get(&ctx_id)
+                .expect("retrieve ok")
+                .expect("present")
+                .registry_state
+                .status,
+            acdp::types::primitives::Status::Active
+        ),
+        "precondition: a freshly published context is Active, or the post-call \
+         assertion proves nothing"
+    );
+
+    store.mark_superseded(&ctx_id).expect("mark_superseded ok");
+
+    assert!(
+        matches!(
+            store
+                .get(&ctx_id)
+                .expect("retrieve ok")
+                .expect("present")
+                .registry_state
+                .status,
+            acdp::types::primitives::Status::Superseded
+        ),
+        "mark_superseded must actually write status='superseded'; the `Ok(())` \
+         mutant reports success and leaves the row Active"
+    );
+}
+
+/// `832:9` replaces `first_version_ctx_id` with `Ok(None)`.
+///
+/// The body is `ORDER BY version ASC, created_at ASC LIMIT 1` over the lineage
+/// (`store.rs:831-845`), so the mutant claims every lineage has no first version.
+/// The lineage deliberately holds TWO versions: with one, `Ok(None)` would still
+/// be wrong but the test would not distinguish "returns the first" from "returns
+/// whatever it found".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registry_store_first_version_ctx_id_returns_the_lineage_head() {
+    let (store, _dir) = store().await;
+    let p = producer(83);
+
+    let v1_ctx = publish(&store, request(&p, "lineage head v1")).await;
+    let v1_body = store
+        .get(&v1_ctx)
+        .expect("retrieve ok")
+        .expect("v1 present")
+        .body;
+    let lineage = v1_body.lineage_id.clone();
+
+    let v2_req = p
+        .supersede_body(&v1_body)
+        .title("lineage head v2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid superseding request");
+    let v2_ctx = publish(&store, v2_req).await;
+    assert_ne!(v1_ctx, v2_ctx, "precondition: two distinct versions exist");
+
+    let first = store
+        .first_version_ctx_id(&lineage)
+        .expect("first_version_ctx_id ok")
+        .expect("a populated lineage HAS a first version; `Ok(None)` claims it does not");
+    assert_eq!(
+        first, v1_ctx,
+        "the lineage head is v1, not the newest version -- ORDER BY version ASC"
+    );
+}
+
+/// `923:9` replaces the `RegistryStore` trait method
+/// `idempotency_evict_expired` with `Ok(())`.
+///
+/// It is a one-line delegation to `idempotency_evict_inner` (`store.rs:922-924`).
+/// `evicting_idempotency_drops_expired_records_and_spares_live_ones` above
+/// already asserts exactly this behaviour in both directions — but through the
+/// INHERENT `evict_idempotency`, so the trait method's own body was never
+/// executed and its mutant survived. This is the same assertion reached through
+/// the trait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registry_store_idempotency_evict_expired_actually_deletes_through_the_trait() {
+    let (store, _dir) = store().await;
+    let p = producer(84);
+
+    let before = Utc::now();
+    commit(
+        Arc::clone(&store),
+        request(&p, "trait-evict keyed"),
+        Some("trait-evict-key".into()),
+    )
+    .await
+    .expect("join")
+    .expect("commit ok");
+    assert_eq!(
+        store.count_idempotency_records().await.unwrap(),
+        Some(1),
+        "precondition: the keyed publish stored exactly one record"
+    );
+
+    // Before the TTL: the record must survive. This half passes against the
+    // mutant and is here so the test asserts the mechanism rather than merely
+    // "the table got smaller".
+    RegistryStore::idempotency_evict_expired(&*store, before).expect("evict ok");
+    assert_eq!(
+        store.count_idempotency_records().await.unwrap(),
+        Some(1),
+        "a record still inside its TTL must survive"
+    );
+
+    // Past the TTL: this is the half that reddens under `-> Ok(())`.
+    RegistryStore::idempotency_evict_expired(&*store, before + Duration::hours(2))
+        .expect("evict ok");
+    assert_eq!(
+        store.count_idempotency_records().await.unwrap(),
+        Some(0),
+        "past its TTL the record must actually be DELETED; the trait method \
+         stubbed to `Ok(())` reports success and leaves it behind"
     );
 }

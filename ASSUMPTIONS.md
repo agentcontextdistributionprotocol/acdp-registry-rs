@@ -4039,3 +4039,74 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   direction — refusing to judge beats judging wrongly — but it is a real constraint on
   Phase 3 and is recorded in the plan's Phase 3 edge cases.
 - **Status:** UNCONFIRMED
+
+## U-552 Phase 2 — `994:35` `<` and `==` are KILLABLE; U-544's EQUIVALENT label was wrong
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** a committed `EQUIVALENT` label backed by a probe can still be wrong, and the only
+  way to find out is to run the mutant.
+- **Chose:** wrote `a_keyed_superseding_publish_replays_instead_of_failing_as_already_superseded`
+  in `crates/acdp-registry-sqlite/tests/store_contract.rs` and ran both mutants in isolation with
+  `cargo mutants -F '^<escaped --list line>$'`. Both come back **CaughtMutant**, that test the
+  SOLE failure (26 passed, 1 failed). U-544's probe was correct but generalised from a
+  NON-superseding request: step 7's `ON CONFLICT` replay fallback (`store.rs:1284-1318`) is
+  reached only AFTER step 2, so a superseding replay with step 1 skipped hits the coherence check
+  at `store.rs:1118-1125` and returns `Err(SupersededTarget{AlreadySuperseded})`.
+- **Alternatives:** accept the committed label (rejected — it is a claim about behaviour, and
+  behaviour is measurable); argue it in review without running it (rejected — the repo's label was
+  itself backed by a probe, so only a stronger measurement settles it).
+- **Blast radius if wrong:** the survivor list would carry two entries that are actually killed,
+  and the ratchet would fail on the next run with the classifier reporting them as proven kills.
+  Self-correcting by design.
+- **Status:** CONFIRMED (2026-09-16) — measured twice, the second time after correcting a
+  poisoned harness (below).
+
+## U-552 Phase 2 — local cargo-mutants verdicts were VOID until safe.directory was injected
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** a `CaughtMutant` verdict means the mutation was detected. **It does not, on its own.**
+- **Chose:** re-ran with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'`
+  exported for the process only — no `git config --global` write, no repo change — and confirmed
+  the killing test by name in `mutants.out/log/<mutant>.log` before believing the verdict.
+- **What happened:** the first run ALSO reported "2 caught", but the killers were
+  `no_tracked_file_contains_a_conflict_marker`, `every_docs_page_is_listed_in_the_docs_index` and
+  `every_directly_read_env_var_is_documented` — workspace scans unrelated to the mutation. This
+  worktree is owned by uid 501 while the session runs as uid 502, so git refuses cargo-mutants'
+  temp copy with `fatal: detected dubious ownership`; `cargo test --workspace` stops at the first
+  failing binary, and `conformance_gate` sorts before `store_contract`, so **the new test never
+  executed.** Right conclusion, no evidence behind it.
+- **Alternatives:** `git config --global --add safe.directory '*'` (rejected — persists a
+  security-relevant setting machine-wide to fix one run); running as uid 501 (not available).
+- **Blast radius if wrong:** every local mutation measurement in these worktrees is untrustworthy,
+  including Phase 3's. CI is unaffected (single-user runner), which makes it worse rather than
+  better: the poisoned run is the one a human uses to decide what to commit. This is exactly the
+  class `mutants.yml`'s AC8 harness check exists to detect, and it reproduced live.
+- **Status:** CONFIRMED (2026-09-16)
+
+## U-552 Phase 2 — the four uncalled trait methods ARE given tests (judgement REVERSED)
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed, first:** "a test can be written that goes red" is not the same as "this is a coverage
+  gap worth closing", so `568:9 put`, `821:9 mark_superseded`, `832:9 first_version_ctx_id` and
+  `923:9 idempotency_evict_expired` should be carried as budgeted survivors under a new label,
+  `UNREACHED-BY-PRODUCTION`, rather than killed. The worry was real: a test whose only purpose is
+  to call an otherwise-uncalled method converts a true finding — *this surface has no production
+  caller* — into a permanently green line that hides it.
+- **REVERSED, and the phase verifier is why.** It pointed at a counter-precedent two rows above in
+  the same table: `store.rs:380:9 lifecycle_events_of_ctx -> Ok(vec![])` is recorded **KILLED
+  (U-543)** by a direct-call test, and that method has no originating production caller either —
+  three impls, one delegating wrapper, plus U-543's own two calls. Carrying these four while
+  counting that one a win would have left the document asserting both positions at once.
+- **Chose:** kill all four with direct contract tests in
+  `crates/acdp-registry-sqlite/tests/store_contract.rs`. Three reasons, in order of weight:
+  (1) `.cargo/mutants.toml`'s governing rule is "PAY FIRST, WIDEN LAST" — a survivor a test CAN
+  kill gets the test; (2) the repo's own precedent on the identical shape; (3) these are genuine
+  backend-CONTRACT surface, not dead code — `acdp-registry-pg/src/store.rs` implements all four and
+  `parity.rs` exists to compare backends, which is the phase rubric's own "contract surface both
+  backends implement → KILL" branch.
+- **Measured:** all four come back **CaughtMutant**, each killed by its own named test as the SOLE
+  failure (30 passed, 1 failed). The killer was confirmed by name in each
+  `mutants.out/log/<mutant>.log`, not inferred from the verdict.
+- **The finding is not lost**, which was the whole objection: the call-site census stays in
+  `docs/MUTATION-SCOPE-CANDIDATES.md`'s U-546 section and in a block comment above the four tests
+  saying why they exist and why the first judgement was reversed.
+- **Blast radius if wrong:** four contract tests pinning behaviour that currently has no production
+  caller. Cheap either way, and a future originating caller now inherits a tested contract.
+- **Status:** CONFIRMED (2026-09-16)
