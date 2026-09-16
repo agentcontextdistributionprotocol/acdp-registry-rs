@@ -3936,3 +3936,43 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 `main` first and release-plz regenerates the release PR with the sections already present.
 
 **Status:** CONFIRMED (2026-09-14).
+
+## U-557 — local `cargo-deny` binary differs from the one CI gates on
+- **Plan:** plans/u-557-clear-yanked-crates.md
+- **Assumed:** cargo-deny 0.19.9 (this worktree) and 0.20.2 (the pinned
+  `EmbarkStudios/cargo-deny-action` image at `3c63498`) agree on the `yanked` check and on
+  the summary-line wording, so a local green predicts a CI green.
+- **Chose:** proved criterion 3 locally with 0.19.9 and recorded the version beside the
+  output, rather than installing 0.20.2 to match. Reproducing the gate's *command* (and its
+  argument ordering, `--workspace` before `check`) is what the criterion asks for; matching
+  its *binary* is a stronger claim than the criterion makes, and CI is the authority that
+  actually blocks.
+- **Alternatives:** install cargo-deny 0.20.2 locally (slow, and still not the action's
+  container); skip the local run entirely and rely on CI (gives up the fast falsification
+  that caught the non-discriminating criterion in the first place).
+- **Blast radius if wrong:** CI's cargo-deny goes red on a PR that was green locally. Now
+  that `cargo-deny` is a required context this blocks the merge — visible immediately, fixed
+  by reading CI's output. No silent failure mode; cost is one round trip.
+- **Status:** UNCONFIRMED
+
+## U-557 — the Postgres test step was not run locally
+- **Plan:** plans/u-557-clear-yanked-crates.md
+- **Assumed:** the lockfile bump does not break the Postgres-backed tests, which are step 3
+  of CI's required `tests` context (`ci.yml:362-370`). That job (`ci.yml:332-480`) has **7**
+  named steps and 7 `cargo test` command lines (`:357, :360, :367, :368, :389, :434, :442`) —
+  not the 5 an earlier draft of this entry claimed, which counted only steps whose *name*
+  begins "cargo test".
+- **Chose:** ran CI's step 1 (`cargo test --locked --workspace`, 708 passed / 0 failed /
+  0 ignored) and left steps 2-5 to CI. **This step is skipped, not covered** — no Postgres is
+  reachable from this worktree (port 5432 closed, no client installed), so there is no local
+  evidence either way. Stating it as skipped rather than folding it into "the suite is green".
+- **Alternatives:** stand up a local Postgres via Docker to run it here. Rejected as
+  disproportionate: neither bumped crate is reached *through* `sqlx-postgres` (its dependency
+  list contains neither `flume` nor `spin`; `wnaf` is on the P-256 signature path). Note this
+  is narrower than "not linked into that binary": `spin` has a **second** parent, `lazy_static`
+  -&gt; `tracing-subscriber`, so it IS compiled into the Postgres test binary. The argument rests
+  on the 708-test sqlite run exercising `spin` heavily, not on its absence. Also
+  CI runs the step on every PR with a service container, blocking.
+- **Blast radius if wrong:** a Postgres-specific regression reaches CI instead of being
+  caught locally. CI blocks it. Cost is one round trip, not a bad merge.
+- **Status:** UNCONFIRMED

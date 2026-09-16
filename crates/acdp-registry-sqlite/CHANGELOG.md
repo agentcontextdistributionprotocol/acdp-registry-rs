@@ -1,5 +1,15 @@
 
 
+## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.1.3...acdp-registry-sqlite/v0.1.4) - 2026-09-16
+
+### Other
+
+- *(sqlite)* kill all 11 unjudged #307 survivors — two instruments agreeing ([#317](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/317))
+- *(sqlite)* kill the last known #307 survivor — connect's parent-dir guard ([#314](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/314))
+- *(sqlite)* kill the contributor-supersession survivor, and run the other four to ground ([#311](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/311))
+- *(sqlite)* kill four #307 survivors in the store read paths ([#310](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/310))
+
+
 ## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.1.2...acdp-registry-sqlite/v0.1.3) - 2026-09-13
 
 ### Fixed

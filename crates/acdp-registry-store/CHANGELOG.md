@@ -1,5 +1,12 @@
 
 
+## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.1.3...acdp-registry-store/v0.1.4) - 2026-09-16
+
+### Other
+
+- *(store)* anchor the §4.5 parity seam to a hand-transcribed spec table ([#302](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/302))
+
+
 ## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.1.2...acdp-registry-store/v0.1.3) - 2026-09-13
 
 ### Fixed
