@@ -3983,7 +3983,6 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 - **Status:** RESOLVED (U-559, 2026-09-16) — **CI ran the step and it passed.** The `tests`
   context on PR #322 (merged `181df1f`) passed in 3m12s with the `postgres:16-alpine`
   service container, covering the Postgres step this worktree could not run. No
-  Postgres-specific regression existed. Note one correction to this entry's own reasoning:
-  it said neither bumped crate is "on the Postgres path", which is narrower than it read —
-  `spin` IS compiled into that binary via `lazy_static` -> `tracing-subscriber`, just not
-  through `sqlx-postgres`. The conclusion held; one of its supporting clauses did not.
+  Postgres-specific regression existed. (This entry's reasoning about `spin` was already
+  corrected in place by U-557 — see the "Alternatives" bullet above, which records that
+  `spin` IS compiled into that binary via a second parent. Nothing further to add here.)
