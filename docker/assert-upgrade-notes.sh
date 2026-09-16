@@ -24,14 +24,17 @@
 #   ci.yml, job `fmt` (check name `rustfmt`) -- BLOCKS.
 #   docker.yml, job `build` (check name `build`) -- REPORTS ONLY.
 #
-# main's required_status_checks.contexts is exactly
-#   ["rustfmt","clippy","tests","conformance (spec fixtures)"]
-# and there are no branch rules or rulesets carrying additional ones. `build` is
-# NOT a member of that list, so a red `build` leaves the merge button green.
+# `build` is NOT among main's required status checks, and no branch rule or
+# ruleset carries additional ones, so a red `build` leaves the merge button
+# green. The list is deliberately not transcribed here -- read it with
+#   gh api repos/{owner}/{repo}/branches/main/protection \
+#     --jq .required_status_checks.contexts
+# A copy here goes stale the moment the setting changes, as the one that used
+# to sit on this line did.
 # U-514 sited this script only in docker.yml and described it as gating the
 # release PR; that was wrong -- it reported. U-516 added the ci.yml copy, inside
 # a job whose check name is already required, which needed no repo-settings
-# change and no fifth context.
+# change and no new context of its own.
 #
 # The docker.yml copy is kept deliberately rather than as a leftover: docker.yml
 # also triggers on the `acdp-registry-server/v*` tag push, which ci.yml never

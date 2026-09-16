@@ -448,11 +448,10 @@
 //!
 //! **Correction (U-520): the `conformance` job is NOT "non-required".** This line
 //! used to say it was, contradicting the required-checks note further down in this
-//! same doc-block. Measured against the live setting:
-//! `required_status_checks.contexts` is
-//! `["rustfmt","clippy","tests","conformance (spec fixtures)"]`, and `ci.yml`'s
-//! `conformance` job publishes exactly that fourth name. So a spec-gated test here
-//! DOES block a merge -- which is what lets `fixture_accounting_totals_are_exact`
+//! same doc-block. `conformance (spec fixtures)` IS one of main's required status
+//! checks, and `ci.yml`'s `conformance` job publishes exactly that name. So a
+//! spec-gated test here DOES block a merge -- which is what lets
+//! `fixture_accounting_totals_are_exact`
 //! and its two companions be spec-gated and still be gates rather than advice. The
 //! ungated pair above remain valuable for the different reason that they hold when
 //! the spec is unreachable.
@@ -611,10 +610,12 @@
 //! field: `DEFERRED` is destructured by two other checks and its type is quoted above,
 //! so widening it edits five sites to gain only name-adjacency to the reason string.
 //!
-//! **Required-checks status (current, re-verified 2026-09-01 per `ASSUMPTIONS.md`):**
-//! `conformance (spec fixtures)` IS among this repo's required status-check contexts --
-//! `required_status_checks.contexts` is `["rustfmt", "clippy", "tests", "conformance
-//! (spec fixtures)"]` on branch protection today. REG-10 Phase 11 recorded a
+//! **Required-checks status:** `conformance (spec fixtures)` IS among this repo's
+//! required status-check contexts on branch protection. The full list is not
+//! transcribed here -- it is state owned by repo settings, and the copy that used
+//! to sit on this line went stale when that setting changed. Read it with
+//! `gh api repos/{owner}/{repo}/branches/main/protection
+//! --jq .required_status_checks.contexts`. REG-10 Phase 11 recorded a
 //! recommendation to add it (it was advisory-only then) and left the branch-protection
 //! change itself to a repo admin, since executing that change is out of scope for any
 //! single diff to this file; a repo admin actioned it on 2026-09-01 (`ASSUMPTIONS.md`'s
