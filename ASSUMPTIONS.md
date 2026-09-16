@@ -3967,8 +3967,11 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   reachable from this worktree (port 5432 closed, no client installed), so there is no local
   evidence either way. Stating it as skipped rather than folding it into "the suite is green".
 - **Alternatives:** stand up a local Postgres via Docker to run it here. Rejected as
-  disproportionate: neither bumped crate is on the Postgres path (`spin` reaches
-  `sqlx-sqlite`'s `flume`, not `sqlx-postgres`; `wnaf` is on the P-256 signature path), and
+  disproportionate: neither bumped crate is reached *through* `sqlx-postgres` (its dependency
+  list contains neither `flume` nor `spin`; `wnaf` is on the P-256 signature path). Note this
+  is narrower than "not linked into that binary": `spin` has a **second** parent, `lazy_static`
+  -&gt; `tracing-subscriber`, so it IS compiled into the Postgres test binary. The argument rests
+  on the 708-test sqlite run exercising `spin` heavily, not on its absence. Also
   CI runs the step on every PR with a service container, blocking.
 - **Blast radius if wrong:** a Postgres-specific regression reaches CI instead of being
   caught locally. CI blocks it. Cost is one round trip, not a bad merge.

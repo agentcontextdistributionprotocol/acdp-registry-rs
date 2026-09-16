@@ -48,11 +48,13 @@ interesting than the version numbers.
 sufficed. No manifest constraint widened; no transitive dependency pinned either crate
 to the yanked version. Each was run separately so its lockfile hunk stays attributable.
 
-**`spin`'s yank was not a security event, and saying so matters.** The yanked set is a
-contiguous band — **0.7.0 through 0.12.1** — minus six versions that were republished out
-of it: `0.7.2`, `0.8.1`, `0.9.9`, `0.10.1`, `0.11.1` and `0.12.2` were **all published on
-2026-07-13 by the same owner** (`zesterer`). Everything at or below 0.6.0 is untouched and
-still live. Six release lines republished in a single day is a maintainer-wide re-release. No RUSTSEC advisory applies to 0.9.9
+**`spin`'s yank was not a security event, and saying so matters.** Every yanked version —
+all 16 of them — falls inside the band **0.7.0 to 0.12.1**, which holds 21 versions. The
+five live ones inside that band (`0.7.2`, `0.8.1`, `0.9.9`, `0.10.1`, `0.11.1`) are
+replacements published out of it, and a sixth, `0.12.2`, was published just above it the
+same day. All six landed on **2026-07-13, from the same owner** (`zesterer`); a seventh,
+`0.12.3`, followed on 2026-08-17. Everything at or below 0.6.0 is untouched and still live.
+Six release lines republished in a single day is a maintainer-wide re-release. No RUSTSEC advisory applies to 0.9.9
 (`RUSTSEC-2023-0031` is `patched = [">= 0.9.8"]`, `RUSTSEC-2019-0031` is withdrawn,
 `RUSTSEC-2019-0013` covers `< 0.5.2`). Recorded because "two yanked crates" reads as two
 vulnerabilities, and one of them was a publishing decision.
