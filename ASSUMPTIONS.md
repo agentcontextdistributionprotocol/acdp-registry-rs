@@ -3976,3 +3976,62 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 - **Blast radius if wrong:** a Postgres-specific regression reaches CI instead of being
   caught locally. CI blocks it. Cost is one round trip, not a bad merge.
 - **Status:** UNCONFIRMED
+
+## U-556 — TLS startup handshake probe
+
+- **Plan:** `plans/u556-tls-startup-handshake.md`
+- **Assumed:** `GET /livez` is the right endpoint to prove an HTTPS exchange — it takes no
+  `State` (`crates/acdp-registry-core/src/handlers/meta.rs:169-175`), so it returns 200 on a
+  cold, empty store under both `storage-sqlite` and `storage-memory`, and no middleware
+  authenticates it.
+- **Chose:** `/livez`, asserting `status == "ok"` rather than the version string (which carries
+  a build sha and moved 0.1.3 → 0.1.4 mid-unit, vindicating the choice).
+- **Alternatives:** `/healthz` — rejected, it has a 503 arm and is strictly more fragile on a
+  cold store. `/` — does not exist; bare 404 fallback.
+- **Blast radius if wrong:** the test would fail loudly on a green build; no production impact.
+- **Status:** UNCONFIRMED
+
+## U-556 — cipher suite deliberately not asserted
+
+- **Plan:** `plans/u556-tls-startup-handshake.md`
+- **Assumed:** the negotiated suite (`TLS13_AES_256_GCM_SHA384`) is a rustls default, not a
+  property this repo chose.
+- **Chose:** capture it in `TlsProbe` and print it in failure messages, but do not assert it.
+  The negotiated protocol *version* is asserted, because that is the property U-556 is about.
+- **Alternatives:** asserting the suite — rejected: it would turn an upstream default change
+  into a red build whose message points at this repo.
+- **Blast radius if wrong:** a suite downgrade within TLS 1.3 would go unnoticed by this test.
+- **Status:** UNCONFIRMED
+
+## U-556 — ALPN assertion added beyond the written plan
+
+- **Plan:** `plans/u556-tls-startup-handshake.md`
+- **Assumed:** asserting the negotiated ALPN is worth a line, since the server advertises
+  `["h2","http/1.1"]` and a client offering the wrong thing would make the HTTP/1.1 request
+  line meaningless.
+- **Chose:** assert `alpn == Some("http/1.1")`. This was **drift** — the plan's phase 1 said
+  "assert on version / status / body" and named no ALPN criterion. It was caught by the phase
+  verifier, not self-flagged, and it shipped only after being falsified (client offering only
+  `h2` → `left: Some("h2") right: Some("http/1.1")`).
+- **Alternatives:** dropping it — rejected once falsification proved it discriminates rather
+  than being decorative.
+- **Blast radius if wrong:** a spurious red if the server's ALPN list ever legitimately changes.
+- **Status:** UNCONFIRMED
+
+## U-556 — child stdout is not drained during the probe
+
+- **Plan:** `plans/u556-tls-startup-handshake.md`
+- **Assumed:** exactly one HTTP request is ever issued, so `TraceLayer`'s two log events
+  (`crates/acdp-registry-core/src/lib.rs:300-302`) cannot fill the child's ~16 KiB pipe buffer.
+- **Chose:** do not drain. **This holds only because `Exchange`-stage probe failures are
+  non-retryable** — retrying the whole exchange would re-issue a real request every 100ms for
+  up to 50 iterations. If that retry policy is ever relaxed, this decision must be re-made with
+  it; the two are one decision, not two. **Measured, since a decision resting on an unverified
+  property is the thing this log exists to prevent:** forcing an `Exchange`-stage failure fails
+  in 0.93s versus 5.32s for a retryable handshake failure that burns all 50 iterations. The gap
+  is the evidence that `Exchange` is not retried.
+- **Alternatives:** draining stdout on a reader thread — rejected as unnecessary complexity for
+  one request.
+- **Blast radius if wrong:** the child could block on a full pipe and the test would hang until
+  the 5s socket timeout, then report `[exchange]`.
+- **Status:** UNCONFIRMED
