@@ -235,8 +235,14 @@ backend = "{backend}"
             }
             // Only a connect/handshake failure is worth retrying: it means the
             // listener is not up YET. An exchange failure means TLS already
-            // worked, so retrying cannot help -- and it would re-issue a real
-            // HTTP request every 100ms into a pipe nothing drains.
+            // worked, so retrying cannot help, and it wastes five seconds.
+            //
+            // This rule USED to be documented as also protecting the child's
+            // undrained stdout pipe. Measured, that justification was wrong: the
+            // pipe grows to 64 KiB, and 50 retried requests at the default log
+            // filter emit ~40 KB and still pass. The variable that actually fills
+            // it is RUST_LOG, which the child inherits -- one probe at `trace`
+            // already uses ~20 KB. See the U-556 follow-up note on `tls_probe`.
             Err(err) if err.retryable => last_err = Some(err),
             Err(err) => {
                 last_err = Some(err);
@@ -287,7 +293,13 @@ backend = "{backend}"
     assert_eq!(
         probe.alpn.as_deref(),
         Some("http/1.1"),
-        "expected the server to negotiate the ALPN protocol we offered"
+        "the server did not negotiate the ALPN protocol we offered. `None` here means it \
+         advertised no ALPN at all -- which silently breaks HTTP/2 for every real client, \
+         and this is the only place in the repo that observes the server's ALPN. Do not \
+         delete this assertion for looking unfireable. Note what it does NOT cover: if the \
+         server's list narrowed from [h2, http/1.1] to [http/1.1], h2 is lost and this still \
+         passes -- catching that needs a second probe offering h2, which is out of scope for \
+         a TLS startup test"
     );
     assert_eq!(
         probe.status, 200,
@@ -307,6 +319,17 @@ backend = "{backend}"
 /// The endpoint the TLS probe requests. Named once so the request line and every
 /// failure message that mentions it cannot drift apart -- a message naming a path
 /// the code no longer requests diagnoses the wrong thing.
+///
+/// **`/livez` specifically, and do not "strengthen" this to a richer endpoint.**
+/// This test's subject is the transport: does the shipped binary install a provider
+/// and complete a real TLS exchange. `livez()` takes no `State`, so it answers 200 on
+/// a cold, empty store under every storage arm. `/healthz` has a 503 arm and would
+/// import a storage-init failure into a test whose red state must mean "TLS broke" --
+/// the exact confusion the branch-on-exit-code work above exists to remove. The
+/// endpoints' own behaviour is already covered in-process over plain HTTP by
+/// `http_integration.rs`; nothing is gained here by duplicating it. Parsing the body
+/// as JSON is the transport property worth having: it proves the bytes survived the
+/// TLS record layer intact.
 #[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
 const PROBE_PATH: &str = "/livez";
 
@@ -321,6 +344,11 @@ const SERVER_NAME: &str = "localhost";
 struct TlsProbe {
     version: Option<rustls::ProtocolVersion>,
     alpn: Option<String>,
+    /// Captured for failure messages, deliberately never asserted. An "is it a TLS 1.3
+    /// AEAD suite" floor would be **unfireable**: the 1.3 registry is AEAD-only by
+    /// construction and the client is pinned to 1.3 below, so such a check cannot fail on
+    /// any run where the version assertion passes. It would read as coverage and prove
+    /// nothing.
     suite: Option<rustls::CipherSuite>,
     status: u16,
     body: String,
@@ -363,8 +391,15 @@ impl Stage {
 
     /// Only these two stages can mean "the listener is not up YET", which is the
     /// only thing another pass of the poll loop could fix. An exchange failure
-    /// means TLS already worked, so retrying cannot help -- and it would re-issue
-    /// a real HTTP request every 100ms into a pipe nothing drains.
+    /// means TLS already worked, so retrying cannot help.
+    ///
+    /// **This rule is NOT what protects the child's undrained stdout**, despite an
+    /// earlier comment here saying so. Measured: the pipe grows to 64 KiB and 50
+    /// retried requests at the default filter emit ~40 KB, well under it. The real
+    /// exposure is `RUST_LOG`, inherited by the child -- at `trace` a single probe
+    /// uses ~20 KB and 50 would wedge. A `matches!` arm cannot gate that anyway;
+    /// the structural fix is file-backed child stdio, which touches the protected
+    /// early-exit block and so belongs to a follow-up unit, not this one.
     fn io_failure_may_be_transient(self) -> bool {
         matches!(self, Self::Connect | Self::Handshake)
     }

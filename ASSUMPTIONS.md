@@ -3989,7 +3989,11 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 - **Alternatives:** `/healthz` — rejected, it has a 503 arm and is strictly more fragile on a
   cold store. `/` — does not exist; bare 404 fallback.
 - **Blast radius if wrong:** the test would fail loudly on a green build; no production impact.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-16, Opus under `/reconcile`). Independent analysis found the
+  endpoints' own behaviour already covered in-process over plain HTTP (`http_integration.rs:220-257`,
+  `:2680`; `conformance_gate.rs:305,330`), so a richer endpoint buys no coverage and imports a
+  storage-init failure mode into a test whose red must mean "TLS broke". The rejection reason is now
+  recorded at the `PROBE_PATH` constant, where a maintainer tempted to "strengthen" it will meet it.
 
 ## U-556 — cipher suite deliberately not asserted
 
@@ -4001,7 +4005,11 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 - **Alternatives:** asserting the suite — rejected: it would turn an upstream default change
   into a red build whose message points at this repo.
 - **Blast radius if wrong:** a suite downgrade within TLS 1.3 would go unnoticed by this test.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-16, Opus under `/reconcile`), on a stronger argument than the one
+  logged. An AEAD *floor* was considered and rejected as **unfireable**: the TLS 1.3 suite registry
+  is AEAD-only by construction, and the client is pinned to 1.3, so such a check cannot fail on any
+  run where the version assertion passes — it would read as coverage and prove nothing. Noted at the
+  `suite` field so nobody adds it later believing it buys something.
 
 ## U-556 — ALPN assertion added beyond the written plan
 
@@ -4016,7 +4024,13 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 - **Alternatives:** dropping it — rejected once falsification proved it discriminates rather
   than being decorative.
 - **Blast radius if wrong:** a spurious red if the server's ALPN list ever legitimately changes.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED — KEEP (2026-09-16, Opus under `/reconcile`). The "near-unfireable"
+  objection is right on mechanics and wrong on conclusion: the reachable `None` branch is what
+  happens if anyone replaces `axum-server`'s acceptor with a hand-rolled `rustls::ServerConfig` — a
+  plausible migration here given this repo's documented provider fight with that crate — and this is
+  the **only** observation of the server's ALPN anywhere in the repo. Its failure mode was deletion,
+  not a false pass, so the assertion message now argues for its own existence and states its blind
+  spot (a list narrowing from [h2, http/1.1] to [http/1.1] loses h2 and still passes).
 
 ## U-556 — child stdout is not drained during the probe
 
@@ -4034,4 +4048,18 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   one request.
 - **Blast radius if wrong:** the child could block on a full pipe and the test would hang until
   the 5s socket timeout, then report `[exchange]`.
-- **Status:** UNCONFIRMED
+- **Status:** **NEEDS-CHANGE** (2026-09-16, Opus under `/reconcile`) — does **not** block shipping
+  U-556; filed as a follow-up. The analysis refuted this entry's own premise on two counts.
+  (a) The ~16 KiB figure is the *initial* pipe allocation; macOS grows it to **64 KiB**, measured at
+  65,531/65,536 B. At the default log filter 50 retried requests emit ~40 KB and the test **still
+  passes** — so the hazard documented here does not fire on the variable it blames.
+  (b) The variable that does fire is **`RUST_LOG`**, which the child inherits (the test sets only
+  `ACDP_REGISTRY_CONFIG`): one probe at `trace` already uses ~20 KB, and 50 would wedge.
+  The right fix is structural and severs the coupling rather than documenting it — give the child
+  file-backed stdio in the existing tempdir instead of pipes: a file never blocks, has no ceiling,
+  and is immune to request count, retry policy and log level at once, while *improving* diagnostics
+  (today a wedged child yields a truncated 64 KiB). **It cannot be done inside U-556:** it requires
+  editing `tls_startup.rs:206-208`, which is inside the byte-identical protected range this unit
+  pre-registered (criterion 6) and which the assign's criterion 3 calls load-bearing. Widening scope
+  to take it would break a criterion this unit's PR claims. Corrected comments are in the code now;
+  the structural fix is a successor unit.
