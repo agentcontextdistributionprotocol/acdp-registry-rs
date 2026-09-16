@@ -28,12 +28,22 @@ jobs:
       #
       # This assertion also runs in `docker.yml`, next to the artifact it
       # describes. That copy REPORTS and cannot block: `docker.yml` publishes the
-      # check named `build`, and main's required_status_checks.contexts is exactly
-      # ["rustfmt","clippy","tests","conformance (spec fixtures)"] -- `build` is
-      # not a member, so a release PR missing its UPGRADING.md section gets a red
-      # `build` and a green merge button. No lane and no lanes leader has
-      # authority over repo settings, so the fix is to run the same assertion in a
-      # job whose check name is ALREADY required, not to ask for a fifth context.
+      # check named `build`, which is not among main's required status checks, so
+      # a release PR missing its UPGRADING.md section gets a red `build` and a
+      # green merge button. (The list is not transcribed here -- read it with
+      # `gh api repos/{owner}/{repo}/branches/main/protection
+      # --jq .required_status_checks.contexts`. A copy here would go stale the
+      # next time the setting changes, which is exactly what happened to the
+      # list this comment used to carry.)
+      #
+      # So the assertion is run again here, in a job whose check name is ALREADY
+      # required. That siting still holds, but NOT for the reason first given:
+      # this used to say no lane and no lanes leader has authority over repo
+      # settings, so a new context could not be asked for. That stopped being
+      # true on 2026-09-16, when the human added `cargo-deny` and `lint` to the
+      # required contexts. The real reason is cheapness and coupling: this copy
+      # needs only a checkout, runs in seconds inside a job that already gates,
+      # and adds no new check name to keep in sync with branch protection.
       #
       # `rustfmt` is that job because the gate needs a checkout and nothing else --
       # no feature-set toolchain, no services, no buildx, no registry login --
@@ -130,7 +140,7 @@ jobs:
       # (tests ~2m36s vs clippy ~39s), so PR latency does not move.
       #
       # Each build step must keep its feature list byte-identical to the clippy
-      # step above it. Do not rename this job: `clippy` is one of the four
+      # step above it. Do not rename this job: `clippy` is one of the required
       # contexts in branch protection's required_status_checks, and a required
       # context that stops reporting leaves every PR waiting on a check that
       # never arrives.

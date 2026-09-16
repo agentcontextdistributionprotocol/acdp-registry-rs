@@ -3953,7 +3953,12 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 - **Blast radius if wrong:** CI's cargo-deny goes red on a PR that was green locally. Now
   that `cargo-deny` is a required context this blocks the merge — visible immediately, fixed
   by reading CI's output. No silent failure mode; cost is one round trip.
-- **Status:** UNCONFIRMED
+- **Status:** RESOLVED (U-559, 2026-09-16) — **the skew was immaterial.** CI's cargo-deny
+  0.20.2 agreed with the local 0.19.9: the `cargo-deny` job passed in 26s on PR #322
+  (merged `181df1f`), under `yanked = "deny"`, and `main`'s own post-merge run passed it
+  too. The local green did predict the CI green. Recorded rather than deleted because the
+  reasoning — that reproducing a gate's *command* is not reproducing its *binary* — stays
+  true and will apply to the next tool-version gap.
 
 ## U-557 — the Postgres test step was not run locally
 - **Plan:** plans/u-557-clear-yanked-crates.md
@@ -3975,7 +3980,12 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   CI runs the step on every PR with a service container, blocking.
 - **Blast radius if wrong:** a Postgres-specific regression reaches CI instead of being
   caught locally. CI blocks it. Cost is one round trip, not a bad merge.
-- **Status:** UNCONFIRMED
+- **Status:** RESOLVED (U-559, 2026-09-16) — **CI ran the step and it passed.** The `tests`
+  context on PR #322 (merged `181df1f`) passed in 3m12s with the `postgres:16-alpine`
+  service container, covering the Postgres step this worktree could not run. No
+  Postgres-specific regression existed. (This entry's reasoning about `spin` was already
+  corrected in place by U-557 — see the "Alternatives" bullet above, which records that
+  `spin` IS compiled into that binary via a second parent. Nothing further to add here.)
 
 ## U-556 — TLS startup handshake probe
 
