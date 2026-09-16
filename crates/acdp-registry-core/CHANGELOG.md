@@ -1,5 +1,19 @@
 
 
+## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.1.3...acdp-registry-core/v0.1.4) - 2026-09-16
+
+### Fixed
+
+- gate the last two ungated body routes, and pin the two accept predicates ([#295](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/295))
+- *(auth,admin)* let the wire code decide the HTTP status ([#293](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/293))
+- *(publish)* reject an unaccepted Content-Type with 415, not 400 ([#290](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/290))
+- *(rate-limit)* charge publishes that fail late where the signer is proven ([#242](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/242)) ([#263](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/263))
+
+### Other
+
+- *(hygiene)* U-545 — close the sqlite sidecar leak across the class, not one crate ([#312](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/312))
+
+
 ## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.1.2...acdp-registry-core/v0.1.3) - 2026-09-13
 
 ### Added
