@@ -31,6 +31,78 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-557 (lane-3) — clearing the yanked crates and making the ratchet enforce -->
+
+### U-557 — the two yanked crates, cleared; `yanked` flipped to `deny`
+
+`deny.toml` had carried `yanked = "warn"` with a comment explaining that this was
+**not** laziness: the stricter setting had been measured, and it failed, because the
+workspace depended on two yanked crates. That comment also pre-specified the fix and
+its ordering — *"Flip this to `deny` in the same change that clears `spin` and `wnaf`,
+not before — flipping first would just redden the build for everyone."* This entry
+records executing exactly that, and the two things that turned out to be more
+interesting than the version numbers.
+
+**The clearing was the easy half.** Both crates had non-yanked in-range successors, so
+`cargo update --package spin` (0.9.8 → 0.9.9) and `--package wnaf` (0.14.0 → 0.14.1)
+sufficed. No manifest constraint widened; no transitive dependency pinned either crate
+to the yanked version. Each was run separately so its lockfile hunk stays attributable.
+
+**`spin`'s yank was not a security event, and saying so matters.** Every yanked version —
+all 16 of them — falls inside the band **0.7.0 to 0.12.1**, which holds 21 versions. The
+five live ones inside that band (`0.7.2`, `0.8.1`, `0.9.9`, `0.10.1`, `0.11.1`) are
+replacements published out of it, and a sixth, `0.12.2`, was published just above it the
+same day. All six landed on **2026-07-13, from the same owner** (`zesterer`); a seventh,
+`0.12.3`, followed on 2026-08-17. Everything at or below 0.6.0 is untouched and still live.
+Six release lines republished in a single day is a maintainer-wide re-release. No RUSTSEC advisory applies to 0.9.9
+(`RUSTSEC-2023-0031` is `patched = [">= 0.9.8"]`, `RUSTSEC-2019-0031` is withdrawn,
+`RUSTSEC-2019-0013` covers `< 0.5.2`). Recorded because "two yanked crates" reads as two
+vulnerabilities, and one of them was a publishing decision.
+
+**`wnaf 0.14.1` is not a cosmetic patch, which is the part worth remembering.**
+It takes a **new non-optional dependency on `primefield`**. So the lockfile diff is not
+the two `version =` lines plus checksums it looks like it should be — it also gains a
+`"primefield",` line inside `wnaf`'s own `dependencies` list. No new `[[package]]` block
+appears, because `primefield 0.14.0` was already locked, already pulled in by
+`primeorder`; that is why `cargo` reported "Locking 1 package" rather than two. License
+and advisory surface are unchanged, but real code moved, and it moved on the ECDSA P-256
+scalar-multiplication path (`wnaf` ← `primeorder` ← `p256` ← `acdp-crypto`) — which is
+why this change was gated on the workspace test run rather than on the lockfile diff
+looking small.
+
+This was caught by the plan's own review round, not by implementation. The acceptance
+criterion as first drafted asserted the diff "touches exactly two `version =` lines plus
+their `checksum =` lines" — a *correct* implementation would have failed it. A criterion
+precise enough to be falsifiable is also precise enough to be falsely specified, and the
+review round is what separates the two.
+
+**The verification trap, and the general shape of it.** `cargo deny check` exits 0 and
+prints `advisories ok, bans ok, licenses ok, sources ok` on the *un-bumped* tree under
+`yanked = "warn"` — character for character what it prints on the fixed tree. Pasting
+that summary as proof of the flip would have proved nothing: a reviewer holding only the
+diff and that output could not tell a post-flip run from a pre-flip one. The
+discriminating assertion is the **absence** of the diagnostic, not the presence of the
+summary: `grep -c 'yanked'` over the captured run, which was **4** before (two
+`warning[yanked]` diagnostics, each with a `yanked version` annotation line) and is
+**0** after. *A summary line that is identical in the passing and failing cases is not
+evidence, however green it looks.*
+
+**What this now costs, and it is deliberately a cost.** On 2026-09-16 `cargo-deny`
+became a **required** status check on `main`. Before that, this flip would have made a
+job fail without letting it block — a true signal with no teeth, which is the gap the
+previous entry on this subject was really describing. Now both halves are installed, and
+the consequence is that an upstream maintainer yanking any crate in the graph will block
+every merge in this repo, on a commit that changed nothing. That is the intended ratchet.
+The rewritten comment block in `deny.toml` is written for whoever meets it in that state:
+it names the one-line fix, and it argues against the shortcut of adding an `ignore` entry
+to get unblocked — which is now the path of least resistance, and which would convert a
+solvable lockfile problem into a permanent silent exemption.
+
+The superseded entry below (`yanked` stays `warn` "because `deny` fails today") is left
+standing. It was true when written, it named the condition for its own retirement, and
+that condition has now been met — editing it would destroy the record of a decision that
+was made correctly with the information available.
+
 <!-- unit U-542 (lane-3) — the sqlite sidecar leak: owning the file is not owning the directory -->
 
 ### U-542 — 89.3 GiB of orphaned SQLite sidecars, and the shape that caused it
