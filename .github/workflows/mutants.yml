@@ -48,6 +48,18 @@ env:
   # anything.
   MUTANTS_EXPECTED_SCOPE: "213"
 
+  # The ONE committed ledger that a drifted survivor line is paired against, to
+  # recover its identity (enclosing function + fn-relative offset + column, and
+  # independently its ordinal within that function) and find where the mutant
+  # moved to. Exactly one file, NEVER a glob: docs/mutation-runs/ also holds a
+  # VOID ledger (measured with copy_vcs lost, so every "caught" in it is an
+  # artifact) and three SUPERSEDED shards. Globbing that directory yields 13
+  # files, 417 records, 66 duplicate names and 11 with CONFLICTING verdicts --
+  # which would trip the classifier's own duplicate-name assertion on every run.
+  # docs/mutation-runs/README.md indexes which ledgers are CURRENT, in prose;
+  # this variable is the machine-readable half of that index.
+  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/u551-core-scope-213-outcomes.json"
+
   # Surviving mutants at that sha. Each is enumerated with its own written reason
   # below; this number is the machine-readable half of that list. It ratchets DOWN
   # as survivors are killed and must never be raised without a reason recorded in
@@ -524,15 +536,70 @@ jobs:
                      "\`cargo mutants --list\` line to MUTANTS_SURVIVORS IN THE SAME" \
                      "COMMIT, with its reason on a # line beside it."
               fi
+              # A DISAPPEARED LINE IS NOT SELF-EXPLANATORY, and this block used to
+              # say so and then leave the reader to work it out: it led with
+              # "Usually GOOD NEWS -- a test now kills it. Delete the line" and
+              # only reached the drift caveat afterwards. A reader who acts on the
+              # headline deletes a LIVE survivor and drops the budget for nothing.
+              #
+              # The gate was never silent -- a drift lands in BOTH `added` and
+              # `removed`, so rc=1 below fires either way. What was missing was the
+              # EVIDENCE. outcomes.json already records every mutant in scope with
+              # its verdict, not just the survivors, and scenario.Mutant.name is
+              # byte-identical to the `cargo mutants --list` line stored in
+              # MUTANTS_SURVIVORS. So the classification is decidable from the
+              # report this run already produced, with no extra cargo invocation.
+              #
+              # The logic lives in a COMMITTED, UNIT-TESTED script rather than more
+              # shell here, and that is the point rather than tidiness: this
+              # workflow has no `pull_request` trigger, so a PR that breaks its
+              # wiring cannot turn it red -- the breakage would surface on the
+              # following Monday's cron, detached from the change that caused it.
+              # conformance_gate.rs makes the same argument in the same words and
+              # asserts this call still exists.
               if [ -n "$removed" ]; then
-                echo "::error::listed as surviving but NO LONGER survives:"
+                # THE LIST IS PRINTED HERE, BEFORE the classifier runs, and that is
+                # deliberate: if the script is missing, renamed or crashes, the
+                # operator must still learn WHICH lines vanished. A diagnostic that
+                # only exists inside the tool being diagnosed is no diagnostic.
+                echo "::error::listed as surviving but NO LONGER in missed.txt:"
                 printf '%s\n' "$removed" | sed 's/^/::error::  - /'
-                echo "::error::Usually GOOD NEWS -- a test now kills it. Delete the line" \
-                     "AND its # reason from MUTANTS_SURVIVORS so the ratchet tightens." \
-                     "This fails rather than passing quietly because a list nobody" \
-                     "prunes stops describing anything, and because a line number that" \
-                     "merely DRIFTED looks exactly like a kill -- check which it is" \
-                     "before deleting."
+
+                printf '%s\n' "$removed" > "$tmp/removed.txt"
+                crc=0
+                if [ -n "${MUTANTS_PRIOR_LEDGER:-}" ]; then
+                  python3 .github/scripts/classify_removed_survivors.py \
+                    --outcomes "$json" \
+                    --removed-file "$tmp/removed.txt" \
+                    --prior-ledger "$MUTANTS_PRIOR_LEDGER" \
+                    --committed-file "$tmp/survivors_expected.txt" \
+                    --expected-scope "$MUTANTS_EXPECTED_SCOPE" || crc=$?
+                else
+                  python3 .github/scripts/classify_removed_survivors.py \
+                    --outcomes "$json" \
+                    --removed-file "$tmp/removed.txt" \
+                    --expected-scope "$MUTANTS_EXPECTED_SCOPE" || crc=$?
+                fi
+
+                # 10 = classified, 11 = the inputs cannot support a conclusion.
+                # NEITHER IS 1 OR 2, on purpose: an unhandled Python exception exits
+                # 1 and an argparse error exits 2, so a crashed classifier would
+                # otherwise be indistinguishable from a normal classification and
+                # its silence would read as agreement.
+                case "$crc" in
+                  10) : ;;
+                  11)
+                    echo "::error::the classifier could not reach a conclusion from" \
+                         "these inputs (see above). Fix the report or" \
+                         "MUTANTS_PRIOR_LEDGER; do not delete survivor lines on the" \
+                         "strength of a count." ;;
+                  *)
+                    echo "::error::the classifier itself failed (exit $crc) rather than" \
+                         "classifying. The lines above are the raw difference and have" \
+                         "NOT been judged: none of them has been shown to be a kill." \
+                         "Fix .github/scripts/classify_removed_survivors.py -- its unit" \
+                         "tests run on every PR via the required 'tests' job." ;;
+                esac
               fi
               rc=1
             fi

@@ -73,3 +73,10 @@ CLAUDE.md
 # future crates/*/PROGRESS.md, which is not what this covers.
 /PROGRESS.md
 /.drive.lock
+
+# Byte-compiled output from `.github/scripts/*.py`. Those scripts are RUN in CI
+# (the ratchet's survivor classifier, and its unit tests in the required `tests`
+# job), so running them locally leaves a `__pycache__/` beside them that would
+# otherwise be committed the first time anyone `git add`s that directory.
+__pycache__/
+*.py[cod]

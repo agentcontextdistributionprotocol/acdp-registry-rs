@@ -3936,3 +3936,106 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 `main` first and release-plz regenerates the release PR with the sections already present.
 
 **Status:** CONFIRMED (2026-09-14).
+
+---
+
+## U-552 Phase 1 — the survivor classifier: every classification still FAILS the job
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** a disappeared survivor line should never turn the ratchet green, not even
+  when the classifier can PROVE the mutant was killed.
+- **Chose:** every branch exits non-zero and names the edit to make. `MUTANTS_SURVIVORS` is
+  a SET EQUALITY; if a proven kill passed green, the committed list would sit disagreeing
+  with `missed.txt` and nothing would force it back into agreement — re-opening the hole
+  U-551's equality closed. The classifier's job is to say WHICH edit to make, not to excuse
+  the reader from making it.
+- **Alternatives:** exit 0 on a proven kill (rejected: silently decays the list); warn-only
+  (rejected: `.cargo/mutants.toml:126-132` already records that a red check nobody can
+  explain gets disabled, which is why every branch here prescribes a remedy).
+- **Blast radius if wrong:** a weekly scheduled job stays red one cycle longer than needed.
+  It blocks no PR — `mutants` is not in `required_status_checks.contexts`. Reversible in a
+  one-line diff.
+- **Status:** UNCONFIRMED
+
+## U-552 Phase 1 — pairing drifted lines needs TWO identity keys, required to agree
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** one line-independent identity is not enough to re-find a mutant that moved.
+- **Chose:** compute both an offset key (`line − function_start_line`, plus column) and an
+  ordinal key (position within the function by line, then column). Pair when both agree; pair
+  on whichever key resolves when only ONE does, saying which; escalate only when both resolve
+  to *different* mutants, or when either matches several.
+- **CORRECTED DURING THIS PHASE.** The first implementation required BOTH keys to resolve,
+  and this entry claimed "they fail on different edits, so requiring agreement costs
+  nothing". That was wrong in direction, and the phase verifier demonstrated it: requiring
+  agreement makes pairing the INTERSECTION of the two keys, so it succeeds only where both
+  survive — i.e. only for whole-function shifts, the one case a single key already handled.
+  Every edit the second key was added to cover was being dumped into the coarse fallback and
+  mislabelled "the two identity keys DISAGREE" when in fact one had simply found nothing.
+  Single-key pairing is now its own labelled outcome.
+- **On injectivity, stated precisely.** The offset key's injectivity is a real measurement:
+  213/213 on the core ledger, 138/138 on store.rs, 351/351 on the union — and dropping a
+  component measurably collapses it (without `replacement`, 213 → 123; without `column`,
+  213 → 204). The ordinal key's injectivity is **true by construction**, since
+  `(file, function, ordinal-within-function)` is unique by definition; quoting "351/351
+  measured" for it, as an earlier draft did, described a check that could not fail.
+- **Alternatives:** the naive `(file, description)` key — measured to collapse 351 mutants to
+  312, merging the three `delete ! in run_search_with_refill` mutants which hold three
+  DIFFERENT verdicts (Caught/Missed/Timeout); re-running the isolated mutant with
+  `-F '^…$'` — works under the committed config, but costs a cold build per line and
+  cannot find a mutant that drifted at all (0 matches), which is the one case that matters.
+- **Blast radius if wrong:** a drift is reported as ambiguous and a human reads
+  `mutants.out/diff/`. The failure direction is deliberately "ask", never "guess".
+- **Status:** UNCONFIRMED
+
+## U-552 Phase 1 — MUTANTS_PRIOR_LEDGER names ONE file, never a glob
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** the pairing basis must be a single named ledger.
+- **Chose:** a `MUTANTS_PRIOR_LEDGER` env var beside `MUTANTS_EXPECTED_SCOPE`, currently
+  `docs/mutation-runs/u551-core-scope-213-outcomes.json`, with `conformance_gate.rs`
+  asserting it is not a glob and that the file exists. Measured: globbing
+  `docs/mutation-runs/*-outcomes.json` matches 13 files / 417 records — it picks up the VOID
+  `u548` ledger (taken with `copy_vcs` lost, so every "caught" in it is an artifact) and
+  three SUPERSEDED `u549` shards — yielding 66 duplicate names, 11 with CONFLICTING verdicts.
+  That would trip the classifier's own duplicate-name assertion on every run.
+- **Alternatives:** a glob (measured broken, above); deriving the CURRENT set by parsing
+  `docs/mutation-runs/README.md` prose (rejected: a prose index is not a machine-readable
+  contract, and parsing it would be a second untested extractor).
+- **Blast radius if wrong:** points at a stale ledger → drifts degrade to the coarse
+  fallback and get reported as ambiguous. Phase 3 must repoint it at the 351-scope ledger;
+  if it forgets, drift pairing silently weakens rather than failing loudly. **That is the
+  sharpest residual risk in this phase** and is why the existence check is a test.
+- **Status:** UNCONFIRMED
+
+## U-552 Phase 1 — the classifier's exit codes are 10/11, not 1/2
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** a classifier that CRASHES must not be readable as one that classified cleanly.
+- **Chose:** `EXIT_CLASSIFIED = 10`, `EXIT_UNSOUND = 11`. An unhandled Python exception exits
+  1 and an argparse error exits 2, so those values would have made a dead script
+  indistinguishable from a normal classification — the workflow would have printed the
+  routine message over a script that never ran. The workflow's `case` treats every other
+  non-zero code as "the classifier itself failed", and prints the raw removed lines
+  BEFORE invoking it so a crash still tells the operator which lines vanished.
+- **Alternatives:** 1/2 (rejected: collides with the interpreter's own codes); parsing the
+  script's stdout for a sentinel (rejected: a crashed script produces no stdout, so the
+  absence of a sentinel and the absence of a problem look identical).
+- **Blast radius if wrong:** none beyond this workflow; the outer `rc=1` already fails the
+  job regardless, so the exit code only governs which message the reader gets.
+- **Status:** UNCONFIRMED
+
+## U-552 Phase 1 — a SHARDED report is refused rather than classified
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** the classifier must never run against one shard of a sharded run.
+- **Chose:** pass `--expected-scope "$MUTANTS_EXPECTED_SCOPE"` and refuse when the report's
+  `total_mutants` disagrees. `cargo mutants --shard N/K` writes a report whose
+  `total_mutants` is that shard's share, so `len(records) == total_mutants` holds PER SHARD
+  and the truncation check passes — while every committed survivor belonging to another
+  shard looks like a line naming no mutant in scope, which classifies as
+  `NO CANDIDATE → delete the line`, for nearly every survivor at once. The scope pin is the
+  only thing that can tell a shard from a whole run.
+- **Alternatives:** reading a shard field from the report (cargo-mutants does not record one);
+  accepting shards and merging them in the classifier (rejected: the merge would have to be
+  right before the check that validates it, and a wrong merge reintroduces duplicate names).
+- **Blast radius if wrong:** if Phase 3's 351-mutant run must be sharded, this gate makes the
+  ratchet hard-fail until the shards are merged into one report. That is the intended
+  direction — refusing to judge beats judging wrongly — but it is a real constraint on
+  Phase 3 and is recorded in the plan's Phase 3 edge cases.
+- **Status:** UNCONFIRMED
