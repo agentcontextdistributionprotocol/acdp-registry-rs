@@ -31,6 +31,160 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-556 (lane-2) — the TLS startup test that never spoke TLS -->
+
+### U-556 — `tls_startup` asserted TLS and observed TCP
+
+`tls_startup_installs_a_provider_and_serves` spawns the real binary with
+`registry.tls.enabled = true`. It is the only executable guard on the crypto-provider
+defect its own module docstring describes. Its readiness loop broke on
+`TcpStream::connect(("127.0.0.1", port)).await.is_ok()` while its assertion read
+*"the registry never accepted a TLS connection"*. The observation was TCP; the claim was
+TLS. **Anything that bound the port satisfied it** — so a rustls handshake regression, of
+exactly the class the `0.23.41 → 0.23.45` bump for RUSTSEC-2026-0285 had just made, would
+have left it green.
+
+This was a **wrong-assertion** bug as much as a missing-capability one. Adding a handshake
+without correcting the message would have left the same false claim in place with a longer
+test behind it, so an acceptance criterion was written for each half — and that mattered,
+because the first draft of the criteria all passed with the false message untouched.
+
+**The probe replaces the TCP connect *inside* the poll loop, and the placement is
+load-bearing.** The first design put the handshake after the loop; that is unsatisfiable.
+The handshake must run before `child.kill()`, while the assertion that reports a
+never-ready server runs after it — no position after the loop satisfies both. Guarding it
+with `if served { … }` would have introduced the runtime skip branch the docstring already
+forbids. Inside the loop all three constraints hold at once, the early-exit / exit-101
+diagnostics stay byte-identical *and* live during the TLS attempts, and the loop's success
+condition finally means what the assertion's message says.
+
+**The self-signed certificate is pinned, not waved through.** `rcgen`'s
+`generate_simple_self_signed` emits `IsCa::NoCa` and therefore no basicConstraints
+extension at all, so webpki accepts the leaf as its own trust anchor with full chain and
+hostname verification on.
+
+**Upstream documents this exact usage as unsupported, and that is a standing limit, not a
+footnote.** `rustls-webpki-0.103.15/src/trust_anchor.rs:21-23` documents
+`anchor_from_trusted_cert` — the function `RootCertStore::add` calls — as one that *"should
+not be used to treat an end-entity certificate as a `TrustAnchor` in an effort to validate
+the same end-entity certificate during path building. Webpki has no support for self-signed
+certificates."* That is this case, named. It nevertheless works, because `IsCa::NoCa` emits
+no basicConstraints and so never reaches the `CaUsedAsEndEntity` arm — settled by running it
+rather than by believing the comment or its absence. But the pinning therefore rests on
+behaviour upstream explicitly declines to promise: **a webpki change could break this test
+without breaking the registry**, and the fix then is an rcgen CA+leaf chain with the CA
+pinned, as `tests/didweb/mod.rs:62-100` already builds.
+
+**A correction worth recording, because the first draft of this entry got it backwards.**
+That draft claimed the pinning makes a stale registry child squatting on the hard-coded port
+`18443` "fail closed because it serves a different certificate". Measured — `openssl s_server`
+on 18443 with an unrelated cert, then the test — the run *does* fail closed, but at
+`tls_startup.rs:224`: the **pre-existing, byte-identical** early-exit branch, reporting
+`exit status: 1, which is NOT the 101 this test exists for`, with `Address already in use
+(os error 48)` on the child's stderr. (That branch names config, storage
+init and port-in-use as *candidate* causes; it does not diagnose which, and that
+non-commitment is deliberate — it is the lesson recorded at `tls_startup.rs:209-214`.)
+The certificate never indicts anything. What U-556 actually changes is that the
+handshake fails *retryably*, so the loop no longer breaks early on a false positive and the
+already-existing `try_wait` branch gets another iteration to catch the child's real exit —
+where the old bare TCP connect set `served = true` on iteration 1 and went green. The
+conclusion held; the mechanism was invented. It is recorded here because a plausible
+mechanism attached to a true conclusion is the hardest kind of wrong claim to notice.
+
+**`ClientConfig::builder()` cannot be used here, and the reason is the defect itself.**
+This binary's graph enables both `ring` and `aws_lc_rs` — via two independent direct edges,
+not one: `crates/acdp-registry-server/Cargo.toml` requests `features = ["ring"]` without
+`default-features = false` while rustls' own `default` includes `aws_lc_rs`, *and*
+`axum-server`'s `tls-rustls` enables `rustls/aws-lc-rs`. So the convenience constructor
+panics with the very "could not automatically determine the process-level CryptoProvider"
+message this test file exists because of. `builder_with_provider` is mandatory.
+
+**Every timeout is on the std socket inside the blocking closure, and `tokio::time::timeout`
+is not a substitute.** It abandons a blocking task rather than cancelling it, and dropping
+the test's runtime waits for blocking tasks that already started. Without socket-level
+timeouts a listener that accepts and never speaks TLS would hang the test **forever** —
+the loop stalling on iteration 1, never reaching `child.kill()`, leaking the child, and
+burning the `tests` job's 45-minute cap with no diagnostic. Note the direction of that: the
+naive fix would have converted a silent false *pass* into a silent 45-minute *hang*. The
+bound was verified by standing up a listener that accepts then sleeps 600s — 5.003s,
+correctly classified non-retryable.
+
+**Falsification.** A test that cannot be made to fail has been lengthened, not widened. Six
+breaks were applied one at a time, each isolating a single assertion, because an earlier
+assertion that fails first masks every later one. Each was applied as a temporary local edit,
+run, and reverted at phase 1's verification gate and re-run independently by that gate — so
+**nothing in the tree evidences them**, which is exactly why they are transcribed here:
+
+| Break | Result | Assertion proved live |
+|---|---|---|
+| Pin an unrelated self-signed cert | `[handshake] invalid peer certificate: BadSignature (kind: InvalidData)` | certificate pinning |
+| Client restricted to TLS 1.2 | handshake **succeeds**, `Some(TLSv1_2)` vs `Some(TLSv1_3)` | the TLS-1.3 assertion |
+| Request a 404 path | `404` vs `200` | the status assertion |
+| Request a 200 path returning other JSON | `Null` vs `"ok"` | the body-content assertion |
+| Offer only `h2` in ALPN | `Some("h2")` vs `Some("http/1.1")` | the ALPN assertion |
+| Force a `config`-stage failure | `[config] "not a valid name" is not a valid server name: invalid dns name` | the message blames the test, not the registry |
+
+The TLS-1.2 break is the one that carries the weight: the handshake **succeeds**, so it is
+the only break that exercises the version assertion at all. A falsification that merely
+severed the connection would have gone red without ever touching it — a probe that reads
+nothing you varied is decorative.
+
+**The one shipped property with no in-tree probe, now measured.** The no-drain decision rests
+entirely on `Exchange`-stage failures being non-retryable — retrying the whole exchange would
+re-issue a real HTTP request every 100ms for up to 50 iterations. Nothing in the suite exercises
+that. Probed by forcing the response parse to fail: the run reports `[exchange] no header/body
+separator …` and finishes in **0.93s**, against **5.32s** for the retryable handshake break in
+the table above, which burns all 50 iterations. The ~5x gap is the discriminating evidence; a
+retryable `Exchange` would have matched the slow number. Still not an in-tree test — the
+branches listed under the limits below remain unprobed.
+
+**The failure message was, briefly, this unit's own defect.** The first cut read *"the
+registry never completed a TLS handshake"* — while firing for `config`, `exchange` and
+`task` failures too, i.e. blaming the registry for client-side bugs in the test. That is a
+fixed explanation pre-diagnosing every other failure, which is exactly what the existing
+exit-101 branch at the top of the same loop was written to avoid, and which the plan had
+warned about in as many words. It was caught by the phase verifier, not by its author. The
+shipped message names the failing stage and says which stages indict which party.
+
+**What this does NOT now cover — read this before assuming the file is settled.**
+
+- **Ordering is still unasserted.** Neither test asserts that the provider install happens
+  *before* the `listening` log. That limit and its reasoning are unchanged by this unit;
+  `main.rs:1049` still logs `listening` ahead of either bind branch. A reader seeing "TLS is
+  really tested now" must not infer the ordering property came with it.
+- **`rustls_is_a_normal_dependency` is hollow, and is not fixed here.** It asserts the
+  manifest's `rustls` line does not contain `aws-lc-rs`, under the message *"requesting both
+  providers is the original defect"* — and passes, **while the crate resolves both providers
+  anyway** through default features, as measured above. It greps a literal string; the
+  property it claims to guard is the resolved feature set, which that string cannot see. It
+  is the same defect class as the one this entry is about, in the same file, and it needs its
+  own unit and its own falsification rather than being folded in here.
+- **Port `18443` remains hard-coded**, a latent hazard under any future CI parallelism — and
+  per the correction above, the diagnostic a reader gets when it collides is the *port-in-use*
+  branch, not anything about TLS.
+- **The module docstring at `tls_startup.rs:6-9` still carries the superseded account** of why
+  two providers are enabled (it names `axum-server` + `reqwest`; the measured pair is
+  `crates/acdp-registry-server/Cargo.toml:47`'s inherited default features + `axum-server`).
+  Both edges named there are real, but they are not the same pair, so a reader who opens the
+  file gets the older story. Left unedited **not** for scope reasons — that docstring is in
+  phase 1's only in-scope file — but because the unit pre-registered a criterion confining its
+  changed hunks to three pre-image ranges, and the docstring is at lines 6-9. Editing it would
+  have broken that criterion and shifted the line-absolute `sed` range guarding the early-exit
+  block. Correcting it is a one-line follow-up for whoever takes the sibling-test unit. (This
+  bullet first gave "path scope" as the reason, which was simply wrong — the same
+  right-conclusion-invented-reason shape corrected five paragraphs above, committed twice in
+  one entry.)
+- **Several error branches in the new probe have no test and no falsification**: the 64 KiB
+  overflow guard (unreachable in practice — `/livez` is ~50 bytes), the `JoinError`/panic arm,
+  the missing-separator and unparseable-status-line arms, and the timeout-to-non-retryable
+  classification (measured out of tree at 5.003s, not in the suite). Their failure mode is a
+  confusing message, never a false pass, which is why they were accepted unprobed — but they
+  are unprobed.
+- **A handshake failure carries no output from the child process.** stdout/stderr are captured
+  only on the early-exit branch (`tls_startup.rs:206-208`), which is disjoint from the
+  handshake path. The new message's stage tag says *which* step failed; it cannot say what the
+  registry was logging while it failed.
+
 <!-- unit U-557 (lane-3) — clearing the yanked crates and making the ratchet enforce -->
 
 ### U-557 — the two yanked crates, cleared; `yanked` flipped to `deny`
