@@ -1,5 +1,14 @@
 
 
+## [0.1.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.1.4...acdp-registry-server/v0.1.5) - 2026-09-19
+
+### Other
+
+- *(tls)* assert the resolved provider property and carry the child's output into the diagnostic (U-560) ([#327](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/327))
+- *(tls)* assert a real TLS 1.3 handshake, not a bare TCP connect (U-556) ([#324](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/324))
+- stop transcribing branch protection; delete one loaded gh api command (U-559) ([#325](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/325))
+
+
 ## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.1.3...acdp-registry-server/v0.1.4) - 2026-09-16
 
 ### Added
