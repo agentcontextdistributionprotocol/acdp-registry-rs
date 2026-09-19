@@ -1,5 +1,6 @@
 
 
+
 ## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.1.3...acdp-registry-sqlite/v0.1.4) - 2026-09-16
 
 ### Other
