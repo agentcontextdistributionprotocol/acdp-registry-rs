@@ -4430,3 +4430,35 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   original claim never named — the request count is not a property of the server alone. The figure
   that belongs here is the one for the client this test actually uses.
 - **Status:** CONFIRMED (2026-09-19) — superseded by the change; nothing further to decide.
+
+## U-552 Phase 3 — the AC4 kill-vs-drift proof, anchored to SYMBOLS not line numbers
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** every survivor line that vanished from the store.rs tranche was KILLED by a
+  test, not merely displaced by a line-number shift. The set check cannot tell those apart.
+- **Chose:** prove it three independent ways rather than trust the count.
+  1. **Arithmetic on the diff.** The only commit touching
+     `crates/acdp-registry-sqlite/src/store.rs` since the shard ledgers is `1070c33`; its
+     14 hunks all start at or below line 1986 (lowest `@@ -1986`), and every survivor site
+     is at or above 1306 in the file, so no survivor could shift.
+  2. **The classifier** returns `KILLED (proven by this run)` for all six against
+     `docs/mutation-runs/u552-union-scope-351-outcomes.json`, matching by exact name.
+  3. **A negative control:** the same six against the 213-scope ledger, which never
+     contained store.rs, return `NOT A KILL` — so the verdict discriminates.
+- **THE SYMBOLS, because a line number written today decays tomorrow.** Carried from
+  U-560's finding (lane-2 cited `tls_startup.rs:149` for an assertion the same commit moved
+  to `:162`). The six killed mutants are identified here by the symbol each one mutates, so
+  this record survives any future reformatting of store.rs:
+  `<impl RegistryStore for SqliteStore>::put`, `::mark_superseded`,
+  `::first_version_ctx_id`, `::idempotency_evict_expired`, and the two non-`>=` comparison
+  replacements on the `expires_at > now` guard inside `::commit_publish`.
+  The two CARRIED survivors are, likewise by symbol: the `>=` replacement on that same
+  `expires_at > now` guard (equivalent — step 1 already DELETEd everything at or before
+  `now` in the same transaction under `BEGIN IMMEDIATE`), and the `!=` -> `==` replacement
+  inside `::commit_publish`'s `if inserted == 0` branch (unreachable by design).
+- **The line numbers above are NOT a counter-example to this rule.** They are an arithmetic
+  claim about ONE named commit's diff (`1070c33`), which is immutable; they are not
+  citations into a moving file. The distinction is the whole point: cite a symbol when you
+  mean "this code", cite a line when you mean "this diff".
+- **Blast radius if wrong:** deleting a survivor line that was never killed drops the budget
+  for nothing and loses a live survivor silently. That is why three proofs, not one.
+- **Status:** UNCONFIRMED
