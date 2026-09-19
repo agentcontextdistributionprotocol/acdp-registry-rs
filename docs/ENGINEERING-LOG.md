@@ -71,9 +71,17 @@ compile-time reference to `rustls::crypto::ring::default_provider` rules out the
 "no providers" reading; `custom-provider` is left unruled-out and the comment says so
 rather than implying coverage.
 
-**The manifest scan was kept**, for the one property only it can see: normal-vs-dev-only.
-No runtime check in this binary can reach that, because Cargo exposes dev-dependencies to
-test targets.
+**The manifest scan was kept** — but not, as a first draft of this entry said, because
+normal-vs-dev-only is otherwise unobservable. That is wrong: since U-530 `main.rs:100`
+names `rustls::` in the **bin**, and Cargo does not expose dev-dependencies to bins, so
+moving the line fails the binary's own compile with `E0433` and produces **zero** test
+results. The dev-only branch of the scan can never print.
+
+What earns those lines is the separate `ring` assertion, which **is** live and which no
+compile gate reaches: drop `features = ["ring"]` and the bin still compiles, because `ring`
+resolves anyway through `reqwest`/`hyper-rustls`/`tokio-rustls`/`sqlx-core` unification —
+while this test goes red. The crate must keep making its own *direct* request for its
+recorded provider choice rather than inheriting it by accident of the graph.
 
 This assertion is an invariant rather than a snapshot because the two-provider state is
 now permanent by a human decision of 2026-09-19 — recorded on the lane board as U-563,
@@ -84,6 +92,17 @@ record: the change that would leave one provider is switching `axum-server` to
 `tls-rustls-no-provider` in the root `Cargo.toml` *and* adding `default-features = false`
 to this crate's `rustls` line — both, since each enabler is independently sufficient — and
 the decision was not to.
+
+**Why the decision went that way**, since `tls_startup.rs:16` points here for the
+reasoning rather than re-deriving it. This crate wants `ring` specifically
+(`crates/acdp-registry-server/Cargo.toml:41-43` — `aws-lc-rs` drags `aws-lc-sys` and
+`prebuilt-nasm`, a C/asm build dependency, into the shipped binary's TLS path). But rustls
+declares `prefer-post-quantum = ["aws_lc_rs"]`, so a `ring`-only build gives up
+post-quantum hybrid key exchange. Post-quantum won, and both providers stay. Note what is
+*not* part of that trade: **TLS 1.2 is provider-independent** (`tls12 = []`), and an
+`aws_lc_rs`-only build would be both single-provider and post-quantum — the constraint is
+that this crate wants `ring`, not that no single-provider form keeps post-quantum. Both
+were asserted the other way earlier in this unit and corrected against the manifests.
 
 **2. The larger half: the diagnostic a reader actually meets carried nothing.**
 

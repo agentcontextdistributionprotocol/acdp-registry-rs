@@ -63,18 +63,25 @@
 ///
 /// Two assertions, and they are reachable from different places on purpose.
 ///
-/// **Normal-vs-dev-only is readable only from the manifest.** Cargo exposes
-/// `[dev-dependencies]` to test targets but not to bins, so no runtime check
-/// *in this test process* can tell the two sections apart.
+/// **The dev-only half of this scan is defensive only, and the comment used to
+/// claim otherwise — twice.** Since U-530, `main.rs:100` names
+/// `rustls::crypto::ring::default_provider()` in the **bin**, and Cargo does
+/// not expose `[dev-dependencies]` to bins. Measured by moving the line:
+/// `cargo build --bin acdp-registry` fails `error[E0433]: cannot find module or
+/// crate rustls --> crates/acdp-registry-server/src/main.rs:100` (rc=101), and
+/// `cargo test --test tls_startup` fails with the **same** error and produces
+/// **zero** test results. So the dev-only panic below can never print: the
+/// bin's own compile is the gate, and it is a harder one than any test.
 ///
-/// **What that does NOT mean, since an earlier version of this comment said
-/// it:** the dev-only state is not a silent one that reaches production. Since
-/// U-530, `main.rs:100` names `rustls::crypto::ring::default_provider()` in the
-/// bin itself, so moving the dependency would fail the *binary's* compile —
-/// `CARGO_BIN_EXE_acdp-registry` would not exist and every test here would be
-/// red. The scan is kept because it names the property directly and fails with
-/// a sentence instead of an `E0433` from a different crate, not because it is
-/// the only thing standing between this repo and a dev-only `rustls`.
+/// **What earns these lines is the `ring` assertion, which is live and which no
+/// compile gate can reach.** Measured: drop `features = ["ring"]` from the
+/// manifest line and the bin still COMPILES (rc=0) — `ring` resolves anyway
+/// through `reqwest`/`hyper-rustls`/`tokio-rustls`/`sqlx-core` unification — so
+/// nothing would notice, while this test goes red. That is the property worth
+/// asserting: this crate must keep making its own DIRECT request for its
+/// recorded provider choice (D-W5-105), rather than inheriting `ring` by
+/// accident of a graph where one unrelated dependency bump could remove it
+/// silently.
 /// Read from the manifest rather than from `cargo tree`'s output on purpose:
 /// the manifest is declarative and order-independent, whereas a scrape of
 /// output a tool formatted for human reading has to be re-verified every time

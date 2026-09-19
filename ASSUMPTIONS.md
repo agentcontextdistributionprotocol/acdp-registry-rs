@@ -4084,18 +4084,35 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 ## U-560 — the manifest scan is kept, for one property only
 
 - **Plan:** `plans/u560-honest-test-infrastructure.md`
-- **Assumed:** whether `rustls` is a *normal* dependency rather than a dev-only one is not
-  observable from inside this test binary at runtime.
-- **Chose:** keep the `[dependencies]` section scan and its `axum-server` anti-vacuity control,
-  and drop only the assertion that was false. Cargo exposes `[dev-dependencies]` to test targets,
-  so a `rustls` that had slipped back into that section would still compile and run in this
-  binary while the shipped binary had none — the exact state that made the original defect
-  unreachable by any test. No runtime check can see that difference.
-- **Alternatives:** delete the scan wholesale now that a runtime assertion exists — rejected, it
-  would lose the one property the scan is right about.
-- **Blast radius if wrong:** low and test-only. If the scan were redundant we would be carrying
-  ~25 lines of dead assertion; nothing ships differently.
-- **Status:** UNCONFIRMED
+- **Assumed (REFUTED by measurement, 2026-09-19):** that normal-vs-dev-only is unobservable
+  except from the manifest, and that the scan is what stands between this repo and a dev-only
+  `rustls`. Both halves are wrong. Since U-530, `src/main.rs:100` names
+  `rustls::crypto::ring::default_provider()` in the **bin**, and Cargo does not expose
+  `[dev-dependencies]` to bins. Measured in a detached scratch worktree of `ff9b3fe` by moving
+  the line into `[dev-dependencies]`: `cargo build --bin acdp-registry` →
+  `error[E0433]: cannot find module or crate rustls --> crates/acdp-registry-server/src/main.rs:100`
+  (rc=101), and `cargo test --test tls_startup` → the **same** E0433, rc=101, with **zero**
+  `test result` lines. The dev-only state never reaches a test binary, so the scan's own dev-only
+  message is unreachable in the one state it was written for.
+- **Chose (decision unchanged, stated reason replaced):** keep the `[dependencies]` scan and its
+  `axum-server` anti-vacuity control — not for normal-vs-dev-only, which the bin's own compile
+  enforces harder than any test could, but for the **`ring` assertion**, which is live and which
+  no compile gate can reach. Measured in the same worktree: drop `features = ["ring"]` and the
+  bin still **compiles** (rc=0) — `ring` resolves anyway through
+  `reqwest`/`hyper-rustls`/`tokio-rustls`/`sqlx-core` feature unification — while this test goes
+  red at `tls_startup.rs:149` with its D-W5-105 message. That is the property worth ~25 lines:
+  this crate must keep making its own DIRECT request for its recorded provider choice rather
+  than inheriting `ring` by accident of a graph where one unrelated bump could remove it.
+- **Alternatives:** delete the scan wholesale now that a runtime assertion exists — rejected on
+  the measurement above: the `ring` assertion is the only check of D-W5-105 anywhere, and it is
+  unreachable from any runtime observation in this process.
+- **Blast radius if wrong:** low and test-only. ~25 lines, of which the dev-only half is now
+  known to be defensive-only; nothing ships differently.
+- **The same refuted claim was carried in two other places and is corrected in this PR:** the
+  `rustls_is_a_normal_dependency` docstring and `docs/ENGINEERING-LOG.md`. Correcting only this
+  entry would have left the repo's permanent log asserting the falsehood.
+- **Status:** CONFIRMED (2026-09-19, Opus under `/reconcile`) — decision kept, stated reason
+  replaced after measurement. See `DECISIONS.md`.
 
 ## U-560 — `custom-provider` is left unruled-out, deliberately
 
@@ -4108,7 +4125,12 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   `rustls::crypto::ring::default_provider` (`crypto/mod.rs:25-26` gates the module on the
   feature). `custom-provider` stays unruled-out and the comment says so.
 - **Measured:** `rustls-0.23.45/src/crypto/mod.rs:259-263` documents all three states returning
-  `None` from `from_crate_features()`; `:249` is the `.expect` that panics.
+  `None` from `from_crate_features()`; `:249` is the `.expect` that panics. **Strengthened on
+  reconcile:** `:266-282` guards *both* `Some(...)` returns with `not(feature = "custom-provider")`
+  and falls through to `None` at `:284-285`, so enabling `custom-provider` returns `None`
+  unconditionally. The blast-radius argument below is therefore not merely plausible but forced
+  by the `cfg` guards — the assertion staying green and the operational invariant holding cannot
+  come apart in that state.
 - **Alternatives:** (a) assert the provider *count* — not reachable from a test crate, which
   cannot `cfg!` on another crate's features; (b) name `rustls::crypto::aws_lc_rs` to detect the
   second provider — rejected, its absence is a desirable end state so that turns a legible red
@@ -4116,7 +4138,8 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 - **Blast radius if wrong:** low. Enabling `custom-provider` in this workspace would leave the
   assertion green for a reason it does not name — but that state also requires an explicit
   provider install, so the operational invariant the test protects would still hold.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-19, Opus under `/reconcile`) — as-is; all three citations
+  verified exact. See `DECISIONS.md`.
 
 ## U-560 — phase 1's docstring cites a record phase 4 creates
 
@@ -4131,10 +4154,19 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 - **Alternatives:** write the decision into `DECISIONS.md` from phase 1 — rejected, that file is
   outside phase 1's declared scope and `/reconcile` owns it; or drop the citation — rejected,
   criterion 7 exists precisely so a reader does not re-open the manifest question.
-- **Blast radius if wrong:** the reference dangles until phase 4 lands. Guarded by an explicit
-  ship gate in the plan (`grep -c 'U-560' docs/ENGINEERING-LOG.md` ≥ 1 before merge, and phase 1
-  must not merge without phase 4).
-- **Status:** UNCONFIRMED
+- **Blast radius if wrong:** the reference dangles until phase 4 lands. **DISCHARGED:** phase 4
+  landed as `6427d89`; the anchor is `docs/ENGINEERING-LOG.md`'s `### U-560` heading, and
+  `D-W5-105` resolves exactly to `crates/acdp-registry-server/Cargo.toml:41-43`. All three
+  ENGINEERING-LOG citations in `tls_startup.rs` reach a tracked record.
+- **One gap found in the cited ARTIFACT, not in this decision:** `tls_startup.rs:16` promises the
+  log is "where to read the reasoning", and the log carried the decision and the reversal
+  mechanism but not the post-quantum trade behind it. Corrected by adding the reasoning to the
+  log rather than by weakening the comment — a citation that resolves to a record missing the
+  thing it was cited for is the same defect this unit exists to remove, one level out.
+- **On `U-563`:** it still resolves nowhere tracked, and the log now says so outright and carries
+  the substance itself instead of leaning on the id for authority, so this entry's own rule (a
+  self-referential citation is not a citation) is satisfied. `tls_startup.rs` no longer cites it.
+- **Status:** CONFIRMED (2026-09-19, Opus under `/reconcile`). See `DECISIONS.md`.
 
 ## U-560 — resolution of U-556's "child stdout is not drained" entry
 
