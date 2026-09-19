@@ -31,6 +31,127 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-560 (lane-2) — a test that asserted a manifest spelling, and a diagnostic nobody could reach -->
+
+### U-560 — asserting the resolved property, not the string that requests it
+
+Two independent defects in `crates/acdp-registry-server/tests/tls_startup.rs`, shipped
+together because they are the same mistake in two registers: a check that reads a
+*request* and reports it as a *result*.
+
+**1. `rustls_is_a_normal_dependency` scanned a manifest and claimed a feature set.**
+
+It section-scanned this crate's `Cargo.toml`, asserted the `rustls` line contains
+`"ring"` and does not contain `aws-lc-rs`, under the message "requesting both providers
+is the original defect: rustls cannot choose and panics at startup". It passed — while
+the crate resolved **both** providers:
+
+```
+rustls v0.23.45 [aws-lc-rs,aws_lc_rs,default,log,logging,
+                 prefer-post-quantum,ring,std,tls12]
+```
+
+A manifest line cannot show a resolved feature set. `aws_lc_rs` has two independent
+enablers and `ring` has five; exactly one of those seven edges appears on the line the
+scan reads, and the edge that decides the question arrives as an **absence** — the
+missing `default-features = false`. No amount of care with the string fixes that, because
+the string is not where the answer lives.
+
+The replacement asserts the consequence this process *can* observe: with rustls unable to
+select a provider from crate features, `ClientConfig::builder()` panics, which is exactly
+why `install_crypto_provider()` (`main.rs:99-108`) exists. It pins the panic **message**,
+not merely `is_err()`, because `builder` has two documented panics and an `is_err()` check
+would pass on the wrong one.
+
+**What that panic proves is stated no wider than it is.** `from_crate_features()` returns
+`None` for *three* feature states (`rustls-0.23.45/src/crypto/mod.rs:259-263`): two
+providers, no providers, or `custom-provider`. So the asserted invariant is the one all
+three share — rustls cannot pick a provider unaided, so `main` must install one. A
+compile-time reference to `rustls::crypto::ring::default_provider` rules out the
+"no providers" reading; `custom-provider` is left unruled-out and the comment says so
+rather than implying coverage.
+
+**The manifest scan was kept**, for the one property only it can see: normal-vs-dev-only.
+No runtime check in this binary can reach that, because Cargo exposes dev-dependencies to
+test targets.
+
+This assertion is an invariant rather than a snapshot because the two-provider state is
+now permanent by decision (U-563, WONTFIX): both providers stay, so `install_default`
+stays load-bearing.
+
+**2. The larger half: the diagnostic a reader actually meets carried nothing.**
+
+The child's stdout/stderr were captured only on the early-exit branch. Every other
+failure — the common case — reported a probe error with none of the registry's own
+output.
+
+Those two paths are not the alternatives they appear to be, and the control that proved
+it also explains why nobody noticed. The retry loop breaks on a **non-retryable** probe
+error, and a timeout is non-retryable (`ProbeError::io`:
+`retryable: stage.io_failure_may_be_transient() && !timed_out`). So when another process
+already holds the port, the first probe times out in the handshake, the loop breaks
+before its next `try_wait`, and the early-exit branch never runs **even though the child
+has already exited**. Measured with a listener that binds 18443 without accepting: the
+child exits in 0.06 s with `Address already in use`, and the test lands on the probe
+assertion, three runs of three. The early-exit message names "port in use" among its own
+causes and was unreachable for that cause.
+
+The child now writes to files in the tempdir the test already owns, and the probe-failure
+assertion reads them. Output entering a panic message is capped at the **first** 64 KiB
+per stream with the cut and both byte counts disclosed — the head, because this is a
+*startup* diagnostic and the signal is the first thing the binary said. There is no
+"full log at `<path>`" pointer: the tempdir is deleted when the test returns, so it would
+dangle by the time anyone followed it.
+
+**A thing the control showed in passing, still unfixed.** The child logs
+`{"message":"listening","addr":"127.0.0.1:18443"}` and *then* fails to bind with
+`Address already in use`. The log line asserts something that is not true yet. The
+install/`listening` ordering this module's docstring describes is still unasserted by any
+test.
+
+**3. The measurements, and which are ours.**
+
+Inherited from U-556 and **not** re-verified here: the 64 KiB pipe ceiling, the
+~40 KB-at-default-filter figure, and the ~20 KB-per-probe figure.
+
+Measured for this unit on 2026-09-19 (debug binary, TLS on, sqlite, `RUST_LOG=trace`):
+forced early exit **200 B**, all of it stderr; successful TLS startup **~35.6 KB**;
+startup plus one probe by this test's own rustls client **46,708 / 46,710 / 46,743 B**.
+The unread pipe was observed stopping at exactly **65,536 B**, and per-request cost is
+constant to within two bytes across eight requests.
+
+So the pipe arrangement this unit replaced had room, after startup, for **two** probes by
+this test's client, and the **third** wedges — the child stops responding without exiting
+and the caller hits its 5 s read timeout. The test issues one request, because only
+`Connect`/`Handshake` probe failures retry and neither issues HTTP. The margin was one
+spare request: a real bound, held in place by a `matches!` arm in a different function
+that told nobody relaxing it what it cost. Files remove the dependence rather than
+document it.
+
+**Any request-count figure of this kind must name the client it describes.** The count is
+a property of the client, not of the server. A heavier OpenSSL client costs ~16.1 KB per
+request against the real probe's ~11.1 KB and wedges one request earlier. Three
+instruments in this unit gave three different answers — three, two, and one — before that
+was noticed; each had measured a different client, and none of the claims had named one.
+An earlier draft of this entry's source material also asserted the child had written
+96,573 B "by the moment a single probe returned", past the ceiling, and asked why a
+pipe-bound child keeps serving past it. That figure was never a one-probe figure: one
+probe leaves the child at ~46.7 KB, **under** the ceiling. The question had no referent
+and is withdrawn; the retraction is recorded in `ASSUMPTIONS.md`.
+
+The superseded "~16 KiB pipe buffer" premise belongs to `ASSUMPTIONS.md`, not to this
+log — U-556's entry here never made that claim — and it had already been self-corrected
+in place by U-556's own reconcile.
+
+**4. What this unit does not fix.**
+
+- The install/`listening` ordering remains unasserted, as above.
+- Port `18443` is still hard-coded, and is now load-bearing for two falsifications rather
+  than one. A parallel run against a busy 18443 fails in a way that now, at least,
+  explains itself.
+- Both crypto providers remain, by human decision (U-563, WONTFIX), so
+  `install_crypto_provider()` stays load-bearing and the phase-1 assertion stays true.
+
 <!-- unit U-556 (lane-2) — the TLS startup test that never spoke TLS -->
 
 ### U-556 — `tls_startup` asserted TLS and observed TCP
