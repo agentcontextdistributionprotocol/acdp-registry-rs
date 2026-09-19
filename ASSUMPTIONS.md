@@ -3954,7 +3954,7 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 - **Blast radius if wrong:** a weekly scheduled job stays red one cycle longer than needed.
   It blocks no PR — `mutants` is not in `required_status_checks.contexts`. Reversible in a
   one-line diff.
-- **Status:** UNCONFIRMED
+- **Status:** **CONFIRMED** (2026-09-19, Opus under `/reconcile`) — holds in code and in test. Every branch returns EXIT_CLASSIFIED (10) and the workflow's outer `rc=1` fires regardless, so a proven kill still reddens the job; the 36 unit tests assert the non-deletion branches explicitly (`assertNotIn("DELETE the line", out)`).
 
 ## U-552 Phase 1 — pairing drifted lines needs TWO identity keys, required to agree
 - **Plan:** `plans/u-552-widen-mutation-scope.md`
@@ -3984,7 +3984,7 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   cannot find a mutant that drifted at all (0 matches), which is the one case that matters.
 - **Blast radius if wrong:** a drift is reported as ambiguous and a human reads
   `mutants.out/diff/`. The failure direction is deliberately "ask", never "guess".
-- **Status:** UNCONFIRMED
+- **Status:** **CONFIRMED** (2026-09-19, Opus under `/reconcile`) — and it earned the confirmation the hard way. The first fixtures were degenerate (one file, one function, one replacement), so both keys were trivially satisfiable and 9 of 10 verifier mutations survived. Rebuilt with multi-file/function/replacement fixtures, then a second layer where only ONE key can succeed, because a passing replacement test was still being rescued by the other key. Phase 3 added a third independent check: 25/25 mutations caught by 36 tests.
 
 ## U-552 Phase 1 — MUTANTS_PRIOR_LEDGER names ONE file, never a glob
 - **Plan:** `plans/u-552-widen-mutation-scope.md`
@@ -4003,7 +4003,7 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   fallback and get reported as ambiguous. Phase 3 must repoint it at the 351-scope ledger;
   if it forgets, drift pairing silently weakens rather than failing loudly. **That is the
   sharpest residual risk in this phase** and is why the existence check is a test.
-- **Status:** UNCONFIRMED
+- **Status:** **CONFIRMED and STRENGTHENED** (2026-09-19, Opus under `/reconcile`) — `conformance_gate.rs` falsifies it against the REAL mutants.yml (glob substitution must produce a violation), and Phase 3 added `the_declared_prior_ledger_actually_exists`, which requires the pointer to resolve AND to be git-TRACKED. The tracked check was not pedantry: `is_file()` alone passes locally on an unstaged ledger and fails only in CI's checkout.
 
 ## U-552 Phase 1 — the classifier's exit codes are 10/11, not 1/2
 - **Plan:** `plans/u-552-widen-mutation-scope.md`
@@ -4019,7 +4019,7 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   absence of a sentinel and the absence of a problem look identical).
 - **Blast radius if wrong:** none beyond this workflow; the outer `rc=1` already fails the
   job regardless, so the exit code only governs which message the reader gets.
-- **Status:** UNCONFIRMED
+- **Status:** **CONFIRMED** (2026-09-19, Opus under `/reconcile`) — the workflow's `case` handles 10, 11 and a catch-all that says the classifier itself failed and that the listed lines have NOT been judged. Asserted by the unit tests via EXIT_CLASSIFIED/EXIT_UNSOUND.
 
 ## U-552 Phase 1 — a SHARDED report is refused rather than classified
 - **Plan:** `plans/u-552-widen-mutation-scope.md`
@@ -4038,7 +4038,7 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   ratchet hard-fail until the shards are merged into one report. That is the intended
   direction — refusing to judge beats judging wrongly — but it is a real constraint on
   Phase 3 and is recorded in the plan's Phase 3 edge cases.
-- **Status:** UNCONFIRMED
+- **Status:** **CONFIRMED, and its stated blast radius did NOT materialise** (2026-09-19, Opus under `/reconcile`). This entry warned that if Phase 3's run had to be sharded, the gate would hard-fail until the shards were merged. Phase 3's run was NOT sharded: one invocation produced all 351 (`total_mutants` 351, `end_time` set, 219/7/124/1 summing to 351), so the constraint never bound. Recording that the risk was real, priced, and then simply did not occur — rather than deleting the entry as if it had never been a risk.
 
 ## U-552 Phase 2 — `994:35` `<` and `==` are KILLABLE; U-544's EQUIVALENT label was wrong
 - **Plan:** `plans/u-552-widen-mutation-scope.md`
@@ -4283,7 +4283,7 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   that was never removed. Bounded: the branch is reached only when the report contains zero
   mutants for that file, which the second control above confirms does not fire while the file
   is still examined.
-- **Status:** UNCONFIRMED
+- **Status:** **CONFIRMED** (2026-09-19, Opus under `/reconcile`) — implemented, and falsified three ways (branch deleted / condition inverted / `cur_files` forced empty → 2, 5, 3 failures against 36 green). The independent Phase 3 verifier reviewed it and called it a real gap-closure.
 ## U-560 — the manifest scan is kept, for one property only
 
 - **Plan:** `plans/u560-honest-test-infrastructure.md`
@@ -4461,4 +4461,4 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   mean "this code", cite a line when you mean "this diff".
 - **Blast radius if wrong:** deleting a survivor line that was never killed drops the budget
   for nothing and loses a live survivor silently. That is why three proofs, not one.
-- **Status:** UNCONFIRMED
+- **Status:** **CONFIRMED** (2026-09-19, Opus under `/reconcile`) — all six classify `KILLED (proven by this run)` against the committed 351 ledger, each matching by exact name at the exact site. Independently re-derived by the Phase 3 verifier, which also replayed the prior 8 survivors against the new ledger and got 6 CaughtMutant / 2 MissedMutant — positive presence, not inference from absence. The harness was separately shown healthy (top sole-killer 3.7% vs the 50% ceiling), without which no CAUGHT verdict would have been evidence at all.
