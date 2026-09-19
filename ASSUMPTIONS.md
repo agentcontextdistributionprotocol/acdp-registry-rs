@@ -3987,6 +3987,92 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   corrected in place by U-557 — see the "Alternatives" bullet above, which records that
   `spin` IS compiled into that binary via a second parent. Nothing further to add here.)
 
+## U-556 — TLS startup handshake probe
+
+- **Plan:** `plans/u556-tls-startup-handshake.md`
+- **Assumed:** `GET /livez` is the right endpoint to prove an HTTPS exchange — it takes no
+  `State` (`crates/acdp-registry-core/src/handlers/meta.rs:169-175`), so it returns 200 on a
+  cold, empty store under both `storage-sqlite` and `storage-memory`, and no middleware
+  authenticates it.
+- **Chose:** `/livez`, asserting `status == "ok"` rather than the version string (which carries
+  a build sha and moved 0.1.3 → 0.1.4 mid-unit, vindicating the choice).
+- **Alternatives:** `/healthz` — rejected, it has a 503 arm and is strictly more fragile on a
+  cold store. `/` — does not exist; bare 404 fallback.
+- **Blast radius if wrong:** the test would fail loudly on a green build; no production impact.
+- **Status:** CONFIRMED (2026-09-16, Opus under `/reconcile`). Independent analysis found the
+  endpoints' own behaviour already covered in-process over plain HTTP (`http_integration.rs:220-257`,
+  `:2680`; `conformance_gate.rs:305,330`), so a richer endpoint buys no coverage and imports a
+  storage-init failure mode into a test whose red must mean "TLS broke". The rejection reason is now
+  recorded at the `PROBE_PATH` constant, where a maintainer tempted to "strengthen" it will meet it.
+
+## U-556 — cipher suite deliberately not asserted
+
+- **Plan:** `plans/u556-tls-startup-handshake.md`
+- **Assumed:** the negotiated suite (`TLS13_AES_256_GCM_SHA384`) is a rustls default, not a
+  property this repo chose.
+- **Chose:** capture it in `TlsProbe` and print it in failure messages, but do not assert it.
+  The negotiated protocol *version* is asserted, because that is the property U-556 is about.
+- **Alternatives:** asserting the suite — rejected: it would turn an upstream default change
+  into a red build whose message points at this repo.
+- **Blast radius if wrong:** a suite downgrade within TLS 1.3 would go unnoticed by this test.
+- **Status:** CONFIRMED (2026-09-16, Opus under `/reconcile`), on a stronger argument than the one
+  logged. An AEAD *floor* was considered and rejected as **unfireable**: the TLS 1.3 suite registry
+  is AEAD-only by construction, and the client is pinned to 1.3, so such a check cannot fail on any
+  run where the version assertion passes — it would read as coverage and prove nothing. Noted at the
+  `suite` field so nobody adds it later believing it buys something.
+
+## U-556 — ALPN assertion added beyond the written plan
+
+- **Plan:** `plans/u556-tls-startup-handshake.md`
+- **Assumed:** asserting the negotiated ALPN is worth a line, since the server advertises
+  `["h2","http/1.1"]` and a client offering the wrong thing would make the HTTP/1.1 request
+  line meaningless.
+- **Chose:** assert `alpn == Some("http/1.1")`. This was **drift** — the plan's phase 1 said
+  "assert on version / status / body" and named no ALPN criterion. It was caught by the phase
+  verifier, not self-flagged, and it shipped only after being falsified (client offering only
+  `h2` → `left: Some("h2") right: Some("http/1.1")`).
+- **Alternatives:** dropping it — rejected once falsification proved it discriminates rather
+  than being decorative.
+- **Blast radius if wrong:** a spurious red if the server's ALPN list ever legitimately changes.
+- **Status:** CONFIRMED — KEEP (2026-09-16, Opus under `/reconcile`). The "near-unfireable"
+  objection is right on mechanics and wrong on conclusion: the reachable `None` branch is what
+  happens if anyone replaces `axum-server`'s acceptor with a hand-rolled `rustls::ServerConfig` — a
+  plausible migration here given this repo's documented provider fight with that crate — and this is
+  the **only** observation of the server's ALPN anywhere in the repo. Its failure mode was deletion,
+  not a false pass, so the assertion message now argues for its own existence and states its blind
+  spot (a list narrowing from [h2, http/1.1] to [http/1.1] loses h2 and still passes).
+
+## U-556 — child stdout is not drained during the probe
+
+- **Plan:** `plans/u556-tls-startup-handshake.md`
+- **Assumed:** exactly one HTTP request is ever issued, so `TraceLayer`'s two log events
+  (`crates/acdp-registry-core/src/lib.rs:300-302`) cannot fill the child's ~16 KiB pipe buffer.
+- **Chose:** do not drain. **This holds only because `Exchange`-stage probe failures are
+  non-retryable** — retrying the whole exchange would re-issue a real request every 100ms for
+  up to 50 iterations. If that retry policy is ever relaxed, this decision must be re-made with
+  it; the two are one decision, not two. **Measured, since a decision resting on an unverified
+  property is the thing this log exists to prevent:** forcing an `Exchange`-stage failure fails
+  in 0.93s versus 5.32s for a retryable handshake failure that burns all 50 iterations. The gap
+  is the evidence that `Exchange` is not retried.
+- **Alternatives:** draining stdout on a reader thread — rejected as unnecessary complexity for
+  one request.
+- **Blast radius if wrong:** the child could block on a full pipe and the test would hang until
+  the 5s socket timeout, then report `[exchange]`.
+- **Status:** **NEEDS-CHANGE** (2026-09-16, Opus under `/reconcile`) — does **not** block shipping
+  U-556; filed as a follow-up. The analysis refuted this entry's own premise on two counts.
+  (a) The ~16 KiB figure is the *initial* pipe allocation; macOS grows it to **64 KiB**, measured at
+  65,531/65,536 B. At the default log filter 50 retried requests emit ~40 KB and the test **still
+  passes** — so the hazard documented here does not fire on the variable it blames.
+  (b) The variable that does fire is **`RUST_LOG`**, which the child inherits (the test sets only
+  `ACDP_REGISTRY_CONFIG`): one probe at `trace` already uses ~20 KB, and 50 would wedge.
+  The right fix is structural and severs the coupling rather than documenting it — give the child
+  file-backed stdio in the existing tempdir instead of pipes: a file never blocks, has no ceiling,
+  and is immune to request count, retry policy and log level at once, while *improving* diagnostics
+  (today a wedged child yields a truncated 64 KiB). **It cannot be done inside U-556:** it requires
+  editing `tls_startup.rs:206-208`, which is inside the byte-identical protected range this unit
+  pre-registered (criterion 6) and which the assign's criterion 3 calls load-bearing. Widening scope
+  to take it would break a criterion this unit's PR claims. Corrected comments are in the code now;
+  the structural fix is a successor unit.
 ## U-526 — percent-encoding is hand-rolled rather than taking a dependency
 - **Plan:** plans/u-526-publish-201-location.md
 - **Assumed:** the `Location` encoding `pub-007` requires can be implemented correctly in this
