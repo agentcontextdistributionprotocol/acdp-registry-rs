@@ -200,7 +200,7 @@ backend = "{backend}"
     // against is an EARLY exit, so check for it on every attempt instead of
     // racing the unwind. (A single 2s liveness check reported "running" while
     // the process was mid-panic during the investigation for this fix.)
-    let mut served = false;
+    let (mut outcome, mut last_err) = (None::<TlsProbe>, None::<ProbeError>);
     for _ in 0..50 {
         if let Some(status) = child.try_wait().expect("try_wait") {
             let out = child.wait_with_output().expect("collect output");
@@ -228,12 +228,26 @@ backend = "{backend}"
                  --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
             );
         }
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            served = true;
-            break;
+        match tls_probe(port, cert.cert.der()).await {
+            Ok(probe) => {
+                outcome = Some(probe);
+                break;
+            }
+            // Only a connect/handshake failure is worth retrying: it means the
+            // listener is not up YET. An exchange failure means TLS already
+            // worked, so retrying cannot help, and it wastes five seconds.
+            //
+            // This rule USED to be documented as also protecting the child's
+            // undrained stdout pipe. Measured, that justification was wrong: the
+            // pipe grows to 64 KiB, and 50 retried requests at the default log
+            // filter emit ~40 KB and still pass. The variable that actually fills
+            // it is RUST_LOG, which the child inherits -- one probe at `trace`
+            // already uses ~20 KB. See the U-556 follow-up note on `tls_probe`.
+            Err(err) if err.retryable => last_err = Some(err),
+            Err(err) => {
+                last_err = Some(err);
+                break;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -242,9 +256,351 @@ backend = "{backend}"
     let _ = child.kill();
     let _ = child.wait();
 
+    // The claim and the observation are now the same thing. This message used to
+    // assert a TLS connection had been established while the loop above only
+    // completed a bare TCP connect, so a rustls handshake regression left it
+    // green -- anything that bound the port satisfied it (U-556).
     assert!(
-        served && still_running,
-        "the registry never accepted a TLS connection on 127.0.0.1:{port} \
-         (served={served}, still_running={still_running})"
+        outcome.is_some() && still_running,
+        "the TLS probe never succeeded against 127.0.0.1:{port} \
+         (probe_ok={}, still_running={still_running}). The stage tag below says which \
+         step failed, and all five are covered: `connect` means it never bound the port, \
+         `handshake` and `exchange` indict the registry, while `config` and `task` are \
+         defects in this test itself. Last probe error: {}",
+        outcome.is_some(),
+        last_err
+            .as_ref()
+            .map(ProbeError::describe)
+            .unwrap_or_else(|| "none recorded".to_string()),
     );
+
+    let probe = outcome.expect("asserted present immediately above");
+
+    // Defence in depth, and deliberately kept even though the client is pinned to
+    // 1.3 at `with_protocol_versions` below -- which means a SERVER that lost 1.3
+    // fails the handshake and is caught by the assertion above, never by this one.
+    // What this guards is a future weakening of that pin: the moment the client
+    // accepts 1.2, "the handshake succeeded" stops implying "over TLS 1.3", and
+    // this line is what still notices. Measured: with a 1.2-only client the
+    // handshake completes and only this assertion fails.
+    assert_eq!(
+        probe.version,
+        Some(rustls::ProtocolVersion::TLSv1_3),
+        "handshake completed but not over TLS 1.3 (negotiated {:?}, suite {:?})",
+        probe.version,
+        probe.suite,
+    );
+    assert_eq!(
+        probe.alpn.as_deref(),
+        Some("http/1.1"),
+        "the server did not negotiate the ALPN protocol we offered. `None` here means it \
+         advertised no ALPN at all -- which silently breaks HTTP/2 for every real client, \
+         and this is the only place in the repo that observes the server's ALPN. Do not \
+         delete this assertion for looking unfireable. Note what it does NOT cover: if the \
+         server's list narrowed from [h2, http/1.1] to [http/1.1], h2 is lost and this still \
+         passes -- catching that needs a second probe offering h2, which is out of scope for \
+         a TLS startup test"
+    );
+    assert_eq!(
+        probe.status, 200,
+        "GET {PROBE_PATH} over TLS returned {}, body: {:?}",
+        probe.status, probe.body
+    );
+
+    let doc: serde_json::Value = serde_json::from_str(&probe.body)
+        .unwrap_or_else(|e| panic!("GET {PROBE_PATH} body was not JSON ({e}): {:?}", probe.body));
+    assert_eq!(
+        doc["status"], "ok",
+        "GET {PROBE_PATH} over TLS did not report healthy: {:?}",
+        probe.body
+    );
+}
+
+/// The endpoint the TLS probe requests. Named once so the request line and every
+/// failure message that mentions it cannot drift apart -- a message naming a path
+/// the code no longer requests diagnoses the wrong thing.
+///
+/// **`/livez` specifically, and do not "strengthen" this to a richer endpoint.**
+/// This test's subject is the transport: does the shipped binary install a provider
+/// and complete a real TLS exchange. `livez()` takes no `State`, so it answers 200 on
+/// a cold, empty store under every storage arm. `/healthz` has a 503 arm and would
+/// import a storage-init failure into a test whose red state must mean "TLS broke" --
+/// the exact confusion the branch-on-exit-code work above exists to remove. The
+/// endpoints' own behaviour is already covered in-process over plain HTTP by
+/// `http_integration.rs`; nothing is gained here by duplicating it. Parsing the body
+/// as JSON is the transport property worth having: it proves the bytes survived the
+/// TLS record layer intact.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+const PROBE_PATH: &str = "/livez";
+
+/// The name the client verifies the certificate against. Must match the SAN the
+/// test's `rcgen` cert is generated for; the socket still connects to 127.0.0.1.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+const SERVER_NAME: &str = "localhost";
+
+/// What a successful TLS probe observed. Every field is something the old test
+/// claimed in its failure message and never actually looked at.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+struct TlsProbe {
+    version: Option<rustls::ProtocolVersion>,
+    alpn: Option<String>,
+    /// Captured for failure messages, deliberately never asserted. An "is it a TLS 1.3
+    /// AEAD suite" floor would be **unfireable**: the 1.3 registry is AEAD-only by
+    /// construction and the client is pinned to 1.3 below, so such a check cannot fail on
+    /// any run where the version assertion passes. It would read as coverage and prove
+    /// nothing.
+    suite: Option<rustls::CipherSuite>,
+    status: u16,
+    body: String,
+}
+
+/// Which step of the probe failed.
+///
+/// An enum rather than a `&'static str` on purpose. The retry rule below is
+/// load-bearing -- it is what keeps "only one HTTP request is ever issued" true,
+/// which in turn is why this test does not need to drain the child's stdout. A
+/// stringly-typed stage would let a single typo at any call site (`"Exchange"`,
+/// `"exchg"`) silently flip an exchange error to retryable, and neither the
+/// compiler nor the suite would notice. Spelled this way, it is unspellable.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    /// Building the client. Always a defect in this test, never in the registry.
+    Config,
+    /// Opening the TCP connection.
+    Connect,
+    /// The TLS handshake itself.
+    Handshake,
+    /// The HTTP request/response over an established TLS connection.
+    Exchange,
+    /// The blocking probe task panicked.
+    Task,
+}
+
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+impl Stage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Connect => "connect",
+            Self::Handshake => "handshake",
+            Self::Exchange => "exchange",
+            Self::Task => "task",
+        }
+    }
+
+    /// Only these two stages can mean "the listener is not up YET", which is the
+    /// only thing another pass of the poll loop could fix. An exchange failure
+    /// means TLS already worked, so retrying cannot help.
+    ///
+    /// **This rule is NOT what protects the child's undrained stdout**, despite an
+    /// earlier comment here saying so. Measured: the pipe grows to 64 KiB and 50
+    /// retried requests at the default filter emit ~40 KB, well under it. The real
+    /// exposure is `RUST_LOG`, inherited by the child -- at `trace` a single probe
+    /// uses ~20 KB and 50 would wedge. A `matches!` arm cannot gate that anyway;
+    /// the structural fix is file-backed child stdio, which touches the protected
+    /// early-exit block and so belongs to a follow-up unit, not this one.
+    fn io_failure_may_be_transient(self) -> bool {
+        matches!(self, Self::Connect | Self::Handshake)
+    }
+}
+
+/// A probe failure, tagged with the stage it failed at.
+///
+/// The stage is not decoration. It decides whether the poll loop retries, and it
+/// keeps the final assertion honest: reporting an HTTP-exchange error under a
+/// message that says "handshake never completed" would be a smaller copy of the
+/// exact defect this test was widened to fix.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+struct ProbeError {
+    stage: Stage,
+    detail: String,
+    retryable: bool,
+}
+
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+impl ProbeError {
+    fn describe(&self) -> String {
+        format!("[{}] {}", self.stage.label(), self.detail)
+    }
+
+    /// A failure that another pass of the loop cannot possibly fix.
+    fn fatal(stage: Stage, detail: String) -> Self {
+        Self {
+            stage,
+            detail,
+            retryable: false,
+        }
+    }
+
+    /// A refused/reset connection means "not up yet" and is worth another pass.
+    /// A **timeout** is not: it means something IS listening on the port and is
+    /// not completing a TLS handshake, which retrying 50 times cannot fix and
+    /// which would otherwise stall the loop for minutes.
+    fn io(stage: Stage, err: &std::io::Error) -> Self {
+        let timed_out = matches!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        );
+        Self {
+            stage,
+            detail: format!("{err} (kind: {:?})", err.kind()),
+            retryable: stage.io_failure_may_be_transient() && !timed_out,
+        }
+    }
+}
+
+/// Complete a real TLS 1.3 handshake against the spawned binary and read an
+/// HTTPS response body.
+///
+/// Runs on the blocking pool because rustls' `Stream` is synchronous, and
+/// **every timeout is set on the std socket inside that closure on purpose**:
+/// `tokio::time::timeout` would abandon this task rather than cancel it, and
+/// dropping the test's runtime waits for blocking tasks that already started —
+/// so a hung handshake would hang the whole test process regardless.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+async fn tls_probe(
+    port: u16,
+    leaf: &rustls::pki_types::CertificateDer<'static>,
+) -> Result<TlsProbe, ProbeError> {
+    let leaf = leaf.clone();
+    match tokio::task::spawn_blocking(move || tls_probe_blocking(port, leaf)).await {
+        Ok(result) => result,
+        Err(join) => Err(ProbeError::fatal(
+            Stage::Task,
+            format!("the probe task panicked: {join}"),
+        )),
+    }
+}
+
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+fn tls_probe_blocking(
+    port: u16,
+    leaf: rustls::pki_types::CertificateDer<'static>,
+) -> Result<TlsProbe, ProbeError> {
+    use std::io::{Read as _, Write as _};
+
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    // Pin the server's own generated certificate as the sole trust anchor rather
+    // than accepting any certificate. `generate_simple_self_signed` emits
+    // `IsCa::NoCa` and no basicConstraints extension, so webpki accepts the leaf
+    // as its own anchor and full chain + hostname verification stay ON.
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(leaf).map_err(|e| {
+        ProbeError::fatal(
+            Stage::Config,
+            format!("pinning the generated certificate failed: {e}"),
+        )
+    })?;
+
+    // `builder_with_provider`, NOT `builder()`. This binary's graph enables both
+    // `ring` and `aws_lc_rs`, so the convenience constructor panics with the very
+    // "could not automatically determine the process-level CryptoProvider"
+    // message this whole test file exists because of.
+    let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .map_err(|e| {
+        ProbeError::fatal(
+            Stage::Config,
+            format!("restricting the client to TLS 1.3 failed: {e}"),
+        )
+    })?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    // The server advertises h2 first, so offering nothing here would risk
+    // negotiating h2 and make the HTTP/1.1 request line below meaningless.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+    let name = rustls::pki_types::ServerName::try_from(SERVER_NAME).map_err(|e| {
+        ProbeError::fatal(
+            Stage::Config,
+            format!("{SERVER_NAME:?} is not a valid server name: {e}"),
+        )
+    })?;
+    let mut conn =
+        rustls::ClientConnection::new(std::sync::Arc::new(config), name).map_err(|e| {
+            ProbeError::fatal(
+                Stage::Config,
+                format!("building the client connection failed: {e}"),
+            )
+        })?;
+
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut sock = std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
+        .map_err(|e| ProbeError::io(Stage::Connect, &e))?;
+    sock.set_read_timeout(Some(IO_TIMEOUT))
+        .map_err(|e| ProbeError::io(Stage::Connect, &e))?;
+    sock.set_write_timeout(Some(IO_TIMEOUT))
+        .map_err(|e| ProbeError::io(Stage::Connect, &e))?;
+
+    // Drive the handshake to completion on its own so a handshake failure is
+    // reported as one, rather than surfacing later as a confusing write error.
+    conn.complete_io(&mut sock)
+        .map_err(|e| ProbeError::io(Stage::Handshake, &e))?;
+
+    let version = conn.protocol_version();
+    let alpn = conn
+        .alpn_protocol()
+        .map(|p| String::from_utf8_lossy(p).into_owned());
+    let suite = conn.negotiated_cipher_suite().map(|s| s.suite());
+
+    // `Connection: close` is required, not stylistic: hyper keeps the connection
+    // alive otherwise, and the server's 30s TimeoutLayer is a REQUEST timeout,
+    // not an idle-connection one, so `read_to_end` would block until IO_TIMEOUT
+    // on every single run.
+    let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+    tls.write_all(
+        format!("GET {PROBE_PATH} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .as_bytes(),
+    )
+    .map_err(|e| ProbeError::io(Stage::Exchange, &e))?;
+    tls.flush()
+        .map_err(|e| ProbeError::io(Stage::Exchange, &e))?;
+
+    // Bounded on purpose. `read_to_end` straight onto a socket grows without any
+    // limit if the peer misbehaves; /livez is ~50 bytes, so 64 KiB is three orders
+    // of magnitude of headroom. Overflow is REPORTED, not truncated -- a silent
+    // truncation would surface later as a baffling JSON parse error.
+    const MAX_RESPONSE: u64 = 64 * 1024;
+    let mut raw = Vec::new();
+    std::io::Read::take(&mut tls, MAX_RESPONSE + 1)
+        .read_to_end(&mut raw)
+        .map_err(|e| ProbeError::io(Stage::Exchange, &e))?;
+    if raw.len() as u64 > MAX_RESPONSE {
+        return Err(ProbeError::fatal(
+            Stage::Exchange,
+            format!("the HTTPS response exceeded {MAX_RESPONSE} bytes"),
+        ));
+    }
+    let text = String::from_utf8_lossy(&raw).into_owned();
+
+    let (head, body) = text.split_once("\r\n\r\n").ok_or_else(|| {
+        ProbeError::fatal(
+            Stage::Exchange,
+            format!("no header/body separator in the HTTPS response: {text:?}"),
+        )
+    })?;
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .ok_or_else(|| {
+            ProbeError::fatal(
+                Stage::Exchange,
+                format!("could not parse a status line from: {head:?}"),
+            )
+        })?;
+
+    Ok(TlsProbe {
+        version,
+        alpn,
+        suite,
+        status,
+        body: body.to_string(),
+    })
 }

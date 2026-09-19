@@ -3708,3 +3708,59 @@ pair inside a double-quoted string would have run the `pr` command by substituti
 
 **Not done:** #286 is neither merged nor approved. Merging a release PR, publishing a tag, a Release
 or a public image is the human's call without exception.
+
+## U-556 — the four TLS-probe assumptions (2026-09-16, decided by Opus under `/reconcile`)
+
+All four entries are test-only and reversible in a commit — no public contract, no schema, no
+auth model, no external dependency (the unit changed no manifest), no trust boundary. None is a
+one-way door, so all four were analyzed by a fresh Opus agent and settled without escalation.
+Three confirmed, one sent back as a follow-up.
+
+**CONFIRMED — `GET /livez` is the probe endpoint.** The analysis found the endpoints' own
+behaviour already covered in-process over plain HTTP (`http_integration.rs:220-257` and `:2680`,
+`conformance_gate.rs:305,330`), so "strengthening" the TLS test toward a richer endpoint buys no
+coverage and imports a storage-init failure mode into a test whose red state must mean *TLS
+broke* — the confusion the branch-on-exit-code work in that file exists to remove. Parsing the
+body as JSON is the transport property worth having: it proves the bytes survived the record
+layer. The rejection reason now lives at the `PROBE_PATH` constant rather than only here,
+because that is where a future maintainer meets the temptation.
+
+**CONFIRMED — the cipher suite is captured but never asserted**, on a stronger argument than the
+one originally logged. The logged reason was "it is an upstream default". The decisive reason is
+that an AEAD *floor* would be **unfireable**: the TLS 1.3 suite registry is AEAD-only by
+construction and the client is pinned to 1.3, so such a check cannot fail on any run where the
+version assertion passes. It would read as coverage and prove nothing — the same defect class
+U-556 exists to fix. Recorded at the `suite` field so nobody adds it later thinking it buys
+something.
+
+**CONFIRMED (keep) — the ALPN assertion**, which was drift beyond the written plan. A prior
+verifier called it close to structurally unfireable, and on mechanics that is right: with the
+client offering exactly `http/1.1` the reachable values are `Some("http/1.1")` and `None`. But
+the `None` branch is what happens if anyone replaces `axum-server`'s acceptor with a hand-rolled
+`rustls::ServerConfig` — a plausible migration here given this repo's documented provider fight
+with that crate — and this line is the **only** observation of the server's ALPN anywhere in the
+repo. Its realistic failure mode was therefore deletion-by-a-reviewer, not a false pass. Kept,
+and its message rewritten to argue for its own existence and to state its blind spot: a list
+narrowing from `[h2, http/1.1]` to `[http/1.1]` loses h2 and this assertion still passes.
+
+**NEEDS-CHANGE (follow-up unit; does not block U-556) — the child's stdout is left undrained.**
+The analysis refuted this entry's own premise twice over, by measurement. The documented
+"~16 KiB pipe buffer" is the *initial* allocation; macOS grows it to **64 KiB** (measured
+65,531/65,536 B), so 50 retried requests at the default log filter emit ~40 KB and the test
+**still passes** — the hazard as documented does not fire on the variable it blames. What does
+fire is **`RUST_LOG`**, which the child inherits because the test sets only
+`ACDP_REGISTRY_CONFIG`: one probe at `trace` already uses ~20 KB. The `Stage` enum does not help
+here either, and this decision's own write-up overstated what that enum bought — an enum makes a
+*typo* unspellable, not a *policy edit*; `io_failure_may_be_transient` is a plain `matches!` that
+anyone can extend in one keystroke with no compiler complaint.
+
+The fix is structural and severs the coupling instead of documenting it: give the child
+file-backed stdio in the tempdir it already owns, rather than pipes. A file never blocks, has no
+ceiling, and is immune to request count, retry policy and log level simultaneously; it also
+*improves* diagnostics, since today a wedged child yields a truncated 64 KiB through
+`wait_with_output()`. **It is deliberately not done in U-556:** it requires editing
+`tls_startup.rs:206-208`, which sits inside the byte-identical protected range this unit
+pre-registered as an acceptance criterion and which the assignment calls load-bearing. Taking it
+would have broken a criterion this unit's own PR claims — so the corrected comments ship now and
+the structural change is a successor unit. This is the second finding U-556 hands forward; the
+first is the hollow `rustls_is_a_normal_dependency` in the same file.

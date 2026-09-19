@@ -8,20 +8,32 @@ no-default-features = false
 
 [advisories]
 version = 2
-# Still "warn", and NOT because the stricter setting was untried. Flipping
-# this to "deny" was measured and it fails TODAY:
+# "deny", and it is enforced rather than aspirational: the graph has zero
+# yanked crates, and this setting is what keeps it that way. The two that
+# were here — `spin` 0.9.8 and `wnaf` 0.14.0 — were cleared in the same
+# change that set this (U-557), which is the ordering the previous version
+# of this comment specified and the only one that does not redden `main`.
 #
-#   error[yanked]: detected yanked crate (try `cargo update -p spin`)
-#   error[yanked]: detected yanked crate (try `cargo update -p wnaf`)
+# WHEN THIS FIRES, AND IT WILL, ON A COMMIT THAT CHANGED NOTHING:
+# a crate is yanked upstream by its maintainer, with no commit in this repo.
+# `cargo-deny` is a REQUIRED status check on `main` (added 2026-09-16), so
+# this blocks every merge in the repo until it is cleared. The tool names
+# the fix in its own output:
 #
-# That is the finding, not a reason to shrug: this workspace already
-# depends on two yanked crates and nobody noticed, precisely because a
-# "warn" on a job that is not a required check is invisible twice over.
-# Resolving it means updating Cargo.lock, which is outside this change's
-# scope, so it is reported rather than silently bundled here. Flip this to
-# "deny" in the same change that clears `spin` and `wnaf`, not before —
-# flipping first would just redden the build for everyone.
-yanked = "warn"
+#   error[yanked]: detected yanked crate (try `cargo update -p <crate>`)
+#
+# Run exactly that, one `--package` at a time so each lockfile hunk is
+# attributable, and check the successor is in range (a patch bump needs no
+# manifest edit; if it does, name the transitive dep that forced it).
+#
+# Do NOT reach for `ignore` below to get unblocked. It is the path of least
+# resistance now that this check blocks, and it converts a solvable lockfile
+# problem into a permanent silent exemption — which is the exact failure this
+# setting exists to prevent. `ignore` is for an advisory with no upstream fix
+# and a written argument for why it cannot reach us (see RUSTSEC-2023-0071
+# below). A yanked crate almost always has a successor; that is what yanking
+# is for.
+yanked = "deny"
 ignore = [
     # RUSTSEC-2023-0071 "Marvin" — RSA private-key timing side channel; no
     # upstream patch exists. `rsa` enters the build graph solely because

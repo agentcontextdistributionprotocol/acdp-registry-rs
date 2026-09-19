@@ -6,19 +6,27 @@ name: lint
 # check name means a shell finding is reported as `lint` rather than arriving
 # disguised as `rustfmt`.
 #
-# WHAT THIS CHECK DOES NOT DO — do not assume otherwise. Branch protection on
-# `main` enumerates its required contexts (`rustfmt`, `clippy`, `tests`,
-# `conformance (spec fixtures)`). `lint` is not among them, so a red `lint` makes
-# the PR visibly red but does NOT prevent a merge. Making it blocking is a
-# protected-branch settings change, not a change to this file:
+# THIS CHECK BLOCKS MERGES. `lint` is a required status check on `main`, so a
+# shell or workflow finding here stops a PR merging — it is a gate, not a report.
 #
-#   gh api -X PATCH repos/{owner}/{repo}/branches/main/protection/required_status_checks \
-#     -f 'contexts[]=rustfmt' -f 'contexts[]=clippy' -f 'contexts[]=tests' \
-#     -f 'contexts[]=conformance (spec fixtures)' -f 'contexts[]=lint'
+# This comment used to say the opposite, and used to carry a ready-to-run
+# `gh api` command that rewrote the required-contexts list to make `lint`
+# required. Both are gone, and the command is deliberately NOT replaced with a
+# corrected one:
 #
-# (`contexts` is replaced wholesale, so every existing context must be repeated
-# or it is dropped — which would silently un-require the four checks that
-# actually gate this repo today.)
+#   * The claim went stale the instant branch protection changed, because it was
+#     a copy of state owned by repo settings with nothing to notice it moving.
+#   * The command was worse than stale. `contexts` is replaced WHOLESALE, so a
+#     command listing yesterday's contexts silently DROPS whichever were added
+#     since — this one would have un-required `cargo-deny`, disabling the
+#     yanked-crate ratchet. A stale sentence misleads a reader; a stale
+#     command acts.
+#
+# The required contexts are not transcribed here, for the same reason. Read them
+# from the source, which cannot be out of date:
+#
+#   gh api repos/{owner}/{repo}/branches/main/protection \
+#     --jq .required_status_checks.contexts
 #
 # Do NOT rename this job, or any job in ci.yml, without updating branch
 # protection in the same change: a required context that stops reporting leaves

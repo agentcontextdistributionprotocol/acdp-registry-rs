@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-auth"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "acdp",
  "acdp-registry-types",
@@ -158,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "acdp",
  "acdp-registry-auth",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-pg"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "acdp",
  "acdp-registry-store",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-server"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "acdp",
  "acdp-registry-auth",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-sqlite"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "acdp",
  "acdp-registry-store",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-store"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "acdp",
  "acdp-registry-types",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-types"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "acdp",
  "axum",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-webhook"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "acdp",
  "acdp-registry-types",
@@ -3178,9 +3178,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
 ]
@@ -4290,13 +4290,14 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wnaf"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab12e7090f27e2ffd9322651492942d50c2926094af30601e1964337db39daf1"
+checksum = "795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa"
 dependencies = [
  "ff 0.14.0",
  "group 0.14.0",
  "hybrid-array",
+ "primefield",
 ]
 
 [[package]]
