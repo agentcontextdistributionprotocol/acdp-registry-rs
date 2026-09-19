@@ -4092,3 +4092,46 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   `/contexts/`) == `body.ctx_id`) and by the three negative examples, all of which are asserted.
   Reversing to a crate is one commit and a `Cargo.toml` line.
 - **Status:** UNCONFIRMED
+
+### CORRECTION (2026-09-19T16:21:56Z) — the rationale above is FALSE, and the question it answers was the wrong one
+
+Appended, not rewritten: the entry above is the record of what was believed, and a
+correction six lines below a false premise is read where a silent edit is not.
+
+**1. "A new external dependency" is factually wrong.** `percent-encoding` v2.3.2 is
+already in `Cargo.lock` (`:2340-2343`) and already on `acdp-registry-core`'s **non-dev**
+path. Measured here, not inferred —
+`cargo tree -p acdp-registry-core -e features,no-dev -i percent-encoding`:
+
+    percent-encoding v2.3.2 <- form_urlencoded v1.2.2 <- url v2.5.8 <- acdp-client v0.13.1
+      <- acdp v0.13.1 <- acdp-registry-auth v0.1.4 <- acdp-registry-core v0.1.4
+
+So a direct dependency adds **zero** new crates and **zero** new `cargo-deny` surface. The
+whole "supply-chain and yanked-crate surface" trade priced a cost that does not exist. The
+`-e features,no-dev` form matters: a dev-only path would not have justified anything, and
+this is a resolver claim, not a manifest claim.
+
+**2. The bigger miss: the encoder already exists in this repo.**
+`crates/acdp-registry-server/tests/common/mod.rs:544-556`, `pct_encode_path_segment` —
+RFC 3986 unreserved set, uppercase hex, iterating UTF-8 bytes. That is byte-identical in
+design to what the entry above proposed to write, and it is already used at 80+ sites. The
+choice was never "hand-roll vs. take a crate". It was **"move the one that exists into
+`acdp-registry-core` vs. write a second copy of it"**, and the entry above did not know
+the first option existed.
+
+**3. The decision survives, for a reason the entry never gave.** Not taking
+`percent-encoding` is still right, but because it ships no RFC-3986-unreserved `AsciiSet`
+— you would define a custom set by hand anyway, which is the same logic with an import.
+That is a design argument; the supply-chain argument was a false one that happened to point
+the same way. A right answer reached through a false premise is not a verified answer, and
+it would have propagated into the PR body as justification.
+
+**4. Revised shape, if the unit proceeds:** move `pct_encode_path_segment` into
+`acdp-registry-core`, have the test helper delegate to it. **Then the test must pin the
+fixture's literal** `/contexts/acdp%3A%2F%2Fregistry.example.com%2F550e8400-e29b-41d4-a716-446655440000`
+and never `format!("/contexts/{}", pct_encode_path_segment(id))` — once producer and
+checker share one function, a derived assertion only proves the copy agrees with itself and
+is blind to any uniform defect in the shared centre.
+
+- **Status:** SUPERSEDED. The decision (hand-roll, no crate) stands; both stated reasons
+  are withdrawn and replaced by item 3. Blocked behind the human's ruling on U-526's scope.
