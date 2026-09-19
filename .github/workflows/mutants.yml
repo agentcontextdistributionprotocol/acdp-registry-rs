@@ -300,15 +300,31 @@ jobs:
   mutants:
     name: mutation oracle (scoped ratchet)
     runs-on: ubuntu-latest
-    # Measured locally at ~7 min wall-clock at the OLD 213 scope with -j4. At the
-    # current 351 scope the same machine took 50m51s (U-552's committed ledger).
-    # The cap below is therefore no longer backed by a measurement with headroom
-    # to spare -- it is an expectation. The first scheduled run at 351 is what
-    # turns it back into a measurement; if it approaches the cap, raise the cap
-    # rather than narrowing the scope to fit it.
-    # The cap is generous against a slower runner but finite, so a hung run fails
-    # instead of burning the job limit.
-    timeout-minutes: 90
+    # MEASURED IN CI, against runs of this same workflow -- not scaled from a
+    # local figure, which is the wrong instrument: this job runs -j1 on a hosted
+    # runner while a developer machine runs -j4.
+    #
+    #   34834723693  213 mutants  success    86.3 min   <- 3.7 min under the cap
+    #   35038109840  213 mutants  success    71.6 min
+    #   35457316722  351 mutants  CANCELLED  90.4 min   <- hit the 90 cap
+    #
+    # THE 90 WAS ALREADY NEARLY BINDING AT 213, and nobody noticed because 86.3
+    # still passed. The comment that used to sit here claimed "~23min" for that
+    # scope; it was off by nearly 4x and had never been re-derived against an
+    # actual run of this workflow. U-552's widening to 351 is what finally pushed
+    # it over, but the headroom was already gone.
+    #
+    # 180, from 86.3 min at 213 scaled by 351/213 (~142 min) plus room for the
+    # runner-to-runner variance the two 213 runs already show (71.6 vs 86.3, a
+    # 20% spread on identical work). RAISING THE CAP IS THE CORRECT FIX AND
+    # NARROWING examine_globs IS NOT: dropping a file empties missed.txt without
+    # a single test being written, which is the exact move
+    # classify_removed_survivors.py's FILE-NOT-IN-SCOPE branch exists to catch.
+    # Still finite, so a hung run fails instead of burning the 6h job limit.
+    #
+    # RE-DERIVE THIS when the scope next changes. The figure above is a
+    # measurement with a shelf life, not a constant.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
@@ -397,13 +413,15 @@ jobs:
         # dependent crate contend for CPU and disk instead of pipelining.
         # Sequentially the cache stays warm.
         #
-        # WALL CLOCK AT THE CURRENT SCOPE -- the 213-scope "~23min" this line
-        # carried is superseded. U-552's full 351-mutant local run took 50m51s
-        # (16:02:13Z -> 16:53:03Z, in the committed ledger's start_time/end_time)
-        # at -j4 on a developer machine. That is NOT a CI figure: the runner is
-        # slower and this step is -j1, so treat 50m51s as a floor, not a forecast.
-        # The timeout-minutes cap below is set from it with that asymmetry in mind
-        # and has NOT been re-derived from an actual CI run at 351.
+        # WALL CLOCK -- the "~23min for the 213 scope" this line used to carry was
+        # wrong by nearly 4x, and it was wrong because it was never checked against
+        # a run of this workflow. Two actual 213-scope CI runs took 71.6 and 86.3
+        # minutes. See the timeout-minutes block ABOVE for the measurements and for
+        # why the cap is now 180.
+        #
+        # For orientation only, NOT a basis for the cap: U-552's 351-mutant run on
+        # a developer machine took 50m51s, but at -j4. This step is -j1 on a hosted
+        # runner, so that number is not comparable and must not be scaled into one.
         run: cargo mutants -j1 || true
 
       # THE RATCHET. Four assertions, each able to fail on its own, and the
