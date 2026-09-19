@@ -3937,6 +3937,179 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 
 **Status:** CONFIRMED (2026-09-14).
 
+---
+
+## U-552 Phase 1 — the survivor classifier: every classification still FAILS the job
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** a disappeared survivor line should never turn the ratchet green, not even
+  when the classifier can PROVE the mutant was killed.
+- **Chose:** every branch exits non-zero and names the edit to make. `MUTANTS_SURVIVORS` is
+  a SET EQUALITY; if a proven kill passed green, the committed list would sit disagreeing
+  with `missed.txt` and nothing would force it back into agreement — re-opening the hole
+  U-551's equality closed. The classifier's job is to say WHICH edit to make, not to excuse
+  the reader from making it.
+- **Alternatives:** exit 0 on a proven kill (rejected: silently decays the list); warn-only
+  (rejected: `.cargo/mutants.toml:126-132` already records that a red check nobody can
+  explain gets disabled, which is why every branch here prescribes a remedy).
+- **Blast radius if wrong:** a weekly scheduled job stays red one cycle longer than needed.
+  It blocks no PR — `mutants` is not in `required_status_checks.contexts`. Reversible in a
+  one-line diff.
+- **Status:** **CONFIRMED** (2026-09-19, Opus under `/reconcile`) — holds in code and in test. Every branch returns EXIT_CLASSIFIED (10) and the workflow's outer `rc=1` fires regardless, so a proven kill still reddens the job; the 36 unit tests assert the non-deletion branches explicitly (`assertNotIn("DELETE the line", out)`).
+
+## U-552 Phase 1 — pairing drifted lines needs TWO identity keys, required to agree
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** one line-independent identity is not enough to re-find a mutant that moved.
+- **Chose:** compute both an offset key (`line − function_start_line`, plus column) and an
+  ordinal key (position within the function by line, then column). Pair when both agree; pair
+  on whichever key resolves when only ONE does, saying which; escalate only when both resolve
+  to *different* mutants, or when either matches several.
+- **CORRECTED DURING THIS PHASE.** The first implementation required BOTH keys to resolve,
+  and this entry claimed "they fail on different edits, so requiring agreement costs
+  nothing". That was wrong in direction, and the phase verifier demonstrated it: requiring
+  agreement makes pairing the INTERSECTION of the two keys, so it succeeds only where both
+  survive — i.e. only for whole-function shifts, the one case a single key already handled.
+  Every edit the second key was added to cover was being dumped into the coarse fallback and
+  mislabelled "the two identity keys DISAGREE" when in fact one had simply found nothing.
+  Single-key pairing is now its own labelled outcome.
+- **On injectivity, stated precisely.** The offset key's injectivity is a real measurement:
+  213/213 on the core ledger, 138/138 on store.rs, 351/351 on the union — and dropping a
+  component measurably collapses it (without `replacement`, 213 → 123; without `column`,
+  213 → 204). The ordinal key's injectivity is **true by construction**, since
+  `(file, function, ordinal-within-function)` is unique by definition; quoting "351/351
+  measured" for it, as an earlier draft did, described a check that could not fail.
+- **Alternatives:** the naive `(file, description)` key — measured to collapse 351 mutants to
+  312, merging the three `delete ! in run_search_with_refill` mutants which hold three
+  DIFFERENT verdicts (Caught/Missed/Timeout); re-running the isolated mutant with
+  `-F '^…$'` — works under the committed config, but costs a cold build per line and
+  cannot find a mutant that drifted at all (0 matches), which is the one case that matters.
+- **Blast radius if wrong:** a drift is reported as ambiguous and a human reads
+  `mutants.out/diff/`. The failure direction is deliberately "ask", never "guess".
+- **Status:** **CONFIRMED** (2026-09-19, Opus under `/reconcile`) — and it earned the confirmation the hard way. The first fixtures were degenerate (one file, one function, one replacement), so both keys were trivially satisfiable and 9 of 10 verifier mutations survived. Rebuilt with multi-file/function/replacement fixtures, then a second layer where only ONE key can succeed, because a passing replacement test was still being rescued by the other key. Phase 3 added a third independent check: 25/25 mutations caught by 36 tests.
+
+## U-552 Phase 1 — MUTANTS_PRIOR_LEDGER names ONE file, never a glob
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** the pairing basis must be a single named ledger.
+- **Chose:** a `MUTANTS_PRIOR_LEDGER` env var beside `MUTANTS_EXPECTED_SCOPE`, currently
+  `docs/mutation-runs/u551-core-scope-213-outcomes.json`, with `conformance_gate.rs`
+  asserting it is not a glob and that the file exists. Measured: globbing
+  `docs/mutation-runs/*-outcomes.json` matches 13 files / 417 records — it picks up the VOID
+  `u548` ledger (taken with `copy_vcs` lost, so every "caught" in it is an artifact) and
+  three SUPERSEDED `u549` shards — yielding 66 duplicate names, 11 with CONFLICTING verdicts.
+  That would trip the classifier's own duplicate-name assertion on every run.
+- **Alternatives:** a glob (measured broken, above); deriving the CURRENT set by parsing
+  `docs/mutation-runs/README.md` prose (rejected: a prose index is not a machine-readable
+  contract, and parsing it would be a second untested extractor).
+- **Blast radius if wrong:** points at a stale ledger → drifts degrade to the coarse
+  fallback and get reported as ambiguous. Phase 3 must repoint it at the 351-scope ledger;
+  if it forgets, drift pairing silently weakens rather than failing loudly. **That is the
+  sharpest residual risk in this phase** and is why the existence check is a test.
+- **Status:** **CONFIRMED and STRENGTHENED** (2026-09-19, Opus under `/reconcile`) — `conformance_gate.rs` falsifies it against the REAL mutants.yml (glob substitution must produce a violation), and Phase 3 added `the_declared_prior_ledger_actually_exists`, which requires the pointer to resolve AND to be git-TRACKED. The tracked check was not pedantry: `is_file()` alone passes locally on an unstaged ledger and fails only in CI's checkout.
+
+## U-552 Phase 1 — the classifier's exit codes are 10/11, not 1/2
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** a classifier that CRASHES must not be readable as one that classified cleanly.
+- **Chose:** `EXIT_CLASSIFIED = 10`, `EXIT_UNSOUND = 11`. An unhandled Python exception exits
+  1 and an argparse error exits 2, so those values would have made a dead script
+  indistinguishable from a normal classification — the workflow would have printed the
+  routine message over a script that never ran. The workflow's `case` treats every other
+  non-zero code as "the classifier itself failed", and prints the raw removed lines
+  BEFORE invoking it so a crash still tells the operator which lines vanished.
+- **Alternatives:** 1/2 (rejected: collides with the interpreter's own codes); parsing the
+  script's stdout for a sentinel (rejected: a crashed script produces no stdout, so the
+  absence of a sentinel and the absence of a problem look identical).
+- **Blast radius if wrong:** none beyond this workflow; the outer `rc=1` already fails the
+  job regardless, so the exit code only governs which message the reader gets.
+- **Status:** **CONFIRMED** (2026-09-19, Opus under `/reconcile`) — the workflow's `case` handles 10, 11 and a catch-all that says the classifier itself failed and that the listed lines have NOT been judged. Asserted by the unit tests via EXIT_CLASSIFIED/EXIT_UNSOUND.
+
+## U-552 Phase 1 — a SHARDED report is refused rather than classified
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** the classifier must never run against one shard of a sharded run.
+- **Chose:** pass `--expected-scope "$MUTANTS_EXPECTED_SCOPE"` and refuse when the report's
+  `total_mutants` disagrees. `cargo mutants --shard N/K` writes a report whose
+  `total_mutants` is that shard's share, so `len(records) == total_mutants` holds PER SHARD
+  and the truncation check passes — while every committed survivor belonging to another
+  shard looks like a line naming no mutant in scope, which classifies as
+  `NO CANDIDATE → delete the line`, for nearly every survivor at once. The scope pin is the
+  only thing that can tell a shard from a whole run.
+- **Alternatives:** reading a shard field from the report (cargo-mutants does not record one);
+  accepting shards and merging them in the classifier (rejected: the merge would have to be
+  right before the check that validates it, and a wrong merge reintroduces duplicate names).
+- **Blast radius if wrong:** if Phase 3's 351-mutant run must be sharded, this gate makes the
+  ratchet hard-fail until the shards are merged into one report. That is the intended
+  direction — refusing to judge beats judging wrongly — but it is a real constraint on
+  Phase 3 and is recorded in the plan's Phase 3 edge cases.
+- **Status:** **CONFIRMED, and its stated blast radius did NOT materialise** (2026-09-19, Opus under `/reconcile`). This entry warned that if Phase 3's run had to be sharded, the gate would hard-fail until the shards were merged. Phase 3's run was NOT sharded: one invocation produced all 351 (`total_mutants` 351, `end_time` set, 219/7/124/1 summing to 351), so the constraint never bound. Recording that the risk was real, priced, and then simply did not occur — rather than deleting the entry as if it had never been a risk.
+
+## U-552 Phase 2 — `994:35` `<` and `==` are KILLABLE; U-544's EQUIVALENT label was wrong
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** a committed `EQUIVALENT` label backed by a probe can still be wrong, and the only
+  way to find out is to run the mutant.
+- **Chose:** wrote `a_keyed_superseding_publish_replays_instead_of_failing_as_already_superseded`
+  in `crates/acdp-registry-sqlite/tests/store_contract.rs` and ran both mutants in isolation with
+  `cargo mutants -F '^<escaped --list line>$'`. Both come back **CaughtMutant**, that test the
+  SOLE failure (26 passed, 1 failed). U-544's probe was correct but generalised from a
+  NON-superseding request: step 7's `ON CONFLICT` replay fallback (`store.rs:1284-1318`) is
+  reached only AFTER step 2, so a superseding replay with step 1 skipped hits the coherence check
+  at `store.rs:1118-1125` and returns `Err(SupersededTarget{AlreadySuperseded})`.
+- **Alternatives:** accept the committed label (rejected — it is a claim about behaviour, and
+  behaviour is measurable); argue it in review without running it (rejected — the repo's label was
+  itself backed by a probe, so only a stronger measurement settles it).
+- **Blast radius if wrong:** the survivor list would carry two entries that are actually killed,
+  and the ratchet would fail on the next run with the classifier reporting them as proven kills.
+  Self-correcting by design.
+- **Status:** CONFIRMED (2026-09-16) — measured twice, the second time after correcting a
+  poisoned harness (below).
+
+## U-552 Phase 2 — local cargo-mutants verdicts were VOID until safe.directory was injected
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** a `CaughtMutant` verdict means the mutation was detected. **It does not, on its own.**
+- **Chose:** re-ran with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'`
+  exported for the process only — no `git config --global` write, no repo change — and confirmed
+  the killing test by name in `mutants.out/log/<mutant>.log` before believing the verdict.
+- **What happened:** the first run ALSO reported "2 caught", but the killers were
+  `no_tracked_file_contains_a_conflict_marker`, `every_docs_page_is_listed_in_the_docs_index` and
+  `every_directly_read_env_var_is_documented` — workspace scans unrelated to the mutation. This
+  worktree is owned by uid 501 while the session runs as uid 502, so git refuses cargo-mutants'
+  temp copy with `fatal: detected dubious ownership`; `cargo test --workspace` stops at the first
+  failing binary, and `conformance_gate` sorts before `store_contract`, so **the new test never
+  executed.** Right conclusion, no evidence behind it.
+- **Alternatives:** `git config --global --add safe.directory '*'` (rejected — persists a
+  security-relevant setting machine-wide to fix one run); running as uid 501 (not available).
+- **Blast radius if wrong:** every local mutation measurement in these worktrees is untrustworthy,
+  including Phase 3's. CI is unaffected (single-user runner), which makes it worse rather than
+  better: the poisoned run is the one a human uses to decide what to commit. This is exactly the
+  class `mutants.yml`'s AC8 harness check exists to detect, and it reproduced live.
+- **Status:** CONFIRMED (2026-09-16)
+
+## U-552 Phase 2 — the four uncalled trait methods ARE given tests (judgement REVERSED)
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed, first:** "a test can be written that goes red" is not the same as "this is a coverage
+  gap worth closing", so `568:9 put`, `821:9 mark_superseded`, `832:9 first_version_ctx_id` and
+  `923:9 idempotency_evict_expired` should be carried as budgeted survivors under a new label,
+  `UNREACHED-BY-PRODUCTION`, rather than killed. The worry was real: a test whose only purpose is
+  to call an otherwise-uncalled method converts a true finding — *this surface has no production
+  caller* — into a permanently green line that hides it.
+- **REVERSED, and the phase verifier is why.** It pointed at a counter-precedent two rows above in
+  the same table: `store.rs:380:9 lifecycle_events_of_ctx -> Ok(vec![])` is recorded **KILLED
+  (U-543)** by a direct-call test, and that method has no originating production caller either —
+  three impls, one delegating wrapper, plus U-543's own two calls. Carrying these four while
+  counting that one a win would have left the document asserting both positions at once.
+- **Chose:** kill all four with direct contract tests in
+  `crates/acdp-registry-sqlite/tests/store_contract.rs`. Three reasons, in order of weight:
+  (1) `.cargo/mutants.toml`'s governing rule is "PAY FIRST, WIDEN LAST" — a survivor a test CAN
+  kill gets the test; (2) the repo's own precedent on the identical shape; (3) these are genuine
+  backend-CONTRACT surface, not dead code — `acdp-registry-pg/src/store.rs` implements all four and
+  `parity.rs` exists to compare backends, which is the phase rubric's own "contract surface both
+  backends implement → KILL" branch.
+- **Measured:** all four come back **CaughtMutant**, each killed by its own named test as the SOLE
+  failure (30 passed, 1 failed). The killer was confirmed by name in each
+  `mutants.out/log/<mutant>.log`, not inferred from the verdict.
+- **The finding is not lost**, which was the whole objection: the call-site census stays in
+  `docs/MUTATION-SCOPE-CANDIDATES.md`'s U-546 section and in a block comment above the four tests
+  saying why they exist and why the first judgement was reversed.
+- **Blast radius if wrong:** four contract tests pinning behaviour that currently has no production
+  caller. Cheap either way, and a future originating caller now inherits a tested contract.
+- **Status:** CONFIRMED (2026-09-16)
 ## U-557 — local `cargo-deny` binary differs from the one CI gates on
 - **Plan:** plans/u-557-clear-yanked-crates.md
 - **Assumed:** cargo-deny 0.19.9 (this worktree) and 0.20.2 (the pinned
@@ -4081,6 +4254,36 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   to take it would break a criterion this unit's PR claims. Corrected comments are in the code now;
   the structural fix is a successor unit.
 
+## U-552 Phase 3 — a file leaving `examine_globs` is diagnosed as a SCOPE change, not a dead expression
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** the Phase 1 `--expected-scope` pin covered every way a committed survivor can
+  stop naming a mutant. It does not, and the gap was found by running Phase 1's own classifier
+  as a NEGATIVE CONTROL during Phase 3 — feeding it the six store.rs lines against the
+  213-scope ledger, a report that never contained that file.
+- **Chose:** classify a removed line whose file contributed **zero** mutants to the report as
+  `FILE NOT IN SCOPE`, with its own action, instead of `NO CANDIDATE → delete the line`.
+  **Why the existing pin cannot catch it:** `--expected-scope` compares TOTALS. Narrow
+  `examine_globs` and update `MUTANTS_EXPECTED_SCOPE` in the *same* commit and
+  `total == expected` still holds — the guard stays silent while a whole file stops being
+  watched, and every survivor in it is reported as an expression that "no longer exists",
+  prescribing exactly the deletion that locks the narrowing in. Dropping a file is the one
+  way to empty `missed.txt` without writing a single test, so it is the one disappearance
+  that must never read as a kill.
+- **Alternatives:** parsing `examine_globs` out of `.cargo/mutants.toml` and comparing
+  (rejected: re-implements glob semantics in a second place, and would disagree with the
+  run that actually happened — the report is the ground truth for what was examined);
+  leaving it to the human (rejected: the prior text actively argued for the wrong edit).
+- **Falsified, not merely tested:** three mutations of the new branch — deleted, condition
+  inverted, and `cur_files` forced empty — produced 2, 5 and 3 test failures respectively,
+  against 36 green on the restored file. One pre-existing test
+  (`test_the_coarse_fallback_does_not_match_across_FILES`) had a fixture in which FILE_A
+  contributed no mutants at all; it was passing for a reason it did not intend, and now
+  carries a FILE_A mutant of its own so it still tests the cross-file property.
+- **Blast radius if wrong:** a false `FILE NOT IN SCOPE` would tell a reader to restore a glob
+  that was never removed. Bounded: the branch is reached only when the report contains zero
+  mutants for that file, which the second control above confirms does not fire while the file
+  is still examined.
+- **Status:** **CONFIRMED** (2026-09-19, Opus under `/reconcile`) — implemented, and falsified three ways (branch deleted / condition inverted / `cur_files` forced empty → 2, 5, 3 failures against 36 green). The independent Phase 3 verifier reviewed it and called it a real gap-closure.
 ## U-560 — the manifest scan is kept, for one property only
 
 - **Plan:** `plans/u560-honest-test-infrastructure.md`
@@ -4227,3 +4430,35 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   original claim never named — the request count is not a property of the server alone. The figure
   that belongs here is the one for the client this test actually uses.
 - **Status:** CONFIRMED (2026-09-19) — superseded by the change; nothing further to decide.
+
+## U-552 Phase 3 — the AC4 kill-vs-drift proof, anchored to SYMBOLS not line numbers
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** every survivor line that vanished from the store.rs tranche was KILLED by a
+  test, not merely displaced by a line-number shift. The set check cannot tell those apart.
+- **Chose:** prove it three independent ways rather than trust the count.
+  1. **Arithmetic on the diff.** The only commit touching
+     `crates/acdp-registry-sqlite/src/store.rs` since the shard ledgers is `1070c33`; its
+     14 hunks all start at or below line 1986 (lowest `@@ -1986`), and every survivor site
+     is at or above 1306 in the file, so no survivor could shift.
+  2. **The classifier** returns `KILLED (proven by this run)` for all six against
+     `docs/mutation-runs/u552-union-scope-351-outcomes.json`, matching by exact name.
+  3. **A negative control:** the same six against the 213-scope ledger, which never
+     contained store.rs, return `NOT A KILL` — so the verdict discriminates.
+- **THE SYMBOLS, because a line number written today decays tomorrow.** Carried from
+  U-560's finding (lane-2 cited `tls_startup.rs:149` for an assertion the same commit moved
+  to `:162`). The six killed mutants are identified here by the symbol each one mutates, so
+  this record survives any future reformatting of store.rs:
+  `<impl RegistryStore for SqliteStore>::put`, `::mark_superseded`,
+  `::first_version_ctx_id`, `::idempotency_evict_expired`, and the two non-`>=` comparison
+  replacements on the `expires_at > now` guard inside `::commit_publish`.
+  The two CARRIED survivors are, likewise by symbol: the `>=` replacement on that same
+  `expires_at > now` guard (equivalent — step 1 already DELETEd everything at or before
+  `now` in the same transaction under `BEGIN IMMEDIATE`), and the `!=` -> `==` replacement
+  inside `::commit_publish`'s `if inserted == 0` branch (unreachable by design).
+- **The line numbers above are NOT a counter-example to this rule.** They are an arithmetic
+  claim about ONE named commit's diff (`1070c33`), which is immutable; they are not
+  citations into a moving file. The distinction is the whole point: cite a symbol when you
+  mean "this code", cite a line when you mean "this diff".
+- **Blast radius if wrong:** deleting a survivor line that was never killed drops the budget
+  for nothing and loses a live survivor silently. That is why three proofs, not one.
+- **Status:** **CONFIRMED** (2026-09-19, Opus under `/reconcile`) — all six classify `KILLED (proven by this run)` against the committed 351 ledger, each matching by exact name at the exact site. Independently re-derived by the Phase 3 verifier, which also replayed the prior 8 survivors against the new ledger and got 6 CaughtMutant / 2 MissedMutant — positive presence, not inference from absence. The harness was separately shown healthy (top sole-killer 3.7% vs the 50% ceiling), without which no CAUGHT verdict would have been evidence at all.

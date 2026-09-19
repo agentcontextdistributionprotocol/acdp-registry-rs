@@ -46,12 +46,33 @@ env:
   # or deleted -- the survivor count falls with it, and a `<=` budget would read
   # that as an improvement. This assertion is what makes the budget below mean
   # anything.
-  MUTANTS_EXPECTED_SCOPE: "213"
+  MUTANTS_EXPECTED_SCOPE: "351"
+
+  # The ONE committed ledger that a drifted survivor line is paired against, to
+  # recover its identity (enclosing function + fn-relative offset + column, and
+  # independently its ordinal within that function) and find where the mutant
+  # moved to. Exactly one file, NEVER a glob: docs/mutation-runs/ also holds a
+  # VOID ledger (measured with copy_vcs lost, so every "caught" in it is an
+  # artifact) and three SUPERSEDED shards. Globbing that directory yields 13
+  # files, 417 records, 66 duplicate names and 11 with CONFLICTING verdicts --
+  # which would trip the classifier's own duplicate-name assertion on every run.
+  # docs/mutation-runs/README.md indexes which ledgers are CURRENT, in prose;
+  # this variable is the machine-readable half of that index.
+  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/u552-union-scope-351-outcomes.json"
 
   # Surviving mutants at that sha. Each is enumerated with its own written reason
   # below; this number is the machine-readable half of that list. It ratchets DOWN
   # as survivors are killed and must never be raised without a reason recorded in
   # the same commit.
+  #
+  # 5 -> 7 (U-552). A RAISE, and the first one this history records. The scope
+  # widened 213 -> 351 by adding sqlite/src/store.rs, which brought 138 previously
+  # unwatched mutants under the gate. Six of that file's eight survivors were PAID
+  # OFF with tests (see .cargo/mutants.toml's kill list); the two that remain are
+  # not killable by any test -- one equivalent, one unreachable by design -- so
+  # they are carried with written reasons. Per-mutant the ratchet TIGHTENED,
+  # 5/213 = 2.3% -> 7/351 = 2.0%, but the budget itself went UP and this line says
+  # so rather than hiding the direction behind the rate.
   #
   # 8 -> 5 (U-521). THREE MUTANTS RETIRED, at TWO sites -- the count is three
   # because `lifecycle_outcome` emits two mutants at one line. U-521's assign said
@@ -79,8 +100,11 @@ env:
   # data-integrity hole; this is a denial of function. Worth fixing either way, but
   # not the same finding.
   #
-  # WHAT IS LEFT IS FIVE, AND ALL FIVE ARE EQUIVALENT MUTANTS -- there is no longer
-  # any survivor in this scope blocked on missing infrastructure. That is the real
+  # WHAT WAS LEFT AT THE 213 SCOPE WAS FIVE, AND ALL FIVE WERE EQUIVALENT MUTANTS
+  # -- no survivor in that scope was blocked on missing infrastructure. (U-552:
+  # the scope is now 351 and the list is SEVEN. The five below are unchanged and
+  # still equivalent; the two added by store.rs are one equivalent and one
+  # UNREACHABLE-BY-DESIGN, which is a third category this paragraph predates.) That is the real
   # shape of this ratchet now: it cannot fall further without either a code change
   # or search beginning to serve restricted rows.
   #
@@ -119,9 +143,13 @@ env:
   #     is not reachable deterministically, and a test that waited for it would be
   #     a flake generator.
   #
-  # NEW FLOOR: 5. Nothing here is retired by more test infrastructure -- all five
-  # are equivalent. Two (the parse_visibility arms) become real coverage gaps if
-  # search ever serves restricted rows, and at that point this drops to 3.
+  # FLOOR AT THE 213 SCOPE: 5. Nothing there is retired by more test
+  # infrastructure -- all five are equivalent. Two (the parse_visibility arms)
+  # become real coverage gaps if search ever serves restricted rows, and at that
+  # point those five drop to 3.
+  #
+  # CURRENT FLOOR: 7, at the 351 scope. See the 5 -> 7 entry above for why the
+  # two store.rs additions are carried rather than killed.
   #
   # MEASURED at 8768b07 over six verified shards, not one run: 213 total / 134
   # caught / 5 missed / 73 unviable / 1 timeout. Every shard's outcomes.json
@@ -155,12 +183,25 @@ env:
   # reason HERE rather than only in the prose above -- an identifier and its
   # justification that live in two places drift apart, and the drift is invisible.
   #
-  # MEASURED, not transcribed: a full 213-mutant run at this commit's tree with
+  # MEASURED, not transcribed: a full 351-mutant run at this commit's tree with
   # the CI-equivalent environment (ACDP_SPEC_DIR at the pinned spec revision and
-  # ACDP_REQUIRE_CONFORMANCE=1 -- without those, 42 fixture-replay tests skip and
-  # the survivor set is wider than CI's). Result 213/134/5/73/1, `end_time`
+  # ACDP_REQUIRE_CONFORMANCE=1 -- without those, fixture-replay tests skip and the
+  # survivor set comes out wider than CI's).
+  #
+  # Result 351 / 219 caught / 7 missed / 124 unviable / 1 timeout, `end_time`
   # present, and `missed.txt`'s line count cross-checked against outcomes.json's
-  # `missed`. Re-measure with: cargo mutants -j1 && cat mutants.out/missed.txt
+  # `missed`. The run is committed at
+  # docs/mutation-runs/u552-union-scope-351-outcomes.json and is what
+  # MUTANTS_PRIOR_LEDGER points at.
+  # Re-measure with: cargo mutants -j1 && cat mutants.out/missed.txt
+  #
+  # HOW MANY TESTS THE SPEC ENV GOVERNS -- re-measured at c41bf14 by U-552:
+  # 63 of 87, NOT the "42 of 70" these comments carried for several units. The
+  # suite grew and the figure was never revisited. Reproduce with:
+  #   ACDP_REQUIRE_CONFORMANCE=1 cargo test -p acdp-registry-server \
+  #     --features storage-sqlite,playground --test conformance
+  # with ACDP_SPEC_DIR UNSET -- 63 of 87 fail with the require-mode panic; with it
+  # set to the pinned spec root, 87 pass and 0 skip.
   MUTANTS_SURVIVORS: |
     # log.rs:131:18 -- guards only `log.cache_root(...)`; `root_for` returns the
     # same root either way and append-only makes any (size -> root) pair
@@ -188,6 +229,43 @@ env:
     # reachable deterministically and a test that waited for it would be a flake
     # generator.
     crates/acdp-registry-core/src/handlers/context.rs:642:39: replace > with >= in publish_inner
+    # ----- sqlite/src/store.rs, admitted by U-552 (scope 213 -> 351) -----
+    # store.rs:994:35 -- EQUIVALENT, and by a stronger argument than the
+    # millisecond-boundary one used for context.rs:642:39 above. Step 1 first runs
+    # `DELETE ... WHERE expires_at_ms <= ?` bound to `now` (store.rs:963-966), so a
+    # row that SURVIVES that delete necessarily has `expires_at_ms >= now_ms + 1`
+    # and `expires_at > now` is unconditionally TRUE for it. `>=` is therefore true
+    # on exactly the same inputs -- no clock-resolution claim needed, because the
+    # DELETE makes the boundary case unreachable outright. Its two siblings at this
+    # same site, `> with <` and `> with ==`, were EQUIVALENT-labelled by U-544 and
+    # KILLED by U-552 once probed with a SUPERSEDING request, so this entry is what
+    # is left after that correction rather than an inherited assumption.
+    crates/acdp-registry-sqlite/src/store.rs:994:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
+    # store.rs:1306:35 -- UNREACHABLE BY DESIGN, not a coverage gap. It sits inside
+    # the `if inserted == 0` branch (store.rs:1284), reached only when a concurrent
+    # publish claims the same idempotency key between this transaction's step-1
+    # SELECT and its step-7 INSERT. `BEGIN IMMEDIATE` (store.rs:954) takes the write
+    # lock for the whole transaction, so no other connection can commit in that
+    # window: every loser instead finds the record at step 1 and is refused there.
+    # The deterministic route is closed too -- step 1 DELETEs an expired record for
+    # the key precisely so the claim cannot collide with a stale row.
+    # WHAT CARRIES THIS LABEL is the `BEGIN IMMEDIATE` argument above, and nothing
+    # else. A corroborating observation, offered as corroboration and NOT as proof:
+    # the sibling GUARD mutant at :1284:29 is CAUGHT while this BODY mutant is
+    # MISSED (both verdicts are in the committed ledger). That pattern is CONSISTENT
+    # with a branch that never executes -- but it does not discriminate, because it
+    # is equally consistent with a branch that does execute and whose flip nothing
+    # asserts. An earlier draft of this comment called it "THE TELL ... in the ledger
+    # rather than argued", which overstated it into evidence it cannot be.
+    # This distinction is not pedantry here: U-544 labelled 994:35 `<` and `==`
+    # EQUIVALENT on a probe that was correct but generalised from the wrong request
+    # shape, and U-552 disproved it by killing both. A label in this list is only as
+    # good as its load-bearing argument, so that argument is named explicitly.
+    # NOTE: store.rs:1285-1287's own comment still says "A concurrent publish won
+    # the key", i.e. asserts this branch IS reachable. One of the two is wrong as
+    # written. Reconciling it means editing src/, which this unit's path grant
+    # allows only for kills -- flagged in the PR for a successor unit.
+    crates/acdp-registry-sqlite/src/store.rs:1306:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
 
   # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
   # unconditional `timeout != 0` until U-504, on the stated reasoning that "a
@@ -222,10 +300,31 @@ jobs:
   mutants:
     name: mutation oracle (scoped ratchet)
     runs-on: ubuntu-latest
-    # Measured locally at ~7 min wall-clock for this scope with -j4.
-    # The cap is generous against a slower runner but finite, so a hung run fails
-    # instead of burning the job limit.
-    timeout-minutes: 90
+    # MEASURED IN CI, against runs of this same workflow -- not scaled from a
+    # local figure, which is the wrong instrument: this job runs -j1 on a hosted
+    # runner while a developer machine runs -j4.
+    #
+    #   34834723693  213 mutants  success    86.3 min   <- 3.7 min under the cap
+    #   35038109840  213 mutants  success    71.6 min
+    #   35457316722  351 mutants  CANCELLED  90.4 min   <- hit the 90 cap
+    #
+    # THE 90 WAS ALREADY NEARLY BINDING AT 213, and nobody noticed because 86.3
+    # still passed. The comment that used to sit here claimed "~23min" for that
+    # scope; it was off by nearly 4x and had never been re-derived against an
+    # actual run of this workflow. U-552's widening to 351 is what finally pushed
+    # it over, but the headroom was already gone.
+    #
+    # 180, from 86.3 min at 213 scaled by 351/213 (~142 min) plus room for the
+    # runner-to-runner variance the two 213 runs already show (71.6 vs 86.3, a
+    # 20% spread on identical work). RAISING THE CAP IS THE CORRECT FIX AND
+    # NARROWING examine_globs IS NOT: dropping a file empties missed.txt without
+    # a single test being written, which is the exact move
+    # classify_removed_survivors.py's FILE-NOT-IN-SCOPE branch exists to catch.
+    # Still finite, so a hung run fails instead of burning the 6h job limit.
+    #
+    # RE-DERIVE THIS when the scope next changes. The figure above is a
+    # measurement with a shelf life, not a constant.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
@@ -234,7 +333,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # THE SPEC IS NOT OPTIONAL HERE, and this is the step most likely to be
       # mistaken for boilerplate. #216 is titled "mutation oracle for
-      # DIRECT-COVERAGE tests". Without ACDP_SPEC_DIR, 42 of the 70 conformance
+      # DIRECT-COVERAGE tests". Without ACDP_SPEC_DIR, 63 of the 87 conformance
       # tests -- essentially every `Direct`-registered family test the coverage
       # tables name -- return before asserting anything:
       #
@@ -300,9 +399,9 @@ jobs:
       - name: cargo mutants (scope and test command come from .cargo/mutants.toml)
         env:
           # Inherited by the `cargo test` that cargo-mutants runs for each mutant,
-          # which is how the 42 fixture-replay tests above actually execute.
+          # which is how the 63 fixture-replay tests above actually execute.
           # REQUIRE mode on purpose: it turns a broken spec checkout into a hard
-          # failure instead of 42 tests silently skipping and the run still
+          # failure instead of 63 tests silently skipping and the run still
           # reporting a number.
           ACDP_SPEC_DIR: ${{ steps.spec.outputs.path }}
           ACDP_REQUIRE_CONFORMANCE: "1"
@@ -312,7 +411,17 @@ jobs:
         # mutant). Parallel jobs get separate build copies and cannot share
         # incremental artifacts, so N simultaneous rebuilds of core plus every
         # dependent crate contend for CPU and disk instead of pipelining.
-        # Sequentially the cache stays warm. The full 213-mutant scope is ~23min.
+        # Sequentially the cache stays warm.
+        #
+        # WALL CLOCK -- the "~23min for the 213 scope" this line used to carry was
+        # wrong by nearly 4x, and it was wrong because it was never checked against
+        # a run of this workflow. Two actual 213-scope CI runs took 71.6 and 86.3
+        # minutes. See the timeout-minutes block ABOVE for the measurements and for
+        # why the cap is now 180.
+        #
+        # For orientation only, NOT a basis for the cap: U-552's 351-mutant run on
+        # a developer machine took 50m51s, but at -j4. This step is -j1 on a hosted
+        # runner, so that number is not comparable and must not be scaled into one.
         run: cargo mutants -j1 || true
 
       # THE RATCHET. Four assertions, each able to fail on its own, and the
@@ -524,15 +633,70 @@ jobs:
                      "\`cargo mutants --list\` line to MUTANTS_SURVIVORS IN THE SAME" \
                      "COMMIT, with its reason on a # line beside it."
               fi
+              # A DISAPPEARED LINE IS NOT SELF-EXPLANATORY, and this block used to
+              # say so and then leave the reader to work it out: it led with
+              # "Usually GOOD NEWS -- a test now kills it. Delete the line" and
+              # only reached the drift caveat afterwards. A reader who acts on the
+              # headline deletes a LIVE survivor and drops the budget for nothing.
+              #
+              # The gate was never silent -- a drift lands in BOTH `added` and
+              # `removed`, so rc=1 below fires either way. What was missing was the
+              # EVIDENCE. outcomes.json already records every mutant in scope with
+              # its verdict, not just the survivors, and scenario.Mutant.name is
+              # byte-identical to the `cargo mutants --list` line stored in
+              # MUTANTS_SURVIVORS. So the classification is decidable from the
+              # report this run already produced, with no extra cargo invocation.
+              #
+              # The logic lives in a COMMITTED, UNIT-TESTED script rather than more
+              # shell here, and that is the point rather than tidiness: this
+              # workflow has no `pull_request` trigger, so a PR that breaks its
+              # wiring cannot turn it red -- the breakage would surface on the
+              # following Monday's cron, detached from the change that caused it.
+              # conformance_gate.rs makes the same argument in the same words and
+              # asserts this call still exists.
               if [ -n "$removed" ]; then
-                echo "::error::listed as surviving but NO LONGER survives:"
+                # THE LIST IS PRINTED HERE, BEFORE the classifier runs, and that is
+                # deliberate: if the script is missing, renamed or crashes, the
+                # operator must still learn WHICH lines vanished. A diagnostic that
+                # only exists inside the tool being diagnosed is no diagnostic.
+                echo "::error::listed as surviving but NO LONGER in missed.txt:"
                 printf '%s\n' "$removed" | sed 's/^/::error::  - /'
-                echo "::error::Usually GOOD NEWS -- a test now kills it. Delete the line" \
-                     "AND its # reason from MUTANTS_SURVIVORS so the ratchet tightens." \
-                     "This fails rather than passing quietly because a list nobody" \
-                     "prunes stops describing anything, and because a line number that" \
-                     "merely DRIFTED looks exactly like a kill -- check which it is" \
-                     "before deleting."
+
+                printf '%s\n' "$removed" > "$tmp/removed.txt"
+                crc=0
+                if [ -n "${MUTANTS_PRIOR_LEDGER:-}" ]; then
+                  python3 .github/scripts/classify_removed_survivors.py \
+                    --outcomes "$json" \
+                    --removed-file "$tmp/removed.txt" \
+                    --prior-ledger "$MUTANTS_PRIOR_LEDGER" \
+                    --committed-file "$tmp/survivors_expected.txt" \
+                    --expected-scope "$MUTANTS_EXPECTED_SCOPE" || crc=$?
+                else
+                  python3 .github/scripts/classify_removed_survivors.py \
+                    --outcomes "$json" \
+                    --removed-file "$tmp/removed.txt" \
+                    --expected-scope "$MUTANTS_EXPECTED_SCOPE" || crc=$?
+                fi
+
+                # 10 = classified, 11 = the inputs cannot support a conclusion.
+                # NEITHER IS 1 OR 2, on purpose: an unhandled Python exception exits
+                # 1 and an argparse error exits 2, so a crashed classifier would
+                # otherwise be indistinguishable from a normal classification and
+                # its silence would read as agreement.
+                case "$crc" in
+                  10) : ;;
+                  11)
+                    echo "::error::the classifier could not reach a conclusion from" \
+                         "these inputs (see above). Fix the report or" \
+                         "MUTANTS_PRIOR_LEDGER; do not delete survivor lines on the" \
+                         "strength of a count." ;;
+                  *)
+                    echo "::error::the classifier itself failed (exit $crc) rather than" \
+                         "classifying. The lines above are the raw difference and have" \
+                         "NOT been judged: none of them has been shown to be a kill." \
+                         "Fix .github/scripts/classify_removed_survivors.py -- its unit" \
+                         "tests run on every PR via the required 'tests' job." ;;
+                esac
               fi
               rc=1
             fi
