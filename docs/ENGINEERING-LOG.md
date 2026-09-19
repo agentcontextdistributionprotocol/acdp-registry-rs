@@ -89,12 +89,19 @@ Those two paths are not the alternatives they appear to be, and the control that
 it also explains why nobody noticed. The retry loop breaks on a **non-retryable** probe
 error, and a timeout is non-retryable (`ProbeError::io`:
 `retryable: stage.io_failure_may_be_transient() && !timed_out`). So when another process
-already holds the port, the first probe times out in the handshake, the loop breaks
-before its next `try_wait`, and the early-exit branch never runs **even though the child
-has already exited**. Measured with a listener that binds 18443 without accepting: the
-child exits in 0.06 s with `Address already in use`, and the test lands on the probe
-assertion, three runs of three. The early-exit message names "port in use" among its own
-causes and was unreachable for that cause.
+already holds the port *without accepting*, the first probe times out in the handshake,
+the loop breaks before its next `try_wait`, and the early-exit branch never runs **even
+though the child has already exited**. Measured with a listener that binds 18443 without
+accepting: the child exits in 0.06 s with `Address already in use`, and the test lands on
+the probe assertion, three runs of three.
+
+The qualifier is load-bearing and a first draft of this entry omitted it. A holder that
+*accepts* and closes produces `UnexpectedEof`, which **is** retryable, so the loop
+survives to its next `try_wait` and the early-exit branch fires normally — verified with
+the same harness in `accept-close` mode. So the branch that is skipped turns on whether
+the holder accepts, not on "port in use" as a cause; the likelier real holder is a server,
+which accepts. The narrower true statement is still what justifies the change: a probe
+failure can arrive with the child already dead and its output unread.
 
 The child now writes to files in the tempdir the test already owns, and the probe-failure
 assertion reads them. Output entering a panic message is capped at the **first** 64 KiB

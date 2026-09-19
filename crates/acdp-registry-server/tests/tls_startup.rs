@@ -405,12 +405,12 @@ backend = "{backend}"
             // version silently replaced it, and turning a diagnostic path into
             // a new failure mode is the wrong trade. The error path is
             // deliberately NOT identical: `wait_with_output()` panicked, while
-            // `read_child_output` substitutes a `<could not read ...>` marker,
+            // `ChildStream::read` substitutes a `<could not read ...>` marker,
             // because losing the whole diagnostic to an unreadable file is the
             // worse outcome on a path that only runs when something is already
             // wrong.
-            let stdout = read_child_output(&stdout_path);
-            let stderr = read_child_output(&stderr_path);
+            let stdout = ChildStream::read(&stdout_path);
+            let stderr = ChildStream::read(&stderr_path);
             // **Branch on the observed code.** The first version of this test
             // printed the 101 explanation for EVERY early exit, so when it
             // failed with exit 1 for an unrelated reason the message said
@@ -468,20 +468,29 @@ backend = "{backend}"
     // Those two paths are not the alternatives they look like. The loop above
     // breaks on a NON-RETRYABLE probe error, and a timeout is non-retryable
     // (`ProbeError::io`: `retryable: stage.io_failure_may_be_transient() &&
-    // !timed_out`). So when something else already holds the port, the first
-    // probe times out in the handshake, the loop breaks before its next
-    // `try_wait`, and the early-exit branch never runs EVEN THOUGH the child
-    // has already exited. Measured: a listener that binds 18443 without
-    // accepting makes the child exit in 0.06s with `Address already in use`,
-    // and the test lands here, 3 runs of 3. The non-101 message above names
-    // "port in use" as one of its causes and is unreachable for that cause.
+    // !timed_out`). So the early-exit branch can be skipped EVEN THOUGH the
+    // child has already exited: the first probe times out, the loop breaks
+    // before its next `try_wait`, and nothing ever observes the exit.
+    //
+    // Measured, and the distinction matters more than it looks. A listener
+    // holding 18443 that does NOT accept makes the child exit in 0.06s with
+    // `Address already in use`, and the test lands here, 3 runs of 3. A holder
+    // that DOES accept and then closes is a different story: the peer close is
+    // `UnexpectedEof`, which is retryable, so the loop survives to its next
+    // `try_wait` and the early-exit branch fires normally.
+    //
+    // So the reachable-ness turns on whether the holder accepts, NOT on "port
+    // in use" as a cause -- an earlier version of this comment said the latter
+    // and was too wide, since the likelier real holder is a server, which
+    // accepts. What is true is narrower and still worth the code below: a probe
+    // failure can arrive with the child already dead and its output unread.
     //
     // Read AFTER the kill so the files are as complete as they will get. The
     // child was still alive a moment ago on the `still_running` path, so its
     // last line may be torn -- said plainly below rather than left for a reader
     // to discover by disbelieving the output.
-    let child_stdout = read_child_output(&stdout_path);
-    let child_stderr = read_child_output(&stderr_path);
+    let child_stdout = ChildStream::read(&stdout_path);
+    let child_stderr = ChildStream::read(&stderr_path);
 
     // The claim and the observation are now the same thing. This message used to
     // assert a TLS connection had been established while the loop above only
@@ -494,7 +503,7 @@ backend = "{backend}"
          step failed, and all five are covered: `connect` means it never bound the port, \
          `handshake` and `exchange` indict the registry, while `config` and `task` are \
          defects in this test itself. Last probe error: {}\n\
-         {}\n\
+         {}{}\n\
          --- child stdout ---\n{child_stdout}\n\
          --- child stderr ---\n{child_stderr}",
         outcome.is_some(),
@@ -504,12 +513,24 @@ backend = "{backend}"
             .unwrap_or_else(|| "none recorded".to_string()),
         if still_running {
             concat!(
-                "The child was STILL RUNNING when this was read and was then killed, so its ",
-                "output may be incomplete and its last line may be torn. Absence of a line ",
-                "below is not proof the registry never logged it.",
+                "The child was STILL RUNNING when the probe loop gave up and was killed just ",
+                "before this read, so its output may be incomplete and its last line may be ",
+                "torn. Absence of a line below is not proof the registry never logged it.",
             )
         } else {
-            "The child had already exited when this was read, so its output below is complete."
+            concat!(
+                "The child had already exited when this was read, so the files hold everything ",
+                "it wrote.",
+            )
+        },
+        if child_stdout.is_partial() || child_stderr.is_partial() {
+            concat!(
+                " NOTE: at least one stream below is NOT shown in full -- it was truncated or ",
+                "could not be read. Each such stream says so at its own end; do not read the ",
+                "sentence above as a claim about what this message contains.",
+            )
+        } else {
+            ""
         },
     );
 
@@ -575,46 +596,98 @@ const PROBE_PATH: &str = "/livez";
 /// How much of each child stream may enter a panic message.
 ///
 /// A file has no ceiling, which is the point of writing to one -- but a panic
-/// message still has a reader. At `RUST_LOG=trace` the child writes ~35.6 KB
-/// during startup alone and ~11.1 KB more per request served, so an uncapped
-/// message is unbounded in exactly the configuration someone turns on when
-/// they are already debugging.
+/// message still has a reader.
+///
+/// **The path that actually overflows this is the retry loop, not the request
+/// this test serves.** A successful run leaves the child at ~46.7 KB at
+/// `RUST_LOG=trace`, which never reaches the cap. A run whose handshake keeps
+/// failing retries 50 times, and each failed handshake costs the child several
+/// KB: measured 343,032 B of stdout for one such run at trace. That is the
+/// case someone meets while already debugging, and it is the reason this
+/// constant exists.
 #[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
 const CHILD_OUTPUT_CAP: usize = 64 * 1024;
 
-/// Read one of the child's output files for inclusion in a panic message.
+/// One of the child's output streams, read for inclusion in a panic message.
 ///
-/// Never panics, and that is the point: this is only ever called from inside a
-/// failure path, so a second failure here would replace the diagnosis with an
-/// unrelated one. An unreadable file reports itself and lets the original
-/// assertion stand.
+/// This is an enum rather than a `String` so the message can say **which of
+/// these three things it is showing**. A caller holding only a `String` has to
+/// assert something about it, and the only sentence available was "complete" --
+/// which is false for a truncated or unreadable stream, and was being printed
+/// above the truncation marker that contradicted it.
 ///
-/// `read` + `from_utf8_lossy` rather than `read_to_string`, deliberately.
-/// `read_to_string` errors on invalid UTF-8; the pipe-based version this
-/// replaced used `from_utf8_lossy` and silently substituted replacement
-/// characters. The binary emits JSON logs so the case is remote, but a
-/// diagnostic path is the wrong place to introduce a new way to fail.
-///
-/// **The cap keeps the HEAD, not the tail, and says that it did.** This is a
-/// *startup* diagnostic: the signal is the first thing the binary said, so a
-/// tail cap would discard exactly the wrong end. An undisclosed cut is the same
-/// defect class this unit exists to remove -- and the tempdir is deleted when
-/// the test returns, so a "full log at <path>" pointer would dangle by the time
-/// anyone read it. The counts go in the message instead.
+/// Reading never panics, and that is the point: this is only ever called from
+/// inside a failure path, so a second failure here would replace the diagnosis
+/// with an unrelated one.
 #[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
-fn read_child_output(path: &std::path::Path) -> String {
-    match std::fs::read(path) {
-        Ok(raw) if raw.len() > CHILD_OUTPUT_CAP => {
-            let total = raw.len();
-            // `from_utf8_lossy` absorbs a multi-byte character cut in half by
-            // the slice, so the cap needs no char-boundary search of its own.
-            let head = String::from_utf8_lossy(&raw[..CHILD_OUTPUT_CAP]);
-            format!(
-                "{head}\n[truncated: showing the FIRST {CHILD_OUTPUT_CAP} bytes of {total}; this is a startup diagnostic, so the head is kept and the tail dropped]"
-            )
+enum ChildStream {
+    Complete(String),
+    /// `total` is the size of the file; the rendered head may be a byte or two
+    /// longer, because a multi-byte character cut by the cap becomes U+FFFD.
+    /// The disclosure therefore talks about bytes the CHILD WROTE, which is the
+    /// quantity a reader can act on, not about the length of the rendered text.
+    Truncated {
+        head: String,
+        total: usize,
+    },
+    Unreadable(String),
+}
+
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+impl ChildStream {
+    /// `read` + `from_utf8_lossy` rather than `read_to_string`, deliberately.
+    /// `read_to_string` errors on invalid UTF-8; the pipe-based version this
+    /// replaced used `from_utf8_lossy` and silently substituted replacement
+    /// characters. The binary emits JSON logs so the case is remote, but a
+    /// diagnostic path is the wrong place to introduce a new way to fail.
+    fn read(path: &std::path::Path) -> Self {
+        match std::fs::read(path) {
+            Ok(raw) if raw.len() > CHILD_OUTPUT_CAP => Self::Truncated {
+                // `from_utf8_lossy` absorbs a multi-byte character cut in half
+                // by the slice, so the cap needs no char-boundary search.
+                head: String::from_utf8_lossy(&raw[..CHILD_OUTPUT_CAP]).into_owned(),
+                total: raw.len(),
+            },
+            Ok(raw) => Self::Complete(String::from_utf8_lossy(&raw).into_owned()),
+            Err(err) => Self::Unreadable(format!("<could not read {}: {err}>", path.display())),
         }
-        Ok(raw) => String::from_utf8_lossy(&raw).into_owned(),
-        Err(err) => format!("<could not read {}: {err}>", path.display()),
+    }
+
+    /// True when this stream is not shown in full, for any reason.
+    fn is_partial(&self) -> bool {
+        !matches!(self, Self::Complete(_))
+    }
+}
+
+/// **The cap keeps the HEAD, not the tail, and says so.**
+///
+/// This is primarily a *startup* diagnostic, so the signal is usually the first
+/// thing the binary said. **That is not universally true and the cost is worth
+/// naming:** on the early-exit path the interesting line is the *last* one
+/// before the process died, and a head-keep cap would drop it. It does not in
+/// practice, because the fatal line goes to **stderr**, which is a few hundred
+/// bytes even at `RUST_LOG=trace` (measured: 200 B for a forced early exit,
+/// 0 B when the child does not die) and so is never capped. One helper with one
+/// behaviour is still right -- two reads of the same files truncating
+/// differently is the inconsistency this unit exists to remove -- but it is a
+/// trade, not a free win.
+///
+/// An undisclosed cut is the same defect class this unit exists to remove, and
+/// the tempdir is deleted when the test returns, so a "full log at <path>"
+/// pointer would dangle by the time anyone read it. The counts go in the
+/// message instead.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+impl std::fmt::Display for ChildStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Complete(text) | Self::Unreadable(text) => f.write_str(text),
+            Self::Truncated { head, total } => write!(
+                f,
+                "{head}\n[truncated: this is the first {CHILD_OUTPUT_CAP} of {total} bytes the \
+                 child wrote. The tail is dropped, not the head, because the signal in a startup \
+                 diagnostic is usually the first thing the binary said.]"
+            ),
+        }
     }
 }
 
