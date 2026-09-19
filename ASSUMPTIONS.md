@@ -4044,6 +4044,11 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 
 ## U-556 — child stdout is not drained during the probe
 
+> **Superseded — see "U-560 — resolution of U-556's 'child stdout is not drained' entry" below.**
+> The reasoning in this entry held up; two figures in it did not. The `~16 KiB` pipe buffer and the
+> "truncated 64 KiB" wording are both corrected there, with fresh measurements. This entry is left
+> as written because the file is cumulative.
+
 - **Plan:** `plans/u556-tls-startup-handshake.md`
 - **Assumed:** exactly one HTTP request is ever issued, so `TraceLayer`'s two log events
   (`crates/acdp-registry-core/src/lib.rs:300-302`) cannot fill the child's ~16 KiB pipe buffer.
@@ -4128,3 +4133,51 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   ship gate in the plan (`grep -c 'U-560' docs/ENGINEERING-LOG.md` ≥ 1 before merge, and phase 1
   must not merge without phase 4).
 - **Status:** UNCONFIRMED
+
+## U-560 — resolution of U-556's "child stdout is not drained" entry
+
+- **Plan:** `plans/u560-honest-test-infrastructure.md`
+- **Resolves:** the `NEEDS-CHANGE` entry above (*"U-556 — child stdout is not drained during the
+  probe"*). This is an APPENDED resolution, not a rewrite: that entry's `Status:` block carries
+  measurements worth keeping, and this file is cumulative.
+- **Done:** the child now writes stdout and stderr to files in the tempdir the test already owns,
+  so the decision that entry recorded — *whether* to drain — no longer exists to be made. Request
+  count, retry policy and `RUST_LOG` stop mattering simultaneously. The coupling that entry warned
+  about ("the two are one decision, not two") is severed rather than documented.
+- **One sentence in that entry is wrong and could not be corrected in place without rewriting it,
+  so it is corrected here:** it says the structural fix improves diagnostics because *"today a
+  wedged child yields a truncated 64 KiB"*. A pipe does not truncate — it **blocks the writer**.
+  And on the early-exit branch the child has already exited, so `wait_with_output()` drains to EOF
+  and gets everything. The real gap is the opposite one: a genuinely wedged child never exits, so
+  `try_wait` never returns `Some`, that call is never reached, and the test falls through to the
+  probe assertion carrying **zero** child bytes. That is what phase 3 of this unit fixes, and it
+  is a larger gain than the pipe swap.
+- **That entry's central reasoning was RIGHT, and this unit's plan briefly talked itself out of
+  it.** It said the no-drain decision "holds only because `Exchange`-stage probe failures are
+  non-retryable... the two are one decision, not two". Measured directly rather than reasoned
+  about, 2026-09-19: a child with an **unread stdout pipe** at `RUST_LOG=trace` stops responding
+  without exiting, and the caller hits its 5s read timeout. The test issues at most one request,
+  and measured (below) it passes with a margin of exactly **one** spare request. That is a genuine
+  bound, exactly as the entry claimed; a draft of U-560's plan called it "an accident of ordering,
+  never a bound", which was wrong and is retracted here.
+- **The byte figures.** The entry's ~16 KiB / ~20 KB-per-probe figures are U-556's and were not
+  re-verified. Measured fresh 2026-09-19 (debug binary, default features, TLS on, sqlite,
+  `RUST_LOG=trace`): forced early exit **200 B**, all of it stderr, stdout 0; successful TLS
+  startup **~35.6 KB** (35,576 / 35,588 / 35,600 / 35,610 B across runs); startup plus one probe
+  by the test's own rustls client **46,708 / 46,710 / 46,743 B**, i.e. ~11.1 KB per probe. The
+  unread pipe was observed stopping at exactly **65,536 B**, and per-request cost is constant to
+  within two bytes across eight requests, so the ~29.9 KB left after startup holds **two** probes
+  and the **third** wedges. Startup alone never wedges — served requests do.
+- **RETRACTION, and it is a retraction of a retraction — held to the standard of the claim it
+  overturns.** An earlier draft of this entry asserted "three requests served, the fourth wedges"
+  and "by the moment a single probe returned, **96,573 B**", and built on the second of those a
+  paragraph asking why a pipe-bound child keeps serving *past* the 64 KiB ceiling. **All three are
+  withdrawn.** 96,573 B was never a one-probe figure: one probe leaves the child at 46.7 KB (real
+  client) or 51.6 KB (a heavier OpenSSL client), both **under** the ceiling, so nothing ever serves
+  past it and the phenomenon I set out to explain does not occur. The "three requests" figure came
+  from a Python/OpenSSL client costing ~16.1 KB per request, not the ~11.1 KB the real probe costs;
+  that client's own wedge point is **one** request served, the second stalling. Three instruments
+  gave three different answers (3, 2, 1) because each measured a **different client**, which the
+  original claim never named — the request count is not a property of the server alone. The figure
+  that belongs here is the one for the client this test actually uses.
+- **Status:** CONFIRMED (2026-09-19) — superseded by the change; nothing further to decide.

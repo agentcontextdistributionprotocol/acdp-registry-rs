@@ -338,10 +338,56 @@ backend = "{backend}"
 
     // Captured, not discarded: in CI the panic message is usually the only
     // artifact anyone reads, so a failure has to carry the binary's own output.
+    //
+    // **Files, not pipes.** A pipe couples this test to how much the child says.
+    // That coupling was documented as safe because "only one request is ever
+    // issued", and measured, that is exactly right -- the margin is just far
+    // thinner than the note implied. With `RUST_LOG=trace`, which the child
+    // inherits because this test sets only `ACDP_REGISTRY_CONFIG`, and a pipe
+    // nobody reads, the child stops responding without exiting, and the probe
+    // hits its 5s read timeout. Measured, on a pipe macOS grows to 64 KiB
+    // (65,536 B exactly -- the unread pipe was observed stopping there):
+    // startup alone is ~35.6 KB, and one probe by this test's own rustls
+    // client adds ~11.1 KB (startup-plus-one-probe measured directly at
+    // 46,708 / 46,710 / 46,743 B). Per-request cost is constant to within a
+    // couple of bytes across eight requests, so the ~29.9 KB left after
+    // startup holds **two** probes and wedges on the **third**. Startup itself
+    // never wedges; it is served requests that do.
+    //
+    // This test issues at most ONE request -- only `Connect`/`Handshake` probe
+    // failures retry, and neither issues HTTP -- so it passes with a margin of
+    // exactly one spare request. That is a real bound, not luck, but it is a
+    // bound held in place by the retry policy in a different function, and
+    // nothing tells whoever relaxes that policy what it costs. Files remove
+    // the dependence entirely.
+    //
+    // A file has no ceiling and never blocks the writer, so request count,
+    // retry policy and `RUST_LOG` all stop mattering at once -- the class goes,
+    // not the instance. The tempdir these live in is alive for the whole test
+    // (`dir`, above), and the parent can read them at any point, whether or not
+    // the child has exited. A draining reader thread was rejected: more
+    // machinery, still bounded, and it would leave the retry policy and the
+    // stdout decision coupled.
+    let stdout_path = dir.path().join("registry.stdout");
+    let stderr_path = dir.path().join("registry.stderr");
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_acdp-registry"))
         .env("ACDP_REGISTRY_CONFIG", &cfg_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(
+            std::fs::File::create(&stdout_path).unwrap_or_else(|e| {
+                panic!(
+                    "create the child's stdout file at {}: {e}",
+                    stdout_path.display()
+                )
+            }),
+        ))
+        .stderr(std::process::Stdio::from(
+            std::fs::File::create(&stderr_path).unwrap_or_else(|e| {
+                panic!(
+                    "create the child's stderr file at {}: {e}",
+                    stderr_path.display()
+                )
+            }),
+        ))
         .spawn()
         .expect("spawn the registry binary");
 
@@ -352,9 +398,19 @@ backend = "{backend}"
     let (mut outcome, mut last_err) = (None::<TlsProbe>, None::<ProbeError>);
     for _ in 0..50 {
         if let Some(status) = child.try_wait().expect("try_wait") {
-            let out = child.wait_with_output().expect("collect output");
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            // The child has exited, so both files are complete -- no flush or
+            // ordering hazard on this path. `read` + `from_utf8_lossy` rather
+            // than `read_to_string`, to preserve the old UTF-8 handling exactly:
+            // `read_to_string` would ERROR on invalid UTF-8 where the pipe
+            // version silently replaced it, and turning a diagnostic path into
+            // a new failure mode is the wrong trade. The error path is
+            // deliberately NOT identical: `wait_with_output()` panicked, while
+            // `read_child_output` substitutes a `<could not read ...>` marker,
+            // because losing the whole diagnostic to an unreadable file is the
+            // worse outcome on a path that only runs when something is already
+            // wrong.
+            let stdout = read_child_output(&stdout_path);
+            let stderr = read_child_output(&stderr_path);
             // **Branch on the observed code.** The first version of this test
             // printed the 101 explanation for EVERY early exit, so when it
             // failed with exit 1 for an unrelated reason the message said
@@ -386,12 +442,12 @@ backend = "{backend}"
             // listener is not up YET. An exchange failure means TLS already
             // worked, so retrying cannot help, and it wastes five seconds.
             //
-            // This rule USED to be documented as also protecting the child's
-            // undrained stdout pipe. Measured, that justification was wrong: the
-            // pipe grows to 64 KiB, and 50 retried requests at the default log
-            // filter emit ~40 KB and still pass. The variable that actually fills
-            // it is RUST_LOG, which the child inherits -- one probe at `trace`
-            // already uses ~20 KB. See the U-556 follow-up note on `tls_probe`.
+            // That is the whole justification now, and it is enough. This rule
+            // was twice documented as ALSO protecting the child's undrained
+            // stdout pipe -- first as its purpose, then as a correction that
+            // still discussed pipe pressure. There is no pipe to protect: the
+            // child writes to files (see the spawn above), so nothing about
+            // this rule depends on how much it says.
             Err(err) if err.retryable => last_err = Some(err),
             Err(err) => {
                 last_err = Some(err);
@@ -482,6 +538,26 @@ backend = "{backend}"
 #[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
 const PROBE_PATH: &str = "/livez";
 
+/// Read one of the child's output files for inclusion in a panic message.
+///
+/// Never panics, and that is the point: this is only ever called from inside a
+/// failure path, so a second failure here would replace the diagnosis with an
+/// unrelated one. An unreadable file reports itself and lets the original
+/// assertion stand.
+///
+/// `read` + `from_utf8_lossy` rather than `read_to_string`, deliberately.
+/// `read_to_string` errors on invalid UTF-8; the pipe-based version this
+/// replaced used `from_utf8_lossy` and silently substituted replacement
+/// characters. The binary emits JSON logs so the case is remote, but a
+/// diagnostic path is the wrong place to introduce a new way to fail.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+fn read_child_output(path: &std::path::Path) -> String {
+    match std::fs::read(path) {
+        Ok(raw) => String::from_utf8_lossy(&raw).into_owned(),
+        Err(err) => format!("<could not read {}: {err}>", path.display()),
+    }
+}
+
 /// The name the client verifies the certificate against. Must match the SAN the
 /// test's `rcgen` cert is generated for; the socket still connects to 127.0.0.1.
 #[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
@@ -505,12 +581,17 @@ struct TlsProbe {
 
 /// Which step of the probe failed.
 ///
-/// An enum rather than a `&'static str` on purpose. The retry rule below is
-/// load-bearing -- it is what keeps "only one HTTP request is ever issued" true,
-/// which in turn is why this test does not need to drain the child's stdout. A
-/// stringly-typed stage would let a single typo at any call site (`"Exchange"`,
-/// `"exchg"`) silently flip an exchange error to retryable, and neither the
-/// compiler nor the suite would notice. Spelled this way, it is unspellable.
+/// An enum rather than a `&'static str` on purpose. The retry rule below decides
+/// whether a failed probe is worth another pass, and a stringly-typed stage would
+/// let a single typo at any call site (`"Exchange"`, `"exchg"`) silently flip an
+/// exchange error to retryable, with neither the compiler nor the suite noticing.
+/// Spelled this way, it is unspellable.
+///
+/// This docstring used to add that the rule "is what keeps *only one HTTP request
+/// is ever issued* true, which in turn is why this test does not need to drain the
+/// child's stdout". The second half is gone: the child's output goes to files, so
+/// draining is not a thing this test does or needs. The first half was true and is
+/// simply no longer load-bearing for anything.
 #[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
@@ -542,13 +623,12 @@ impl Stage {
     /// only thing another pass of the poll loop could fix. An exchange failure
     /// means TLS already worked, so retrying cannot help.
     ///
-    /// **This rule is NOT what protects the child's undrained stdout**, despite an
-    /// earlier comment here saying so. Measured: the pipe grows to 64 KiB and 50
-    /// retried requests at the default filter emit ~40 KB, well under it. The real
-    /// exposure is `RUST_LOG`, inherited by the child -- at `trace` a single probe
-    /// uses ~20 KB and 50 would wedge. A `matches!` arm cannot gate that anyway;
-    /// the structural fix is file-backed child stdio, which touches the protected
-    /// early-exit block and so belongs to a follow-up unit, not this one.
+    /// Nothing here has anything to do with the child's stdout any more. Two
+    /// earlier versions of this comment said it did -- one claiming this rule
+    /// protected an undrained pipe, one correcting that while still arguing
+    /// about pipe capacity. The file-backed stdio it called a follow-up unit is
+    /// the spawn above, so the question is closed rather than re-answered: a
+    /// file has no ceiling and never blocks its writer.
     fn io_failure_may_be_transient(self) -> bool {
         matches!(self, Self::Connect | Self::Handshake)
     }
