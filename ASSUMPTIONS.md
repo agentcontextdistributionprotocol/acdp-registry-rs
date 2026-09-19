@@ -4065,8 +4065,10 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   one request.
 - **Blast radius if wrong:** the child could block on a full pipe and the test would hang until
   the 5s socket timeout, then report `[exchange]`.
-- **Status:** **NEEDS-CHANGE** (2026-09-16, Opus under `/reconcile`) — does **not** block shipping
-  U-556; filed as a follow-up. The analysis refuted this entry's own premise on two counts.
+- **Status:** **RESOLVED** (2026-09-19, U-561) — the follow-up landed; see the U-561 section at
+  the end of this file for the evidence. Superseded text, kept because this file is cumulative:
+  *"**NEEDS-CHANGE** (2026-09-16, Opus under `/reconcile`) — does **not** block shipping
+  U-556; filed as a follow-up."* The analysis refuted this entry's own premise on two counts.
   (a) The ~16 KiB figure is the *initial* pipe allocation; macOS grows it to **64 KiB**, measured at
   65,531/65,536 B. At the default log filter 50 retried requests emit ~40 KB and the test **still
   passes** — so the hazard documented here does not fire on the variable it blames.
@@ -4227,3 +4229,105 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   original claim never named — the request count is not a property of the server alone. The figure
   that belongs here is the one for the client this test actually uses.
 - **Status:** CONFIRMED (2026-09-19) — superseded by the change; nothing further to decide.
+
+## U-561 — open entries whose named trigger has already fired (lane-2, 2026-09-19)
+
+Scope: this file's open status declarations, plus the `docs/ENGINEERING-LOG.md` cross-references
+into it. **Everything here is appended.** The single in-place edit is the status *token* on
+U-556's entry above — lane-2's own entry, per U-507's precedent of rewriting the token only — and
+the superseded text is preserved inline there rather than deleted.
+
+### The census, and why three earlier counts were all unfit
+
+**Measured on `723fba8`: 4,229 lines, 17 open declarations** — 14 `UNCONFIRMED`, 2 `OPEN`,
+1 `NEEDS-CHANGE`. Three other figures were in play and none survives:
+
+- **37** — `grep -c UNCONFIRMED`. **28 of the 37 are prose.**
+- **9** — an anchored `^- \*\*Status:\*\* UNCONFIRMED`. A **2.9x undercount**, and it failed for
+  the reason U-507 already documented at length in this file: statuses here also appear
+  mid-prose-line, parenthesised (`**Status (updated …):**`), spelled `**Status of the original
+  assumption:`, with the token **wrapped onto the next line**, and as a bullet or heading label
+  with **no `Status` word at all**. The pattern was derived from the entries lane-2 had written
+  itself, which is exactly the shape that misses what somebody else wrote.
+- **26** — a first corrected extractor. It **overcounted**: a 400-char window bled into the
+  following line, and U-507's `**UNCONFIRMED → CONFIRMED.**` resolution headings — which are
+  *closures* — read as open.
+
+The extractor that produced 17 resolves `A → B` transitions to `B`, reads only the status span,
+and was **self-tested against 9 known-closed and 17 known-open fixtures before its number was
+quoted**. Completeness was then checked from the other side: every one of the 31 lines carrying an
+open token that the census did *not* flag was read individually.
+
+**Method note for whoever counts next.** Do not write a fresh pattern. U-507's census saved this
+unit from shipping a 2.9x undercount, and this entry exists to do the same again: the count is
+only as wide as its pattern, and agreement between two methods that share an extractor is
+structural, not corroboration.
+
+### Settled — trigger demonstrably fired (1 of 17)
+
+- **U-556 — "child stdout is not drained during the probe"** (`NEEDS-CHANGE` → `RESOLVED`). The
+  structural fix that entry specified — *"give the child file-backed stdio in the existing tempdir
+  instead of pipes"* — **landed in U-560** (`723fba8`, PR #327), together with the probe-path
+  diagnostic. The resolution entry appended by U-560 already states *"Resolves: the
+  `NEEDS-CHANGE` entry above"*; what was stale was the status line itself, 110 lines above it,
+  which still read `NEEDS-CHANGE` with nothing pointing forward.
+
+### Verified still open — the trigger has NOT fired (16 of 17)
+
+Evidence recorded so the next pass does not re-derive it. **Two of these are near-misses that a
+single grep would have closed wrongly:**
+
+- **`#205` — "there is no `ETag` anywhere"**: `git grep -il etag` **does** return a file. It is a
+  **comment** at `handlers/meta.rs` (*"the 404 carries no ETag"*) which **corroborates** the entry.
+  No ETag is emitted. Positive control: `cache-control` matches three files, so the search works.
+- **`predecessor_admission` — "the conformance fixtures do not cover the RFC-ACDP-0014 §4 reject
+  path at all"**: conformance now cites *"RFC-ACDP-0014 §4/§5"* in several places. But `rev-001`
+  is a **single-vector ACCEPT golden** for §5 step 2 (a revocation must not be signed by the key it
+  revokes); it is **not** the §4 **reject** path for predecessor admission. Same section label,
+  different path. The entry's upstream citation
+  `acdp-server-0.10.0/src/registry/server.rs:716-727` is **exact**, and immutable — it names a
+  pinned version, so it cannot decay.
+
+Also verified as still-true: `playground.refuse_on_no_live_pin` does not exist (`PlaygroundConfig`
+carries exactly `enabled`, `pinned_keys`, `pinned_only`; positive control `pinned_keys` matches
+three files); `validate_config` still only checks `.trim().is_empty()` on the EdDSA PEM and never
+parses one; `/log/checkpoint` still inherits `private` via `if_not_present`, and `handlers/log.rs`
+still sets no cache header.
+
+The remaining eleven are gated on a human ruling, an operator observation, a coordinator decision
+or the scheduling of another unit. None has fired. One of them (`U-513`) waits on the settings
+decision that is U-562 — which is itself blocked on a token nobody has granted, so it cannot fire.
+
+### Restated — an open entry that named nothing which could close it
+
+- **`predecessor_admission` enforcement: store-level coverage, not end-to-end wiring.** This entry
+  carried **no trigger at all** — no `Settled by:`, no owner, no closure condition — so it was open
+  by construction rather than by evidence. That is the same defect as a status whose trigger has
+  fired, pointed the other way: in both cases the record asserts a state the evidence does not
+  support. **Settled by:** either a conformance fixture exercising the RFC-ACDP-0014 §4 *reject*
+  path (upstream spec issue #57), or an end-to-end HTTP test in
+  `crates/acdp-registry-server/tests/conformance.rs` superseding a key-revocation context.
+  **Owner:** whoever takes spec issue #57. **Falsifiable now:** if either exists, this closes.
+
+### Citation decay — corrected by appending, never by editing another unit's lines
+
+Line numbers into a **moving file** decay. Lane-1's refinement, adopted: a line number is still
+correct when it cites **one named commit's diff**, which is immutable; cite a **symbol or a quoted
+string** for live code.
+
+| site | cites | actually at | note |
+|---|---|---|---|
+| `docs/ENGINEERING-LOG.md` U-507 section | `ASSUMPTIONS.md:2872` | **`:2881`** | `:2872` is unrelated JSON-whitespace prose |
+| `docs/ENGINEERING-LOG.md` U-507 section | `ASSUMPTIONS.md:315` | **`:313-314`** | lands in the right entry, wrong sentence |
+| U-507's resolution of `predecessor_admission` | "status line `:569`" | **`:578`** | `:569` is prose |
+| the quickstart entry | `validate_config` (`main.rs:123`) | **`main.rs:160`** | the function moved |
+
+### One entry asserts two statuses at once
+
+**`W2-U3`** carries `- **Status:** CONFIRMED` and, on the **next line**,
+`- **Update, 2026-09-11 — PARTIALLY narrowed, still UNCONFIRMED.**` Both are the entry's own
+words. Not corrected here — it is another lane's entry and the right token is a judgement its
+owner should make — but recorded so it is not read as settled. **Settled by:** that entry's owner
+choosing one.
+
+- **Status:** CONFIRMED (2026-09-19) — census and triage are evidence, not judgement calls.
