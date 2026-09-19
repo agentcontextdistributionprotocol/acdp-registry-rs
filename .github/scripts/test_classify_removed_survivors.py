@@ -354,10 +354,18 @@ class TestKeyComponentsAreLoadBearing(Base):
         Same description in two files; the committed line names FILE_A, whose
         expression is gone. Dropping the file from the coarse key would offer
         FILE_B's mutant as a candidate for FILE_A's line.
+
+        FILE_A must keep a mutant of its OWN here -- one with a different
+        description, so it is not a coarse candidate. Without it the file
+        contributes nothing to the report and the FILE-NOT-IN-SCOPE branch
+        answers first, which would leave this test passing on a classifier whose
+        coarse key had lost its file component entirely.
         """
         old = name_for(FILE_A, 100, 9, "replace > with == in f")
         cur = report([mutant(name_for(FILE_B, 100, 9, "replace > with == in f"),
-                             "CaughtMutant", file=FILE_B, fn="f")])
+                             "CaughtMutant", file=FILE_B, fn="f"),
+                      mutant(name_for(FILE_A, 500, 9, "replace - with + in unrelated"),
+                             "CaughtMutant", file=FILE_A, fn="unrelated")])
         rc, out = self.run_script(outcomes=cur, removed=[old], prior=report([]))
         self.assertIn("NO CANDIDATE", out)
         self.assertNotIn(FILE_B, out.split("NO CANDIDATE")[0].split(old)[-1])
@@ -617,6 +625,52 @@ class TestLedgerFreshness(Base):
         self.assertIn("will not tell you to delete", out)
         self.assertNotIn("DELETE the line", out)
         self.assertEqual(rc, EXIT_CLASSIFIED)
+
+
+class TestFileLeftTheScope(Base):
+    """A file dropped from `examine_globs` empties its survivors from missed.txt
+    without a single test being written. That is the one way to make the ratchet
+    look tighter by watching less, so it must never be reported as a kill -- and
+    it must not be reported as "the expression no longer exists" either, which
+    would prescribe exactly the deletion that locks the narrowing in."""
+
+    def test_a_file_with_zero_mutants_is_named_as_a_scope_change(self):
+        gone = name_for(file=FILE_B, line=200, desc="replace > with == in h")
+        cur = report([mutant(name_for(file=FILE_A), "CaughtMutant", file=FILE_A)])
+        rc, out = self.run_script(outcomes=cur, removed=[gone])
+        self.assertIn("FILE NOT IN SCOPE", out)
+        self.assertIn(FILE_B, out)
+        # The dangerous misreading, in all three of its spellings.
+        self.assertNotIn("NO CANDIDATE", out)
+        self.assertNotIn("KILLED (proven by this run)", out)
+        self.assertIn("do NOT record it", out)
+        self.assertEqual(rc, EXIT_CLASSIFIED)
+
+    def test_a_file_still_in_scope_is_NOT_reported_as_a_scope_change(self):
+        """The discrimination, not just the new branch: same shape, same absent
+        mutant, but the file is still being examined -- so the honest reading is
+        that the expression really is gone."""
+        gone = name_for(file=FILE_A, line=999, desc="replace + with - in vanished")
+        cur = report([mutant(name_for(file=FILE_A), "CaughtMutant", file=FILE_A)])
+        rc, out = self.run_script(outcomes=cur, removed=[gone])
+        self.assertIn("NO CANDIDATE", out)
+        self.assertNotIn("FILE NOT IN SCOPE", out)
+        self.assertEqual(rc, EXIT_CLASSIFIED)
+
+    def test_the_expected_scope_guard_CANNOT_catch_this(self):
+        """Why the file check has to exist at its own level. --expected-scope
+        compares TOTALS, so narrowing examine_globs and updating
+        MUTANTS_EXPECTED_SCOPE in the same commit keeps total == expected. The
+        totals agree, the guard stays silent, and a whole file stops being
+        watched -- this must still be caught, and as CLASSIFIED, not UNSOUND."""
+        gone = name_for(file=FILE_B, line=200, desc="replace > with == in h")
+        cur = report([mutant(name_for(file=FILE_A, line=i), "CaughtMutant", file=FILE_A)
+                      for i in (10, 20, 30)])
+        rc, out = self.run_script(outcomes=cur, removed=[gone],
+                                  extra=["--expected-scope", "3"])
+        self.assertIn("FILE NOT IN SCOPE", out)
+        self.assertEqual(rc, EXIT_CLASSIFIED)
+        self.assertNotEqual(rc, EXIT_UNSOUND)
 
 
 if __name__ == "__main__":

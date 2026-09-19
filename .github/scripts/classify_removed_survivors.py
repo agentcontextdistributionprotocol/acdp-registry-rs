@@ -267,6 +267,17 @@ def classify(removed, current, prior):
         if d:
             cur_by_desc[d].append(r)
 
+    # Which files this run examined AT ALL. A committed survivor naming a file
+    # that contributed ZERO mutants is not evidence about the source -- the file
+    # left `examine_globs`. The --expected-scope guard cannot see this: it
+    # compares TOTALS, so narrowing the globs and updating MUTANTS_EXPECTED_SCOPE
+    # in one commit keeps total == expected while a whole file silently stops
+    # being watched. Reporting that as "the expression no longer exists, delete
+    # the line" would hand the reader the ratchet's own undoing dressed as
+    # routine cleanup -- narrowing scope is the one way to empty missed.txt
+    # without writing a single test.
+    cur_files = {d[0] for d in (describe(r["name"] or "") for r in current) if d}
+
     for line in removed:
         note("")
         # The workflow already printed the raw list; this is the per-line verdict.
@@ -396,9 +407,18 @@ def classify(removed, current, prior):
             for c in cands:
                 err(f"    + {c['name']}  ({c['summary']})")
             err("  ACTION: open mutants.out/diff/ for each and choose by hand.")
+        elif d and d[0] not in cur_files:
+            err(f"  FILE NOT IN SCOPE: this run examined NO mutants in {d[0]} at "
+                "all, so the report cannot speak to this line. The expression may "
+                "still be present and still be ALIVE; what changed is "
+                "examine_globs, not the source.")
+            err("  ACTION: restore the file to examine_globs in .cargo/mutants.toml. "
+                "If dropping it was deliberate, delete the line AND say in the same "
+                "commit that this file is no longer watched -- but do NOT record it "
+                "as a kill, and do not let the survivor budget fall on its account.")
         else:
-            err("  NO CANDIDATE: the mutable expression no longer exists in the "
-                "source at all.")
+            err("  NO CANDIDATE: the file is still in scope, but the mutable "
+                "expression no longer exists in the source at all.")
             err("  ACTION: delete the line and record IN THE SAME COMMIT what "
                 "removed the expression.")
 

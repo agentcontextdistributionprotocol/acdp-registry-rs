@@ -46,7 +46,7 @@ env:
   # or deleted -- the survivor count falls with it, and a `<=` budget would read
   # that as an improvement. This assertion is what makes the budget below mean
   # anything.
-  MUTANTS_EXPECTED_SCOPE: "213"
+  MUTANTS_EXPECTED_SCOPE: "351"
 
   # The ONE committed ledger that a drifted survivor line is paired against, to
   # recover its identity (enclosing function + fn-relative offset + column, and
@@ -58,12 +58,21 @@ env:
   # which would trip the classifier's own duplicate-name assertion on every run.
   # docs/mutation-runs/README.md indexes which ledgers are CURRENT, in prose;
   # this variable is the machine-readable half of that index.
-  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/u551-core-scope-213-outcomes.json"
+  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/u552-union-scope-351-outcomes.json"
 
   # Surviving mutants at that sha. Each is enumerated with its own written reason
   # below; this number is the machine-readable half of that list. It ratchets DOWN
   # as survivors are killed and must never be raised without a reason recorded in
   # the same commit.
+  #
+  # 5 -> 7 (U-552). A RAISE, and the first one this history records. The scope
+  # widened 213 -> 351 by adding sqlite/src/store.rs, which brought 138 previously
+  # unwatched mutants under the gate. Six of that file's eight survivors were PAID
+  # OFF with tests (see .cargo/mutants.toml's kill list); the two that remain are
+  # not killable by any test -- one equivalent, one unreachable by design -- so
+  # they are carried with written reasons. Per-mutant the ratchet TIGHTENED,
+  # 5/213 = 2.3% -> 7/351 = 2.0%, but the budget itself went UP and this line says
+  # so rather than hiding the direction behind the rate.
   #
   # 8 -> 5 (U-521). THREE MUTANTS RETIRED, at TWO sites -- the count is three
   # because `lifecycle_outcome` emits two mutants at one line. U-521's assign said
@@ -91,8 +100,11 @@ env:
   # data-integrity hole; this is a denial of function. Worth fixing either way, but
   # not the same finding.
   #
-  # WHAT IS LEFT IS FIVE, AND ALL FIVE ARE EQUIVALENT MUTANTS -- there is no longer
-  # any survivor in this scope blocked on missing infrastructure. That is the real
+  # WHAT WAS LEFT AT THE 213 SCOPE WAS FIVE, AND ALL FIVE WERE EQUIVALENT MUTANTS
+  # -- no survivor in that scope was blocked on missing infrastructure. (U-552:
+  # the scope is now 351 and the list is SEVEN. The five below are unchanged and
+  # still equivalent; the two added by store.rs are one equivalent and one
+  # UNREACHABLE-BY-DESIGN, which is a third category this paragraph predates.) That is the real
   # shape of this ratchet now: it cannot fall further without either a code change
   # or search beginning to serve restricted rows.
   #
@@ -131,9 +143,13 @@ env:
   #     is not reachable deterministically, and a test that waited for it would be
   #     a flake generator.
   #
-  # NEW FLOOR: 5. Nothing here is retired by more test infrastructure -- all five
-  # are equivalent. Two (the parse_visibility arms) become real coverage gaps if
-  # search ever serves restricted rows, and at that point this drops to 3.
+  # FLOOR AT THE 213 SCOPE: 5. Nothing there is retired by more test
+  # infrastructure -- all five are equivalent. Two (the parse_visibility arms)
+  # become real coverage gaps if search ever serves restricted rows, and at that
+  # point those five drop to 3.
+  #
+  # CURRENT FLOOR: 7, at the 351 scope. See the 5 -> 7 entry above for why the
+  # two store.rs additions are carried rather than killed.
   #
   # MEASURED at 8768b07 over six verified shards, not one run: 213 total / 134
   # caught / 5 missed / 73 unviable / 1 timeout. Every shard's outcomes.json
@@ -167,12 +183,25 @@ env:
   # reason HERE rather than only in the prose above -- an identifier and its
   # justification that live in two places drift apart, and the drift is invisible.
   #
-  # MEASURED, not transcribed: a full 213-mutant run at this commit's tree with
+  # MEASURED, not transcribed: a full 351-mutant run at this commit's tree with
   # the CI-equivalent environment (ACDP_SPEC_DIR at the pinned spec revision and
-  # ACDP_REQUIRE_CONFORMANCE=1 -- without those, 42 fixture-replay tests skip and
-  # the survivor set is wider than CI's). Result 213/134/5/73/1, `end_time`
+  # ACDP_REQUIRE_CONFORMANCE=1 -- without those, fixture-replay tests skip and the
+  # survivor set comes out wider than CI's).
+  #
+  # Result 351 / 219 caught / 7 missed / 124 unviable / 1 timeout, `end_time`
   # present, and `missed.txt`'s line count cross-checked against outcomes.json's
-  # `missed`. Re-measure with: cargo mutants -j1 && cat mutants.out/missed.txt
+  # `missed`. The run is committed at
+  # docs/mutation-runs/u552-union-scope-351-outcomes.json and is what
+  # MUTANTS_PRIOR_LEDGER points at.
+  # Re-measure with: cargo mutants -j1 && cat mutants.out/missed.txt
+  #
+  # HOW MANY TESTS THE SPEC ENV GOVERNS -- re-measured at c41bf14 by U-552:
+  # 63 of 87, NOT the "42 of 70" these comments carried for several units. The
+  # suite grew and the figure was never revisited. Reproduce with:
+  #   ACDP_REQUIRE_CONFORMANCE=1 cargo test -p acdp-registry-server \
+  #     --features storage-sqlite,playground --test conformance
+  # with ACDP_SPEC_DIR UNSET -- 63 of 87 fail with the require-mode panic; with it
+  # set to the pinned spec root, 87 pass and 0 skip.
   MUTANTS_SURVIVORS: |
     # log.rs:131:18 -- guards only `log.cache_root(...)`; `root_for` returns the
     # same root either way and append-only makes any (size -> root) pair
@@ -200,6 +229,43 @@ env:
     # reachable deterministically and a test that waited for it would be a flake
     # generator.
     crates/acdp-registry-core/src/handlers/context.rs:642:39: replace > with >= in publish_inner
+    # ----- sqlite/src/store.rs, admitted by U-552 (scope 213 -> 351) -----
+    # store.rs:994:35 -- EQUIVALENT, and by a stronger argument than the
+    # millisecond-boundary one used for context.rs:642:39 above. Step 1 first runs
+    # `DELETE ... WHERE expires_at_ms <= ?` bound to `now` (store.rs:963-966), so a
+    # row that SURVIVES that delete necessarily has `expires_at_ms >= now_ms + 1`
+    # and `expires_at > now` is unconditionally TRUE for it. `>=` is therefore true
+    # on exactly the same inputs -- no clock-resolution claim needed, because the
+    # DELETE makes the boundary case unreachable outright. Its two siblings at this
+    # same site, `> with <` and `> with ==`, were EQUIVALENT-labelled by U-544 and
+    # KILLED by U-552 once probed with a SUPERSEDING request, so this entry is what
+    # is left after that correction rather than an inherited assumption.
+    crates/acdp-registry-sqlite/src/store.rs:994:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
+    # store.rs:1306:35 -- UNREACHABLE BY DESIGN, not a coverage gap. It sits inside
+    # the `if inserted == 0` branch (store.rs:1284), reached only when a concurrent
+    # publish claims the same idempotency key between this transaction's step-1
+    # SELECT and its step-7 INSERT. `BEGIN IMMEDIATE` (store.rs:954) takes the write
+    # lock for the whole transaction, so no other connection can commit in that
+    # window: every loser instead finds the record at step 1 and is refused there.
+    # The deterministic route is closed too -- step 1 DELETEs an expired record for
+    # the key precisely so the claim cannot collide with a stale row.
+    # WHAT CARRIES THIS LABEL is the `BEGIN IMMEDIATE` argument above, and nothing
+    # else. A corroborating observation, offered as corroboration and NOT as proof:
+    # the sibling GUARD mutant at :1284:29 is CAUGHT while this BODY mutant is
+    # MISSED (both verdicts are in the committed ledger). That pattern is CONSISTENT
+    # with a branch that never executes -- but it does not discriminate, because it
+    # is equally consistent with a branch that does execute and whose flip nothing
+    # asserts. An earlier draft of this comment called it "THE TELL ... in the ledger
+    # rather than argued", which overstated it into evidence it cannot be.
+    # This distinction is not pedantry here: U-544 labelled 994:35 `<` and `==`
+    # EQUIVALENT on a probe that was correct but generalised from the wrong request
+    # shape, and U-552 disproved it by killing both. A label in this list is only as
+    # good as its load-bearing argument, so that argument is named explicitly.
+    # NOTE: store.rs:1285-1287's own comment still says "A concurrent publish won
+    # the key", i.e. asserts this branch IS reachable. One of the two is wrong as
+    # written. Reconciling it means editing src/, which this unit's path grant
+    # allows only for kills -- flagged in the PR for a successor unit.
+    crates/acdp-registry-sqlite/src/store.rs:1306:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
 
   # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
   # unconditional `timeout != 0` until U-504, on the stated reasoning that "a
@@ -234,7 +300,12 @@ jobs:
   mutants:
     name: mutation oracle (scoped ratchet)
     runs-on: ubuntu-latest
-    # Measured locally at ~7 min wall-clock for this scope with -j4.
+    # Measured locally at ~7 min wall-clock at the OLD 213 scope with -j4. At the
+    # current 351 scope the same machine took 50m51s (U-552's committed ledger).
+    # The cap below is therefore no longer backed by a measurement with headroom
+    # to spare -- it is an expectation. The first scheduled run at 351 is what
+    # turns it back into a measurement; if it approaches the cap, raise the cap
+    # rather than narrowing the scope to fit it.
     # The cap is generous against a slower runner but finite, so a hung run fails
     # instead of burning the job limit.
     timeout-minutes: 90
@@ -246,7 +317,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # THE SPEC IS NOT OPTIONAL HERE, and this is the step most likely to be
       # mistaken for boilerplate. #216 is titled "mutation oracle for
-      # DIRECT-COVERAGE tests". Without ACDP_SPEC_DIR, 42 of the 70 conformance
+      # DIRECT-COVERAGE tests". Without ACDP_SPEC_DIR, 63 of the 87 conformance
       # tests -- essentially every `Direct`-registered family test the coverage
       # tables name -- return before asserting anything:
       #
@@ -312,9 +383,9 @@ jobs:
       - name: cargo mutants (scope and test command come from .cargo/mutants.toml)
         env:
           # Inherited by the `cargo test` that cargo-mutants runs for each mutant,
-          # which is how the 42 fixture-replay tests above actually execute.
+          # which is how the 63 fixture-replay tests above actually execute.
           # REQUIRE mode on purpose: it turns a broken spec checkout into a hard
-          # failure instead of 42 tests silently skipping and the run still
+          # failure instead of 63 tests silently skipping and the run still
           # reporting a number.
           ACDP_SPEC_DIR: ${{ steps.spec.outputs.path }}
           ACDP_REQUIRE_CONFORMANCE: "1"
@@ -324,7 +395,15 @@ jobs:
         # mutant). Parallel jobs get separate build copies and cannot share
         # incremental artifacts, so N simultaneous rebuilds of core plus every
         # dependent crate contend for CPU and disk instead of pipelining.
-        # Sequentially the cache stays warm. The full 213-mutant scope is ~23min.
+        # Sequentially the cache stays warm.
+        #
+        # WALL CLOCK AT THE CURRENT SCOPE -- the 213-scope "~23min" this line
+        # carried is superseded. U-552's full 351-mutant local run took 50m51s
+        # (16:02:13Z -> 16:53:03Z, in the committed ledger's start_time/end_time)
+        # at -j4 on a developer machine. That is NOT a CI figure: the runner is
+        # slower and this step is -j1, so treat 50m51s as a floor, not a forecast.
+        # The timeout-minutes cap below is set from it with that asymmetry in mind
+        # and has NOT been re-derived from an actual CI run at 351.
         run: cargo mutants -j1 || true
 
       # THE RATCHET. Four assertions, each able to fail on its own, and the

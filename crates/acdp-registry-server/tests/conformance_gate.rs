@@ -2190,9 +2190,7 @@ fn classifier_wiring_violations(mutants_yml: &str) -> Vec<String> {
              paired to its new location and every drift degrades to a coarse guess."
                 .to_string(),
         ),
-        Some(p) if p.is_empty() => {
-            v.push("MUTANTS_PRIOR_LEDGER is declared but empty.".to_string())
-        }
+        Some("") => v.push("MUTANTS_PRIOR_LEDGER is declared but empty.".to_string()),
         Some(p) if p.contains('*') || p.contains('?') => v.push(format!(
             "MUTANTS_PRIOR_LEDGER is a GLOB ({p:?}). It must name exactly ONE ledger: \
              docs/mutation-runs/ also holds a VOID ledger and three SUPERSEDED shards, \
@@ -2258,6 +2256,55 @@ fn classifier_wiring_violations(mutants_yml: &str) -> Vec<String> {
         );
     }
     v
+}
+
+#[test]
+fn the_declared_prior_ledger_actually_exists() {
+    // MUTANTS_PRIOR_LEDGER is a PATH, and nothing else checks that it resolves.
+    // The ratchet fails closed if it dangles -- the classifier cannot open the
+    // file, exits non-10/11, and the workflow reports "the classifier itself
+    // failed" -- but only on the rare branch where a committed survivor vanishes.
+    // Between the rename and that branch firing, the gate looks healthy and its
+    // drift evidence is silently unavailable. The pointer is re-aimed every time
+    // the scope is re-measured (U-551 -> U-552 renamed it), so this is a live
+    // hazard, not a hypothetical one. Checking existence here moves detection to
+    // the PR that breaks it, on the required `tests` context.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let mutants_yml = std::fs::read_to_string(root.join(".github/workflows/mutants.yml"))
+        .expect("read .github/workflows/mutants.yml");
+
+    let ledger = yaml_scalar(&mutants_yml, "MUTANTS_PRIOR_LEDGER")
+        .expect("mutants.yml declares MUTANTS_PRIOR_LEDGER");
+    assert!(
+        !ledger.is_empty(),
+        "MUTANTS_PRIOR_LEDGER is declared but empty"
+    );
+    assert!(
+        root.join(ledger).is_file(),
+        "MUTANTS_PRIOR_LEDGER points at {ledger:?}, which is not a file in this repo.          A dangling ledger pointer does not fail until a committed survivor vanishes,          which may be many PRs after the rename that broke it."
+    );
+
+    // ON DISK IS NOT ENOUGH -- it must be TRACKED. CI checks out the commit, so a
+    // ledger that exists only in someone's working tree is absent there. Testing
+    // `is_file()` alone passes locally for the author and fails for everyone else,
+    // which is the worst shape a gate can have: green where it is written, red
+    // where it is enforced. `git ls-files` is a second enumeration that an
+    // unstaged file cannot satisfy.
+    let tracked = std::process::Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--", ledger])
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("could not run `git ls-files` in {}: {e}", root.display()));
+    assert!(
+        tracked.status.success(),
+        "MUTANTS_PRIOR_LEDGER points at {ledger:?}, which exists on disk but is NOT \
+         tracked by git. CI checks out the commit, so the ratchet would find no ledger \
+         there while this test passes locally. `git add` it."
+    );
 }
 
 #[test]
@@ -2339,9 +2386,26 @@ fn each_classifier_wiring_invariant_is_individually_falsified() {
         );
     }
     // A glob is the one break that is an EDIT rather than a deletion.
-    let globbed = real.replace(
-        "docs/mutation-runs/u551-core-scope-213-outcomes.json",
-        "docs/mutation-runs/*-outcomes.json",
+    //
+    // The ledger path is READ OUT of the real file rather than written here as a
+    // literal. A literal pins this test to one ledger filename, and ledgers are
+    // renamed every time the scope is re-measured -- U-552 renamed it from
+    // `u551-core-scope-213` to `u552-union-scope-351`. With a literal, that
+    // rename makes `replace` a silent no-op, so `globbed == real`, no violation
+    // is produced, and the assertion fires with the message "so that invariant is
+    // decorative" -- convicting the gate of a defect that is really in this test.
+    // A falsification whose mutation never applied does not prove the invariant
+    // is dead; it proves nothing at all, which is the more dangerous of the two.
+    let ledger = yaml_scalar(&real, "MUTANTS_PRIOR_LEDGER")
+        .expect("mutants.yml declares MUTANTS_PRIOR_LEDGER");
+    assert!(
+        !ledger.is_empty() && !ledger.contains('*'),
+        "MUTANTS_PRIOR_LEDGER is {ledger:?}, which is empty or already a glob --          the glob falsification below cannot mean anything against it"
+    );
+    let globbed = real.replace(ledger, "docs/mutation-runs/*-outcomes.json");
+    assert_ne!(
+        globbed, real,
+        "substituting the ledger path {ledger:?} changed nothing, so the glob          falsification never ran. Fix THIS test, not the gate."
     );
     assert!(
         !classifier_wiring_violations(&globbed).is_empty(),

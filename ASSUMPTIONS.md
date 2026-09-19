@@ -4246,3 +4246,34 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   pre-registered (criterion 6) and which the assign's criterion 3 calls load-bearing. Widening scope
   to take it would break a criterion this unit's PR claims. Corrected comments are in the code now;
   the structural fix is a successor unit.
+
+## U-552 Phase 3 — a file leaving `examine_globs` is diagnosed as a SCOPE change, not a dead expression
+- **Plan:** `plans/u-552-widen-mutation-scope.md`
+- **Assumed:** the Phase 1 `--expected-scope` pin covered every way a committed survivor can
+  stop naming a mutant. It does not, and the gap was found by running Phase 1's own classifier
+  as a NEGATIVE CONTROL during Phase 3 — feeding it the six store.rs lines against the
+  213-scope ledger, a report that never contained that file.
+- **Chose:** classify a removed line whose file contributed **zero** mutants to the report as
+  `FILE NOT IN SCOPE`, with its own action, instead of `NO CANDIDATE → delete the line`.
+  **Why the existing pin cannot catch it:** `--expected-scope` compares TOTALS. Narrow
+  `examine_globs` and update `MUTANTS_EXPECTED_SCOPE` in the *same* commit and
+  `total == expected` still holds — the guard stays silent while a whole file stops being
+  watched, and every survivor in it is reported as an expression that "no longer exists",
+  prescribing exactly the deletion that locks the narrowing in. Dropping a file is the one
+  way to empty `missed.txt` without writing a single test, so it is the one disappearance
+  that must never read as a kill.
+- **Alternatives:** parsing `examine_globs` out of `.cargo/mutants.toml` and comparing
+  (rejected: re-implements glob semantics in a second place, and would disagree with the
+  run that actually happened — the report is the ground truth for what was examined);
+  leaving it to the human (rejected: the prior text actively argued for the wrong edit).
+- **Falsified, not merely tested:** three mutations of the new branch — deleted, condition
+  inverted, and `cur_files` forced empty — produced 2, 5 and 3 test failures respectively,
+  against 36 green on the restored file. One pre-existing test
+  (`test_the_coarse_fallback_does_not_match_across_FILES`) had a fixture in which FILE_A
+  contributed no mutants at all; it was passing for a reason it did not intend, and now
+  carries a FILE_A mutant of its own so it still tests the cross-file property.
+- **Blast radius if wrong:** a false `FILE NOT IN SCOPE` would tell a reader to restore a glob
+  that was never removed. Bounded: the branch is reached only when the report contains zero
+  mutants for that file, which the second control above confirms does not fire while the file
+  is still examined.
+- **Status:** UNCONFIRMED

@@ -89,17 +89,23 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 213 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 351 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
-# MEASURED AT a66e1f2 (unit U-540), with the command that reproduces it:
+# MEASURED AT c41bf14 (unit U-552), with the command that reproduces it:
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
 #     crates/acdp-registry-core/src/handlers/context.rs   139
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs              9
+#     crates/acdp-registry-sqlite/src/store.rs            138
 #     ----------------------------------------------------------
-#     total                                               213
+#     total                                               351
+#
+# The widening is PURELY ADDITIVE: `comm -23` of the sorted 213-mutant list
+# against the 351-mutant one is empty, so no previously-scoped mutant was lost.
+# That is checked rather than assumed, because a glob edit that silently DROPS a
+# file would also shrink the survivor count and read as an improvement.
 #
 # `MUTANTS_EXPECTED_SCOPE` in .github/workflows/mutants.yml pins exactly this
 # number, as an EQUALITY rather than a floor, and the two are checked against
@@ -111,38 +117,74 @@ copy_vcs = true
 #
 # At the ~6.2s/mutant marginal cost measured in DECISIONS.md #17 that is ~2.5h,
 # and #216 lists "blocking PRs on a full mutation run" as a non-goal. This is a
-# scheduled job over a bounded set, by design. 213 of 1427 is 14.9%.
+# scheduled job over a bounded set, by design. 351 of 1427 is 24.6%.
+# (Was 213 of 1427 = 14.9% before U-552 added sqlite/src/store.rs.)
 #
 # ---------------------------------------------------------------------------
-# sqlite/src/store.rs — EVALUATED BY U-540, MEASURED, AND DEFERRED (#307)
+# sqlite/src/store.rs — DEFERRED BY U-540, PAID DOWN, AND ADMITTED BY U-552
 # ---------------------------------------------------------------------------
 #
-# WHY IT IS NOT IN THE GLOB LIST, EVEN THOUGH THE CASE FOR IT IS GOOD. Widening
-# to include it would take the scope to 351 and the SURVIVOR COUNT PAST THE
-# BUDGET. Measured over 95 of its 138 mutants: 47 caught / 14 missed / 34
-# unviable -- a 23% survivor rate among viable mutants, extrapolating to roughly
-# 20 survivors against a budget of 5.
+# THIS IS THE UNIT THE DEFERRAL WAS WAITING FOR. The text below is kept rather
+# than deleted, because the estimate it records was wrong in an instructive
+# direction and the correction is the useful part.
 #
-# That is precisely the failure this file already warns about twelve lines
-# above: "a red check nobody can explain gets disabled, after which the real
-# regression walks through." Raising 5 -> 20 to admit a file is not a ratchet in
-# the direction mutants.yml defines ("it ratchets DOWN as survivors are killed
-# and must never be raised without a reason recorded in the same commit"), and
-# "these are real untested paths" is an argument for writing tests, not for
-# raising a budget.
+# WHAT U-540 PREDICTED. "Widening would take the scope to 351 and the survivor
+# count past the budget. Measured over 95 of its 138 mutants: 47 caught / 14
+# missed / 34 unviable -- a 23% survivor rate among viable mutants, extrapolating
+# to roughly 20 survivors against a budget of 5."
 #
-# SO THE ORDER IS: PAY FIRST, WIDEN LAST. The survivors are paid down in their
-# own units, each PR killing a slice with tests; the LAST of them adds this glob
-# with the budget unchanged. The scope pin then only ever admits code that is
-# already covered, which is the invariant that keeps the check explicable.
+# WHAT THE FULL MEASUREMENT FOUND. U-549/U-550 ran all 138 across 8 shards:
+# 79 caught / 8 missed / 51 unviable / 0 timeout. **Eight survivors, not ~20.**
+# The extrapolation was off by 2.5x because a 95-of-138 partial is not a random
+# sample of the file -- the unjudged 43 were the tail, and the survivor rate is
+# not uniform across a file's functions. A partial run extrapolates badly, and
+# the number it produced was load-bearing enough to defer a whole scope change.
+#
+# WHAT U-552 THEN DID, under this file's own "PAY FIRST, WIDEN LAST" rule:
+# killed SIX of the eight, and admitted the glob carrying TWO.
+#
+#   killed  994:35  `>` -> `<`   and  `>` -> `==`   (a keyed SUPERSEDING replay)
+#   killed  568:9   put
+#   killed  821:9   mark_superseded
+#   killed  832:9   first_version_ctx_id
+#   killed  923:9   idempotency_evict_expired
+#   carried 994:35  `>` -> `>=`  EQUIVALENT
+#   carried 1306:35 `!=` -> `==` UNREACHABLE-BY-DESIGN (behind BEGIN IMMEDIATE)
+#
+# THE BUDGET GOES UP, 5 -> 7, AND THAT IS A RAISE. Saying it "stays the same
+# because the scope grew" would be spin: the number of mutants this repo admits
+# it cannot kill went from five to seven. The aspiration stated here was that the
+# last unit would "add this glob with the budget unchanged", and that is NOT what
+# happened, because two of the eight are not killable by any test:
+#
+#   * `994:35 >= ` is true on exactly the same inputs as `>`. Step 1 first runs
+#     `DELETE ... WHERE expires_at_ms <= now`, so a surviving row necessarily has
+#     `expires_at_ms >= now_ms + 1` and `expires_at > now` is unconditionally
+#     true. There is no input that distinguishes them.
+#   * `1306:35` sits inside the `inserted == 0` branch, which `BEGIN IMMEDIATE`
+#     makes unreachable -- every would-be racer is serialised and refused at
+#     step 1 instead. Its sibling GUARD mutant at `1284:29` is CAUGHT while this
+#     body mutant is MISSED, and guard-caught/body-missed is the signature of a
+#     branch that never executes.
+#
+# Both are enumerated in MUTANTS_SURVIVORS with those reasons, so the raise is
+# two named mutants rather than a number moved. Per-mutant, the ratchet TIGHTENED:
+# 5 survivors in 213 (2.3%) -> 7 in 351 (2.0%), with 138 previously unwatched
+# mutants now watched.
+#
+# SUPERSEDED BY U-552 -- the two paragraphs that follow described the DEFERRAL,
+# and there is no longer one: store.rs is in examine_globs above and the
+# committed scope is 351. They are kept because the `--file` mechanic they
+# document is still true and still useful, not because the deferral is.
 #
 # You do NOT need this glob to work on those survivors: `--file` UNIONS with
-# this list (demonstrated below), so a local run can target the file while the
-# committed scope stays at 213.
+# this list (demonstrated below), so a local run can target a file without
+# editing the committed scope.
 #
-# THE INVENTORY IS NOT LOST WITH THIS DEFERRAL -- it is in docs/MUTATION-SCOPE-
-# CANDIDATES.md and issue #307, so the 14 known survivors are visible without a
-# red check standing in for them.
+# THE INVENTORY WAS NOT LOST WITH THAT DEFERRAL -- it was in docs/MUTATION-SCOPE-
+# CANDIDATES.md and issue #307. The "14 known survivors" that sentence counted
+# is itself now historical: the full measurement found 8, and U-552 killed 6 of
+# those, leaving 2 carried with written reasons.
 #
 # #216 step 1 scopes the oracle to "receipt/log/lineage emission, the publish
 # path, visibility filtering". Receipt, log and the publish path were already
@@ -204,7 +246,7 @@ copy_vcs = true
 #
 # WHY IT NO LONGER APPLIES: the unit holding context.rs finished and landed. The
 # file is now stable enough to key a budget to, and it is the densest core logic
-# in the scope — 139 of the 213 mutants, and the home of four of the five
+# in the core scope — 139 of the 351 mutants, and the home of four of the seven
 # budgeted survivors enumerated in mutants.yml. Excluding it would have left the
 # ratchet measuring the thin end of the codebase.
 #
@@ -232,6 +274,7 @@ examine_globs = [
     "crates/acdp-registry-core/src/receipt.rs",
     "crates/acdp-registry-core/src/handlers/log.rs",
     "crates/acdp-registry-core/src/handlers/context.rs",
+    "crates/acdp-registry-sqlite/src/store.rs",
 ]
 
 # ---------------------------------------------------------------------------
@@ -291,7 +334,12 @@ minimum_test_timeout = 300
 #
 #    The constant 13 is a floor: the `delete field … from struct … expression`
 #    mutants in acdp-registry-store are emitted regardless of the regex. So
-#    `--examine-re` cannot be trusted to isolate one mutant. `examine_globs` above
+#    `--examine-re` cannot be trusted to isolate one mutant WHEN RUN UNDER
+#    `--no-config` (which is how the 13 above were measured). Under the
+#    committed config the fail-open floor is ZERO, and a fully anchored,
+#    regex-escaped `-F '^<verbatim --list line>$'` isolates exactly one --
+#    measured in U-552 on six real mutants, and it is the escape hatch to use
+#    when a single mutant must be re-run by hand. `examine_globs` above
 #    does NOT have this defect — it filters those 13 out correctly, which is a
 #    further reason the scope is expressed as globs here rather than as a regex.
 #    To isolate a single mutant, use `--file` plus a line-scoped check of `--list`.
