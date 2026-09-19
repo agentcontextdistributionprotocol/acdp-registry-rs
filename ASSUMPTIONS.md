@@ -3986,3 +3986,23 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   Postgres-specific regression existed. (This entry's reasoning about `spin` was already
   corrected in place by U-557 — see the "Alternatives" bullet above, which records that
   `spin` IS compiled into that binary via a second parent. Nothing further to add here.)
+
+## U-526 — percent-encoding is hand-rolled rather than taking a dependency
+- **Plan:** plans/u-526-publish-201-location.md
+- **Assumed:** the `Location` encoding `pub-007` requires can be implemented correctly in this
+  repo without a percent-encoding crate.
+- **Chose:** hand-roll it. The rule set is five lines of spec over a two-character alphabet —
+  `:` → `%3A`, `/` → `%2F`, uppercase hex, the leading `/contexts/` left unencoded, authority
+  and uuid not further encoded — and `pub-007` supplies an exact positive vector plus **three
+  negative ones** (colon-only-encoded, fully unencoded, wrong-ctx_id) to test against. A
+  general percent-encoding crate would also encode more than the spec asks unless configured
+  with a custom set, so the "safe default" is not actually the default.
+- **Alternatives:** add `percent-encoding`. Rejected on trade, not on principle: a new external
+  dependency in a workspace `cargo-deny` now gates (required context since 2026-09-16) is a
+  supply-chain and yanked-crate surface for ~15 lines of logic whose correctness the spec
+  already pins with vectors.
+- **Blast radius if wrong:** a mis-encoded `Location` is a wire defect on a public contract —
+  but it is caught by the fixture's own round-trip property (percent-decode(Location minus
+  `/contexts/`) == `body.ctx_id`) and by the three negative examples, all of which are asserted.
+  Reversing to a crate is one commit and a `Cargo.toml` line.
+- **Status:** UNCONFIRMED
