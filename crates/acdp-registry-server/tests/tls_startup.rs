@@ -64,9 +64,17 @@
 /// Two assertions, and they are reachable from different places on purpose.
 ///
 /// **Normal-vs-dev-only is readable only from the manifest.** Cargo exposes
-/// `[dev-dependencies]` to test targets, so a `rustls` that had slipped back
-/// into that section would still compile and run *here* while the shipped
-/// binary had none — no runtime check in this binary can see the difference.
+/// `[dev-dependencies]` to test targets but not to bins, so no runtime check
+/// *in this test process* can tell the two sections apart.
+///
+/// **What that does NOT mean, since an earlier version of this comment said
+/// it:** the dev-only state is not a silent one that reaches production. Since
+/// U-530, `main.rs:100` names `rustls::crypto::ring::default_provider()` in the
+/// bin itself, so moving the dependency would fail the *binary's* compile —
+/// `CARGO_BIN_EXE_acdp-registry` would not exist and every test here would be
+/// red. The scan is kept because it names the property directly and fails with
+/// a sentence instead of an `E0433` from a different crate, not because it is
+/// the only thing standing between this repo and a dev-only `rustls`.
 /// Read from the manifest rather than from `cargo tree`'s output on purpose:
 /// the manifest is declarative and order-independent, whereas a scrape of
 /// output a tool formatted for human reading has to be re-verified every time
@@ -266,9 +274,10 @@ fn rustls_is_a_normal_dependency() {
 /// quietly swallow a real failure; a runtime `return` would.
 ///
 /// The excluded builds, and why each is excluded rather than fixed:
-/// - `storage-pg` needs a live database to get past storage init, and CI's
-///   `postgres` job runs only `--test pg_integration`, so this would never
-///   execute there.
+/// - `storage-pg` needs a live database to get past storage init, and the one
+///   CI step that has one runs only `--test pg_integration` (`ci.yml:372-380`,
+///   a step in the single `test` job -- there is no separate `postgres` job),
+///   so this would never execute there.
 /// - **no storage backend at all** (`--no-default-features`, a real CI
 ///   configuration) exits 1 at startup with `no storage backend feature
 ///   enabled` before reaching any TLS work — measured in U-532.
@@ -436,6 +445,11 @@ backend = "{backend}"
         match tls_probe(port, cert.cert.der()).await {
             Ok(probe) => {
                 outcome = Some(probe);
+                // Clear the retry history. A probe that eventually succeeded
+                // has no "last error", and leaving one here let the assertion
+                // below quote a stale retry-loop failure as its diagnosis of a
+                // run whose probe actually worked.
+                last_err = None;
                 break;
             }
             // Only a connect/handshake failure is worth retrying: it means the
@@ -496,21 +510,43 @@ backend = "{backend}"
     // assert a TLS connection had been established while the loop above only
     // completed a bare TCP connect, so a rustls handshake regression left it
     // green -- anything that bound the port satisfied it (U-556).
+    // **Two different failures share this assertion and need different
+    // sentences.** No completed probe is one thing; a probe that SUCCEEDED and
+    // a registry that then exited is another -- and the second is precisely
+    // what the `still_running` conjunct exists to catch. Reporting it as "the
+    // probe never succeeded" contradicts the `probe_ok=true` printed beside it
+    // and the child's own 200 in the output below.
+    let headline = if outcome.is_some() {
+        format!(
+            "the TLS probe SUCCEEDED against 127.0.0.1:{port}, and the registry then EXITED \
+             (probe_ok=true, still_running=false). The handshake is not in question here: \
+             look below for why the process died after serving a request."
+        )
+    } else {
+        format!(
+            "the TLS probe never succeeded against 127.0.0.1:{port} \
+             (probe_ok=false, still_running={still_running}). \
+             **The stage tag says where the probe stopped, not who is at fault** -- an \
+             earlier version of this message assigned blame per stage and was wrong for the \
+             commonest case. `connect`: no TCP connection completed. `handshake`: TCP \
+             connected but TLS did not finish, which INCLUDES a foreign process holding this \
+             port, so on its own it does not indict the registry. `exchange`: TLS finished \
+             and the HTTP request or response failed, which does indict whatever answered. \
+             `config` and `task` are defects in this test itself. Read the child output \
+             below before concluding the registry is at fault. Last probe error: {}",
+            last_err
+                .as_ref()
+                .map(ProbeError::describe)
+                .unwrap_or_else(|| "none recorded".to_string()),
+        )
+    };
+
     assert!(
         outcome.is_some() && still_running,
-        "the TLS probe never succeeded against 127.0.0.1:{port} \
-         (probe_ok={}, still_running={still_running}). The stage tag below says which \
-         step failed, and all five are covered: `connect` means it never bound the port, \
-         `handshake` and `exchange` indict the registry, while `config` and `task` are \
-         defects in this test itself. Last probe error: {}\n\
+        "{headline}\n\
          {}{}\n\
          --- child stdout ---\n{child_stdout}\n\
          --- child stderr ---\n{child_stderr}",
-        outcome.is_some(),
-        last_err
-            .as_ref()
-            .map(ProbeError::describe)
-            .unwrap_or_else(|| "none recorded".to_string()),
         if still_running {
             concat!(
                 "The child was STILL RUNNING when the probe loop gave up and was killed just ",
@@ -666,11 +702,16 @@ impl ChildStream {
 /// naming:** on the early-exit path the interesting line is the *last* one
 /// before the process died, and a head-keep cap would drop it. It does not in
 /// practice, because the fatal line goes to **stderr**, which is a few hundred
-/// bytes even at `RUST_LOG=trace` (measured: 200 B for a forced early exit,
-/// 0 B when the child does not die) and so is never capped. One helper with one
-/// behaviour is still right -- two reads of the same files truncating
-/// differently is the inconsistency this unit exists to remove -- but it is a
-/// trade, not a free win.
+/// bytes for the failures this test provokes, and so is not capped in practice.
+/// Measured at `RUST_LOG=trace`: ~200 B for a forced early exit, 0 B when the
+/// child does not die. **Treat the 200 as indicative, not as a constant** --
+/// that stderr is `Error: tls.cert_path '<path>' does not exist`, so most of it
+/// is the tempdir path and it moves with the path's length (196 B and 237 B for
+/// a short and a long one). And it is not a guarantee: any stderr-heavy death,
+/// a panic with `RUST_BACKTRACE=1` being the obvious one, would exceed the cap
+/// and lose its tail. One helper with one behaviour is still right -- two reads
+/// of the same files truncating differently is the inconsistency this unit
+/// exists to remove -- but it is a trade, not a free win.
 ///
 /// An undisclosed cut is the same defect class this unit exists to remove, and
 /// the tempdir is deleted when the test returns, so a "full log at <path>"

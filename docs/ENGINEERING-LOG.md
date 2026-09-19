@@ -76,8 +76,14 @@ No runtime check in this binary can reach that, because Cargo exposes dev-depend
 test targets.
 
 This assertion is an invariant rather than a snapshot because the two-provider state is
-now permanent by decision (U-563, WONTFIX): both providers stay, so `install_default`
-stays load-bearing.
+now permanent by a human decision of 2026-09-19 — recorded on the lane board as U-563,
+WONTFIX — that both providers stay, so `install_default` stays load-bearing. **That id
+resolves nowhere in this repository**, and by this unit's own rule (a self-referential
+citation is not a citation) it cannot be the record. This paragraph is therefore the
+record: the change that would leave one provider is switching `axum-server` to
+`tls-rustls-no-provider` in the root `Cargo.toml` *and* adding `default-features = false`
+to this crate's `rustls` line — both, since each enabler is independently sufficient — and
+the decision was not to.
 
 **2. The larger half: the diagnostic a reader actually meets carried nothing.**
 
@@ -118,14 +124,22 @@ test.
 
 **3. The measurements, and which are ours.**
 
-Inherited from U-556 and **not** re-verified here: the 64 KiB pipe ceiling, the
-~40 KB-at-default-filter figure, and the ~20 KB-per-probe figure.
+Inherited from U-556 and **not** re-verified here: the ~40 KB-at-default-filter figure
+and the ~20 KB-per-probe figure — and the second of those is *superseded* for this test's
+own client by the ~11.1 KB below, rather than merely carried forward.
 
 Measured for this unit on 2026-09-19 (debug binary, TLS on, sqlite, `RUST_LOG=trace`):
-forced early exit **200 B**, all of it stderr; successful TLS startup **~35.6 KB**;
-startup plus one probe by this test's own rustls client **46,708 / 46,710 / 46,743 B**.
-The unread pipe was observed stopping at exactly **65,536 B**, and per-request cost is
-constant to within two bytes across eight requests.
+successful TLS startup **~35.6 KB**; startup plus one probe by this test's own rustls
+client **46,708 / 46,710 / 46,743 B**; per-request cost constant to within two bytes
+across eight requests; a forced early exit **~200 B**, all of it stderr — indicative
+only, because that line embeds the tempdir path and moves with its length (196 B and
+237 B measured for a short and a long path), so it is not a constant to rely on.
+
+The **64 KiB pipe ceiling** belongs in neither list as first written. U-556 measured it
+(65,531 / 65,536 B) and this unit re-measured it independently, observing the unread pipe
+stop at exactly **65,536 B**. An earlier version of this section listed it as inherited-
+and-not-re-verified four lines above quoting this unit's own fresh measurement of the
+same quantity — a contradiction in the paragraph whose entire job is attribution.
 
 So the pipe arrangement this unit replaced had room, after startup, for **two** probes by
 this test's client, and the **third** wedges — the child stops responding without exiting
@@ -150,14 +164,20 @@ The superseded "~16 KiB pipe buffer" premise belongs to `ASSUMPTIONS.md`, not to
 log — U-556's entry here never made that claim — and it had already been self-corrected
 in place by U-556's own reconcile.
 
-**4. What this unit does not fix.**
+**4. What this unit does not fix.** Not an exhaustive list — in a unit about completeness
+claims, a closed numbered list under this heading would be one. These are the ones known
+at merge:
 
 - The install/`listening` ordering remains unasserted, as above.
 - Port `18443` is still hard-coded, and is now load-bearing for two falsifications rather
   than one. A parallel run against a busy 18443 fails in a way that now, at least,
   explains itself.
-- Both crypto providers remain, by human decision (U-563, WONTFIX), so
+- Both crypto providers remain, by the human decision recorded above, so
   `install_crypto_provider()` stays load-bearing and the phase-1 assertion stays true.
+- **The branches this unit added have no in-suite test.** `ChildStream::Truncated`,
+  `::Unreadable` and the cap arithmetic were each falsified out-of-tree and the edits
+  reverted, so nothing in CI executes them. That widens the standing limit U-556's own
+  entry records ("several error branches have no test") rather than closing it.
 
 <!-- unit U-556 (lane-2) — the TLS startup test that never spoke TLS -->
 
@@ -312,6 +332,9 @@ shipped message names the failing stage and says which stages indict which party
   only on the early-exit branch (`tls_startup.rs:206-208`), which is disjoint from the
   handshake path. The new message's stage tag says *which* step failed; it cannot say what the
   registry was logging while it failed.
+  *(Fixed by U-560 — see its entry above. The probe-failure message now carries both streams.
+  U-560 also withdrew the reading that the stage tag identifies a culprit: under a foreign
+  process holding the port the stage is `handshake` and the registry is innocent.)*
 
 <!-- unit U-557 (lane-3) — clearing the yanked crates and making the ratchet enforce -->
 

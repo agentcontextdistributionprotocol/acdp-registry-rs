@@ -4045,9 +4045,11 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 ## U-556 — child stdout is not drained during the probe
 
 > **Superseded — see "U-560 — resolution of U-556's 'child stdout is not drained' entry" below.**
-> The reasoning in this entry held up; two figures in it did not. The `~16 KiB` pipe buffer and the
-> "truncated 64 KiB" wording are both corrected there, with fresh measurements. This entry is left
-> as written because the file is cumulative.
+> The reasoning in this entry held up; two figures in it did not, and they were corrected by two
+> different units. The `~16 KiB` pipe buffer was already corrected **by this entry's own
+> `Status:` block below**, under U-556's `/reconcile` — U-560 did not re-verify it and must not be
+> read as its source. What U-560 corrects is the separate *"truncated 64 KiB"* wording, which
+> misdescribes how a pipe fails. This entry is left as written because the file is cumulative.
 
 - **Plan:** `plans/u556-tls-startup-handshake.md`
 - **Assumed:** exactly one HTTP request is ever issued, so `TraceLayer`'s two log events
@@ -4162,12 +4164,20 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   never a bound", which was wrong and is retracted here.
 - **The byte figures.** The entry's ~16 KiB / ~20 KB-per-probe figures are U-556's and were not
   re-verified. Measured fresh 2026-09-19 (debug binary, default features, TLS on, sqlite,
-  `RUST_LOG=trace`): forced early exit **200 B**, all of it stderr, stdout 0; successful TLS
-  startup **~35.6 KB** (35,576 / 35,588 / 35,600 / 35,610 B across runs); startup plus one probe
-  by the test's own rustls client **46,708 / 46,710 / 46,743 B**, i.e. ~11.1 KB per probe. The
-  unread pipe was observed stopping at exactly **65,536 B**, and per-request cost is constant to
-  within two bytes across eight requests, so the ~29.9 KB left after startup holds **two** probes
-  and the **third** wedges. Startup alone never wedges — served requests do.
+  `RUST_LOG=trace`): forced early exit **~200 B**, all of it stderr, stdout 0 — indicative only,
+  since that line embeds the tempdir path and moves with its length (196 / 237 B for a short and a
+  long path); successful TLS startup **~35.6 KB** (35,576 / 35,588 / 35,600 / 35,610 B across
+  runs); startup plus one probe by the test's own rustls client **46,708 / 46,710 / 46,743 B**,
+  i.e. ~11.1 KB per probe, which **supersedes** the inherited ~20 KB-per-probe figure for this
+  client. Per-request cost is constant to within two bytes across eight requests, so the ~29.9 KB
+  left after startup holds **two** probes and the **third** wedges. Startup alone never wedges —
+  served requests do.
+- **On the 64 KiB ceiling, which the line above used to claim both ways.** U-556 measured it
+  (65,531 / 65,536 B) and this unit re-measured it independently, observing the unread pipe stop
+  at exactly **65,536 B**. So it is *not* one of the inherited-and-unverified figures, and listing
+  it as such alongside a fresh measurement of the same quantity was a contradiction four lines
+  wide. The genuinely inherited-and-not-re-verified figures are the ~40 KB-at-default-filter one
+  and the ~20 KB-per-probe one.
 - **RETRACTION, and it is a retraction of a retraction — held to the standard of the claim it
   overturns.** An earlier draft of this entry asserted "three requests served, the fourth wedges"
   and "by the moment a single probe returned, **96,573 B**", and built on the second of those a
