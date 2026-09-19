@@ -12,14 +12,42 @@
 //! `listening` with the bind address. The operator-visible symptom was "it
 //! says it is listening and the port refuses connections".
 //!
+//! **Two providers is the permanent state, by decision** — recorded in
+//! `docs/ENGINEERING-LOG.md` under U-560, which is where to read the reasoning
+//! rather than re-deriving it here. In short: dropping the second provider was
+//! proposed and refused, because this crate wants `ring` specifically
+//! (`Cargo.toml:41-43` — `aws-lc-rs` drags `aws-lc-sys` + `prebuilt-nasm`, a
+//! C/asm build dependency, into the shipped binary), and rustls declares
+//! `prefer-post-quantum = ["aws_lc_rs"]`, so a `ring`-only build gives up
+//! post-quantum hybrid key exchange. Post-quantum won.
+//!
+//! Note what is *not* part of that trade, because an earlier draft of this
+//! comment said it was: **TLS 1.2 is provider-independent**
+//! (`rustls-0.23.45/Cargo.toml:97`, `tls12 = []`). A single-provider build
+//! would have to re-add `tls12` explicitly only because it reaches
+//! single-provider via `default-features = false`, which drops every default —
+//! that is a curable detail of the mechanism, not a cost of choosing one
+//! provider.
+//!
+//! So `install_crypto_provider()` (`main.rs:99-108`, called at `:114`) is
+//! load-bearing for good rather than a workaround awaiting a manifest fix, and
+//! [`rustls_is_a_normal_dependency`] asserts the invariant that makes it
+//! necessary.
+//!
 //! ## Two checks, because they fail for different reasons
 //!
 //! [`tls_startup_installs_a_provider_and_serves`] spawns the real binary and
 //! is the one that would have caught the defect. [`rustls_is_a_normal_dependency`]
-//! is cheap, needs no cert, and catches the narrower thing the spawn test
-//! cannot distinguish: that the manifest move actually landed, rather than
-//! `rustls` silently remaining dev-only — the state in which the panic could
-//! not reach any test binary in the first place.
+//! is cheap, needs no cert, and asserts that this crate keeps making its own
+//! DIRECT request for `ring` — the recorded provider choice (D-W5-105) — which
+//! no compile gate can see, because `ring` resolves anyway through
+//! `reqwest`/`hyper-rustls`/`tokio-rustls`/`sqlx-core` unification.
+//!
+//! **It does NOT earn its place by catching a dev-only `rustls`, though this
+//! paragraph said so until U-560 measured it.** Since U-530, `main.rs:100`
+//! names `rustls::` in the bin, and Cargo does not expose `[dev-dependencies]`
+//! to bins, so that state fails the binary's own compile and produces no test
+//! binary at all. The dev-only arm below is defensive only.
 //!
 //! **Neither test asserts the ORDER** in which the provider install and the
 //! `listening` log occur. Measured, not assumed: moving
@@ -36,14 +64,63 @@
 //! the call site in `main.rs` and by nothing executable, and a reader should
 //! not infer coverage that is not here.
 
-/// `rustls` must be a **normal** dependency of this crate, carrying exactly
-/// one provider feature.
+/// `rustls` must be a **normal** dependency of this crate, and this process
+/// must still be unable to pick a provider on its own.
 ///
-/// Read from the manifest rather than from `cargo tree`'s output on purpose.
-/// The manifest is declarative and order-independent; a scrape of output a
-/// tool formatted for human reading has to be re-verified every time that
-/// formatting changes, and counting lines in it is how a query says `<none>`
-/// when it means `rc=1`.
+/// Two assertions, and they are reachable from different places on purpose.
+///
+/// **The dev-only half of this scan is defensive only, and the comment used to
+/// claim otherwise — twice.** Since U-530, `main.rs:100` names
+/// `rustls::crypto::ring::default_provider()` in the **bin**, and Cargo does
+/// not expose `[dev-dependencies]` to bins. Measured by moving the line:
+/// `cargo build --bin acdp-registry` fails `error[E0433]: cannot find module or
+/// crate rustls --> crates/acdp-registry-server/src/main.rs:100` (rc=101), and
+/// `cargo test --test tls_startup` fails with the **same** error and produces
+/// **zero** test results. So the dev-only panic below can never print: the
+/// bin's own compile is the gate, and it is a harder one than any test.
+///
+/// **What earns these lines is the `ring` assertion, which is live and which no
+/// compile gate can reach.** Measured: drop `features = ["ring"]` from the
+/// manifest line and the bin still COMPILES (rc=0) — `ring` resolves anyway
+/// through `reqwest`/`hyper-rustls`/`tokio-rustls`/`sqlx-core` unification — so
+/// nothing would notice, while this test goes red. That is the property worth
+/// asserting: this crate must keep making its own DIRECT request for its
+/// recorded provider choice (D-W5-105), rather than inheriting `ring` by
+/// accident of a graph where one unrelated dependency bump could remove it
+/// silently.
+/// Read from the manifest rather than from `cargo tree`'s output on purpose:
+/// the manifest is declarative and order-independent, whereas a scrape of
+/// output a tool formatted for human reading has to be re-verified every time
+/// that formatting changes, and counting lines in it is how a query says
+/// `<none>` when it means `rc=1`.
+///
+/// **The provider count is NOT readable from that manifest line**, which is
+/// why this test used to assert a falsehood. It asserted that the line does
+/// not mention `aws-lc-rs` and called that "the two-provider defect is
+/// prevented" — while the crate resolved both providers anyway:
+///
+/// ```text
+/// cargo tree -e features -p acdp-registry-server -i rustls@0.23.45 -f '{p} [{f}]'
+/// rustls v0.23.45 [aws-lc-rs,aws_lc_rs,default,log,logging,prefer-post-quantum,ring,std,tls12]
+/// ```
+///
+/// Neither provider has a single enabler, which is the deeper reason a
+/// one-line scan cannot answer this. `aws_lc_rs` has **two** independent
+/// sources: `axum-server`'s `tls-rustls = ["tls-rustls-no-provider",
+/// "rustls/aws-lc-rs"]`, declared in `axum-server-0.8.0/Cargo.toml` and merely
+/// *switched on* by root `Cargo.toml:35`; and this crate's own line, which
+/// omits `default-features = false`, so rustls' `default` set — which contains
+/// `aws_lc_rs` — applies. `ring` has **five**: this crate's direct dependency,
+/// `reqwest` (`__rustls-ring`), `hyper-rustls`, `tokio-rustls` and `sqlx-core`.
+///
+/// Exactly one of those seven edges is printed on the line the scan reads —
+/// `features = ["ring"]` — and it is the one that needs no outside knowledge.
+/// The edge that decides this test's subject is the opposite kind: `aws_lc_rs`
+/// arrives through an *absence*, the missing `default-features = false`, and
+/// seeing it requires knowing rustls' own default set, which the line does not
+/// carry. A scan can read a token; it cannot read a token that is not there
+/// and know what its absence enables. So the property is asserted where it is
+/// actually observable: from the consequence, below.
 #[test]
 fn rustls_is_a_normal_dependency() {
     let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
@@ -84,13 +161,106 @@ fn rustls_is_a_normal_dependency() {
         });
     assert!(
         rustls_line.contains("\"ring\""),
-        "`rustls` must request exactly one provider feature, and `ring` is the recorded \
-         choice (D-W5-105): {rustls_line}"
+        "this crate must REQUEST `ring`, which is the recorded choice (D-W5-105 — the \
+         reasoning is inline at `crates/acdp-registry-server/Cargo.toml:41-43`, since \
+         the id itself is not in that file). Note \
+         what this does and does not say: it asserts the request, not the resolution — \
+         the graph resolves `ring` AND `aws_lc_rs`, deliberately and permanently, which \
+         is what the next assertion is about. A line naming both would satisfy this one. \
+         Manifest line: {rustls_line}"
     );
+    // Assert the CONSEQUENCE of the resolved feature set, which this process
+    // can observe, rather than a spelling on a manifest line, which it cannot.
+    //
+    // **State precisely what the panic proves, because it is not "exactly two
+    // providers".** `ClientConfig::builder()` panics with the message below
+    // whenever `CryptoProvider::from_crate_features()` returns `None`
+    // (`rustls-0.23.45/src/crypto/mod.rs:249`), and that function's own
+    // documentation (`:259-263`) gives THREE such states: the features name two
+    // providers, or they name none, or `custom-provider` is enabled. A green
+    // here is consistent with all three.
+    //
+    // That is still exactly the invariant worth asserting, because all three
+    // mean the same operational thing: **rustls cannot pick a provider on its
+    // own, so `main` must install one explicitly.** That — not the provider
+    // count — is why `install_crypto_provider()` exists in `main.rs:99-108`.
+    // The assertion below is deliberately written to that claim and no wider.
+    //
+    // The "none" reading is ruled out separately, one line above the panic
+    // check: naming `rustls::crypto::ring::default_provider` fails to COMPILE
+    // if the `ring` feature is gone, which is the legible failure for a
+    // provider this crate requests directly. (Naming `aws_lc_rs` the same way
+    // would be wrong: its absence is a desirable end state, so a compile error
+    // is the wrong failure shape.) `custom-provider` is left unruled-out; it
+    // would present as the `Some(_)` branch of the message below, or as its
+    // branch (b).
+    //
+    // It is an invariant rather than a snapshot: the decision to keep both
+    // providers is recorded in `docs/ENGINEERING-LOG.md` under U-560.
+    //
+    // Soundness precondition, and it is a property of this file: nothing in
+    // this test binary installs a process default. There are no `mod`
+    // declarations here, so no sibling test module is compiled in, and the
+    // spawn test's probe builds its client with `builder_with_provider`, which
+    // installs nothing. Adding `mod didweb;` would break that — it is branch
+    // (a) of the message below.
+    //
+    // The payload is bound rather than discarded because the causes of a red
+    // are distinguished by *what was observed*: no panic at all versus a panic
+    // with different words. A message that cannot print the payload would
+    // pre-diagnose one cause for both.
+    //
+    // Control for the "no providers at all" reading of the panic below: this
+    // is a compile-time reference, so it costs nothing at runtime and fails
+    // loudly at build time if `ring` stops resolving.
+    let _ring_is_compiled_in: fn() -> rustls::crypto::CryptoProvider =
+        rustls::crypto::ring::default_provider;
+
+    let caught = std::panic::catch_unwind(rustls::ClientConfig::builder);
+    let payload: Option<String> = caught.err().map(|e| {
+        e.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_else(|| "<panic payload was neither String nor &str>".to_string())
+    });
     assert!(
-        !rustls_line.contains("aws-lc-rs"),
-        "requesting both providers is the original defect: rustls cannot choose and panics \
-         at startup: {rustls_line}"
+        payload.as_deref().is_some_and(|m| {
+            m.contains("Could not automatically determine the process-level CryptoProvider")
+        }),
+        "`rustls::ClientConfig::builder()` did not panic with the process-level \
+         CryptoProvider message, so this process CAN now pick a crypto provider \
+         unaided. Observed panic payload: {payload:?}\n\
+         \n\
+         A red here is not necessarily breakage. Read the payload first — it \
+         splits the causes, and they are not ranked, because nothing here \
+         measures which is likelier:\n\
+         \n\
+         Payload `None` (nothing panicked) means either:\n\
+         (a) something in THIS test binary now installs a process-level default. \
+         Adding `mod didweb;` is how that happens — `tests/didweb/mod.rs:228-235` \
+         installs one under a `Once`. Check this file's `mod` declarations FIRST; \
+         it is the one cause that says nothing about the dependency graph.\n\
+         (b) the graph now resolves exactly one provider, so rustls can choose. \
+         This needs BOTH of `aws_lc_rs`'s enablers to be gone at once — see the \
+         two-enabler paragraph in this function's docstring. Neither alone does \
+         it: drop `axum-server`'s explicit `rustls/aws-lc-rs` and this crate's \
+         own line still inherits `aws_lc_rs` through rustls' `default`; change \
+         rustls' `default` and `axum-server`'s explicit edge survives, since \
+         `axum-server` sets `default-features = false` on rustls and that edge \
+         is its only contribution. So do not stop at checking one of them, and \
+         do not assume a decision was revisited — go and look. If one provider \
+         really does resolve, `install_crypto_provider()` at `main.rs:99-108` \
+         may no longer be required, and the right response is to RE-EVALUATE \
+         that call against the U-560 entry in `docs/ENGINEERING-LOG.md`.\n\
+         \n\
+         Payload `Some(_)` with different text means rustls reworded this panic, \
+         or panicked for another reason. The invariant is intact; update the \
+         substring this assertion looks for, and check the new text is still \
+         about provider selection.\n\
+         \n\
+         In none of these cases is deleting this test the fix: it is the only \
+         executable record of why that install call exists. Manifest line, for \
+         reference (it cannot show the resolved set): {rustls_line}"
     );
 }
 
@@ -117,9 +287,10 @@ fn rustls_is_a_normal_dependency() {
 /// quietly swallow a real failure; a runtime `return` would.
 ///
 /// The excluded builds, and why each is excluded rather than fixed:
-/// - `storage-pg` needs a live database to get past storage init, and CI's
-///   `postgres` job runs only `--test pg_integration`, so this would never
-///   execute there.
+/// - `storage-pg` needs a live database to get past storage init, and the one
+///   CI step that has one runs only `--test pg_integration` (`ci.yml:372-380`,
+///   a step in the single `test` job -- there is no separate `postgres` job),
+///   so this would never execute there.
 /// - **no storage backend at all** (`--no-default-features`, a real CI
 ///   configuration) exits 1 at startup with `no storage backend feature
 ///   enabled` before reaching any TLS work — measured in U-532.
@@ -189,10 +360,56 @@ backend = "{backend}"
 
     // Captured, not discarded: in CI the panic message is usually the only
     // artifact anyone reads, so a failure has to carry the binary's own output.
+    //
+    // **Files, not pipes.** A pipe couples this test to how much the child says.
+    // That coupling was documented as safe because "only one request is ever
+    // issued", and measured, that is exactly right -- the margin is just far
+    // thinner than the note implied. With `RUST_LOG=trace`, which the child
+    // inherits because this test sets only `ACDP_REGISTRY_CONFIG`, and a pipe
+    // nobody reads, the child stops responding without exiting, and the probe
+    // hits its 5s read timeout. Measured, on a pipe macOS grows to 64 KiB
+    // (65,536 B exactly -- the unread pipe was observed stopping there):
+    // startup alone is ~35.6 KB, and one probe by this test's own rustls
+    // client adds ~11.1 KB (startup-plus-one-probe measured directly at
+    // 46,708 / 46,710 / 46,743 B). Per-request cost is constant to within a
+    // couple of bytes across eight requests, so the ~29.9 KB left after
+    // startup holds **two** probes and wedges on the **third**. Startup itself
+    // never wedges; it is served requests that do.
+    //
+    // This test issues at most ONE request -- only `Connect`/`Handshake` probe
+    // failures retry, and neither issues HTTP -- so it passes with a margin of
+    // exactly one spare request. That is a real bound, not luck, but it is a
+    // bound held in place by the retry policy in a different function, and
+    // nothing tells whoever relaxes that policy what it costs. Files remove
+    // the dependence entirely.
+    //
+    // A file has no ceiling and never blocks the writer, so request count,
+    // retry policy and `RUST_LOG` all stop mattering at once -- the class goes,
+    // not the instance. The tempdir these live in is alive for the whole test
+    // (`dir`, above), and the parent can read them at any point, whether or not
+    // the child has exited. A draining reader thread was rejected: more
+    // machinery, still bounded, and it would leave the retry policy and the
+    // stdout decision coupled.
+    let stdout_path = dir.path().join("registry.stdout");
+    let stderr_path = dir.path().join("registry.stderr");
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_acdp-registry"))
         .env("ACDP_REGISTRY_CONFIG", &cfg_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(
+            std::fs::File::create(&stdout_path).unwrap_or_else(|e| {
+                panic!(
+                    "create the child's stdout file at {}: {e}",
+                    stdout_path.display()
+                )
+            }),
+        ))
+        .stderr(std::process::Stdio::from(
+            std::fs::File::create(&stderr_path).unwrap_or_else(|e| {
+                panic!(
+                    "create the child's stderr file at {}: {e}",
+                    stderr_path.display()
+                )
+            }),
+        ))
         .spawn()
         .expect("spawn the registry binary");
 
@@ -203,9 +420,19 @@ backend = "{backend}"
     let (mut outcome, mut last_err) = (None::<TlsProbe>, None::<ProbeError>);
     for _ in 0..50 {
         if let Some(status) = child.try_wait().expect("try_wait") {
-            let out = child.wait_with_output().expect("collect output");
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            // The child has exited, so both files are complete -- no flush or
+            // ordering hazard on this path. `read` + `from_utf8_lossy` rather
+            // than `read_to_string`, to preserve the old UTF-8 handling exactly:
+            // `read_to_string` would ERROR on invalid UTF-8 where the pipe
+            // version silently replaced it, and turning a diagnostic path into
+            // a new failure mode is the wrong trade. The error path is
+            // deliberately NOT identical: `wait_with_output()` panicked, while
+            // `ChildStream::read` substitutes a `<could not read ...>` marker,
+            // because losing the whole diagnostic to an unreadable file is the
+            // worse outcome on a path that only runs when something is already
+            // wrong.
+            let stdout = ChildStream::read(&stdout_path);
+            let stderr = ChildStream::read(&stderr_path);
             // **Branch on the observed code.** The first version of this test
             // printed the 101 explanation for EVERY early exit, so when it
             // failed with exit 1 for an unrelated reason the message said
@@ -231,18 +458,23 @@ backend = "{backend}"
         match tls_probe(port, cert.cert.der()).await {
             Ok(probe) => {
                 outcome = Some(probe);
+                // Clear the retry history. A probe that eventually succeeded
+                // has no "last error", and leaving one here let the assertion
+                // below quote a stale retry-loop failure as its diagnosis of a
+                // run whose probe actually worked.
+                last_err = None;
                 break;
             }
             // Only a connect/handshake failure is worth retrying: it means the
             // listener is not up YET. An exchange failure means TLS already
             // worked, so retrying cannot help, and it wastes five seconds.
             //
-            // This rule USED to be documented as also protecting the child's
-            // undrained stdout pipe. Measured, that justification was wrong: the
-            // pipe grows to 64 KiB, and 50 retried requests at the default log
-            // filter emit ~40 KB and still pass. The variable that actually fills
-            // it is RUST_LOG, which the child inherits -- one probe at `trace`
-            // already uses ~20 KB. See the U-556 follow-up note on `tls_probe`.
+            // That is the whole justification now, and it is enough. This rule
+            // was twice documented as ALSO protecting the child's undrained
+            // stdout pipe -- first as its purpose, then as a correction that
+            // still discussed pipe pressure. There is no pipe to protect: the
+            // child writes to files (see the spawn above), so nothing about
+            // this rule depends on how much it says.
             Err(err) if err.retryable => last_err = Some(err),
             Err(err) => {
                 last_err = Some(err);
@@ -256,22 +488,99 @@ backend = "{backend}"
     let _ = child.kill();
     let _ = child.wait();
 
+    // Read the child's own output for the assertion below. Until this unit, the
+    // probe-failure path -- the failure a reader actually MEETS -- carried none
+    // of it, while the early-exit path carried all of it.
+    //
+    // Those two paths are not the alternatives they look like. The loop above
+    // breaks on a NON-RETRYABLE probe error, and a timeout is non-retryable
+    // (`ProbeError::io`: `retryable: stage.io_failure_may_be_transient() &&
+    // !timed_out`). So the early-exit branch can be skipped EVEN THOUGH the
+    // child has already exited: the first probe times out, the loop breaks
+    // before its next `try_wait`, and nothing ever observes the exit.
+    //
+    // Measured, and the distinction matters more than it looks. A listener
+    // holding 18443 that does NOT accept makes the child exit in 0.06s with
+    // `Address already in use`, and the test lands here, 3 runs of 3. A holder
+    // that DOES accept and then closes is a different story: the peer close is
+    // `UnexpectedEof`, which is retryable, so the loop survives to its next
+    // `try_wait` and the early-exit branch fires normally.
+    //
+    // So the reachable-ness turns on whether the holder accepts, NOT on "port
+    // in use" as a cause -- an earlier version of this comment said the latter
+    // and was too wide, since the likelier real holder is a server, which
+    // accepts. What is true is narrower and still worth the code below: a probe
+    // failure can arrive with the child already dead and its output unread.
+    //
+    // Read AFTER the kill so the files are as complete as they will get. The
+    // child was still alive a moment ago on the `still_running` path, so its
+    // last line may be torn -- said plainly below rather than left for a reader
+    // to discover by disbelieving the output.
+    let child_stdout = ChildStream::read(&stdout_path);
+    let child_stderr = ChildStream::read(&stderr_path);
+
     // The claim and the observation are now the same thing. This message used to
     // assert a TLS connection had been established while the loop above only
     // completed a bare TCP connect, so a rustls handshake regression left it
     // green -- anything that bound the port satisfied it (U-556).
+    // **Two different failures share this assertion and need different
+    // sentences.** No completed probe is one thing; a probe that SUCCEEDED and
+    // a registry that then exited is another -- and the second is precisely
+    // what the `still_running` conjunct exists to catch. Reporting it as "the
+    // probe never succeeded" contradicts the `probe_ok=true` printed beside it
+    // and the child's own 200 in the output below.
+    let headline = if outcome.is_some() {
+        format!(
+            "the TLS probe SUCCEEDED against 127.0.0.1:{port}, and the registry then EXITED \
+             (probe_ok=true, still_running=false). The handshake is not in question here: \
+             look below for why the process died after serving a request."
+        )
+    } else {
+        format!(
+            "the TLS probe never succeeded against 127.0.0.1:{port} \
+             (probe_ok=false, still_running={still_running}). \
+             **The stage tag says where the probe stopped, not who is at fault** -- an \
+             earlier version of this message assigned blame per stage and was wrong for the \
+             commonest case. `connect`: no TCP connection completed. `handshake`: TCP \
+             connected but TLS did not finish, which INCLUDES a foreign process holding this \
+             port, so on its own it does not indict the registry. `exchange`: TLS finished \
+             and the HTTP request or response failed, which does indict whatever answered. \
+             `config` and `task` are defects in this test itself. Read the child output \
+             below before concluding the registry is at fault. Last probe error: {}",
+            last_err
+                .as_ref()
+                .map(ProbeError::describe)
+                .unwrap_or_else(|| "none recorded".to_string()),
+        )
+    };
+
     assert!(
         outcome.is_some() && still_running,
-        "the TLS probe never succeeded against 127.0.0.1:{port} \
-         (probe_ok={}, still_running={still_running}). The stage tag below says which \
-         step failed, and all five are covered: `connect` means it never bound the port, \
-         `handshake` and `exchange` indict the registry, while `config` and `task` are \
-         defects in this test itself. Last probe error: {}",
-        outcome.is_some(),
-        last_err
-            .as_ref()
-            .map(ProbeError::describe)
-            .unwrap_or_else(|| "none recorded".to_string()),
+        "{headline}\n\
+         {}{}\n\
+         --- child stdout ---\n{child_stdout}\n\
+         --- child stderr ---\n{child_stderr}",
+        if still_running {
+            concat!(
+                "The child was STILL RUNNING when the probe loop gave up and was killed just ",
+                "before this read, so its output may be incomplete and its last line may be ",
+                "torn. Absence of a line below is not proof the registry never logged it.",
+            )
+        } else {
+            concat!(
+                "The child had already exited when this was read, so the files hold everything ",
+                "it wrote.",
+            )
+        },
+        if child_stdout.is_partial() || child_stderr.is_partial() {
+            concat!(
+                " NOTE: at least one stream below is NOT shown in full -- it was truncated or ",
+                "could not be read. Each such stream says so at its own end; do not read the ",
+                "sentence above as a claim about what this message contains.",
+            )
+        } else {
+            ""
+        },
     );
 
     let probe = outcome.expect("asserted present immediately above");
@@ -333,6 +642,109 @@ backend = "{backend}"
 #[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
 const PROBE_PATH: &str = "/livez";
 
+/// How much of each child stream may enter a panic message.
+///
+/// A file has no ceiling, which is the point of writing to one -- but a panic
+/// message still has a reader.
+///
+/// **The path that actually overflows this is the retry loop, not the request
+/// this test serves.** A successful run leaves the child at ~46.7 KB at
+/// `RUST_LOG=trace`, which never reaches the cap. A run whose handshake keeps
+/// failing retries 50 times, and each failed handshake costs the child several
+/// KB: measured 343,032 B of stdout for one such run at trace. That is the
+/// case someone meets while already debugging, and it is the reason this
+/// constant exists.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+const CHILD_OUTPUT_CAP: usize = 64 * 1024;
+
+/// One of the child's output streams, read for inclusion in a panic message.
+///
+/// This is an enum rather than a `String` so the message can say **which of
+/// these three things it is showing**. A caller holding only a `String` has to
+/// assert something about it, and the only sentence available was "complete" --
+/// which is false for a truncated or unreadable stream, and was being printed
+/// above the truncation marker that contradicted it.
+///
+/// Reading never panics, and that is the point: this is only ever called from
+/// inside a failure path, so a second failure here would replace the diagnosis
+/// with an unrelated one.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+enum ChildStream {
+    Complete(String),
+    /// `total` is the size of the file; the rendered head may be a byte or two
+    /// longer, because a multi-byte character cut by the cap becomes U+FFFD.
+    /// The disclosure therefore talks about bytes the CHILD WROTE, which is the
+    /// quantity a reader can act on, not about the length of the rendered text.
+    Truncated {
+        head: String,
+        total: usize,
+    },
+    Unreadable(String),
+}
+
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+impl ChildStream {
+    /// `read` + `from_utf8_lossy` rather than `read_to_string`, deliberately.
+    /// `read_to_string` errors on invalid UTF-8; the pipe-based version this
+    /// replaced used `from_utf8_lossy` and silently substituted replacement
+    /// characters. The binary emits JSON logs so the case is remote, but a
+    /// diagnostic path is the wrong place to introduce a new way to fail.
+    fn read(path: &std::path::Path) -> Self {
+        match std::fs::read(path) {
+            Ok(raw) if raw.len() > CHILD_OUTPUT_CAP => Self::Truncated {
+                // `from_utf8_lossy` absorbs a multi-byte character cut in half
+                // by the slice, so the cap needs no char-boundary search.
+                head: String::from_utf8_lossy(&raw[..CHILD_OUTPUT_CAP]).into_owned(),
+                total: raw.len(),
+            },
+            Ok(raw) => Self::Complete(String::from_utf8_lossy(&raw).into_owned()),
+            Err(err) => Self::Unreadable(format!("<could not read {}: {err}>", path.display())),
+        }
+    }
+
+    /// True when this stream is not shown in full, for any reason.
+    fn is_partial(&self) -> bool {
+        !matches!(self, Self::Complete(_))
+    }
+}
+
+/// **The cap keeps the HEAD, not the tail, and says so.**
+///
+/// This is primarily a *startup* diagnostic, so the signal is usually the first
+/// thing the binary said. **That is not universally true and the cost is worth
+/// naming:** on the early-exit path the interesting line is the *last* one
+/// before the process died, and a head-keep cap would drop it. It does not in
+/// practice, because the fatal line goes to **stderr**, which is a few hundred
+/// bytes for the failures this test provokes, and so is not capped in practice.
+/// Measured at `RUST_LOG=trace`: ~200 B for a forced early exit, 0 B when the
+/// child does not die. **Treat the 200 as indicative, not as a constant** --
+/// that stderr is `Error: tls.cert_path '<path>' does not exist`, so most of it
+/// is the tempdir path and it moves with the path's length (196 B and 237 B for
+/// a short and a long one). And it is not a guarantee: any stderr-heavy death,
+/// a panic with `RUST_BACKTRACE=1` being the obvious one, would exceed the cap
+/// and lose its tail. One helper with one behaviour is still right -- two reads
+/// of the same files truncating differently is the inconsistency this unit
+/// exists to remove -- but it is a trade, not a free win.
+///
+/// An undisclosed cut is the same defect class this unit exists to remove, and
+/// the tempdir is deleted when the test returns, so a "full log at <path>"
+/// pointer would dangle by the time anyone read it. The counts go in the
+/// message instead.
+#[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
+impl std::fmt::Display for ChildStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Complete(text) | Self::Unreadable(text) => f.write_str(text),
+            Self::Truncated { head, total } => write!(
+                f,
+                "{head}\n[truncated: this is the first {CHILD_OUTPUT_CAP} of {total} bytes the \
+                 child wrote. The tail is dropped, not the head, because the signal in a startup \
+                 diagnostic is usually the first thing the binary said.]"
+            ),
+        }
+    }
+}
+
 /// The name the client verifies the certificate against. Must match the SAN the
 /// test's `rcgen` cert is generated for; the socket still connects to 127.0.0.1.
 #[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
@@ -356,12 +768,17 @@ struct TlsProbe {
 
 /// Which step of the probe failed.
 ///
-/// An enum rather than a `&'static str` on purpose. The retry rule below is
-/// load-bearing -- it is what keeps "only one HTTP request is ever issued" true,
-/// which in turn is why this test does not need to drain the child's stdout. A
-/// stringly-typed stage would let a single typo at any call site (`"Exchange"`,
-/// `"exchg"`) silently flip an exchange error to retryable, and neither the
-/// compiler nor the suite would notice. Spelled this way, it is unspellable.
+/// An enum rather than a `&'static str` on purpose. The retry rule below decides
+/// whether a failed probe is worth another pass, and a stringly-typed stage would
+/// let a single typo at any call site (`"Exchange"`, `"exchg"`) silently flip an
+/// exchange error to retryable, with neither the compiler nor the suite noticing.
+/// Spelled this way, it is unspellable.
+///
+/// This docstring used to add that the rule "is what keeps *only one HTTP request
+/// is ever issued* true, which in turn is why this test does not need to drain the
+/// child's stdout". The second half is gone: the child's output goes to files, so
+/// draining is not a thing this test does or needs. The first half was true and is
+/// simply no longer load-bearing for anything.
 #[cfg(any(feature = "storage-sqlite", feature = "storage-memory"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
@@ -393,13 +810,12 @@ impl Stage {
     /// only thing another pass of the poll loop could fix. An exchange failure
     /// means TLS already worked, so retrying cannot help.
     ///
-    /// **This rule is NOT what protects the child's undrained stdout**, despite an
-    /// earlier comment here saying so. Measured: the pipe grows to 64 KiB and 50
-    /// retried requests at the default filter emit ~40 KB, well under it. The real
-    /// exposure is `RUST_LOG`, inherited by the child -- at `trace` a single probe
-    /// uses ~20 KB and 50 would wedge. A `matches!` arm cannot gate that anyway;
-    /// the structural fix is file-backed child stdio, which touches the protected
-    /// early-exit block and so belongs to a follow-up unit, not this one.
+    /// Nothing here has anything to do with the child's stdout any more. Two
+    /// earlier versions of this comment said it did -- one claiming this rule
+    /// protected an undrained pipe, one correcting that while still arguing
+    /// about pipe capacity. The file-backed stdio it called a follow-up unit is
+    /// the spawn above, so the question is closed rather than re-answered: a
+    /// file has no ceiling and never blocks its writer.
     fn io_failure_may_be_transient(self) -> bool {
         matches!(self, Self::Connect | Self::Handshake)
     }

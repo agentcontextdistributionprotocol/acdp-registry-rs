@@ -4044,6 +4044,13 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
 
 ## U-556 — child stdout is not drained during the probe
 
+> **Superseded — see "U-560 — resolution of U-556's 'child stdout is not drained' entry" below.**
+> The reasoning in this entry held up; two figures in it did not, and they were corrected by two
+> different units. The `~16 KiB` pipe buffer was already corrected **by this entry's own
+> `Status:` block below**, under U-556's `/reconcile` — U-560 did not re-verify it and must not be
+> read as its source. What U-560 corrects is the separate *"truncated 64 KiB"* wording, which
+> misdescribes how a pipe fails. This entry is left as written because the file is cumulative.
+
 - **Plan:** `plans/u556-tls-startup-handshake.md`
 - **Assumed:** exactly one HTTP request is ever issued, so `TraceLayer`'s two log events
   (`crates/acdp-registry-core/src/lib.rs:300-302`) cannot fill the child's ~16 KiB pipe buffer.
@@ -4073,3 +4080,150 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   pre-registered (criterion 6) and which the assign's criterion 3 calls load-bearing. Widening scope
   to take it would break a criterion this unit's PR claims. Corrected comments are in the code now;
   the structural fix is a successor unit.
+
+## U-560 — the manifest scan is kept, for one property only
+
+- **Plan:** `plans/u560-honest-test-infrastructure.md`
+- **Assumed (REFUTED by measurement, 2026-09-19):** that normal-vs-dev-only is unobservable
+  except from the manifest, and that the scan is what stands between this repo and a dev-only
+  `rustls`. Both halves are wrong. Since U-530, `src/main.rs:100` names
+  `rustls::crypto::ring::default_provider()` in the **bin**, and Cargo does not expose
+  `[dev-dependencies]` to bins. Measured in a detached scratch worktree of `ff9b3fe` by moving
+  the line into `[dev-dependencies]`: `cargo build --bin acdp-registry` →
+  `error[E0433]: cannot find module or crate rustls --> crates/acdp-registry-server/src/main.rs:100`
+  (rc=101), and `cargo test --test tls_startup` → the **same** E0433, rc=101, with **zero**
+  `test result` lines. The dev-only state never reaches a test binary, so the scan's own dev-only
+  message is unreachable in the one state it was written for.
+- **Chose (decision unchanged, stated reason replaced):** keep the `[dependencies]` scan and its
+  `axum-server` anti-vacuity control — not for normal-vs-dev-only, which the bin's own compile
+  enforces harder than any test could, but for the **`ring` assertion**, which is live and which
+  no compile gate can reach. Measured in the same worktree: drop `features = ["ring"]` and the
+  bin still **compiles** (rc=0) — `ring` resolves anyway through
+  `reqwest`/`hyper-rustls`/`tokio-rustls`/`sqlx-core` feature unification — while this test goes
+  red at `tls_startup.rs:162` with its D-W5-105 message. That is the property worth ~25 lines:
+  this crate must keep making its own DIRECT request for its recorded provider choice rather
+  than inheriting `ring` by accident of a graph where one unrelated bump could remove it.
+- **Alternatives:** delete the scan wholesale now that a runtime assertion exists — rejected on
+  the measurement above: the `ring` assertion is the only check of D-W5-105 anywhere, and it is
+  unreachable from any runtime observation in this process.
+- **Blast radius if wrong:** low and test-only. ~25 lines, of which the dev-only half is now
+  known to be defensive-only; nothing ships differently.
+- **The same refuted claim was carried in two other places and is corrected in this PR:** the
+  `rustls_is_a_normal_dependency` docstring and `docs/ENGINEERING-LOG.md`. Correcting only this
+  entry would have left the repo's permanent log asserting the falsehood.
+- **Status:** CONFIRMED (2026-09-19, Opus under `/reconcile`) — decision kept, stated reason
+  replaced after measurement. See `DECISIONS.md`.
+
+## U-560 — `custom-provider` is left unruled-out, deliberately
+
+- **Plan:** `plans/u560-honest-test-infrastructure.md`
+- **Assumed:** `ClientConfig::builder()` panicking with the process-level-CryptoProvider message
+  is worth asserting even though it does not identify *which* of three feature states caused it.
+- **Chose:** assert the panic and its message, narrow the stated invariant to what all three
+  states share — rustls cannot select a provider unaided, so `main` must install one — and rule
+  out only the "no providers" reading, via a compile-time reference to
+  `rustls::crypto::ring::default_provider` (`crypto/mod.rs:25-26` gates the module on the
+  feature). `custom-provider` stays unruled-out and the comment says so.
+- **Measured:** `rustls-0.23.45/src/crypto/mod.rs:259-263` documents all three states returning
+  `None` from `from_crate_features()`; `:249` is the `.expect` that panics. **Strengthened on
+  reconcile:** `:266-282` guards *both* `Some(...)` returns with `not(feature = "custom-provider")`
+  and falls through to `None` at `:284-285`, so enabling `custom-provider` returns `None`
+  unconditionally. The blast-radius argument below is therefore not merely plausible but forced
+  by the `cfg` guards — the assertion staying green and the operational invariant holding cannot
+  come apart in that state.
+- **Alternatives:** (a) assert the provider *count* — not reachable from a test crate, which
+  cannot `cfg!` on another crate's features; (b) name `rustls::crypto::aws_lc_rs` to detect the
+  second provider — rejected, its absence is a desirable end state so that turns a legible red
+  into a hard compile error; (c) scrape `cargo tree` — rejected by the test's own docstring.
+- **Blast radius if wrong:** low. Enabling `custom-provider` in this workspace would leave the
+  assertion green for a reason it does not name — but that state also requires an explicit
+  provider install, so the operational invariant the test protects would still hold.
+- **Status:** CONFIRMED (2026-09-19, Opus under `/reconcile`) — as-is; all three citations
+  verified exact. See `DECISIONS.md`.
+
+## U-560 — phase 1's docstring cites a record phase 4 creates
+
+- **Plan:** `plans/u560-honest-test-infrastructure.md`
+- **Assumed:** a citation in tracked code must resolve in tracked files. Measured: `U-563` and
+  `D-W5-105` each appeared in exactly one tracked file — the test asserting them — because
+  `plans/*` is gitignored (`.gitignore:62`). A self-referential citation is not a citation.
+- **Chose:** point the docstring at the U-560 entry in `docs/ENGINEERING-LOG.md` (created by
+  phase 4, same PR) for the keep-both-providers decision, and at
+  `crates/acdp-registry-server/Cargo.toml:41-43` for `D-W5-105`, which carries its reasoning
+  inline and is tracked today.
+- **Alternatives:** write the decision into `DECISIONS.md` from phase 1 — rejected, that file is
+  outside phase 1's declared scope and `/reconcile` owns it; or drop the citation — rejected,
+  criterion 7 exists precisely so a reader does not re-open the manifest question.
+- **Blast radius if wrong:** the reference dangles until phase 4 lands. **DISCHARGED:** phase 4
+  landed as `6427d89`; the anchor is `docs/ENGINEERING-LOG.md`'s `### U-560` heading, and
+  `D-W5-105`'s REASONING is inline at `crates/acdp-registry-server/Cargo.toml:41-43` —
+  the id string itself is not in that file, which is why the test's message points at the lines
+  rather than at the id. All three
+  ENGINEERING-LOG citations in `tls_startup.rs` reach a tracked record.
+- **One gap found in the cited ARTIFACT, not in this decision:** `tls_startup.rs:16` promises the
+  log is "where to read the reasoning", and the log carried the decision and the reversal
+  mechanism but not the post-quantum trade behind it. Corrected by adding the reasoning to the
+  log rather than by weakening the comment — a citation that resolves to a record missing the
+  thing it was cited for is the same defect this unit exists to remove, one level out.
+- **On `U-563`:** before this PR it appeared in no tracked file at all. It now appears in four,
+  all added here — but only as a pointer to an off-repo board, never as the authority. The log
+  says so outright and carries the substance itself (the reversal needs BOTH enablers removed),
+  so this entry's own rule — a self-referential citation is not a citation — is satisfied by the
+  record existing, not by the id resolving. `tls_startup.rs` no longer cites the id at all.
+- **Status:** CONFIRMED (2026-09-19, Opus under `/reconcile`). See `DECISIONS.md`.
+
+## U-560 — resolution of U-556's "child stdout is not drained" entry
+
+- **Plan:** `plans/u560-honest-test-infrastructure.md`
+- **Resolves:** the `NEEDS-CHANGE` entry above (*"U-556 — child stdout is not drained during the
+  probe"*). This is an APPENDED resolution, not a rewrite: that entry's `Status:` block carries
+  measurements worth keeping, and this file is cumulative.
+- **Done:** the child now writes stdout and stderr to files in the tempdir the test already owns,
+  so the decision that entry recorded — *whether* to drain — no longer exists to be made. Request
+  count, retry policy and `RUST_LOG` stop mattering simultaneously. The coupling that entry warned
+  about ("the two are one decision, not two") is severed rather than documented.
+- **One sentence in that entry is wrong and could not be corrected in place without rewriting it,
+  so it is corrected here:** it says the structural fix improves diagnostics because *"today a
+  wedged child yields a truncated 64 KiB"*. A pipe does not truncate — it **blocks the writer**.
+  And on the early-exit branch the child has already exited, so `wait_with_output()` drains to EOF
+  and gets everything. The real gap is the opposite one: a genuinely wedged child never exits, so
+  `try_wait` never returns `Some`, that call is never reached, and the test falls through to the
+  probe assertion carrying **zero** child bytes. That is what phase 3 of this unit fixes, and it
+  is a larger gain than the pipe swap.
+- **That entry's central reasoning was RIGHT, and this unit's plan briefly talked itself out of
+  it.** It said the no-drain decision "holds only because `Exchange`-stage probe failures are
+  non-retryable... the two are one decision, not two". Measured directly rather than reasoned
+  about, 2026-09-19: a child with an **unread stdout pipe** at `RUST_LOG=trace` stops responding
+  without exiting, and the caller hits its 5s read timeout. The test issues at most one request,
+  and measured (below) it passes with a margin of exactly **one** spare request. That is a genuine
+  bound, exactly as the entry claimed; a draft of U-560's plan called it "an accident of ordering,
+  never a bound", which was wrong and is retracted here.
+- **The byte figures.** The entry's ~16 KiB / ~20 KB-per-probe figures are U-556's and were not
+  re-verified. Measured fresh 2026-09-19 (debug binary, default features, TLS on, sqlite,
+  `RUST_LOG=trace`): forced early exit **~200 B**, all of it stderr, stdout 0 — indicative only,
+  since that line embeds the tempdir path and moves with its length (196 / 237 B for a short and a
+  long path); successful TLS startup **~35.6 KB** (35,576 / 35,588 / 35,600 / 35,610 B across
+  runs); startup plus one probe by the test's own rustls client **46,708 / 46,710 / 46,743 B**,
+  i.e. ~11.1 KB per probe, which **supersedes** the inherited ~20 KB-per-probe figure for this
+  client. Per-request cost is constant to within two bytes across eight requests, so the ~29.9 KB
+  left after startup holds **two** probes and the **third** wedges. Startup alone never wedges —
+  served requests do.
+- **On the 64 KiB ceiling, which the line above used to claim both ways.** U-556 measured it
+  (65,531 / 65,536 B) and this unit re-measured it independently, observing the unread pipe stop
+  at exactly **65,536 B**. So it is *not* one of the inherited-and-unverified figures, and listing
+  it as such alongside a fresh measurement of the same quantity was a contradiction four lines
+  wide. The genuinely inherited-and-not-re-verified figures are the ~40 KB-at-default-filter one
+  and the ~20 KB-per-probe one.
+- **RETRACTION, and it is a retraction of a retraction — held to the standard of the claim it
+  overturns.** An earlier draft of this entry asserted "three requests served, the fourth wedges"
+  and "by the moment a single probe returned, **96,573 B**", and built on the second of those a
+  paragraph asking why a pipe-bound child keeps serving *past* the 64 KiB ceiling. **All three are
+  withdrawn.** 96,573 B was never a one-probe figure: one probe leaves the child at 46.7 KB (real
+  client) or 51.6 KB (a heavier OpenSSL client), both **under** the ceiling, so nothing ever serves
+  past it and the phenomenon I set out to explain does not occur. The "three requests" figure came
+  from a Python/OpenSSL client costing ~16.1 KB per request, not the ~11.1 KB the real probe costs;
+  that client's own wedge point is **one** request served, the second stalling. Three instruments
+  gave three different answers (3, 2, 1) because each measured a **different client**, which the
+  original claim never named — the request count is not a property of the server alone. The figure
+  that belongs here is the one for the client this test actually uses.
+- **Status:** CONFIRMED (2026-09-19) — superseded by the change; nothing further to decide.

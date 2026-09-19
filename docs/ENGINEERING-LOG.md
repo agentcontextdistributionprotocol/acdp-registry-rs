@@ -31,6 +31,179 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-560 (lane-2) — a test that asserted a manifest spelling, and a diagnostic nobody could reach -->
+
+### U-560 — asserting the resolved property, not the string that requests it
+
+Two independent defects in `crates/acdp-registry-server/tests/tls_startup.rs`, shipped
+together because they are the same mistake in two registers: a check that reads a
+*request* and reports it as a *result*.
+
+**1. `rustls_is_a_normal_dependency` scanned a manifest and claimed a feature set.**
+
+It section-scanned this crate's `Cargo.toml`, asserted the `rustls` line contains
+`"ring"` and does not contain `aws-lc-rs`, under the message "requesting both providers
+is the original defect: rustls cannot choose and panics at startup". It passed — while
+the crate resolved **both** providers:
+
+```
+rustls v0.23.45 [aws-lc-rs,aws_lc_rs,default,log,logging,
+                 prefer-post-quantum,ring,std,tls12]
+```
+
+A manifest line cannot show a resolved feature set. `aws_lc_rs` has two independent
+enablers and `ring` has five; exactly one of those seven edges appears on the line the
+scan reads, and the edge that decides the question arrives as an **absence** — the
+missing `default-features = false`. No amount of care with the string fixes that, because
+the string is not where the answer lives.
+
+The replacement asserts the consequence this process *can* observe: with rustls unable to
+select a provider from crate features, `ClientConfig::builder()` panics, which is exactly
+why `install_crypto_provider()` (`main.rs:99-108`) exists. It pins the panic **message**,
+not merely `is_err()`, because `builder` has two documented panics and an `is_err()` check
+would pass on the wrong one.
+
+**What that panic proves is stated no wider than it is.** `from_crate_features()` returns
+`None` for *three* feature states (`rustls-0.23.45/src/crypto/mod.rs:259-263`): two
+providers, no providers, or `custom-provider`. So the asserted invariant is the one all
+three share — rustls cannot pick a provider unaided, so `main` must install one. A
+compile-time reference to `rustls::crypto::ring::default_provider` rules out the
+"no providers" reading; `custom-provider` is left unruled-out and the comment says so
+rather than implying coverage.
+
+**The manifest scan was kept** — but not, as a first draft of this entry said, because
+normal-vs-dev-only is otherwise unobservable. That is wrong: since U-530 `main.rs:100`
+names `rustls::` in the **bin**, and Cargo does not expose dev-dependencies to bins, so
+moving the line fails the binary's own compile with `E0433` and produces **zero** test
+results. The dev-only branch of the scan can never print.
+
+What earns those lines is the separate `ring` assertion, which **is** live and which no
+compile gate reaches: drop `features = ["ring"]` and the bin still compiles, because `ring`
+resolves anyway through `reqwest`/`hyper-rustls`/`tokio-rustls`/`sqlx-core` unification —
+while this test goes red. The crate must keep making its own *direct* request for its
+recorded provider choice rather than inheriting it by accident of the graph.
+
+This assertion is an invariant rather than a snapshot because the two-provider state is
+now permanent by a human decision of 2026-09-19 — recorded on the lane board as U-563,
+WONTFIX — that both providers stay, so `install_default` stays load-bearing. **That id
+resolves nowhere in this repository**, and by this unit's own rule (a self-referential
+citation is not a citation) it cannot be the record. This paragraph is therefore the
+record: the change that would leave one provider is switching `axum-server` to
+`tls-rustls-no-provider` in the root `Cargo.toml` *and* adding `default-features = false`
+to this crate's `rustls` line — both, since each enabler is independently sufficient — and
+the decision was not to.
+
+**Why the decision went that way**, since `tls_startup.rs:16` points here for the
+reasoning rather than re-deriving it. This crate wants `ring` specifically
+(`crates/acdp-registry-server/Cargo.toml:41-43` — `aws-lc-rs` drags `aws-lc-sys` and
+`prebuilt-nasm`, a C/asm build dependency, into the shipped binary's TLS path). But rustls
+declares `prefer-post-quantum = ["aws_lc_rs"]`, so a `ring`-only build gives up
+post-quantum hybrid key exchange. Post-quantum won, and both providers stay. Note what is
+*not* part of that trade: **TLS 1.2 is provider-independent** (`tls12 = []`), and an
+`aws_lc_rs`-only build would be both single-provider and post-quantum — the constraint is
+that this crate wants `ring`, not that no single-provider form keeps post-quantum. Both
+were asserted the other way earlier in this unit and corrected against the manifests.
+
+**2. The larger half: the diagnostic a reader actually meets carried nothing.**
+
+The child's stdout/stderr were captured only on the early-exit branch. Every other
+failure — the common case — reported a probe error with none of the registry's own
+output.
+
+Those two paths are not the alternatives they appear to be, and the control that proved
+it also explains why nobody noticed. The retry loop breaks on a **non-retryable** probe
+error, and a timeout is non-retryable (`ProbeError::io`:
+`retryable: stage.io_failure_may_be_transient() && !timed_out`). So when another process
+already holds the port *without accepting*, the first probe times out in the handshake,
+the loop breaks before its next `try_wait`, and the early-exit branch never runs **even
+though the child has already exited**. Measured with a listener that binds 18443 without
+accepting: the child exits in 0.06 s with `Address already in use`, and the test lands on
+the probe assertion, three runs of three.
+
+The qualifier is load-bearing and a first draft of this entry omitted it. A holder that
+*accepts* and closes produces `UnexpectedEof`, which **is** retryable, so the loop
+survives to its next `try_wait` and the early-exit branch fires normally — verified with
+the same harness in `accept-close` mode. So the branch that is skipped turns on whether
+the holder accepts, not on "port in use" as a cause; the likelier real holder is a server,
+which accepts. The narrower true statement is still what justifies the change: a probe
+failure can arrive with the child already dead and its output unread.
+
+The child now writes to files in the tempdir the test already owns, and the probe-failure
+assertion reads them. Output entering a panic message is capped at the **first** 64 KiB
+per stream with the cut and both byte counts disclosed — the head, because this is a
+*startup* diagnostic and the signal is the first thing the binary said. There is no
+"full log at `<path>`" pointer: the tempdir is deleted when the test returns, so it would
+dangle by the time anyone followed it.
+
+**A thing the control showed in passing, still unfixed.** The child logs
+`{"message":"listening","addr":"127.0.0.1:18443"}` and *then* fails to bind with
+`Address already in use`. The log line asserts something that is not true yet. The
+install/`listening` ordering this module's docstring describes is still unasserted by any
+test.
+
+**3. The measurements, and which are ours.**
+
+Inherited from U-556 and **not** re-verified here: the ~40 KB-at-default-filter figure
+and the ~20 KB-per-probe figure — and the second of those is *superseded* for this test's
+own client by the ~11.1 KB below, rather than merely carried forward.
+
+Measured for this unit on 2026-09-19 (debug binary, TLS on, sqlite, `RUST_LOG=trace`):
+successful TLS startup **~35.6 KB**; startup plus one probe by this test's own rustls
+client **46,708 / 46,710 / 46,743 B**; per-request cost constant to within two bytes
+across eight requests; a forced early exit **~200 B**, all of it stderr — indicative
+only, because that line embeds the tempdir path and moves with its length (196 B and
+237 B measured for a short and a long path), so it is not a constant to rely on.
+
+The **64 KiB pipe ceiling** belongs in neither list as first written. U-556 measured it
+(65,531 / 65,536 B) and this unit re-measured it independently, observing the unread pipe
+stop at exactly **65,536 B**. An earlier version of this section listed it as inherited-
+and-not-re-verified four lines above quoting this unit's own fresh measurement of the
+same quantity — a contradiction in the paragraph whose entire job is attribution.
+
+So the pipe arrangement this unit replaced had room, after startup, for **two** probes by
+this test's client, and the **third** wedges — the child stops responding without exiting
+and the caller hits its 5 s read timeout. The test issues one request, because only
+`Connect`/`Handshake` probe failures retry and neither issues HTTP. The margin was one
+spare request: a real bound, held in place by a `matches!` arm in a different function
+that told nobody relaxing it what it cost. Files remove the dependence rather than
+document it.
+
+**Any request-count figure of this kind must name the client it describes.** The count is
+a property of the client, not of the server. A heavier OpenSSL client costs ~16.1 KB per
+request against the real probe's ~11.1 KB and wedges one request earlier. Three
+instruments in this unit gave three different answers — three, two, and one — before that
+was noticed; each had measured a different client, and none of the claims had named one.
+An earlier draft of this entry's source material also asserted the child had written
+96,573 B "by the moment a single probe returned", past the ceiling, and asked why a
+pipe-bound child keeps serving past it. That figure was never a one-probe figure: one
+probe leaves the child at ~46.7 KB, **under** the ceiling. The question had no referent
+and is withdrawn; the retraction is recorded in `ASSUMPTIONS.md`.
+
+The superseded "~16 KiB pipe buffer" premise belongs to `ASSUMPTIONS.md`, not to this
+log — U-556's entry here never made that claim — and it had already been self-corrected
+in place by U-556's own reconcile.
+
+**A note for two other entries in this file.** This unit rewrote `tls_startup.rs` heavily,
+moving `let dir = tempfile::tempdir()` from `:145` to `:316`. The U-542 entry below and
+`DECISIONS.md:3628` both cite `tls_startup.rs:145` as the model for the owned-`TempDir`
+pattern; both are still right in substance and now want `:316`. Recorded here because this
+file is append-only and those lines cannot be corrected in place.
+
+**4. What this unit does not fix.** Not an exhaustive list — in a unit about completeness
+claims, a closed numbered list under this heading would be one. These are the ones known
+at merge:
+
+- The install/`listening` ordering remains unasserted, as above.
+- Port `18443` is still hard-coded, and is now load-bearing for two falsifications rather
+  than one. A parallel run against a busy 18443 fails in a way that now, at least,
+  explains itself.
+- Both crypto providers remain, by the human decision recorded above, so
+  `install_crypto_provider()` stays load-bearing and the phase-1 assertion stays true.
+- **The branches this unit added have no in-suite test.** `ChildStream::Truncated`,
+  `::Unreadable` and the cap arithmetic were each falsified out-of-tree and the edits
+  reverted, so nothing in CI executes them. That widens the standing limit U-556's own
+  entry records ("several error branches have no test") rather than closing it.
+
 <!-- unit U-556 (lane-2) — the TLS startup test that never spoke TLS -->
 
 ### U-556 — `tls_startup` asserted TLS and observed TCP
@@ -184,6 +357,9 @@ shipped message names the failing stage and says which stages indict which party
   only on the early-exit branch (`tls_startup.rs:206-208`), which is disjoint from the
   handshake path. The new message's stage tag says *which* step failed; it cannot say what the
   registry was logging while it failed.
+  *(Fixed by U-560 — see its entry above. The probe-failure message now carries both streams.
+  U-560 also withdrew the reading that the stage tag identifies a culprit: under a foreign
+  process holding the port the stage is `handshake` and the registry is innocent.)*
 
 <!-- unit U-557 (lane-3) — clearing the yanked crates and making the ratchet enforce -->
 
