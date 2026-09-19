@@ -4100,7 +4100,7 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   no compile gate can reach. Measured in the same worktree: drop `features = ["ring"]` and the
   bin still **compiles** (rc=0) — `ring` resolves anyway through
   `reqwest`/`hyper-rustls`/`tokio-rustls`/`sqlx-core` feature unification — while this test goes
-  red at `tls_startup.rs:149` with its D-W5-105 message. That is the property worth ~25 lines:
+  red at `tls_startup.rs:162` with its D-W5-105 message. That is the property worth ~25 lines:
   this crate must keep making its own DIRECT request for its recorded provider choice rather
   than inheriting `ring` by accident of a graph where one unrelated bump could remove it.
 - **Alternatives:** delete the scan wholesale now that a runtime assertion exists — rejected on
@@ -4156,16 +4156,20 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   criterion 7 exists precisely so a reader does not re-open the manifest question.
 - **Blast radius if wrong:** the reference dangles until phase 4 lands. **DISCHARGED:** phase 4
   landed as `6427d89`; the anchor is `docs/ENGINEERING-LOG.md`'s `### U-560` heading, and
-  `D-W5-105` resolves exactly to `crates/acdp-registry-server/Cargo.toml:41-43`. All three
+  `D-W5-105`'s REASONING is inline at `crates/acdp-registry-server/Cargo.toml:41-43` —
+  the id string itself is not in that file, which is why the test's message points at the lines
+  rather than at the id. All three
   ENGINEERING-LOG citations in `tls_startup.rs` reach a tracked record.
 - **One gap found in the cited ARTIFACT, not in this decision:** `tls_startup.rs:16` promises the
   log is "where to read the reasoning", and the log carried the decision and the reversal
   mechanism but not the post-quantum trade behind it. Corrected by adding the reasoning to the
   log rather than by weakening the comment — a citation that resolves to a record missing the
   thing it was cited for is the same defect this unit exists to remove, one level out.
-- **On `U-563`:** it still resolves nowhere tracked, and the log now says so outright and carries
-  the substance itself instead of leaning on the id for authority, so this entry's own rule (a
-  self-referential citation is not a citation) is satisfied. `tls_startup.rs` no longer cites it.
+- **On `U-563`:** before this PR it appeared in no tracked file at all. It now appears in four,
+  all added here — but only as a pointer to an off-repo board, never as the authority. The log
+  says so outright and carries the substance itself (the reversal needs BOTH enablers removed),
+  so this entry's own rule — a self-referential citation is not a citation — is satisfied by the
+  record existing, not by the id resolving. `tls_startup.rs` no longer cites the id at all.
 - **Status:** CONFIRMED (2026-09-19, Opus under `/reconcile`). See `DECISIONS.md`.
 
 ## U-560 — resolution of U-556's "child stdout is not drained" entry

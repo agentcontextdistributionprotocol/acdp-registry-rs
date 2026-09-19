@@ -183,6 +183,12 @@ The superseded "~16 KiB pipe buffer" premise belongs to `ASSUMPTIONS.md`, not to
 log — U-556's entry here never made that claim — and it had already been self-corrected
 in place by U-556's own reconcile.
 
+**A note for two other entries in this file.** This unit rewrote `tls_startup.rs` heavily,
+moving `let dir = tempfile::tempdir()` from `:145` to `:316`. The U-542 entry below and
+`DECISIONS.md:3628` both cite `tls_startup.rs:145` as the model for the owned-`TempDir`
+pattern; both are still right in substance and now want `:316`. Recorded here because this
+file is append-only and those lines cannot be corrected in place.
+
 **4. What this unit does not fix.** Not an exhaustive list — in a unit about completeness
 claims, a closed numbered list under this heading would be one. These are the ones known
 at merge:

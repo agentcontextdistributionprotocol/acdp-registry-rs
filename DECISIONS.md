@@ -3786,7 +3786,7 @@ by measurement and replaced**.
   error, rc=101, **zero** `test result` lines. The scan's dev-only message cannot print.
 - **The real reason, measured.** Drop `features = ["ring"]` and the bin still **compiles** (rc=0) —
   `ring` resolves anyway via `reqwest`/`hyper-rustls`/`tokio-rustls`/`sqlx-core` unification — while
-  the test goes red at `tls_startup.rs:149`. The `ring` assertion is live, compile-invisible, and
+  the test goes red at `tls_startup.rs:162`. The `ring` assertion is live, compile-invisible, and
   the only check of D-W5-105 anywhere. That is what earns the lines.
 - **Follow-through:** the same refuted claim was carried in the test docstring and in
   `docs/ENGINEERING-LOG.md`. Both corrected in this PR. Fixing only `ASSUMPTIONS.md` would have
@@ -3809,8 +3809,9 @@ green would be "for a reason it does not name" is accurate and the invariant gen
 
 ### 3. "Phase 1's docstring cites a record phase 4 creates" — **CONFIRMED, blast radius discharged**
 
-Decided by: Opus. Phase 4 landed (`6427d89`); `docs/ENGINEERING-LOG.md` is tracked, and `D-W5-105`
-resolves exactly to `crates/acdp-registry-server/Cargo.toml:41-43`. All three ENGINEERING-LOG
+Decided by: Opus. Phase 4 landed (`6427d89`); `docs/ENGINEERING-LOG.md` is tracked, and `D-W5-105`'s
+REASONING is inline at `crates/acdp-registry-server/Cargo.toml:41-43` (the id string itself is
+not in that file, which is why the test's message points at the lines rather than the id). All three ENGINEERING-LOG
 citations in `tls_startup.rs` reach a tracked record.
 
 **One gap in the cited artifact, not in the decision:** `tls_startup.rs:16` promises the log is
@@ -3820,10 +3821,26 @@ Corrected by adding the reasoning to the log rather than by weakening the commen
 resolves to a record missing the thing it was cited for is this unit's own defect class, one level
 out.
 
-**`U-563`** still resolves nowhere tracked. The log now says so outright and carries the substance
+**`U-563`** appeared in no tracked file before this PR and in four after it — all added here, and
+all as a pointer to an off-repo board rather than as the authority. The log carries the substance
 itself — the reversal needs `axum-server` switched to `tls-rustls-no-provider` **and**
 `default-features = false` on this crate's `rustls` line, both, since each enabler is independently
 sufficient — instead of leaning on the id for authority. `tls_startup.rs` no longer cites it.
+
+### Collateral — two pre-existing citations this PR invalidated
+
+Not a decision, recorded because these files are append-only and the affected lines cannot be
+edited in place. This unit rewrote `crates/acdp-registry-server/tests/tls_startup.rs` heavily, which
+moved `let dir = tempfile::tempdir()` from **`:145` to `:316`**. Two accurate pre-existing citations
+now point at the wrong line:
+
+- `DECISIONS.md:3628` — "`tls_startup.rs:145` already had this shape and was the model"
+- `docs/ENGINEERING-LOG.md:442` — "`tls_startup.rs:145` already had this shape; it was the model"
+
+Both meant the owned-`TempDir` pattern, and both are **still correct in substance** — read `:316`.
+A line number in a cumulative record is a pin into a file that keeps moving; that is a property of
+citing lines at all, not a defect in those entries. Where this unit could choose, it cited a
+symbol or a quoted string instead.
 
 **Summary:** 3 entries, 3 settled without escalation, 0 deferred. One had its reasoning replaced
 after measurement; none changed what ships. No code follow-up is required before the next `/ship`.

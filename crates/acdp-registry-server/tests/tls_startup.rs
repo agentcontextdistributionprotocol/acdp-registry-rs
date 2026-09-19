@@ -38,10 +38,16 @@
 //!
 //! [`tls_startup_installs_a_provider_and_serves`] spawns the real binary and
 //! is the one that would have caught the defect. [`rustls_is_a_normal_dependency`]
-//! is cheap, needs no cert, and catches the narrower thing the spawn test
-//! cannot distinguish: that the manifest move actually landed, rather than
-//! `rustls` silently remaining dev-only — the state in which the panic could
-//! not reach any test binary in the first place.
+//! is cheap, needs no cert, and asserts that this crate keeps making its own
+//! DIRECT request for `ring` — the recorded provider choice (D-W5-105) — which
+//! no compile gate can see, because `ring` resolves anyway through
+//! `reqwest`/`hyper-rustls`/`tokio-rustls`/`sqlx-core` unification.
+//!
+//! **It does NOT earn its place by catching a dev-only `rustls`, though this
+//! paragraph said so until U-560 measured it.** Since U-530, `main.rs:100`
+//! names `rustls::` in the bin, and Cargo does not expose `[dev-dependencies]`
+//! to bins, so that state fails the binary's own compile and produces no test
+//! binary at all. The dev-only arm below is defensive only.
 //!
 //! **Neither test asserts the ORDER** in which the provider install and the
 //! `listening` log occur. Measured, not assumed: moving
@@ -157,7 +163,7 @@ fn rustls_is_a_normal_dependency() {
         rustls_line.contains("\"ring\""),
         "this crate must REQUEST `ring`, which is the recorded choice (D-W5-105 — the \
          reasoning is inline at `crates/acdp-registry-server/Cargo.toml:41-43`, since \
-         that decision id resolves nowhere else in this repo). Note \
+         the id itself is not in that file). Note \
          what this does and does not say: it asserts the request, not the resolution — \
          the graph resolves `ring` AND `aws_lc_rs`, deliberately and permanently, which \
          is what the next assertion is about. A line naming both would satisfy this one. \
