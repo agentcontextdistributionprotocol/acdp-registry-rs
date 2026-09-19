@@ -12,6 +12,28 @@
 //! `listening` with the bind address. The operator-visible symptom was "it
 //! says it is listening and the port refuses connections".
 //!
+//! **Two providers is the permanent state, by decision** — recorded in
+//! `docs/ENGINEERING-LOG.md` under U-560, which is where to read the reasoning
+//! rather than re-deriving it here. In short: dropping the second provider was
+//! proposed and refused, because this crate wants `ring` specifically
+//! (`Cargo.toml:41-43` — `aws-lc-rs` drags `aws-lc-sys` + `prebuilt-nasm`, a
+//! C/asm build dependency, into the shipped binary), and rustls declares
+//! `prefer-post-quantum = ["aws_lc_rs"]`, so a `ring`-only build gives up
+//! post-quantum hybrid key exchange. Post-quantum won.
+//!
+//! Note what is *not* part of that trade, because an earlier draft of this
+//! comment said it was: **TLS 1.2 is provider-independent**
+//! (`rustls-0.23.45/Cargo.toml:97`, `tls12 = []`). A single-provider build
+//! would have to re-add `tls12` explicitly only because it reaches
+//! single-provider via `default-features = false`, which drops every default —
+//! that is a curable detail of the mechanism, not a cost of choosing one
+//! provider.
+//!
+//! So `install_crypto_provider()` (`main.rs:99-108`, called at `:114`) is
+//! load-bearing for good rather than a workaround awaiting a manifest fix, and
+//! [`rustls_is_a_normal_dependency`] asserts the invariant that makes it
+//! necessary.
+//!
 //! ## Two checks, because they fail for different reasons
 //!
 //! [`tls_startup_installs_a_provider_and_serves`] spawns the real binary and
@@ -36,14 +58,48 @@
 //! the call site in `main.rs` and by nothing executable, and a reader should
 //! not infer coverage that is not here.
 
-/// `rustls` must be a **normal** dependency of this crate, carrying exactly
-/// one provider feature.
+/// `rustls` must be a **normal** dependency of this crate, and this process
+/// must still be unable to pick a provider on its own.
 ///
-/// Read from the manifest rather than from `cargo tree`'s output on purpose.
-/// The manifest is declarative and order-independent; a scrape of output a
-/// tool formatted for human reading has to be re-verified every time that
-/// formatting changes, and counting lines in it is how a query says `<none>`
-/// when it means `rc=1`.
+/// Two assertions, and they are reachable from different places on purpose.
+///
+/// **Normal-vs-dev-only is readable only from the manifest.** Cargo exposes
+/// `[dev-dependencies]` to test targets, so a `rustls` that had slipped back
+/// into that section would still compile and run *here* while the shipped
+/// binary had none — no runtime check in this binary can see the difference.
+/// Read from the manifest rather than from `cargo tree`'s output on purpose:
+/// the manifest is declarative and order-independent, whereas a scrape of
+/// output a tool formatted for human reading has to be re-verified every time
+/// that formatting changes, and counting lines in it is how a query says
+/// `<none>` when it means `rc=1`.
+///
+/// **The provider count is NOT readable from that manifest line**, which is
+/// why this test used to assert a falsehood. It asserted that the line does
+/// not mention `aws-lc-rs` and called that "the two-provider defect is
+/// prevented" — while the crate resolved both providers anyway:
+///
+/// ```text
+/// cargo tree -e features -p acdp-registry-server -i rustls@0.23.45 -f '{p} [{f}]'
+/// rustls v0.23.45 [aws-lc-rs,aws_lc_rs,default,log,logging,prefer-post-quantum,ring,std,tls12]
+/// ```
+///
+/// Neither provider has a single enabler, which is the deeper reason a
+/// one-line scan cannot answer this. `aws_lc_rs` has **two** independent
+/// sources: `axum-server`'s `tls-rustls = ["tls-rustls-no-provider",
+/// "rustls/aws-lc-rs"]`, declared in `axum-server-0.8.0/Cargo.toml` and merely
+/// *switched on* by root `Cargo.toml:35`; and this crate's own line, which
+/// omits `default-features = false`, so rustls' `default` set — which contains
+/// `aws_lc_rs` — applies. `ring` has **five**: this crate's direct dependency,
+/// `reqwest` (`__rustls-ring`), `hyper-rustls`, `tokio-rustls` and `sqlx-core`.
+///
+/// Exactly one of those seven edges is printed on the line the scan reads —
+/// `features = ["ring"]` — and it is the one that needs no outside knowledge.
+/// The edge that decides this test's subject is the opposite kind: `aws_lc_rs`
+/// arrives through an *absence*, the missing `default-features = false`, and
+/// seeing it requires knowing rustls' own default set, which the line does not
+/// carry. A scan can read a token; it cannot read a token that is not there
+/// and know what its absence enables. So the property is asserted where it is
+/// actually observable: from the consequence, below.
 #[test]
 fn rustls_is_a_normal_dependency() {
     let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
@@ -84,13 +140,106 @@ fn rustls_is_a_normal_dependency() {
         });
     assert!(
         rustls_line.contains("\"ring\""),
-        "`rustls` must request exactly one provider feature, and `ring` is the recorded \
-         choice (D-W5-105): {rustls_line}"
+        "this crate must REQUEST `ring`, which is the recorded choice (D-W5-105 — the \
+         reasoning is inline at `crates/acdp-registry-server/Cargo.toml:41-43`, since \
+         that decision id resolves nowhere else in this repo). Note \
+         what this does and does not say: it asserts the request, not the resolution — \
+         the graph resolves `ring` AND `aws_lc_rs`, deliberately and permanently, which \
+         is what the next assertion is about. A line naming both would satisfy this one. \
+         Manifest line: {rustls_line}"
     );
+    // Assert the CONSEQUENCE of the resolved feature set, which this process
+    // can observe, rather than a spelling on a manifest line, which it cannot.
+    //
+    // **State precisely what the panic proves, because it is not "exactly two
+    // providers".** `ClientConfig::builder()` panics with the message below
+    // whenever `CryptoProvider::from_crate_features()` returns `None`
+    // (`rustls-0.23.45/src/crypto/mod.rs:249`), and that function's own
+    // documentation (`:259-263`) gives THREE such states: the features name two
+    // providers, or they name none, or `custom-provider` is enabled. A green
+    // here is consistent with all three.
+    //
+    // That is still exactly the invariant worth asserting, because all three
+    // mean the same operational thing: **rustls cannot pick a provider on its
+    // own, so `main` must install one explicitly.** That — not the provider
+    // count — is why `install_crypto_provider()` exists in `main.rs:99-108`.
+    // The assertion below is deliberately written to that claim and no wider.
+    //
+    // The "none" reading is ruled out separately, one line above the panic
+    // check: naming `rustls::crypto::ring::default_provider` fails to COMPILE
+    // if the `ring` feature is gone, which is the legible failure for a
+    // provider this crate requests directly. (Naming `aws_lc_rs` the same way
+    // would be wrong: its absence is a desirable end state, so a compile error
+    // is the wrong failure shape.) `custom-provider` is left unruled-out; it
+    // would present as the `Some(_)` branch of the message below, or as its
+    // branch (b).
+    //
+    // It is an invariant rather than a snapshot: the decision to keep both
+    // providers is recorded in `docs/ENGINEERING-LOG.md` under U-560.
+    //
+    // Soundness precondition, and it is a property of this file: nothing in
+    // this test binary installs a process default. There are no `mod`
+    // declarations here, so no sibling test module is compiled in, and the
+    // spawn test's probe builds its client with `builder_with_provider`, which
+    // installs nothing. Adding `mod didweb;` would break that — it is branch
+    // (a) of the message below.
+    //
+    // The payload is bound rather than discarded because the causes of a red
+    // are distinguished by *what was observed*: no panic at all versus a panic
+    // with different words. A message that cannot print the payload would
+    // pre-diagnose one cause for both.
+    //
+    // Control for the "no providers at all" reading of the panic below: this
+    // is a compile-time reference, so it costs nothing at runtime and fails
+    // loudly at build time if `ring` stops resolving.
+    let _ring_is_compiled_in: fn() -> rustls::crypto::CryptoProvider =
+        rustls::crypto::ring::default_provider;
+
+    let caught = std::panic::catch_unwind(rustls::ClientConfig::builder);
+    let payload: Option<String> = caught.err().map(|e| {
+        e.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_else(|| "<panic payload was neither String nor &str>".to_string())
+    });
     assert!(
-        !rustls_line.contains("aws-lc-rs"),
-        "requesting both providers is the original defect: rustls cannot choose and panics \
-         at startup: {rustls_line}"
+        payload.as_deref().is_some_and(|m| {
+            m.contains("Could not automatically determine the process-level CryptoProvider")
+        }),
+        "`rustls::ClientConfig::builder()` did not panic with the process-level \
+         CryptoProvider message, so this process CAN now pick a crypto provider \
+         unaided. Observed panic payload: {payload:?}\n\
+         \n\
+         A red here is not necessarily breakage. Read the payload first — it \
+         splits the causes, and they are not ranked, because nothing here \
+         measures which is likelier:\n\
+         \n\
+         Payload `None` (nothing panicked) means either:\n\
+         (a) something in THIS test binary now installs a process-level default. \
+         Adding `mod didweb;` is how that happens — `tests/didweb/mod.rs:228-235` \
+         installs one under a `Once`. Check this file's `mod` declarations FIRST; \
+         it is the one cause that says nothing about the dependency graph.\n\
+         (b) the graph now resolves exactly one provider, so rustls can choose. \
+         This needs BOTH of `aws_lc_rs`'s enablers to be gone at once — see the \
+         two-enabler paragraph in this function's docstring. Neither alone does \
+         it: drop `axum-server`'s explicit `rustls/aws-lc-rs` and this crate's \
+         own line still inherits `aws_lc_rs` through rustls' `default`; change \
+         rustls' `default` and `axum-server`'s explicit edge survives, since \
+         `axum-server` sets `default-features = false` on rustls and that edge \
+         is its only contribution. So do not stop at checking one of them, and \
+         do not assume a decision was revisited — go and look. If one provider \
+         really does resolve, `install_crypto_provider()` at `main.rs:99-108` \
+         may no longer be required, and the right response is to RE-EVALUATE \
+         that call against the U-560 entry in `docs/ENGINEERING-LOG.md`.\n\
+         \n\
+         Payload `Some(_)` with different text means rustls reworded this panic, \
+         or panicked for another reason. The invariant is intact; update the \
+         substring this assertion looks for, and check the new text is still \
+         about provider selection.\n\
+         \n\
+         In none of these cases is deleting this test the fix: it is the only \
+         executable record of why that install call exists. Manifest line, for \
+         reference (it cannot show the resolved set): {rustls_line}"
     );
 }
 

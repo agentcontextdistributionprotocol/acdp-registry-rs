@@ -4073,3 +4073,58 @@ abandoned, and the replacement PR would be red again with nobody watching. The f
   pre-registered (criterion 6) and which the assign's criterion 3 calls load-bearing. Widening scope
   to take it would break a criterion this unit's PR claims. Corrected comments are in the code now;
   the structural fix is a successor unit.
+
+## U-560 — the manifest scan is kept, for one property only
+
+- **Plan:** `plans/u560-honest-test-infrastructure.md`
+- **Assumed:** whether `rustls` is a *normal* dependency rather than a dev-only one is not
+  observable from inside this test binary at runtime.
+- **Chose:** keep the `[dependencies]` section scan and its `axum-server` anti-vacuity control,
+  and drop only the assertion that was false. Cargo exposes `[dev-dependencies]` to test targets,
+  so a `rustls` that had slipped back into that section would still compile and run in this
+  binary while the shipped binary had none — the exact state that made the original defect
+  unreachable by any test. No runtime check can see that difference.
+- **Alternatives:** delete the scan wholesale now that a runtime assertion exists — rejected, it
+  would lose the one property the scan is right about.
+- **Blast radius if wrong:** low and test-only. If the scan were redundant we would be carrying
+  ~25 lines of dead assertion; nothing ships differently.
+- **Status:** UNCONFIRMED
+
+## U-560 — `custom-provider` is left unruled-out, deliberately
+
+- **Plan:** `plans/u560-honest-test-infrastructure.md`
+- **Assumed:** `ClientConfig::builder()` panicking with the process-level-CryptoProvider message
+  is worth asserting even though it does not identify *which* of three feature states caused it.
+- **Chose:** assert the panic and its message, narrow the stated invariant to what all three
+  states share — rustls cannot select a provider unaided, so `main` must install one — and rule
+  out only the "no providers" reading, via a compile-time reference to
+  `rustls::crypto::ring::default_provider` (`crypto/mod.rs:25-26` gates the module on the
+  feature). `custom-provider` stays unruled-out and the comment says so.
+- **Measured:** `rustls-0.23.45/src/crypto/mod.rs:259-263` documents all three states returning
+  `None` from `from_crate_features()`; `:249` is the `.expect` that panics.
+- **Alternatives:** (a) assert the provider *count* — not reachable from a test crate, which
+  cannot `cfg!` on another crate's features; (b) name `rustls::crypto::aws_lc_rs` to detect the
+  second provider — rejected, its absence is a desirable end state so that turns a legible red
+  into a hard compile error; (c) scrape `cargo tree` — rejected by the test's own docstring.
+- **Blast radius if wrong:** low. Enabling `custom-provider` in this workspace would leave the
+  assertion green for a reason it does not name — but that state also requires an explicit
+  provider install, so the operational invariant the test protects would still hold.
+- **Status:** UNCONFIRMED
+
+## U-560 — phase 1's docstring cites a record phase 4 creates
+
+- **Plan:** `plans/u560-honest-test-infrastructure.md`
+- **Assumed:** a citation in tracked code must resolve in tracked files. Measured: `U-563` and
+  `D-W5-105` each appeared in exactly one tracked file — the test asserting them — because
+  `plans/*` is gitignored (`.gitignore:62`). A self-referential citation is not a citation.
+- **Chose:** point the docstring at the U-560 entry in `docs/ENGINEERING-LOG.md` (created by
+  phase 4, same PR) for the keep-both-providers decision, and at
+  `crates/acdp-registry-server/Cargo.toml:41-43` for `D-W5-105`, which carries its reasoning
+  inline and is tracked today.
+- **Alternatives:** write the decision into `DECISIONS.md` from phase 1 — rejected, that file is
+  outside phase 1's declared scope and `/reconcile` owns it; or drop the citation — rejected,
+  criterion 7 exists precisely so a reader does not re-open the manifest question.
+- **Blast radius if wrong:** the reference dangles until phase 4 lands. Guarded by an explicit
+  ship gate in the plan (`grep -c 'U-560' docs/ENGINEERING-LOG.md` ≥ 1 before merge, and phase 1
+  must not merge without phase 4).
+- **Status:** UNCONFIRMED
