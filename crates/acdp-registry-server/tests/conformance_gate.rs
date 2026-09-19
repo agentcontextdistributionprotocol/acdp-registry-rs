@@ -2134,3 +2134,319 @@ jobs:
         "two bump targets must trip 10, got {v:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// THE SURVIVOR CLASSIFIER'S WIRING.
+//
+// Same verification gap as `spec_pin_violations` above, and worth restating
+// because it is the whole reason this logic is a committed script rather than
+// more shell inside the workflow. `mutants.yml` is `schedule:` +
+// `workflow_dispatch` with NO `pull_request` trigger, so a PR that deletes the
+// classifier call, renames the script, or points MUTANTS_PRIOR_LEDGER at a glob
+// cannot turn that job red. The damage surfaces on the next Monday's cron,
+// detached from the change that caused it -- and in this case it surfaces as a
+// ratchet that quietly went back to telling readers "Usually GOOD NEWS, delete
+// the line" about mutants that merely moved.
+//
+// The GLOB check is not hypothetical. `docs/mutation-runs/` holds a VOID ledger
+// (measured with `copy_vcs` lost, so every "caught" in it is an artifact) and
+// three SUPERSEDED shards. Globbing that directory yields 13 files, 417 records,
+// 66 duplicate names and 11 with CONFLICTING verdicts -- which the classifier
+// would (correctly) refuse to classify against, turning the ratchet into a
+// permanent hard failure nobody could act on.
+// ---------------------------------------------------------------------------
+
+const CLASSIFIER: &str = ".github/scripts/classify_removed_survivors.py";
+
+/// The value of a top-level `KEY: "value"` env entry, unquoted.
+fn yaml_scalar<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'))
+        .map(|v| v.trim().trim_matches('"').trim_matches('\''))
+}
+
+fn classifier_wiring_violations(mutants_yml: &str) -> Vec<String> {
+    let mut v = Vec::new();
+
+    if !mutants_yml.contains(CLASSIFIER) {
+        v.push(format!(
+            "mutants.yml never invokes {CLASSIFIER}. A disappeared survivor line is \
+             then reported with no evidence of whether it was KILLED or merely DRIFTED."
+        ));
+    }
+    // It must read the FULL report. `missed.txt` is the survivor subset and is
+    // exactly what cannot answer the question.
+    if !mutants_yml.contains("--outcomes") {
+        v.push(
+            "the classifier is invoked without --outcomes, so it cannot read the full \
+             verdict map that makes a kill provable."
+                .to_string(),
+        );
+    }
+    match yaml_scalar(mutants_yml, "MUTANTS_PRIOR_LEDGER") {
+        None => v.push(
+            "MUTANTS_PRIOR_LEDGER is not declared, so a drifted survivor cannot be \
+             paired to its new location and every drift degrades to a coarse guess."
+                .to_string(),
+        ),
+        Some("") => v.push("MUTANTS_PRIOR_LEDGER is declared but empty.".to_string()),
+        Some(p) if p.contains('*') || p.contains('?') => v.push(format!(
+            "MUTANTS_PRIOR_LEDGER is a GLOB ({p:?}). It must name exactly ONE ledger: \
+             docs/mutation-runs/ also holds a VOID ledger and three SUPERSEDED shards, \
+             whose verdicts contradict the current ones."
+        )),
+        Some(_) => {}
+    }
+    if !mutants_yml.contains("--prior-ledger") {
+        v.push(
+            "MUTANTS_PRIOR_LEDGER is declared but never passed as --prior-ledger, so it \
+             documents an intent the run does not act on."
+                .to_string(),
+        );
+    }
+    if !mutants_yml.contains("--removed-file") {
+        v.push(
+            "the classifier is invoked without --removed-file, so it is given nothing to \
+             classify."
+                .to_string(),
+        );
+    }
+    // A SHARDED report classifies every other shard's survivors as deleted, and
+    // only the scope pin can tell a shard from a whole run.
+    if !mutants_yml.contains("--expected-scope") {
+        v.push(
+            "the classifier is invoked without --expected-scope, so a SHARDED report \
+             would be classified as if it were the whole run -- reporting every survivor \
+             belonging to another shard as one whose expression was deleted."
+                .to_string(),
+        );
+    }
+    // Without this the entire prior-ledger FRESHNESS gate can be disabled by
+    // deleting one flag, while every other wiring check stays green.
+    if !mutants_yml.contains("--committed-file") {
+        v.push(
+            "the classifier is invoked without --committed-file, so a STALE prior ledger \
+             is never detected: a MUTANTS_SURVIVORS line edited without committing a \
+             matching ledger would silently degrade every drift to a coarse guess."
+                .to_string(),
+        );
+    }
+    // The exit codes are 10/11 precisely so a crash (1) or an argparse error (2)
+    // cannot be read as a normal classification. Handling that distinction is the
+    // point; dropping it re-hides a broken classifier.
+    if !mutants_yml.contains("the classifier itself failed") {
+        v.push(
+            "the workflow does not distinguish a CRASHED classifier from a normal \
+             classification. The script exits 10/11 on purpose so that 1 (unhandled \
+             exception) and 2 (argparse) stay distinguishable; without that branch a \
+             crash reads as agreement."
+                .to_string(),
+        );
+    }
+    // The raw list must be printed by the WORKFLOW, before the classifier runs --
+    // otherwise a missing or crashing script leaves the operator with no idea
+    // which lines vanished.
+    if !mutants_yml.contains("listed as surviving but NO LONGER in missed.txt:") {
+        v.push(
+            "the workflow no longer prints the removed lines itself. A diagnostic that \
+             exists only inside the tool being diagnosed disappears exactly when the \
+             tool breaks."
+                .to_string(),
+        );
+    }
+    v
+}
+
+#[test]
+fn the_declared_prior_ledger_actually_exists() {
+    // MUTANTS_PRIOR_LEDGER is a PATH, and nothing else checks that it resolves.
+    // The ratchet fails closed if it dangles -- the classifier cannot open the
+    // file, exits non-10/11, and the workflow reports "the classifier itself
+    // failed" -- but only on the rare branch where a committed survivor vanishes.
+    // Between the rename and that branch firing, the gate looks healthy and its
+    // drift evidence is silently unavailable. The pointer is re-aimed every time
+    // the scope is re-measured (U-551 -> U-552 renamed it), so this is a live
+    // hazard, not a hypothetical one. Checking existence here moves detection to
+    // the PR that breaks it, on the required `tests` context.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let mutants_yml = std::fs::read_to_string(root.join(".github/workflows/mutants.yml"))
+        .expect("read .github/workflows/mutants.yml");
+
+    let ledger = yaml_scalar(&mutants_yml, "MUTANTS_PRIOR_LEDGER")
+        .expect("mutants.yml declares MUTANTS_PRIOR_LEDGER");
+    assert!(
+        !ledger.is_empty(),
+        "MUTANTS_PRIOR_LEDGER is declared but empty"
+    );
+    assert!(
+        root.join(ledger).is_file(),
+        "MUTANTS_PRIOR_LEDGER points at {ledger:?}, which is not a file in this repo.          A dangling ledger pointer does not fail until a committed survivor vanishes,          which may be many PRs after the rename that broke it."
+    );
+
+    // ON DISK IS NOT ENOUGH -- it must be TRACKED. CI checks out the commit, so a
+    // ledger that exists only in someone's working tree is absent there. Testing
+    // `is_file()` alone passes locally for the author and fails for everyone else,
+    // which is the worst shape a gate can have: green where it is written, red
+    // where it is enforced. `git ls-files` is a second enumeration that an
+    // unstaged file cannot satisfy.
+    let tracked = std::process::Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--", ledger])
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("could not run `git ls-files` in {}: {e}", root.display()));
+    assert!(
+        tracked.status.success(),
+        "MUTANTS_PRIOR_LEDGER points at {ledger:?}, which exists on disk but is NOT \
+         tracked by git. CI checks out the commit, so the ratchet would find no ledger \
+         there while this test passes locally. `git add` it."
+    );
+}
+
+#[test]
+fn the_survivor_classifier_is_still_wired_into_the_ratchet() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let read =
+        |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("read {p}: {e}"));
+    let mutants_yml = read(".github/workflows/mutants.yml");
+
+    let violations = classifier_wiring_violations(&mutants_yml);
+    assert!(
+        violations.is_empty(),
+        "the survivor classifier's wiring is broken:\n  {}\n\nmutants.yml has no \
+         pull_request trigger, so without this test the breakage would surface on the \
+         next Monday cron rather than on the change that caused it.",
+        violations.join("\n  ")
+    );
+
+    // The script and its tests must actually exist -- a wiring check that passes
+    // while the target is missing is the failure this whole unit is about.
+    for p in [
+        CLASSIFIER,
+        ".github/scripts/test_classify_removed_survivors.py",
+    ] {
+        assert!(
+            root.join(p).is_file(),
+            "{p} is referenced but does not exist"
+        );
+    }
+
+    // And the ledger it names must exist, or every drift silently degrades to the
+    // coarse fallback while the workflow still looks correctly configured.
+    let ledger = yaml_scalar(&mutants_yml, "MUTANTS_PRIOR_LEDGER").expect("checked above");
+    assert!(
+        root.join(ledger).is_file(),
+        "MUTANTS_PRIOR_LEDGER names {ledger}, which does not exist. Drift pairing would \
+         fall back to a coarse (file, description) match that cannot tell sibling \
+         mutants apart -- and in this repo three `delete !` mutants in one function hold \
+         three DIFFERENT verdicts."
+    );
+}
+
+/// Every invariant above must FAIL on its own breakage, or the test is four
+/// assertions that have never been shown to do anything.
+#[test]
+fn each_classifier_wiring_invariant_is_individually_falsified() {
+    // FALSIFIED AGAINST THE REAL FILE FIRST. A hand-written control can only
+    // contain the shapes its author thought of; the shipped workflow is the input
+    // that actually has to survive these checks.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let real = std::fs::read_to_string(root.join(".github/workflows/mutants.yml"))
+        .expect("read mutants.yml");
+    for (label, needle) in [
+        ("call deleted", CLASSIFIER),
+        ("--outcomes dropped", "--outcomes"),
+        ("--removed-file dropped", "--removed-file"),
+        ("--expected-scope dropped", "--expected-scope"),
+        ("--prior-ledger dropped", "--prior-ledger"),
+        ("--committed-file dropped", "--committed-file"),
+        ("crash branch dropped", "the classifier itself failed"),
+        (
+            "workflow stops printing the list",
+            "listed as surviving but NO LONGER in missed.txt:",
+        ),
+    ] {
+        let broken = real.replace(needle, "# removed by falsification #");
+        assert!(
+            !classifier_wiring_violations(&broken).is_empty(),
+            "breaking the REAL mutants.yml ({label}) produced no violation, so that \
+             invariant is decorative"
+        );
+    }
+    // A glob is the one break that is an EDIT rather than a deletion.
+    //
+    // The ledger path is READ OUT of the real file rather than written here as a
+    // literal. A literal pins this test to one ledger filename, and ledgers are
+    // renamed every time the scope is re-measured -- U-552 renamed it from
+    // `u551-core-scope-213` to `u552-union-scope-351`. With a literal, that
+    // rename makes `replace` a silent no-op, so `globbed == real`, no violation
+    // is produced, and the assertion fires with the message "so that invariant is
+    // decorative" -- convicting the gate of a defect that is really in this test.
+    // A falsification whose mutation never applied does not prove the invariant
+    // is dead; it proves nothing at all, which is the more dangerous of the two.
+    let ledger = yaml_scalar(&real, "MUTANTS_PRIOR_LEDGER")
+        .expect("mutants.yml declares MUTANTS_PRIOR_LEDGER");
+    assert!(
+        !ledger.is_empty() && !ledger.contains('*'),
+        "MUTANTS_PRIOR_LEDGER is {ledger:?}, which is empty or already a glob --          the glob falsification below cannot mean anything against it"
+    );
+    let globbed = real.replace(ledger, "docs/mutation-runs/*-outcomes.json");
+    assert_ne!(
+        globbed, real,
+        "substituting the ledger path {ledger:?} changed nothing, so the glob          falsification never ran. Fix THIS test, not the gate."
+    );
+    assert!(
+        !classifier_wiring_violations(&globbed).is_empty(),
+        "pointing the REAL mutants.yml at a ledger GLOB produced no violation"
+    );
+
+    let good = format!(
+        "env:\n  MUTANTS_EXPECTED_SCOPE: \"213\"\n  \
+         MUTANTS_PRIOR_LEDGER: \"docs/mutation-runs/u551-core-scope-213-outcomes.json\"\n\
+         jobs:\n  mutants:\n    steps:\n      - run: |\n          python3 {CLASSIFIER} \
+         --outcomes \"$json\" --removed-file r.txt --prior-ledger \"$MUTANTS_PRIOR_LEDGER\" \
+         --expected-scope 213 --committed-file c.txt\n          echo 'listed as surviving but NO LONGER in \
+         missed.txt:'\n          echo 'the classifier itself failed'\n"
+    );
+    assert!(
+        classifier_wiring_violations(&good).is_empty(),
+        "the control input must be clean, or every case below proves nothing"
+    );
+
+    // Each break is a plausible edit, not a typo, and each must be caught ALONE.
+    let cases: Vec<(&str, String)> = vec![
+        ("call deleted", good.replace(CLASSIFIER, "echo skipped #")),
+        ("--outcomes dropped", good.replace("--outcomes \"$json\" ", "")),
+        (
+            "ledger undeclared",
+            good.replace("  MUTANTS_PRIOR_LEDGER: \"docs/mutation-runs/u551-core-scope-213-outcomes.json\"\n", ""),
+        ),
+        (
+            "ledger is a glob",
+            good.replace(
+                "docs/mutation-runs/u551-core-scope-213-outcomes.json",
+                "docs/mutation-runs/*-outcomes.json",
+            ),
+        ),
+        ("declared but never passed", good.replace(" --prior-ledger \"$MUTANTS_PRIOR_LEDGER\"", "")),
+    ];
+    for (label, broken) in cases {
+        assert!(
+            !classifier_wiring_violations(&broken).is_empty(),
+            "breaking the wiring ({label}) produced NO violation, so that invariant is \
+             decorative:\n{broken}"
+        );
+    }
+}

@@ -6,6 +6,32 @@ per-mutant verdicts for 95 of this file's 138 mutants were lost exactly that way
 
 ## Index — which ledgers are CURRENT
 
+**One ledger is CURRENT for the whole CI scope: `u552-union-scope-351-outcomes.json`.**
+Everything below it is history, kept for the reasons each section gives. A reader summing
+the `u549-*` set gets 19 survivors; a reader summing `u549` + `u550` gets 8; the tranche has
+been at **2** since U-552 paid six of them off with tests. Sum nothing — read the current
+ledger.
+
+| ledger | scope | result | status |
+|---|---|---|---|
+| `u552-union-scope-351-outcomes.json` | **351** — core 213 + `sqlite/src/store.rs` 138 | 219 caught / **7 missed** / 124 unviable / 1 timeout | **CURRENT** |
+| `u551-core-scope-213-outcomes.json` | 213 | 134 caught / 5 missed / 73 unviable / 1 timeout | SUPERSEDED by `u552` |
+| `u549`/`u550` store.rs shards (11 files) | 138, in 8 shards | 8 missed across the set | SUPERSEDED by `u552` |
+
+**The `u549`/`u550`/`u551` ledgers are SUPERSEDED, not VOID** — the same distinction the
+shard table below draws, now applied one level up. They were correct measurements of the
+tree as it stood. U-552 added tests that killed six of the eight store.rs survivors and then
+widened `examine_globs` so all 351 are measured in ONE run, which is what makes a single
+current ledger possible at all. Nothing about how they were taken is in question.
+
+**Why one run replaced eleven shard files:** a sharded report's `total_mutants` is that
+shard's share, so `len(records) == total_mutants` holds per shard and a truncated run is
+indistinguishable from a complete one. `.github/scripts/classify_removed_survivors.py`
+refuses a sharded report for exactly this reason (`--expected-scope`). Shards were a disk
+workaround, never the preferred shape.
+
+### Historical — the shard-by-shard state before U-552
+
 **A reader summing the `u549-*` set gets 19 survivors, and that has not been the tranche's
 state since U-550.** Three of those shards were re-run; the table below is which file to
 believe for each shard.
@@ -22,7 +48,13 @@ believe for each shard.
 | 5/8 | `u550-sqlite-store-shard-5of8` | 1 | `u549-…-5of8` (was 7) |
 | 6/8 | `u550-sqlite-store-shard-6of8` | 0 | `u549-…-6of8` (was 4) |
 | 7/8 | `u550-sqlite-store-shard-7of8` | 0 | `u549-…-7of8` (was 1) |
-| **total** | | **8** | |
+| **total** | | **8** | all eight SUPERSEDED by `u552` |
+
+**Six of those eight were killed by U-552, not re-labelled.** `568:9` `put`, `821:9`
+`mark_superseded`, `832:9` `first_version_ctx_id`, `923:9` `idempotency_evict_expired`, and
+both killable `994:35` comparisons (`<` and `==`). The two that remain are `994:35 >=`
+(equivalent) and `1306:35 !=` (unreachable by design); both carry their reason in
+`MUTANTS_SURVIVORS`.
 
 **The `u549` 5/6/7 ledgers are SUPERSEDED, not VOID, and the distinction is load-bearing.**
 They were correct measurements of the tree as it stood; U-550 then added tests that killed
@@ -37,11 +69,16 @@ with a bad one.**
 |---|---|---|
 | `u551-core-scope-213-outcomes.json` | 213 (the three `examine_globs` files) | 134 caught / **5 missed** / 73 unviable / 1 timeout |
 
-This is the measured basis for `MUTANTS_SURVIVORS` in `.github/workflows/mutants.yml` — the
-committed survivor set the ratchet now compares against, rather than a count. Taken with
+**SUPERSEDED by `u552-union-scope-351-outcomes.json`,** which re-measured all 213 of these
+alongside store.rs and returned the same five core survivors, byte for byte. That agreement
+across two runs at different scopes is the reason this file is worth keeping.
+
+This was the measured basis for `MUTANTS_SURVIVORS` in `.github/workflows/mutants.yml` — the
+committed survivor set the ratchet compares against, rather than a count. Taken with
 the CI-equivalent environment (`ACDP_SPEC_DIR` at the pinned spec revision,
-`ACDP_REQUIRE_CONFORMANCE=1`); without those, 42 fixture-replay tests skip and the survivor
-set comes out wider than CI's.
+`ACDP_REQUIRE_CONFORMANCE=1`); without those, **63 of 87** fixture-replay tests skip and the
+survivor set comes out wider than CI's. (Re-measured by U-552: the "42 of 70" this and
+`mutants.yml` both carried was stale — the suite grew and the figure was never revisited.)
 
 ## Read this before trusting any file here
 
