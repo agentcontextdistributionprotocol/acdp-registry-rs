@@ -3844,3 +3844,60 @@ symbol or a quoted string instead.
 
 **Summary:** 3 entries, 3 settled without escalation, 0 deferred. One had its reasoning replaced
 after measurement; none changed what ships. No code follow-up is required before the next `/ship`.
+
+## U-574 — `store.rs:1285-1287` vs. `MUTATION-SCOPE-CANDIDATES.md`: which claim was wrong (2026-09-20, decided by Opus under `/drive`, lane-2)
+
+The assign's own stated working hypothesis was that `MUTATION-SCOPE-CANDIDATES.md`'s
+**UNREACHABLE-BY-DESIGN** classification of `store.rs:1306:35` (`!=`→`==` in
+`commit_publish`) might be wrong "for the code path", even if the mutation-testing harness
+genuinely can't exercise it — because the comment at `store.rs:1285-1287` ("A concurrent
+publish won the key... reject as a duplicate when the content_hash differs") looked like it
+described real, reachable duplicate-key handling. Traced rather than assumed; the
+hypothesis inverted.
+
+**Finding: `MUTATION-SCOPE-CANDIDATES.md` is correct. The `store.rs:1285-1287` comment is
+the one that's wrong** — not factually false about what its own branch does if reached, but
+misleading about *whether* it's reached: it describes itself as the mechanism for normal
+concurrent-publish duplicate detection, when that detection actually lives ~270 lines
+earlier, at `commit_publish`'s "step 1" (`store.rs:958-1009`, a `SELECT`-based check with
+its own replay/`DuplicatePublish` returns at `:1001`/`:1003`). `BEGIN IMMEDIATE`
+(`store.rs:954`) fully serializes every writer, and step 1 always runs first and always
+returns early on any existing non-expired row — so the `if inserted == 0` block at `:1284`
+onward (and the `!=` inside it at `:1306`) can only be reached if step 1 already let a
+duplicate through, which the transaction structure makes impossible.
+
+**Three independent lines of evidence, not one:**
+1. **Code structure** — two near-identical idempotency checks exist, step 1 (read-based)
+   and step 7 (insert-based, `:1257-1310`); step 1 unconditionally runs first when a key is
+   present and always short-circuits on any existing row.
+2. **Existing tests, traced by hand.** `conformance.rs`'s
+   `idem001_004_publish_idempotency_key_lifecycle_and_restart_durability` runs idem-002
+   (same key/hash → replay) and idem-003 (same key, different hash → 409) sequentially, no
+   concurrency at all — both resolve at step 1 (`:1001`/`:1003`), never step 7.
+   `store.rs`'s own `concurrent_publish_same_idempotency_key_creates_one_context` races two
+   genuine `tokio::join!` threads on the same key and still resolves at step 1.
+3. **Prior art already on the board.** `docs/mutation-runs/README.md:85-125`'s
+   `VOID-u548-...` postmortem used `store.rs:1306:35` coming back "caught" as *the tell*
+   that an entire mutation run's harness was broken (`copy_vcs` lost) — specifically
+   because U-544 had already *proved* that mutant unreachable. `MUTATION-SCOPE-CANDIDATES.md:271-278`
+   documents that trace: an `eprintln!` at `inserted == 0` fired zero times across the
+   whole suite, including both racing tests, and a deliberate attempt to force the branch
+   (pre-expiring the record) still didn't reach it, because step 1's own `DELETE ... WHERE
+   expires_at_ms <= ?` removes the stale row first.
+
+An independent fresh-agent review pass re-opened every citation above (including a
+deliberate counterexample search — grepping every writer to `idempotency_records`
+workspace-wide for a path that could bypass `BEGIN IMMEDIATE`'s serialization) and found
+none. See `plans/U-574-mutation-scope-doc-fixes.md`'s own "Plan review" section for the
+full trace.
+
+**Resolution:** `store.rs:1285-1287`'s comment corrected to state the branch is
+unreachable-by-design under the current structure and to name step 1 as where real
+duplicate-key handling lives, kept only as defense-in-depth against a future refactor
+breaking that invariant. `docs/MUTATION-SCOPE-CANDIDATES.md` is **unchanged** — it was
+already right, and editing a correct document to "resolve" a contradiction whose actual
+cause is elsewhere would have been the wrong fix. No production-logic change; comment-only.
+
+**Blast radius if this decision is later found wrong:** none for production behavior (no
+code changed) — worst case is the corrected comment itself needing a further correction,
+same as the one it replaced.

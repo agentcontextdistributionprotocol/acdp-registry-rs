@@ -1282,9 +1282,20 @@ impl RegistryStore for SqliteStore {
                 .rows_affected();
 
                 if inserted == 0 {
-                    // A concurrent publish won the key. Discard our context
-                    // insert and replay the winner's record (or reject as a
-                    // duplicate when the content_hash differs).
+                    // Defense-in-depth, not the primary path: real duplicate-key
+                    // detection (replay on a matching content_hash, reject on a
+                    // mismatch) already happened above, at step 1 (this fn,
+                    // ~:958-1009). BEGIN IMMEDIATE serializes every writer, so no
+                    // other transaction can commit a matching row between step 1's
+                    // read and this INSERT -- this branch is therefore unreachable
+                    // by design under the current structure (confirmed: an
+                    // eprintln! here never fired across the suite, including
+                    // genuine tokio::join! races -- see MUTATION-SCOPE-CANDIDATES.md
+                    // and docs/mutation-runs/README.md's VOID-u548 entry) and is
+                    // kept only in case that invariant is ever broken by a future
+                    // refactor. Discard our context insert and replay the winner's
+                    // record (or reject as a duplicate when the content_hash
+                    // differs) if it ever does fire.
                     tx.rollback().await.ok();
                     let row = sqlx::query(
                         "SELECT content_hash, response_json \
