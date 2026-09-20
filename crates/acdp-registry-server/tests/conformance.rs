@@ -502,25 +502,28 @@
 //!
 //! **THAT ORACLE NOW EXISTS** (#216, unit U-502). `.cargo/mutants.toml` configures
 //! `cargo-mutants` over `acdp-registry-core`'s `receipt.rs`, `handlers/log.rs` and
-//! `handlers/context.rs`, and `.github/workflows/mutants.yml` runs it on a schedule against
+//! `handlers/context.rs`, plus `acdp-registry-sqlite`'s `store.rs` (U-552 widened the scope
+//! to this fourth file), and `.github/workflows/mutants.yml` runs it on a schedule against
 //! a committed survivor budget that fails the job when it is exceeded. Re-measured at
-//! 60b08b7 (U-539): **213 mutants**, of which 134 caught / 5 missed / 73 unviable /
+//! c41bf14 (U-552): **351 mutants**, of which 219 caught / 7 missed / 124 unviable /
 //! 1 timeout. So do not reach for `cargo-mutants` as a thing someone should do one day --
 //! run `cargo mutants`.
 //!
 //! Two limits on that, because a reader who over-trusts this is worse off than one who
-//! ignores it. The scope is THREE FILES, not this file and not the workspace (1427 mutants
-//! at 60b08b7), so a mutation of code outside those three is still unoracled -- and that is
+//! ignores it. The scope is FOUR FILES, not this file and not the workspace (1427 mutants
+//! at a66e1f2), so a mutation of code outside those four is still unoracled -- and that is
 //! most of what the tests below exercise. And the oracle runs the tests in THIS file only
-//! in require mode: 42 of the 70 tests here return early without `ACDP_SPEC_DIR`, so the
-//! scheduled job sets it and a bare local `cargo test --workspace` does not.
+//! in require mode: 63 of the 87 tests here return early without `ACDP_SPEC_DIR`
+//! (re-measured at c41bf14 by U-552; this was "42 of the 70" for several prior units and
+//! the suite grew without the figure being revisited), so the scheduled job sets it and a
+//! bare local `cargo test --workspace` does not.
 //!
 //! **#216 item 4 is settled (U-539): the two anti-vacuity guards below are KEPT.** The
 //! question it posed was whether they survive as a cheap first line or are retired as
 //! misleading now that a real oracle exists. Retired would have been wrong, for three
 //! measured reasons rather than sentiment:
 //!
-//!   * **Reach.** The oracle covers 213 of 1427 workspace mutants, in three files. The 41
+//!   * **Reach.** The oracle covers 351 of 1427 workspace mutants, in four files. The 41
 //!     functions these guards pin span did resolution, signatures, canonicalisation,
 //!     lineage, capabilities, idempotency, rate limiting, anchors, witness, schema and
 //!     status -- almost all of it outside the oracle's scope, where a gutted test body
