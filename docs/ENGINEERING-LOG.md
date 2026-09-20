@@ -31,6 +31,77 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- unit U-561 (lane-2) — the open entries that were not open, and the count that was three different numbers -->
+
+### U-561 — `ASSUMPTIONS.md`'s open entries, and what counting them cost
+
+U-507 reconciled this file's open entries in September. U-561 asked a narrower question: of the
+declarations still open, **which name an event that has since happened?** An entry like that is
+stale in the worst way — it reads as an open question that was in fact answered, so the record
+asserts more doubt than the evidence supports.
+
+**Answer: one of seventeen.** U-556's `NEEDS-CHANGE` ("child stdout is not drained during the
+probe") specified a structural fix — file-backed stdio for the spawned child — and that fix landed
+in U-560 (#327). The resolution was already appended to the file; the *status line* 110 lines above
+it still read `NEEDS-CHANGE` with nothing pointing forward. Settled, with the evidence.
+
+The other sixteen are correctly open. Their defects are **citation decay and missing triggers**,
+not wrong status — which is a different unit's worth of work from what the backlog implied.
+
+**The expensive part was the count, and it is the part worth recording.** Four numbers were
+produced for "how many open declarations are there", and the first three were all wrong:
+
+| count | method | verdict |
+|---|---|---|
+| 37 | `grep -c UNCONFIRMED` | **28 of the 37 are prose** |
+| 9 | anchored `^- \*\*Status:\*\* UNCONFIRMED` | **2.9x undercount** |
+| 26 | first corrected extractor | **overcount** — a 400-char window bled into the next line, and `**UNCONFIRMED → CONFIRMED.**` *resolution headings* read as open |
+| **17** | transition-aware extractor, self-tested against 9 known-closed and 17 known-open fixtures before its number was quoted | holds; all 31 unflagged token-bearing lines then read individually |
+
+The 9 failed for a reason **this repository had already written down**: U-507's own census records
+that statuses here appear in six shapes, including thirteen times as a bullet or heading label with
+no `Status` word at all. The pattern that produced 9 was derived from the entries its author had
+written personally — which is precisely the shape that misses what somebody else wrote. *Search the
+record before writing the sweep; it may already contain the taxonomy, better.*
+
+**Two near-misses would each have closed an entry wrongly**, and both were caught only by refusing
+to take a grep's word:
+
+- *"there is no `ETag` anywhere"* — `git grep -il etag` **does** return a file. It is a **comment**
+  reading "the 404 carries no ETag", which **corroborates** the entry it appears to refute.
+- *"the conformance fixtures do not cover the RFC-ACDP-0014 §4 reject path at all"* — conformance
+  now cites "RFC-ACDP-0014 §4/§5" in several places, but `rev-001` is a single-vector **ACCEPT**
+  golden for §5 step 2. Same section label, different path.
+
+**One entry named nothing that could ever close it** — no `Settled by:`, no owner, no condition. An
+open status with no trigger is open by construction rather than by evidence, which is the same
+defect as a fired trigger pointed the other way. It now carries a falsifiable one.
+
+### Citation decay, including this file's own
+
+Line numbers into a **moving file** decay; a line number citing **one named commit's diff** does
+not, because that diff is immutable. Cite a symbol or a quoted string for live code.
+
+The section above titled *"Two references this unit made stale, outside its path grant"* — a unit
+recording references it had invalidated — now has that exact problem itself:
+
+- `ASSUMPTIONS.md:2872` ("entry 9, `mutants.yml` derives the spec pin") → the heading is at
+  **`:2881`**; `:2872` is unrelated prose about JSON whitespace.
+- `ASSUMPTIONS.md:315` (`bump-spec-ref.yml` requesting `permission-workflows`) → the claim is at
+  **`:313-314`**; `:315` lands in the right entry on the wrong sentence.
+
+Both corrected by **appending**, not by editing another unit's lines. Two more were found inside
+`ASSUMPTIONS.md` itself and are corrected there.
+
+### What this unit does not fix
+
+Not an exhaustive list. `W2-U3` asserts `Status: CONFIRMED` and, on the next line, *"PARTIALLY
+narrowed, still UNCONFIRMED"* — both its own words. Left for that entry's owner to resolve rather
+than settled from outside, and recorded so it is not mistaken for closed. Eleven entries remain
+gated on a human ruling, an operator observation, a coordinator decision, or the scheduling of
+another unit; one of those waits on a settings decision that is itself blocked on a credential
+nobody has granted, so it cannot fire.
+
 <!-- unit U-560 (lane-2) — a test that asserted a manifest spelling, and a diagnostic nobody could reach -->
 
 ### U-560 — asserting the resolved property, not the string that requests it
