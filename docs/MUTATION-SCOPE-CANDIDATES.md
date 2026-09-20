@@ -49,15 +49,15 @@ pay them down, and is deliberately not pre-judged here.
 | `store.rs:342:26` | `+` → `*` in `list_contexts` | **KILLED (U-543)** |
 | `store.rs:342:26` | `+` → `-` in `list_contexts` | **KILLED (U-543)** |
 | `store.rs:380:9` | `lifecycle_events_of_ctx` → `Ok(vec![])` | **KILLED (U-543)** |
-| `store.rs:568:9` | `put` → `Ok(())` | **EQUIVALENT (U-546)** |
-| `store.rs:821:9` | `mark_superseded` → `Ok(())` | **EQUIVALENT (U-546)** |
-| `store.rs:832:9` | `first_version_ctx_id` → `Ok(None)` | **EQUIVALENT (U-546)** |
-| `store.rs:923:9` | `idempotency_evict_expired` → `Ok(())` | **EQUIVALENT (U-546)** |
-| `store.rs:994:35` | `>` → `<` in `commit_publish` | **EQUIVALENT (U-544)** |
-| `store.rs:994:35` | `>` → `==` in `commit_publish` | **EQUIVALENT (U-544)** |
+| `store.rs:568:9` | `put` → `Ok(())` | **KILLED (U-552)** |
+| `store.rs:821:9` | `mark_superseded` → `Ok(())` | **KILLED (U-552)** |
+| `store.rs:832:9` | `first_version_ctx_id` → `Ok(None)` | **KILLED (U-552)** |
+| `store.rs:923:9` | `idempotency_evict_expired` → `Ok(())` | **KILLED (U-552)** |
+| `store.rs:994:35` | `>` → `<` in `commit_publish` | **KILLED (U-552)** |
+| `store.rs:994:35` | `>` → `==` in `commit_publish` | **KILLED (U-552)** |
 | `store.rs:994:35` | `>` → `>=` in `commit_publish` | **EQUIVALENT (U-544)** |
 | `store.rs:1090:59` | `==` → `!=` in `commit_publish` | **KILLED (U-544)** |
-| `store.rs:1306:35` | `!=` → `==` in `commit_publish` | **NEEDS A SEAM (U-544)** |
+| `store.rs:1306:35` | `!=` → `==` in `commit_publish` | **UNREACHABLE-BY-DESIGN (U-544/U-552)** |
 
 ### The one survivor that was run to ground
 
@@ -213,21 +213,60 @@ scope and not covered above:
 (`storage-pg`, `storage-memory`, `playground`), so survivors there would include code the
 default-feature workspace suite never compiles.
 
-### U-544: four of the five `commit_publish` comparison survivors are not coverage gaps
+### U-544: two of the five `commit_publish` comparison survivors are not coverage gaps
+*(was "four of five" — U-552 killed `994:35` `<` and `==`; see the corrected block below.)*
 
 Slice 2 set out to kill five comparison mutants and killed **one**. The other four were run to
 ground, and the result matters more than the kill: **a survivor is not automatically a missing
 test.**
 
-**`store.rs:994:35` (`if expires_at > now`, ×3) — OUTCOME-EQUIVALENT, probed not argued.** With
-`<` applied, an `eprintln!` at the step-7 conflict gate fires exactly once and the suite stays
-green. Skipping the TTL branch lets the publish proceed to
-`INSERT … ON CONFLICT(agent_id, key) DO NOTHING`, which collides with the live record, reports
-zero rows affected, rolls the new context back, and replays the stored response — the **same
-`IdempotentReplay`, the same `ctx_id`**, by a second route. The idempotency contract is enforced
-twice, so breaking the first enforcement is invisible at this API. `>=` carries a second,
-independent argument: `now` is `Utc::now()` while `expires_at` is rebuilt from stored
-milliseconds, so the two differ only on an exact millisecond boundary.
+**`store.rs:994:35` (`if expires_at > now`, ×3) — TWO OF THE THREE ARE KILLABLE. U-544's
+`EQUIVALENT` label was wrong for `<` and `==`, and U-552 killed them.**
+
+U-544's probe was correct and its generalisation was not. With `<` applied, skipping the TTL
+branch lets the publish proceed to `INSERT … ON CONFLICT(agent_id, key) DO NOTHING`, which
+collides with the live record, rolls the new context back and replays the stored response —
+the same `IdempotentReplay`, the same `ctx_id`, by a second route. **That holds only for a
+request that does not supersede.** The second enforcement lives at `store.rs:1284-1318`,
+which is reached only AFTER step 2.
+
+For a keyed publish that DOES supersede, step 6 (`store.rs:1241`) marks the predecessor
+superseded inside the same transaction, so a replay with step 1 skipped reaches step 2's
+coherence check at `store.rs:1118-1125` and returns
+`Err(SupersededTarget { AlreadySuperseded })` instead of `Ok(IdempotentReplay)`. Killed by
+`a_keyed_superseding_publish_replays_instead_of_failing_as_already_superseded` in
+`crates/acdp-registry-sqlite/tests/store_contract.rs`.
+
+Measured, not argued. The **exact reproducible command** — `--file` is mandatory, because
+`store.rs` is deliberately outside `examine_globs` and `--file` UNIONS with it; omitting it
+matches zero mutants and exits 0, which reads as success:
+
+```sh
+cargo mutants --file crates/acdp-registry-sqlite/src/store.rs -j1 \
+  -F '^crates/acdp-registry-sqlite/src/store\.rs:994:35: replace > with (<|==) in <impl RegistryStore for SqliteStore>::commit_publish$'
+```
+
+Both come back **CaughtMutant** with that test the SOLE failure (26 passed, 1 failed) — not a
+harness-wide failure. The four trait-method mutants are reproduced the same way with
+`-F '^crates/acdp-registry-sqlite/src/store\.rs:(568:9|821:9|832:9|923:9):'` → 4 caught, 1 unviable,
+each killed by its own named test at 30 passed / 1 failed.
+
+**Check the killer by NAME before believing any of this.** On a machine where the worktree's owner
+differs from the running user, git refuses cargo-mutants' temp copy (`dubious ownership`),
+`conformance_gate` panics, `cargo test --workspace` stops at that first failing binary, and every
+mutant is reported "caught" while the test under evaluation never runs. Export
+`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'` first. This is the
+class `mutants.yml`'s AC8 harness check exists to detect, and it occurred during U-552.
+
+Why the mutated branch is unconditionally false rather than merely different: step 1 first runs
+`DELETE … WHERE expires_at_ms <= ?` bound to `now` (`store.rs:963-966`), so any surviving row has
+`expires_at_ms >= now_ms + 1`. `expires_at > now` is therefore unconditionally TRUE for a
+surviving row, and `<` / `==` unconditionally false.
+
+**`>` → `>=` remains genuinely EQUIVALENT** by that same arithmetic — true on exactly the same
+inputs — and stays in `MUTANTS_SURVIVORS` with that reason. Note this is a STRONGER argument than
+the millisecond-boundary one previously given here: it needs no claim about clock resolution,
+because the `DELETE` makes the boundary case unreachable outright.
 
 **`store.rs:1306:35` (`prior_hash != content_hash`) — NEEDS A SEAM, not a test.** An `eprintln!`
 at `inserted == 0` fires **zero** times across the entire suite, including both racing tests.
@@ -250,12 +289,30 @@ mutants too.
 
 ### U-546: the whole `-> Ok(())` write-path family is dead trait surface
 
+> **U-552 KILLED all four. The census below is right; the label on it was not.**
+> These were carried as `EQUIVALENT (U-546)`, and "equivalent" was the wrong word: an equivalent
+> mutant cannot change behaviour, whereas these change behaviour perfectly well and simply have
+> nothing calling them. U-552 first proposed relabelling them `UNREACHED-BY-PRODUCTION` and
+> carrying them as budgeted survivors, on the argument that a test whose only purpose is to call an
+> uncalled method converts a true finding into a permanently green line that hides it.
+>
+> **That was reversed.** Two rows above, `380:9 lifecycle_events_of_ctx` is recorded KILLED (U-543)
+> by a direct-call test — and it has no originating production caller either. Carrying these four
+> while counting that one a win asserts both positions at once. What settled it:
+> `.cargo/mutants.toml`'s governing rule is "PAY FIRST, WIDEN LAST"; `acdp-registry-pg` implements
+> all four, so they are genuine backend-CONTRACT surface rather than dead code; and `parity.rs`
+> exists precisely to compare the two backends.
+>
+> The finding is not lost by killing them — it is this section, plus a block comment above the four
+> tests in `crates/acdp-registry-sqlite/tests/store_contract.rs`. What changed is that the contract
+> is now pinned, so a future originating caller inherits a tested method rather than an untested one.
+
 Slice 3 killed **nothing**, and that is the correct outcome. All four are `RegistryStore` trait
 methods that `SqliteStore` must implement because the trait requires them, and that **nothing in
 this workspace ever calls**.
 
 **Resolved by TYPE, because the name is ambiguous.** A bare `.put(` count is meaningless here:
-`ChallengeStore::put(ChallengeRecord) -> Result<(), AuthError>` owns 12 of the call sites, all in
+`ChallengeStore::put(ChallengeRecord) -> Result<(), AuthError>` owns 13 of the call sites, all in
 `acdp-registry-auth`, and is a different trait entirely.
 `RegistryStore::put(Body) -> Result<(), AcdpError>` has exactly **three**, and all three are
 *delegating wrapper impls* that forward to another implementation:
@@ -284,11 +341,20 @@ type-blind reading of it would have wrongly promoted this one to "reachable".
 called — produced 9 panic lines, so the detector demonstrably works and the zero is a real zero
 rather than a broken check.
 
-**Revisit trigger:** this equivalence expires the moment any of the four gains an originating
-caller. It is a property of the current call graph, not of the methods.
+**Revisit trigger — SUPERSEDED BY U-552.** This was written as "this equivalence expires the
+moment any of the four gains an originating caller". Two corrections: the word was never
+`equivalence` (these mutations change behaviour perfectly well — nothing calls the code), and
+U-552 stopped waiting for the trigger. All four are now KILLED by direct contract tests in
+`crates/acdp-registry-sqlite/tests/store_contract.rs`, on the reasoning that `.cargo/mutants.toml`'s
+"PAY FIRST, WIDEN LAST" rule governs, that `acdp-registry-pg` implements all four so they are real
+backend-contract surface, and that the repo had already made exactly this call for the identical
+shape (`380:9 lifecycle_events_of_ctx`, KILLED by U-543, which has no originating caller either).
+The call-graph census below remains correct and is why the tests are written as direct
+trait-method calls.
 
-**Running classification: 5 killed, 7 equivalent, 1 needs a seam, 1 open** — out of 14 known
-survivors, from 95 of 138 mutants judged. The one still open is `49:16` `delete !` in
+**Running classification (as recorded at U-547): 5 killed, 7 equivalent, 1 needs a seam, 1 open**
+— out of 14 known survivors, from 95 of 138 mutants judged. **U-552 revised this: 11 killed,
+1 equivalent, 1 unreachable-by-design, 1 open** (see "The known list" below). The one still open is `49:16` `delete !` in
 `SqliteStore::connect`.
 
 ### U-547: the last known survivor, and what the whole exercise showed
@@ -305,17 +371,29 @@ branch if someone changes the fixture.
 
 ### The known list is now fully resolved
 
-| | |
-|---|---|
-| killed | **6** |
-| equivalent | **7** |
-| needs a seam | **1** (`1306:35`, race-only) |
-| open | **0** *(true only of the KNOWN list; U-549 measured all 138 and found 11 more — see below)* |
+| | as of U-547 | **after U-552** |
+|---|---|---|
+| killed | 6 | **12** |
+| equivalent | 7 | **1** (`994:35` `>` → `>=`) |
+| unreachable-by-design | — | **1** (`1306:35`, race-only) |
+| open | 0 | **0** *(true only of the KNOWN list; U-549 measured all 138 and found 11 more — see below)* |
 
-**Half the known survivors were not coverage gaps.** Seven of fourteen were equivalent — code whose
-mutation cannot change observable behaviour — and an eighth needs a test seam rather than a test.
-That ratio is the single most useful number here for anyone sizing this work: **a survivor list is
-not a work list**, and #307 should never have been sized by its survivor count.
+**U-552 REVISED THE HEADLINE THIS SECTION USED TO CARRY.** It read: *"Half the known survivors were
+not coverage gaps. Seven of fourteen were equivalent — code whose mutation cannot change observable
+behaviour."* Six of those seven have since been killed, so the sentence was wrong in the direction
+that matters — it told a reader that most of a survivor list is not worth working, which is the
+most quotable and most load-bearing claim in this document.
+
+What survives of the original point, stated accurately: **a survivor is a fact, not a verdict**, and
+the verdict has to be re-derived rather than inherited. Of the fourteen known survivors, exactly ONE
+is genuinely equivalent (`994:35` `>` → `>=`, where a preceding `DELETE … expires_at_ms <= now`
+makes the comparison unconditionally true) and ONE is unreachable by design (`1306:35`, behind
+`BEGIN IMMEDIATE`). The other twelve were killable, including four that spent two units labelled
+`EQUIVALENT` on a census that was correct and a WORD that was not, and two whose `EQUIVALENT` label
+rested on a probe that was correct for the case probed and did not generalise.
+
+So #307 should still not have been sized by its raw survivor count — but the error runs the other
+way from what was written here: the list under-counted the work, it did not over-count it.
 
 ### U-548: the disk block is lifted, and the judged/unjudged split was lost
 

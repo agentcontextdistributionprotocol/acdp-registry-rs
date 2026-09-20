@@ -393,6 +393,45 @@ jobs:
       # genuine need to ignore one has to edit this step, which is visible in
       # review. The conformance suite is a spec-obligation ratchet; a silently
       # skipped obligation is the failure mode it exists to prevent.
+      # The mutation ratchet's survivor classifier. It lives in a committed script
+      # precisely so it can be tested HERE, on every PR, in a required context.
+      # `mutants.yml` is schedule-only, so logic left inside that workflow is
+      # exercised by no PR trigger at all: a break would surface on the following
+      # Monday's cron, detached from the change that caused it.
+      #
+      # `-v` and the explicit summary check for the same reason the #[ignore] step
+      # below reads libtest's summary line: a harness that collected ZERO tests
+      # exits 0, and "ran nothing" must never read as "nothing is wrong".
+      - name: survivor classifier unit tests (mutants.yml ratchet logic)
+        run: |
+          set -uo pipefail
+          # The exit code is captured rather than left to `set -e` ON PURPOSE.
+          # A suite that collects ZERO tests exits 5 on Python 3.12+ and 0 on
+          # older versions -- so under `set -e` the run would abort before the
+          # count check on one version and sail past it on another, and the guard
+          # below would be decorative exactly where it matters. Capturing lets
+          # "the suite failed" and "the suite ran nothing" report as the distinct
+          # findings they are.
+          out="$(python3 .github/scripts/test_classify_removed_survivors.py -v 2>&1)"; trc=$?
+          echo "$out"
+          summary="$(printf '%s\n' "$out" | grep -E '^Ran [0-9]+ tests?' || true)"
+          if [ -z "$summary" ]; then
+            echo "::error::could not find unittest's summary line in the output above." \
+                 "This check cannot conclude anything, so it fails rather than passing:" \
+                 "a harness that never started is indistinguishable from a clean run" \
+                 "if you only read the exit code."
+            exit 1
+          fi
+          count="$(printf '%s\n' "$summary" | grep -oE '[0-9]+' | head -1)"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::the classifier test suite collected $count tests. A suite" \
+                 "that runs nothing passes identically to one that runs and is clean."
+            exit 1
+          fi
+          if [ "$trc" -ne 0 ]; then
+            echo "::error::the classifier test suite failed (exit $trc); see above."
+            exit 1
+          fi
       - name: conformance suite has no ignored tests (#216 — the #[ignore] defeat)
         run: |
           set -euo pipefail
