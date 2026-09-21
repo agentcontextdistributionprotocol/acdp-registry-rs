@@ -1,0 +1,81 @@
+# CI drift-detection for transcribed protection lists (U-562).
+#
+# WHY THIS EXISTS. U-559 (#325) deleted every stale copy of main's branch-protection
+# required_status_checks.contexts from comments in ci.yml, lint.yml,
+# assert-upgrade-notes.sh and conformance.rs -- each had drifted from the live setting
+# before, and a stale comment is worse than none. Every copy was replaced with an
+# instruction to read the setting live via `gh api .../protection`.
+#
+# U-559 fixed today's staleness but installed no automation to keep it fixed -- its own
+# report said so explicitly. This job is that automation: it reads the live setting on a
+# schedule and fails the moment it stops matching EXPECTED below, so the assumption those
+# four files' logic depends on (that these specific contexts gate `main`) gets caught the
+# same day it changes, not discovered by a stale comment weeks later.
+#
+# NOT ON pull_request. Branch protection changes through the GitHub UI, not through a PR
+# to this repo, so a PR-triggered run has nothing to catch here -- a scheduled ratchet is
+# the right shape, same reasoning as mutants.yml.
+#
+# THE TOKEN. Reading /branches/{branch}/protection is a repository-administration read.
+# That permission does not exist as a GITHUB_TOKEN workflow-permission key at all -- it's
+# App/PAT-only -- so the default token could never do this no matter what the
+# `permissions:` block below says. acdp-deps-bot already authenticates other workflows in
+# this repo (bump-acdp.yml, bump-spec.yml, notify-website.yml, release-plz.yml) via the
+# ACDP_BOT_APP_ID / ACDP_BOT_PRIVATE_KEY org secrets; its installation was granted
+# `administration: read` for this unit (2026-09-21) rather than minting a new PAT, so
+# there is one fewer credential to rotate.
+name: branch-protection-drift
+
+on:
+  schedule:
+    # 05:23 UTC daily. Off the hour, and offset from mutants.yml's Monday 05:17 so the
+    # two scheduled jobs don't queue at the same instant.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint token for branch-protection read
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.ACDP_BOT_APP_ID }}
+          private-key: ${{ secrets.ACDP_BOT_PRIVATE_KEY }}
+          owner: agentcontextdistributionprotocol
+          repositories: acdp-registry-rs
+
+      - name: Compare live required contexts against the pinned baseline
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          # THE BASELINE. What ci.yml, lint.yml, assert-upgrade-notes.sh and
+          # conformance.rs's own doc-comments assume main's required status checks are,
+          # as of U-562 (2026-09-21). It lives here and nowhere else: raising it is a
+          # one-line diff that shows up in review -- same ratchet shape as mutants.yml's
+          # survivor budget. Order does not matter; both sides are sorted before
+          # comparing.
+          expected='["cargo-deny","clippy","conformance (spec fixtures)","lint","rustfmt","tests"]'
+
+          actual="$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" \
+            --jq '.required_status_checks.contexts | sort')"
+          expected_sorted="$(printf '%s' "$expected" | jq -c 'sort')"
+
+          if [ "$actual" != "$expected_sorted" ]; then
+            echo "::error::main's required_status_checks.contexts drifted from the baseline this repo assumes."
+            echo "  expected: $expected_sorted"
+            echo "  actual:   $actual"
+            echo
+            echo "Update the baseline above, then re-check every comment that names these"
+            echo "contexts: ci.yml, lint.yml, assert-upgrade-notes.sh, and"
+            echo "crates/acdp-registry-server/tests/conformance.rs."
+            exit 1
+          fi
+
+          echo "required_status_checks.contexts unchanged: $actual"
