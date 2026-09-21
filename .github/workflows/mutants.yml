@@ -241,7 +241,7 @@ env:
     # KILLED by U-552 once probed with a SUPERSEDING request, so this entry is what
     # is left after that correction rather than an inherited assumption.
     crates/acdp-registry-sqlite/src/store.rs:994:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
-    # store.rs:1306:35 -- UNREACHABLE BY DESIGN, not a coverage gap. It sits inside
+    # store.rs:1317:35 -- UNREACHABLE BY DESIGN, not a coverage gap. It sits inside
     # the `if inserted == 0` branch (store.rs:1284), reached only when a concurrent
     # publish claims the same idempotency key between this transaction's step-1
     # SELECT and its step-7 INSERT. `BEGIN IMMEDIATE` (store.rs:954) takes the write
@@ -261,11 +261,12 @@ env:
     # EQUIVALENT on a probe that was correct but generalised from the wrong request
     # shape, and U-552 disproved it by killing both. A label in this list is only as
     # good as its load-bearing argument, so that argument is named explicitly.
-    # NOTE: store.rs:1285-1287's own comment still says "A concurrent publish won
-    # the key", i.e. asserts this branch IS reachable. One of the two is wrong as
-    # written. Reconciling it means editing src/, which this unit's path grant
-    # allows only for kills -- flagged in the PR for a successor unit.
-    crates/acdp-registry-sqlite/src/store.rs:1306:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
+    # The in-code comment at this site used to contradict this label (it read as
+    # asserting the branch IS reachable); U-574 (2ed7499) corrected it to match
+    # this UNREACHABLE-BY-DESIGN argument, and its rewrite shifted the `!=`
+    # comparison from :1306:35 to :1317:35 without content change. Line number
+    # updated here to match; the reconciliation itself is done, not pending.
+    crates/acdp-registry-sqlite/src/store.rs:1317:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
 
   # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
   # unconditional `timeout != 0` until U-504, on the stated reasoning that "a
