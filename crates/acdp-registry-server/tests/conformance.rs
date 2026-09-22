@@ -337,11 +337,13 @@
 //! `dk-003` were already covered by the pre-existing `did_key_golden_vector_accepted_and_
 //! gated` (above), merely not yet registered in `COVERED`; Phase 13 registers it under
 //! both families. `dk-001`/`dk-002`/`dk-004` get DIRECT coverage via
-//! `dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver`, which
-//! documents a discovered wrong-reason trap (see that test's own doc comment): this
-//! repo's `acdp` dependency rejects all three with `schema_violation`, not the
-//! fixtures' pinned `key_resolution_failed` -- spec-sanctioned for `dk-002` only, a
-//! genuine (unfixable from this file) conformance gap for `dk-001`/`dk-004`. `rev-002`
+//! `dk001_002_004_did_key_resolution_negatives_hit_the_resolver`. Through acdp
+//! 0.13.1 this repo's `acdp` dependency rejected all three with `schema_violation`
+//! instead of the fixtures' pinned `key_resolution_failed` -- spec-sanctioned for
+//! `dk-002`/`dk-004` (an `alternative_error_code`) but a genuine conformance gap for
+//! `dk-001`. acdp 0.14.0 settled the did:key resolver boundary (acdp-spec #69) and
+//! this repo now observes `key_resolution_failed` for all three, matching each
+//! fixture's own pinned value directly (see that test's own doc comment). `rev-002`
 //! stays out of scope: it applies only to `acdp-consumer`, never `acdp-registry-core`
 //! (`HARNESS_PROFILES`), matching the "registry side only" framing `rev`'s now-removed
 //! `DEFERRED` entry always should have carried precisely (it previously misdescribed
@@ -9678,7 +9680,7 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
     (
         "dk",
         &[CoverageMechanism::Direct(&[
-            "dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver",
+            "dk001_002_004_did_key_resolution_negatives_hit_the_resolver",
             "did_key_golden_vector_accepted_and_gated",
         ])],
     ),
@@ -10049,7 +10051,7 @@ const DIRECT_FNS: &[(&str, fn())] = &[
     direct_fn!(sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected),
     direct_fn!(did_key_golden_vector_accepted_and_gated),
     direct_fn!(rev001_key_revocation_context_golden_accepted_and_self_signed_rejected),
-    direct_fn!(dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver),
+    direct_fn!(dk001_002_004_did_key_resolution_negatives_hit_the_resolver),
     direct_fn!(did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets),
     direct_fn!(err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing),
     direct_fn!(rate001_publish_rate_limit_trips_429_with_retry_after),
@@ -12888,52 +12890,54 @@ const EXPECTED_DK_NEGATIVE_FIXTURE_COUNT: usize = 3;
 /// `did_key_golden_vector_accepted_and_gated` (above) already
 /// builds for sig-003/dk-003): three did:key resolution NEGATIVES.
 ///
-/// **Discovered wrong-reason trap (report this plainly, do not paper over
-/// it):** this repo's `acdp` dependency does NOT reach
+/// **Formerly a wrong-reason trap, now settled (acdp-registry-rs#336):**
+/// through acdp 0.13.1, this repo's `acdp` dependency did NOT reach
 /// `acdp_verify::verify_publish_request_signature_offline` (the resolver
 /// path RFC-ACDP-0001 §5.11.1 describes, and that emits
 /// `key_resolution_failed`) for any of these three fixtures. Two SEPARATE
 /// upstream schema-layer checks -- `acdp_validation::validate_agent_did`
 /// (calls `acdp_did::key::resolve_did_key` for a did:key `agent_id`) and
 /// `validate_did_key_key_id_form` (calls `acdp_did::key::resolve_did_key_url`
-/// for a did:key `signature.key_id`) -- run FIRST, as part of schema
+/// for a did:key `signature.key_id`) -- ran FIRST, as part of schema
 /// validation (`validate_publish_request`, before `validate_post_schema`'s
-/// registry-limit/crypto steps), and BOTH wrap any resolution failure as
-/// `AcdpError::SchemaViolation`, not `AcdpError::KeyResolution`. Verified
-/// empirically against the `acdp` dependency this workspace locks (see
-/// `Cargo.lock` -- this crate's own `Cargo.toml` says
-/// `acdp = { workspace = true }` and carries no version) before writing
-/// these assertions, and the assertion below re-verifies it on every run.
+/// registry-limit/crypto steps), and BOTH wrapped any resolution failure as
+/// `AcdpError::SchemaViolation`, not `AcdpError::KeyResolution`. acdp 0.14.0
+/// settled the did:key resolver boundary (acdp-spec commit `16211e64`,
+/// "settle two implementer-reported divergences -- embedded.content_hash and
+/// the did:key resolver boundary (#69)") and this workspace's `acdp` (see
+/// `Cargo.lock`) now reaches the resolver directly for all three fixtures,
+/// same as it always did for did:web. Verified empirically against the
+/// `acdp` dependency this workspace locks before writing these assertions,
+/// and the assertions below re-verify it on every run.
 ///
-///   * dk-001 (wrong multicodec prefix) -> observed `schema_violation`/400,
-///     NOT the fixture's pinned `key_resolution_failed`. The fixture's own
-///     `expected.behavior` text states this MUST be `key_resolution_failed`
-///     with no schema-validation carve-out -- this is a genuine conformance
-///     gap in the `acdp` dependency, not something this crate (which
-///     may only edit this test file) can fix. The HTTP status (400,
-///     permanent) and the overall security property (never falls back to a
-///     raw key, never mis-reports `unsupported_algorithm`) both still hold.
-///   * dk-002 (malformed multibase, 3 cases) -> observed `schema_violation`/
-///     400 for all three. UNLIKE dk-001/004, this fixture's own
-///     `expected.behavior` text EXPLICITLY sanctions this: "Registries MAY
-///     reject case-by-case at schema validation with schema_violation if
-///     their did pattern catches it first" -- so this is a genuine pass,
-///     not a gap.
-///   * dk-004 (fragment mismatch) -> observed `schema_violation`/400, NOT
-///     `key_resolution_failed`. Same gap as dk-001: `validate_did_key_key_id_
-///     form` wraps `resolve_did_key_url`'s (correctly-worded, per its own
-///     doc comment) `key_resolution_failed` into `schema_violation` before
-///     the offline verifier ever runs. No schema-validation carve-out in
-///     this fixture's text either.
+///   * dk-001 (wrong multicodec prefix) -> observed `key_resolution_failed`/
+///     400, matching this fixture's own pinned `expected.error_code`
+///     directly. This fixture offers no `alternative_error_code`, so this is
+///     the only conformant code -- there was no gap to sanction, only a
+///     wrong-reason pass to fix.
+///   * dk-002 (malformed multibase, 3 cases) -> observed
+///     `key_resolution_failed`/400 for all three. This fixture's own
+///     `expected.behavior` text requires `key_resolution_failed` for all
+///     three cases, and separately sanctions an `alternative_error_code` of
+///     `schema_violation` for cases 1-2 ONLY (never case 3, which reaches
+///     step 3 of RFC-ACDP-0001 §5.11.1 and forbids the schema-layer code) --
+///     so the previously-observed `schema_violation` was conformant for
+///     cases 1-2 alone, never for case 3. Now that all three observe
+///     `key_resolution_failed`, every case matches the fixture's REQUIRED
+///     code directly and the case-3-only distinction no longer matters here.
+///   * dk-004 (fragment mismatch) -> observed `key_resolution_failed`/400,
+///     matching this fixture's own pinned `expected.error_code` directly
+///     (an `alternative_error_code` of `schema_violation` is also sanctioned,
+///     but is no longer what this repo's `acdp` dependency does).
 ///
-/// This test pins the OBSERVED, currently-necessary wire codes rather than
-/// the fixture's literal `expected.error_code` for dk-001/004 -- asserting
-/// the fixture's literal value would either be dishonestly worked around or
-/// permanently red, and an always-red new test is not a usable CI ratchet.
-/// If a future `acdp` release changes this routing, this test's asserts
-/// must be revisited (and the gap note above retired).
+/// This test pins the OBSERVED wire codes, which now equal the fixtures'
+/// own pinned `expected.error_code` for all three. If a future `acdp`
+/// release moves any of dk-002 cases 1-2 or dk-004 to the sanctioned
+/// `schema_violation` alternative, that is still conformant and this test's
+/// asserts must be revisited accordingly -- but dk-001 and dk-002 case 3
+/// have no alternative and must stay `key_resolution_failed`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolver() {
+async fn dk001_002_004_did_key_resolution_negatives_hit_the_resolver() {
     let Some(fixtures) = spec_fixtures() else {
         eprintln!(
             "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping dk-001/002/004 \
@@ -12985,9 +12989,9 @@ async fn dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolve
         let (status, body) = post_publish_json(&app, serde_json::to_value(&req).unwrap()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "dk-001 body = {body}");
         assert_eq!(
-            body["error"]["code"], "schema_violation",
-            "dk-001: observed wire code (see doc comment for the divergence from this \
-             fixture's pinned key_resolution_failed) -- body = {body}"
+            body["error"]["code"], "key_resolution_failed",
+            "dk-001: acdp 0.14.0 settled the did:key resolver boundary (see doc comment) -- \
+             this now matches the fixture's own pinned value -- body = {body}"
         );
     }
 
@@ -13021,8 +13025,10 @@ async fn dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolve
                 case["case"]
             );
             assert_eq!(
-                body["error"]["code"], "schema_violation",
-                "dk-002 case {:?} body = {body}",
+                body["error"]["code"], "key_resolution_failed",
+                "dk-002 case {:?}: acdp 0.14.0 settled the did:key resolver boundary (see \
+                 doc comment) -- this now matches the fixture's own pinned value for all \
+                 three cases -- body = {body}",
                 case["case"]
             );
         }
@@ -13043,9 +13049,9 @@ async fn dk001_002_004_did_key_resolution_negatives_hit_schema_layer_not_resolve
         let (status, body) = post_publish_json(&app, serde_json::to_value(&req).unwrap()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "dk-004 body = {body}");
         assert_eq!(
-            body["error"]["code"], "schema_violation",
-            "dk-004: observed wire code (see doc comment for the divergence from this \
-             fixture's pinned key_resolution_failed) -- body = {body}"
+            body["error"]["code"], "key_resolution_failed",
+            "dk-004: acdp 0.14.0 settled the did:key resolver boundary (see doc comment) -- \
+             this now matches the fixture's own pinned value -- body = {body}"
         );
     }
 
