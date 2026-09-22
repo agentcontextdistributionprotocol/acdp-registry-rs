@@ -8145,6 +8145,7 @@ async fn data_ref001_007_publish_path_rejections_enforced() {
                 embedded: Some(EmbeddedContent {
                     encoding: EmbeddedEncoding::Base64,
                     content: Value::String(b64),
+                    content_hash: None,
                 }),
                 extensions: Default::default(),
             }
@@ -8201,6 +8202,7 @@ async fn data_ref001_007_publish_path_rejections_enforced() {
                 embedded: Some(EmbeddedContent {
                     encoding: EmbeddedEncoding::Utf8,
                     content: Value::String(content.to_string()),
+                    content_hash: None,
                 }),
                 extensions: Default::default(),
             }

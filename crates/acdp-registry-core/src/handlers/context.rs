@@ -203,62 +203,6 @@ pub(crate) fn reject_reserved_tenant(tenant: Option<&str>) -> Result<(), Registr
 
 /// Resolve the tenant a **publish** writes into.
 ///
-/// Is `req.agent_id` **provably** the signer of this exact request, using only
-/// offline checks the handler can run itself?
-///
-/// This is the identity oracle behind the #242 charge (see [`PublishCharge`]).
-/// It answers one question — may we spend this agent's publish budget even if
-/// the publish goes on to fail? — and it must be impossible to answer "yes"
-/// without the agent's private key.
-///
-/// # The two checks, and why neither alone is enough
-///
-/// 1. **Recompute `content_hash` over the body.** Binds the hash to *this*
-///    request.
-/// 2. **`verify_publish_request_signature_offline`.** Binds `content_hash` to
-///    `agent_id`'s key, and requires `signature.key_id`'s DID portion to equal
-///    `agent_id`.
-///
-/// Composed, in that order: *this exact body was signed by `agent_id`'s key.*
-///
-/// Step 1 is not optional and the order is not cosmetic. Step 2 verifies a
-/// signature over `content_hash`, but says nothing about whether `content_hash`
-/// describes the body in front of us. Keyed on step 2 alone, a captured
-/// `(agent_id, content_hash, signature)` triple replayed under a *different*
-/// body would read as "identity proven" and would spend the real agent's
-/// budget. Step 1 kills that: the replayed body hashes to something else.
-///
-/// This mirrors the SDK's own did:key pipeline exactly
-/// (`acdp-server/src/registry/server.rs:492`), which runs hash recomputation
-/// (`validator.rs` step 4) before `verify_publish_request_signature_offline` for
-/// the same reason.
-///
-/// # What is deliberately NOT checked
-///
-/// Schema validation. It is not part of the identity proof, and excluding it
-/// makes this oracle *broader*, not laxer: a producer flooding signed-but-
-/// schema-invalid publishes is precisely the noisy producer the limiter exists
-/// to throttle, so charging it is correct.
-///
-/// # This must never reject a request
-///
-/// It returns `bool`, not `Result`, on purpose. A `false` means "do not charge",
-/// never "reject". The request proceeds to the SDK exactly as before and the SDK
-/// produces the authoritative error, so no publish that is accepted today
-/// becomes rejected. Every failure mode here — a non-did:key producer, an
-/// unserialisable request — falls to `false`, which is the safe direction for a
-/// *charge* decision.
-fn publish_identity_proven_offline(req: &PublishRequest) -> bool {
-    let Ok(body_value) = serde_json::to_value(req) else {
-        return false;
-    };
-    match acdp::crypto::hash::compute_content_hash(&body_value) {
-        Ok(recomputed) if recomputed == req.content_hash => {}
-        _ => return false,
-    }
-    acdp::crypto::verify::verify_publish_request_signature_offline(req).is_ok()
-}
-
 /// Publish is producer-authenticated (the signature over `content_hash` proves
 /// `agent_id`), so — unlike a read — the authoritative tenant is the producer's
 /// `[[auth.tenant_agents]]` binding, NOT a spoofable `X-Tenant-Id` header.
@@ -540,30 +484,39 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         // the pinned-key gate like any did:web agent, so it was only ever
         // truly cryptographically verified on a registry with `[playground]`
         // absent entirely (e.g. the old dedicated receipts-only registry).
-        // #242: a did:key identity is self-verifying, so the handler can
-        // establish it offline BEFORE handing off to the SDK -- which is what
-        // makes this branch chargeable without an SDK change. Arm here, not
-        // after the call, so every late failure inside it (DuplicatePublish,
-        // a store error, the capabilities gate on `supported_did_methods`) is
-        // already covered. If the identity is NOT proven we leave the guard
-        // disarmed and fall through unchanged: the SDK still produces the
-        // authoritative error, and an unproven `agent_id` is never charged.
-        if publish_identity_proven_offline(&req) {
-            charge.arm();
-        }
+        // acdp-registry-rs#336 / U-501 addendum (2026-09-22): the hand-rolled
+        // `publish_identity_proven_offline` oracle this repo kept alongside the
+        // SDK's own (then-separate) verification is gone. `acdp` v0.14.0's
+        // `prove_publish_identity_did_key` (acdp-rs#273) runs the identical
+        // hash+sig pipeline and is now the ONLY did:key verification path --
+        // the SDK's own `publish_verified_did_key_in_tenant` is defined as
+        // exactly `prove_publish_identity_did_key` + `commit_proven` -- so
+        // there is no more a second, more lenient "real" check for a failed
+        // proof to fall through to. A failed proof is therefore rejected, not
+        // silently accepted uncharged; see DECISIONS.md's U-501 addendum for
+        // why that is a faithful read of "current behavior," not a regression.
+        // `charge` is moved into the blocking-pool closure and armed between
+        // prove and commit (not returned-then-armed) so a panic inside
+        // `commit_proven` still charges: `charge`'s `Drop` fires on unwind
+        // whichever thread it happens to be on.
         let server2 = server.clone();
         let req_clone = req.clone();
         let idem = idempotency_key.clone();
         let tenant = publish_tenant.clone();
-        tokio::task::spawn_blocking(move || {
-            server2.publish_verified_did_key_in_tenant(
-                &req_clone,
-                idem.as_deref(),
-                tenant.as_deref(),
-            )
+        let (charge_back, outcome) = tokio::task::spawn_blocking(move || {
+            let mut charge = charge;
+            let outcome = server2
+                .prove_publish_identity_did_key(&req_clone)
+                .and_then(|proven| {
+                    charge.arm();
+                    server2.commit_proven(proven, idem.as_deref(), tenant.as_deref())
+                });
+            (charge, outcome)
         })
         .await
-        .map_err(|e| RegistryError::Internal(format!("join: {e}")))??
+        .map_err(|e| RegistryError::Internal(format!("join: {e}")))?;
+        charge = charge_back;
+        outcome.map(|o| o.into_response())?
     } else if playground_snapshot.enabled {
         // Playground: skip DID verification — stop after schema + size + hash.
         // `publish_unverified_for_tests` doesn't accept an idempotency key,
@@ -587,33 +540,38 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
             algorithm,
         } = pin_outcome
         {
-            // Pinned + cryptographically verified: route through the SDK's
-            // dedicated method so a receipts-advertising registry can mint
-            // a receipt off the pinned key's fingerprint. This method
-            // handles idempotency internally (unlike
-            // `publish_unverified_for_tests` below), so no manual
-            // lookup/record dance is needed here.
-            // #242: `enforce_pinned_signature` has just verified this
-            // request's signature against the operator-pinned public key, so
-            // `agent_id` is proven here by the same mechanism the endpoint
-            // already treats as proof. Arm before the call so a late failure
-            // inside it is charged.
-            charge.arm();
+            // Pinned + cryptographically verified: `enforce_pinned_signature`
+            // above is the ONLY signature check on this branch -- steps 7-8
+            // are explicitly the caller's responsibility in the SDK's pinned
+            // API (`prove_publish_identity_pinned`'s doc comment), so it is
+            // kept whole, not replaced. acdp-registry-rs#336 / U-501 addendum
+            // (2026-09-22): what changes is what runs AFTER it. Previously
+            // this branch armed immediately and called the SDK's bundled
+            // `publish_pinned_verified_in_tenant`; now it runs
+            // `prove_publish_identity_pinned` (schema/size/hash validation
+            // plus the RFC-ACDP-0014 §5 self-revocation check) explicitly and
+            // arms only once THAT also succeeds, then `commit_proven`s the
+            // result -- the same prove/commit shape as did:key, for the same
+            // reason (a panic during commit must still charge; see that
+            // branch's comment).
             let server2 = server.clone();
             let req_clone = req.clone();
             let idem = idempotency_key.clone();
             let tenant = publish_tenant.clone();
-            tokio::task::spawn_blocking(move || {
-                server2.publish_pinned_verified_in_tenant(
-                    &req_clone,
-                    idem.as_deref(),
-                    tenant.as_deref(),
-                    &public_key_b64,
-                    &algorithm,
-                )
+            let (charge_back, outcome) = tokio::task::spawn_blocking(move || {
+                let mut charge = charge;
+                let outcome = server2
+                    .prove_publish_identity_pinned(&req_clone, &public_key_b64, &algorithm)
+                    .and_then(|proven| {
+                        charge.arm();
+                        server2.commit_proven(proven, idem.as_deref(), tenant.as_deref())
+                    });
+                (charge, outcome)
             })
             .await
-            .map_err(|e| RegistryError::Internal(format!("join: {e}")))??
+            .map_err(|e| RegistryError::Internal(format!("join: {e}")))?;
+            charge = charge_back;
+            outcome.map(|o| o.into_response())?
         } else {
             // #128: `publish_unverified_for_tests` (unlike the SDK's
             // `commit_via_store`, which the other three branches ride) does
@@ -697,14 +655,30 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         // tenant is threaded into the atomic commit so `tenant_id` is written
         // in the same INSERT as the context row (P0 #3) — no separate stamping
         // UPDATE that a crash could leave stranded in the default bucket.
+        //
+        // #242/acdp-rs#273/acdp-registry-rs#336 (2026-09-22): this branch used
+        // to call the SDK's bundled `publish_verified_in_tenant` with no
+        // pre-charge proof step at all -- the one genuine remaining gap #242
+        // left open, since establishing identity needs the resolver-backed DID
+        // resolution inside the SDK call, and duplicating that from the
+        // handler would mean a second network round-trip and SSRF surface
+        // (see the now-fulfilled design ask this repo filed upstream,
+        // `plans/cross-repo/acdp-rs-publish-charge-seam.md`). `acdp` v0.14.0's
+        // `prove_publish_identity`/`commit_proven` split closes it: identity
+        // is proven first, the charge arms immediately, and a late failure
+        // inside `commit_proven` (a store error, a duplicate-publish race) is
+        // now charged like the other three branches. No spawn_blocking here,
+        // matching this branch's existing shape -- `commit_proven` runs
+        // synchronously on the async task, same as the old bundled call did.
+        let proven = server.prove_publish_identity(&req, &resolver).await?;
+        charge.arm();
         server
-            .publish_verified_in_tenant(
-                &req,
+            .commit_proven(
+                proven,
                 idempotency_key.as_deref(),
-                &resolver,
                 publish_tenant.as_deref(),
             )
-            .await?
+            .map(|o| o.into_response())?
     };
 
     // Playground path only: `publish_unverified_for_tests` does not carry
@@ -780,37 +754,31 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
     // `set_tenant_of_ctx` above can fail after the branch join — and a charge
     // for work that did not happen is the mirror of the bug this fixes.
     //
-    // #242, PARTIALLY CLOSED -- read this before assuming late failures are
-    // charged everywhere. Arming here covers the success path for all four
-    // branches. Two branches additionally arm EARLIER, so their late failures
-    // are charged too:
+    // #242, CLOSED for three of four branches as of acdp-registry-rs#336
+    // (2026-09-22) -- read this before assuming late failures are charged
+    // everywhere. Arming here covers the success path for all four branches.
+    // Three branches additionally arm EARLIER, once `prove_publish_identity*`
+    // returns `Ok` (see each branch's own comment), so their late failures --
+    // a store error, a duplicate-publish race, `set_tenant_of_ctx` above --
+    // are charged too: did:key, playground-pinned, and now production
+    // (did:web), which was the one genuine remaining gap #242 left open.
+    // Closing it needed a verification/charge seam in the SDK; the design
+    // this repo filed upstream (`plans/cross-repo/acdp-rs-publish-charge-seam.md`)
+    // shipped as acdp-rs#273 / acdp v0.14.0's `prove_publish_identity`/
+    // `commit_proven` split.
     //
-    //   did:key            -- armed once `publish_identity_proven_offline`
-    //                         says so (hash recomputation + offline signature
-    //                         verification), before the SDK call.
-    //   playground, pinned -- armed once `enforce_pinned_signature` returns
-    //                         `Verified`, before the SDK call.
+    // The one branch that still does NOT charge late failures is NOT a gap
+    // and must never be "fixed":
     //
-    // The two that do NOT charge late failures, and they are not the same kind
-    // of thing:
+    //   playground, unpinned -- nothing is verified on that branch at all, so
+    //       there is no identity to charge. Arming there would key an
+    //       insertion on an attacker-supplied `agent_id`, which is exactly the
+    //       shape #242 rejected and exactly what A1 removed. It stays
+    //       uncharged on failure permanently. The bucket there is fairness
+    //       accounting, not a security control.
     //
-    //   production (did:web) -- a GENUINE REMAINING GAP. Identity really is
-    //       established, but only inside the resolver-backed SDK call, so the
-    //       handler cannot observe it without a second DID-document resolution
-    //       (network cost, a second SSRF surface, cache divergence). Closing it
-    //       needs a verification/charge seam in the SDK; the design is in
-    //       plans/cross-repo/acdp-rs-publish-charge-seam.md and is filed
-    //       upstream. This is the part of #242 that stays open.
-    //
-    //   playground, unpinned -- NOT A GAP, and must never be "fixed". Nothing
-    //       is verified on that branch at all, so there is no identity to
-    //       charge. Arming there would key an insertion on an attacker-supplied
-    //       `agent_id`, which is exactly the shape #242 rejected and exactly
-    //       what A1 removed. It stays uncharged on failure permanently. The
-    //       bucket there is fairness accounting, not a security control.
-    //
-    // `publish_charges_exactly_two_branches_on_late_failure` in
-    // tests/http_integration.rs pins this four-way split by count, so a
+    // `late_failures_are_charged_on_exactly_three_of_the_four_publish_branches`
+    // in tests/http_integration.rs pins this four-way split by count, so a
     // silently dropped or silently added arm fails the suite.
     charge.arm();
     if response.registry_receipt.is_some() {

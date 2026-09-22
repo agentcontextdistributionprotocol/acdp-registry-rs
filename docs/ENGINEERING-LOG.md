@@ -31,6 +31,60 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+<!-- U-501 addendum — acdp-registry-rs#336, adopting acdp-rs's Proven/commit_proven split -->
+
+### U-501 addendum — the did:web gap closes, and a plan's acceptance criterion doesn't survive contact with the shipped API
+
+#242 closed two of four publish branches by hand in September: `publish_identity_proven_offline`
+(a hand-rolled hash+signature duplicate) let did:key charge a late failure, and
+`enforce_pinned_signature` did the same for the playground-pinned branch. The did:web production
+branch was the one gap left — establishing identity from the registry side would have meant a
+second DID-document resolution per publish, a second SSRF surface, and a cache that could disagree
+with the SDK's. The design this repo wanted from the SDK instead is written down in
+`plans/cross-repo/acdp-rs-publish-charge-seam.md` and was filed upstream.
+
+`acdp-rs` shipped it in v0.14.0: `Proven<'a>` / `prove_publish_identity` /
+`prove_publish_identity_did_key` / `prove_publish_identity_pinned` / `commit_proven` (acdp-rs#273).
+Issue #336 tracked adopting it. The did:web branch now proves identity via the SDK's real DID
+resolution, arms the charge, then commits — no new I/O, matching the design ask exactly. did:key
+and pinned were rewired onto the same prove/commit shape, which deletes the hand-rolled did:key
+duplicate: the SDK's own `publish_verified_did_key_in_tenant` is now *defined* as
+`prove_publish_identity_did_key` + `commit_proven`, so there is nothing left for a separate
+in-repo check to duplicate.
+
+**The part worth recording is what happened to one line in the adoption plan, not the adoption
+itself.** The plan — written and reviewed before implementation — specified, as its most heavily
+flagged acceptance criterion, that a failed did:key/pinned proof must NOT be rejected: it had to
+reproduce the deleted oracle's "false = don't charge, never reject" contract, staying an accepted,
+uncharged publish. Implementing that literally turned out to require falling back to committing
+genuinely unverified content on a failed proof — the only 0.14.0 path that could satisfy the
+letter of the criterion admits exactly and only forged, signature-invalid did:key publishes. That
+is not preserving behavior; it is a new hole.
+
+The premise turned out to already be false one version earlier than the plan assumed. The "real"
+SDK call the old oracle's `false` used to fall through to ran a strict superset of the oracle's own
+checks even in acdp-server 0.13.1 — so nothing the oracle ever rejected was genuinely being
+accepted downstream. Two tests already in this repo's suite had been pinning *rejection*, not
+acceptance, for these exact cases all along
+(`naming_a_victim_does_not_spend_their_budget`, `a_replayed_envelope_over_a_different_body_does_not_spend_the_budget`)
+— the record contradicted the plan's premise before the plan was ever read against it.
+
+A written, human-reviewed design document was wrong about a security-relevant behavior, and the
+way that surfaced was a fresh agent re-deriving the claim from source rather than trusting the
+document's framing — the same discipline `/reconcile` applies to this repo's own `UNCONFIRMED`
+entries, run here against another repo's plan instead. The fix: reject on a failed proof for
+did:key/pinned too, matching did:web. `DECISIONS.md`'s "U-501 addendum" entry carries the full
+analysis; this file just marks that a plan being reviewed once does not make it correct forever,
+and does not exempt an adoption from checking it against the code that actually shipped.
+
+One smaller, real side effect rides along: because the SDK's prove functions bundle schema
+validation into the identity proof (the deleted oracle didn't), the charge-arm point for did:key/
+pinned moves slightly later. A validly-signed but schema-invalid publish — which the old oracle
+deliberately charged, on the theory that a noisy-but-signed producer should still pay — is now an
+uncharged rejection instead. Judged benign (every such rejection now fails before the one
+expensive step, the signature verify) and recorded rather than left for a future reader to
+rediscover as a mystery.
+
 <!-- unit U-561 (lane-2) — the open entries that were not open, and the count that was three different numbers -->
 
 ### U-561 — `ASSUMPTIONS.md`'s open entries, and what counting them cost

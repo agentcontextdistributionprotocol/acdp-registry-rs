@@ -3963,3 +3963,94 @@ ruling, not a deferral: the status line no longer names a settled-by-future-even
 builds remain merge-blocking exactly as before. If the calculus changes later (e.g. `clippy`
 grows enough that the builds become worth separating for reasons beyond latency), this is a fresh
 ask, not a reopening of this one.
+
+## U-501 addendum — adopting acdp-rs's Proven/commit_proven split closes the did:web gap
+(2026-09-22, decided by the human on Fable's analysis, issue #336)
+
+**Trigger.** `acdp-rs` v0.14.0 shipped `Proven<'a>` / `prove_publish_identity` /
+`prove_publish_identity_did_key` / `prove_publish_identity_pinned` / `commit_proven` (acdp-rs#273),
+the seam this repo asked for in `plans/cross-repo/acdp-rs-publish-charge-seam.md` (U-501) when it
+closed #242 for two of four publish branches by hand. Issue #336 tracked adopting it once it
+shipped; the human asked to check on blocked work, confirmed the blocker had cleared, and asked
+for the adoption to be implemented.
+
+**What changed, all three publish branches.**
+- **did:web** (`context.rs`, the production path): `prove_publish_identity(&req, &resolver).await?`
+  → `charge.arm()` → `commit_proven(...)`. This is the fourth and last branch #242 left open —
+  identity is established via the SDK's real DID resolution + signature verification (no second
+  resolution, no new SSRF surface — same network call `publish_verified_in_tenant` always made),
+  and a late failure inside `commit_proven` is now charged.
+- **did:key**: `publish_identity_proven_offline` (the hand-rolled hash+signature duplicate this
+  repo kept alongside the SDK's own check) is deleted. `prove_publish_identity_did_key` replaces
+  it and is now the ONLY verification path — the SDK's own `publish_verified_did_key_in_tenant` is
+  defined as exactly that function plus `commit_proven`.
+- **pinned**: `enforce_pinned_signature` (this repo's own pinned-key signature check — the SDK
+  explicitly leaves steps 7-8 to the caller here, so it is not a duplicate and was kept whole) now
+  feeds into `prove_publish_identity_pinned` + `commit_proven` rather than the SDK's bundled
+  `publish_pinned_verified_in_tenant`.
+- **playground, unpinned**: unchanged, correctly out of scope — nothing is verified on this branch,
+  so there is no `Proven` to produce.
+
+**The decision that needed a human, not just code review: what happens when
+`prove_publish_identity_did_key`/`_pinned` fails.** The human-reviewed cross-repo adoption plan
+(`acdp-rs/plans/cross-repo/acdp-registry-rs-publish-charge-seam-adoption.md`) specified, as a
+bolded "most important" acceptance criterion, that a failed proof on these two branches must NOT
+be rejected — it must reproduce the old oracle's "false = don't charge, never reject" contract,
+i.e. the publish should still be accepted, just uncharged.
+
+Implementing that literally turned out to require committing genuinely unverified content
+whenever proving failed (the only 0.14.0 path that could satisfy it,
+`publish_unverified_in_tenant_for_tests`, admits exactly and only forged, signature-invalid
+did:key publishes) — which read as a real security regression, not a preserved behavior. Per this
+repo's autonomy ladder, a trust-boundary question like this is not an agent's call to make
+unilaterally either way (neither "follow the plan literally" nor "override it silently"), so it
+was put to a fresh Fable agent for independent verification, then to the human.
+
+**Fable's finding, independently re-derived from source, not from the plan's framing:** the
+premise behind the plan's acceptance criterion was already false in acdp-server 0.13.1, not merely
+made stale by 0.14.0. The "real" SDK call the old oracle's `false` used to fall through to
+(`publish_verified_did_key_in_tenant`) ran a strict superset of the oracle's own hash+signature
+checks (same `compute_content_hash`, same `verify_publish_request_signature_offline`, plus schema/
+size/DID-method checks the oracle never ran) — so nothing the oracle rejected was ever genuinely
+accepted by the real call either. This repo's own existing tests already pinned this:
+`naming_a_victim_does_not_spend_their_budget` and
+`a_replayed_envelope_over_a_different_body_does_not_spend_the_budget` both assert REJECTION for
+oracle-`false` inputs, not acceptance. In 0.14.0 the "real" call is now literally DEFINED as
+`prove_publish_identity_did_key` + `commit_proven`, so the second, more-lenient fallback path the
+plan's criterion depends on does not exist to preserve. Full write-up, including a line-by-line
+comparison against both the 0.13.1 and 0.14.0 SDK source, is in the Fable agent's transcript;
+this entry carries the conclusion and the reasoning path, not the full trace.
+
+**Decision: reject on prove failure for did:key/pinned too, matching did:web (`?`, no fallback).**
+The human was shown Fable's analysis directly and chose option (a) — treat a failed proof as a
+rejection, abandoning the plan's literal acceptance criterion on this one point as inapplicable to
+the 0.14.0 API shape rather than following it into the fallback that would have been required.
+
+**A real, smaller, named side effect — not the same question, don't conflate the two.** Because
+`prove_publish_identity_did_key`/`_pinned` bundle schema/hash validation INTO the identity proof
+(unlike the deleted oracle, which checked hash+signature alone), the charge-arm point for did:key/
+pinned moves slightly later — after schema validation, not just after hash+signature. A validly-
+signed but schema-invalid publish, which the old oracle deliberately charged (see the now-
+superseded U-501 assumption in `ASSUMPTIONS.md` about excluding schema from the oracle), is now an
+uncharged rejection instead. This is judged benign (every such rejection now fails at or before the
+hash check, i.e. before the one expensive step, so it cannot be used to burn CPU for free) and no
+existing test pinned the old charged set for this specific case, but it is a real behavior change
+and is recorded here so it is not mistaken for an oversight later.
+
+**Tests.** `late_failures_are_charged_on_exactly_three_of_the_four_publish_branches` (renamed from
+"...two_of_the_four...") is the regression test for the did:web closure — its did:web probe was
+rewired to use the in-process did:web fixture server (`tests/didweb/`) rather than the default
+real-DNS resolver, because with a real resolver the probe's DID never resolves at all and the test
+would "pass" for the wrong reason (never reaching commit either way), not because the gap is
+closed. `a_did_key_publish_that_fails_late_is_charged` was rewired from a `key_resolution_failed`
+trigger (now an uncharged, pre-arm failure under the new narrowing above) to a missing-supersession-
+target trigger (still a genuine post-arm, commit-time failure).
+
+**Blast radius if this decision is later found wrong.** Rejecting on a failed proof, where the plan
+asked for accept-uncharged, is a strictly MORE conservative choice on the accept/reject axis — it
+can only turn some previously-accepted-uncharged request into a rejection, never the reverse, and
+Fable's analysis found no such request should exist in the first place. If a legitimate did:key/
+pinned publish is ever found to be wrongly rejected by `prove_publish_identity_did_key`/`_pinned`
+for a reason that is not a genuine identity/schema failure, that is a bug in the SDK's prove
+function or this repo's call site, not a reason to reintroduce a fallback to an unverified commit
+path.
