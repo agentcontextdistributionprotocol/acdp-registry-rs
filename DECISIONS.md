@@ -3941,3 +3941,25 @@ U-556's AC6 case existed to enforce.
 this pass, only the record of the two entries' status. Both remain trivially correctable: U-508
 back to PARTIAL if the setting is ever found to have reverted (the new drift-detection job in
 U-562 would itself catch that), or U-513 to CONFIRMED the day a feature-builds context is added.
+
+## U-513 addendum — the human declines the settings change (2026-09-22)
+
+U-513's blocker is a genuine one-way door in miniature: unblocking it means a repo admin adding a
+new context to `required_status_checks.contexts`, which changes merge behaviour for every
+contributor and is not something an agent can do on the human's behalf (the same reasoning U-508
+used when it escalated rather than performed its own settings change). So the ask — split the
+feature builds into a parallel job, once a human adds its check name to the required list — was
+put to the human directly, alongside U-575's fresh measurement: the build steps cost 2-10s each
+and sit off the critical path, so the ~8s latency this entry originally weighed against has
+already shrunk to near-zero in practice.
+
+**Decision: leave the builds inside `clippy`.** Given the actual cost is close to nothing, the
+human chose not to spend a branch-protection settings change — which carries its own small risk
+(the required-contexts list is replaced wholesale, so a typo silently un-requires an existing
+check) — to chase a latency win that no longer meaningfully exists. This closes U-513 as a
+ruling, not a deferral: the status line no longer names a settled-by-future-event condition.
+
+**Blast radius if this is later found wrong:** low. Nothing changed in code or settings; the
+builds remain merge-blocking exactly as before. If the calculus changes later (e.g. `clippy`
+grows enough that the builds become worth separating for reasons beyond latency), this is a fresh
+ask, not a reopening of this one.
