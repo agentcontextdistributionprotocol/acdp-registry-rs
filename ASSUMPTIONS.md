@@ -2508,15 +2508,28 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 
 - **Assumption:** schema validation can be excluded from the identity oracle without weakening
   it.
-- **Reasoning:** `publish_identity_proven_offline` recomputes `content_hash` and verifies the
-  offline signature, but deliberately does not call `validate_publish_request`. Schema validity
-  is not part of an identity proof: if the hash binds the body and the signature binds the hash
-  to `agent_id`'s key, then `agent_id` signed this body whether or not the body is schema-legal.
-  Excluding it makes the oracle *broader* (more publishes chargeable), not laxer in the
-  dangerous direction, and a producer flooding signed-but-schema-invalid publishes is precisely
-  the noisy producer the limiter exists to throttle.
-- **Status:** CONFIRMED by construction. Reversible in one line if it is ever wrong — adding the
-  call can only reduce what is charged, never permit an unproven charge.
+- **Status:** SUPERSEDED (2026-09-22, acdp-registry-rs#336) — `publish_identity_proven_offline`,
+  the hand-rolled oracle this assumption was about, is deleted. did:key/pinned now prove identity
+  via the SDK's own `prove_publish_identity_did_key`/`prove_publish_identity_pinned` (acdp v0.14.0,
+  acdp-rs#273), which bundles schema/size/hash/algorithm-binding validation (`validate_post_schema`)
+  INTO the identity proof — there is no longer a way to prove hash+signature alone, first. The
+  practical effect: a validly-signed but schema-invalid did:key/pinned publish, which the old
+  oracle deliberately charged (per the reasoning this entry used to give, preserved below), is now
+  an UNCHARGED rejection instead — the narrowing is real but small, since every such rejection now
+  fails at or before the recomputed-hash check, i.e. before the one expensive step (the signature
+  verify), so it cannot be used to burn CPU for free. Root cause: this repo no longer controls the
+  boundary between "identity check" and "schema check" — the SDK does, and it drew that line
+  differently. See DECISIONS.md's U-501 addendum (2026-09-22) for the full analysis (by a Fable
+  agent under `/reconcile`, on the human's request) that surfaced this narrowing.
+  Superseded text, kept because this file is cumulative: *"Reasoning: `publish_identity_proven_offline`
+  recomputes `content_hash` and verifies the offline signature, but deliberately does not call
+  `validate_publish_request`. Schema validity is not part of an identity proof: if the hash binds
+  the body and the signature binds the hash to `agent_id`'s key, then `agent_id` signed this body
+  whether or not the body is schema-legal. Excluding it makes the oracle broader (more publishes
+  chargeable), not laxer in the dangerous direction, and a producer flooding signed-but-schema-invalid
+  publishes is precisely the noisy producer the limiter exists to throttle. Status: CONFIRMED by
+  construction. Reversible in one line if it is ever wrong — adding the call can only reduce what
+  is charged, never permit an unproven charge."*
 
 - **Assumption:** the oracle cannot cause a request to be rejected that is accepted today.
 - **Evidence:** it returns `bool`, not `Result`, and every failure path inside it returns
@@ -2534,13 +2547,50 @@ conclude the leak does not exist. The marker test pins `limit=2`.
 
 - **Assumption:** the production `did:web` branch cannot be charged from inside this repo at an
   acceptable cost.
-- **Evidence:** `publish_verified_in_tenant` resolves the DID document over the network inside
-  the SDK call. Establishing identity in the handler first would need a second resolution per
-  publish — a second network round-trip, a second SSRF surface, and a cache that can disagree
-  with the SDK's. Not attempted; the seam is designed in
-  `plans/cross-repo/acdp-rs-publish-charge-seam.md` and filed upstream.
-- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13; unmeasurable by construction, so evidence cannot close it). **Settled by:** a reviewer accepting or rejecting the trade. **Owner:** the reviewer. This is a judgement about cost, not a measured fact. It is the one
-  claim in this unit a reviewer should push back on if they disagree about the trade.
+- **Status:** RESOLVED, not by accepting the trade (2026-09-22, acdp-registry-rs#336) — the seam
+  this repo asked for in `plans/cross-repo/acdp-rs-publish-charge-seam.md` shipped as acdp-rs#273
+  / acdp v0.14.0's `Proven`/`prove_publish_identity`/`commit_proven` split. The did:web branch now
+  calls `prove_publish_identity(&req, &resolver).await?` (the same real DID resolution + signature
+  verification `publish_verified_in_tenant` always did — no second resolution, no new SSRF
+  surface), arms `PublishCharge` immediately on success, then `commit_proven`s the result — so a
+  late failure (a store error, a duplicate-publish race) is now charged, closing the fourth and
+  last branch of #242.
+  `late_failures_are_charged_on_exactly_three_of_the_four_publish_branches` in
+  `crates/acdp-registry-server/tests/http_integration.rs` is the regression test: it proves the
+  did:web branch charges a genuine commit-time failure using a real (fixture) DID resolution, not
+  merely that the code compiles against the new signature. This entry's original judgement — that
+  the cost of closing this from the registry side was unacceptable — was correct and remains the
+  reason the fix had to come from the SDK, not from this repo re-attempting its own resolution.
+  Superseded text, kept because this file is cumulative: *"Evidence: `publish_verified_in_tenant`
+  resolves the DID document over the network inside the SDK call. Establishing identity in the
+  handler first would need a second resolution per publish — a second network round-trip, a second
+  SSRF surface, and a cache that can disagree with the SDK's. Not attempted; the seam is designed
+  in `plans/cross-repo/acdp-rs-publish-charge-seam.md` and filed upstream. Status: UNCONFIRMED
+  (re-checked U-507 2026-09-13; unmeasurable by construction, so evidence cannot close it). Settled
+  by: a reviewer accepting or rejecting the trade. Owner: the reviewer. This is a judgement about
+  cost, not a measured fact. It is the one claim in this unit a reviewer should push back on if
+  they disagree about the trade."*
+
+- **Assumption:** when `prove_publish_identity_did_key`/`prove_publish_identity_pinned` (acdp
+  v0.14.0) fails, the publish must be rejected, not accepted-uncharged.
+- **Reasoning:** the human-reviewed cross-repo adoption plan
+  (`acdp-rs/plans/cross-repo/acdp-registry-rs-publish-charge-seam-adoption.md`) specified the
+  opposite as a bolded, hard acceptance criterion — reproduce the old `publish_identity_proven_offline`
+  oracle's "false = don't charge, never reject" contract. A fresh Fable agent, asked to verify this
+  independently (not asked to agree), found the premise was already false in acdp-server 0.13.1:
+  the "real" SDK call the old oracle's `false` used to fall through to
+  (`publish_verified_did_key_in_tenant`) ran a strict SUPERSET of the oracle's own checks, so
+  nothing the oracle rejected was ever actually accepted — the existing tests
+  `naming_a_victim_does_not_spend_their_budget` and
+  `a_replayed_envelope_over_a_different_body_does_not_spend_the_budget` already pinned *rejected*,
+  not accepted, for exactly these cases. In 0.14.0 the "real" call is now DEFINED as
+  `prove_publish_identity_did_key` + `commit_proven`, so there is no more a second, more lenient
+  path to fall back to — and the only 0.14.0 path that could honor the plan's literal instruction
+  (`publish_unverified_in_tenant_for_tests`) would admit exactly and only forged, signature-invalid
+  did:key publishes. See DECISIONS.md's U-501 addendum (2026-09-22) for Fable's full analysis.
+- **Status:** CONFIRMED (2026-09-22, the human, presented with Fable's analysis) — reject on prove
+  failure, matching did:web. The plan's acceptance criterion on this point is retired as
+  inapplicable to the 0.14.0 API shape, not merely stale.
 
 ## U-505 — index of deferred work surfaced from this file and DECISIONS.md (2026-09-13, lane-1)
 

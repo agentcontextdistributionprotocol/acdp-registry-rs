@@ -3,8 +3,12 @@
 **Target repo:** `agentcontextdistributionprotocol/acdp-rs` (the `acdp` SDK).
 **Written from:** `acdp-registry-rs`, unit U-501, closing the in-repo half of
 [`acdp-registry-rs#242`](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/issues/242).
-**Status here:** design only. This file is a *read* target for whoever picks the work up in
-`acdp-rs`; nothing in this repo writes to that one.
+**Status here:** FULFILLED (2026-09-22). `acdp-rs` shipped Option B as designed below
+(`Proven<'a>` / `prove_publish_identity*` / `commit_proven`, acdp-rs#273, released in acdp v0.14.0)
+and this repo adopted it in `acdp-registry-rs#336` — see `DECISIONS.md`'s "U-501 addendum" entry
+for the adoption decision and `ASSUMPTIONS.md`'s U-501 entries for the resulting status. This file
+is otherwise left as-written below: it is the historical record of what was asked for and why,
+not a live design doc to keep current.
 
 ## The problem, from the registry's side
 

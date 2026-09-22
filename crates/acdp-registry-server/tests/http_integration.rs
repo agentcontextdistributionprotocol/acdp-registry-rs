@@ -8080,12 +8080,13 @@ async fn credential_endpoints_are_never_stored() {
 /// different producers would prove nothing.
 ///
 /// RENAMED for #242, which made the old name (`..._fails_late_...`) actively
-/// misleading: late failures on the `did:key` and pinned-playground branches ARE
+/// misleading: late failures on three of the four branches (did:key,
+/// pinned-playground, and now production did:web — acdp-registry-rs#336) ARE
 /// charged now. The distinction this test pins is not early-vs-late in the
 /// pipeline, it is **before-vs-after the signer is proven** -- the tenant check
 /// is on the unproven side, so it must still cost nothing. See
-/// `late_failures_are_charged_on_exactly_two_of_the_four_publish_branches` for
-/// the other side of that line.
+/// `late_failures_are_charged_on_exactly_three_of_the_four_publish_branches`
+/// for the other side of that line.
 #[tokio::test]
 async fn a_publish_that_fails_before_the_signer_is_proven_does_not_consume_the_agents_budget() {
     let mut cfg = config(true);
@@ -9235,25 +9236,36 @@ async fn log_entries_honours_anonymous_public_reads_from_caps() {
 /// #242, the headline case: a cryptographically flawless `did:key` publish that
 /// the registry then refuses must still spend the agent's budget.
 ///
-/// The failure used here is the SDK's capabilities gate — this registry does not
-/// advertise `did:key`, so every attempt is a permanent 400
-/// `key_resolution_failed` raised *inside* `publish_verified_did_key_in_tenant`,
-/// i.e. after the handler has already proven the signer offline. No attempt ever
-/// succeeds, which is exactly what makes this discriminating: under the pre-fix
-/// tree the success-path `record` is unreachable, so the budget is NEVER spent
-/// and the producer can hammer a full verify plus a store round-trip forever.
+/// acdp-registry-rs#336 / U-501 addendum (2026-09-22): the failure trigger
+/// changed. It used to be the SDK's `supported_did_methods` capabilities gate
+/// (`key_resolution_failed`) -- but that gate now runs INSIDE
+/// `prove_publish_identity_did_key` (part of `validate_post_schema`'s steps
+/// 1-6), i.e. BEFORE the charge arms, so it is no longer "late" under the
+/// prove/commit split and would no longer be charged (see DECISIONS.md's
+/// U-501 addendum for why that narrowing is correct, not a regression). The
+/// trigger here is now a missing supersession target -- signed and offline-
+/// verifiable, so `prove_publish_identity_did_key` succeeds and the charge
+/// arms, and the target only turns out not to exist once `commit_proven`
+/// reaches the store, which is genuinely late relative to the new arm point.
 ///
 /// Falsified: deleting the `charge.arm()` in the did:key branch makes the final
 /// assertion below see a third 400 instead of a 429.
 #[tokio::test]
 async fn a_did_key_publish_that_fails_late_is_charged() {
     let mut cfg = config(false);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
     cfg.limits.publish_rate_per_minute = 2;
-    let h = harness_from_config(cfg).await;
+    let h = build_harness_with_caps(cfg, receipts_caps(), None).await;
 
+    let missing = || {
+        acdp::types::primitives::CtxId(
+            "acdp://registry.test/aaaaaaaa-2222-4333-8444-555555555555".to_string(),
+        )
+    };
     let make = |title: &str| {
         did_key_producer(70)
-            .publish_request()
+            .supersede(missing())
+            .version(2)
             .title(title)
             .context_type(ContextType::DataSnapshot)
             .visibility(Visibility::Public)
@@ -9269,12 +9281,12 @@ async fn a_did_key_publish_that_fails_late_is_charged() {
         assert_eq!(
             status,
             StatusCode::BAD_REQUEST,
-            "attempt {i} must reach the SDK and fail there: {v}"
+            "attempt {i} must reach commit and fail there: {v}"
         );
         assert_eq!(
-            v["error"]["code"], "key_resolution_failed",
-            "attempt {i} must fail at the capabilities gate, i.e. AFTER the \
-             handler proved the signer: {v}"
+            v["error"]["code"], "superseded_target",
+            "attempt {i} must fail at the store's missing-target check, i.e. \
+             AFTER the handler proved the signer: {v}"
         );
     }
 
@@ -9284,7 +9296,7 @@ async fn a_did_key_publish_that_fails_late_is_charged() {
         status,
         StatusCode::TOO_MANY_REQUESTS,
         "two late failures must exhaust a budget of 2 (#242). Pre-fix this is \
-         another 400 key_resolution_failed, forever: {v}"
+         another 400 superseded_target, forever: {v}"
     );
 }
 
@@ -9295,9 +9307,10 @@ async fn a_did_key_publish_that_fails_late_is_charged() {
 /// This is the exact A1/P5 attack. The request is a valid publish signed by one
 /// did:key producer, with `agent_id` overwritten to name a *victim*. The
 /// signature does not verify against the victim's key, so
-/// `publish_identity_proven_offline` returns false, the guard is never armed,
-/// and the victim's bucket is never touched — even though the attempt goes on to
-/// cost a full trip into the SDK.
+/// `prove_publish_identity_did_key` (acdp-registry-rs#336: the SDK's own check,
+/// replacing the hand-rolled `publish_identity_proven_offline` this repo used to
+/// keep alongside it) returns `Err`, the guard is never armed, and the request
+/// is rejected -- the victim's bucket is never touched.
 ///
 /// Falsified: making the oracle return `true` unconditionally turns the victim's
 /// own publish below into a 429.
@@ -9372,10 +9385,11 @@ async fn naming_a_victim_does_not_spend_their_budget() {
 /// `(agent_id, content_hash, signature)` triple with the *title* swapped — passes
 /// that check while the attacker holds no key at all. Only recomputing
 /// `content_hash` over the body catches it, which is why
-/// `publish_identity_proven_offline` does that FIRST and refuses to charge on a
-/// mismatch.
+/// `PublishValidator::validate_post_schema` does that FIRST, inside
+/// `prove_publish_identity_did_key` (acdp-registry-rs#336), and the guard never
+/// arms on a mismatch.
 ///
-/// Falsified: removing the `compute_content_hash` comparison from the oracle
+/// Falsified: removing the hash-recomputation check from the SDK's validator
 /// (leaving only the signature check) turns the victim's own publish below into
 /// a 429. Without this test that deletion reddens nothing in the entire suite.
 #[tokio::test]
@@ -9440,17 +9454,27 @@ async fn a_replayed_envelope_over_a_different_body_does_not_spend_the_budget() {
 /// again. If the first was charged the second is `429`; if it was not, the
 /// second repeats the original late failure.
 ///
+/// acdp-registry-rs#336 (2026-09-22): the production `did:web` branch flipped
+/// from "no" to "yes" -- acdp v0.14.0's `prove_publish_identity`/`commit_proven`
+/// split (acdp-rs#273) closed the one remaining gap #242 left open. Its probe
+/// now uses the same in-process did:web fixture server as
+/// `a_did_web_retract_retracts_rather_than_republishing`, not the default
+/// (real-DNS) resolver the other harnesses in this file use -- with a real
+/// resolver, `producer(_)`'s DID never resolves at all (`agents.test` is not a
+/// real host), so identity is never established and this test would trivially
+/// "pass" for the wrong reason: not because the branch is uncharged by design,
+/// but because it can never reach commit to prove the charged case either way.
+///
 /// | branch | late failure charged? | why |
 /// |---|---|---|
-/// | `did:key` | **yes** | identity proven offline in the handler before the SDK call |
-/// | playground, pinned | **yes** | `enforce_pinned_signature` proved it before the SDK call |
+/// | `did:key` | **yes** | `prove_publish_identity_did_key` succeeds before `commit_proven` runs |
+/// | playground, pinned | **yes** | `enforce_pinned_signature` + `prove_publish_identity_pinned` both succeed first |
 /// | playground, unpinned | no, **by design, permanently** | nothing is verified at all, so there is no identity to charge; arming would key an insertion on an attacker-supplied `agent_id` — the shape #242 rejected |
-/// | production `did:web` | no, **remaining gap** | identity is established only inside the resolver-backed SDK call; closing it needs an SDK seam (see `plans/cross-repo/acdp-rs-publish-charge-seam.md`, filed upstream) |
+/// | production `did:web` | **yes** | `prove_publish_identity` succeeds (real DID resolution + signature check, via the fixture server) before `commit_proven` runs |
 ///
-/// The two "no" rows are NOT the same kind of thing and must not be collapsed:
-/// one is correct and must never change, the other is outstanding work.
-#[tokio::test]
-async fn late_failures_are_charged_on_exactly_two_of_the_four_publish_branches() {
+/// The one "no" row is not outstanding work — it must never change.
+#[tokio::test(flavor = "multi_thread")]
+async fn late_failures_are_charged_on_exactly_three_of_the_four_publish_branches() {
     // A supersession naming a context that does not exist. Signed as part of the
     // body (via `supersede`, not by mutating the built request), so it survives
     // the recomputed-hash check and fails where we want it to: on the store
@@ -9544,10 +9568,45 @@ async fn late_failures_are_charged_on_exactly_two_of_the_four_publish_branches()
     }
 
     // ── branch 4: production did:web ─────────────────────────────────────
+    // Needs the in-process fixture server (see this test's doc comment) so
+    // identity is genuinely established and the failure genuinely happens at
+    // commit -- assembled from the same public pieces
+    // `didweb_lifecycle_harness` uses, minus lifecycle (not needed here) and
+    // with this probe's own rate limit.
     {
+        let addr = didweb::spawn_didweb_server().await;
+        let resolver = Arc::new(
+            WebResolver::with_test_endpoint(
+                didweb::ca_pem().as_bytes(),
+                didweb::DIDWEB_AUTHORITY,
+                addr,
+            )
+            .expect("test-endpoint resolver"),
+        );
         let mut cfg = config(false);
         cfg.limits.publish_rate_per_minute = 1;
-        let h = harness_from_config(cfg).await;
+        let db = tempfile::Builder::new()
+            .prefix("acdp-didweb-242-")
+            .tempdir()
+            .unwrap();
+        let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
+            .await
+            .unwrap();
+        store.migrate().await.unwrap();
+        let server = Arc::new(RegistryServer::try_new(store, caps_030(), AUTHORITY).unwrap());
+        let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+        let secret = JwtSecret::from_bytes(&[42u8; 32]);
+        let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
+        let auth = Arc::new(AuthService::new(
+            AuthConfig::default(),
+            challenges,
+            signer,
+            resolver,
+            AUTHORITY.into(),
+        ));
+        let state = AppStateInner::new(server, auth, None, cfg, None);
+        let h = Harness::with_db_dir(build_router(state), db);
+
         let req = producer(93)
             .supersede(missing())
             .version(2)
@@ -9565,7 +9624,7 @@ async fn late_failures_are_charged_on_exactly_two_of_the_four_publish_branches()
         ("did:key", true),
         ("playground pinned", true),
         ("playground unpinned", false),
-        ("production did:web", false),
+        ("production did:web", true),
     ];
     assert_eq!(
         outcomes, expected,
@@ -9574,13 +9633,13 @@ async fn late_failures_are_charged_on_exactly_two_of_the_four_publish_branches()
          handlers/context.rs -- both describe this split to the next reader"
     );
 
-    // And the count, asserted exactly. A `>= 2` here would pass against a build
+    // And the count, asserted exactly. A `>= 3` here would pass against a build
     // that silently dropped an arm and against one that armed an unauthenticated
     // branch -- the two regressions this whole unit is about.
     assert_eq!(
         outcomes.iter().filter(|(_, c)| *c).count(),
-        2,
-        "exactly two of four branches charge late failures"
+        3,
+        "exactly three of four branches charge late failures"
     );
 }
 

@@ -228,7 +228,10 @@ fn http_status_for_acdp(err: &AcdpError) -> u16 {
         AcdpError::SupersededTarget { reason, .. } => match reason {
             SupersessionReason::VersionMismatch | SupersessionReason::AlreadySuperseded => 409,
             // NotFound, LineageMismatch, CrossRegistrySupersessionUnsupported,
-            // LineageWalkFailed, Other → static client error.
+            // LineageWalkFailed, RevocationTypeMismatch (RFC-ACDP-0014 §4, acdp
+            // v0.14.0 — a non-revocation context tried to supersede a
+            // key-revocation target; a static request-shape violation, not a
+            // race), Other → static client error.
             _ => 400,
         },
         AcdpError::RateLimited(_) => 429,
@@ -437,6 +440,12 @@ mod tests {
         );
         assert_eq!(mk(SupersessionReason::VersionMismatch).http_status(), 409);
         assert_eq!(mk(SupersessionReason::AlreadySuperseded).http_status(), 409);
+        // acdp-registry-rs#336 / RFC-ACDP-0014 §4 (acdp v0.14.0): new variant,
+        // same static-violation bucket as NotFound/LineageMismatch/etc above.
+        assert_eq!(
+            mk(SupersessionReason::RevocationTypeMismatch).http_status(),
+            400
+        );
     }
 
     /// #12 — `details.reason` reaches the wire so clients don't parse `message`.
