@@ -3024,25 +3024,28 @@ still open, and this is the outcome:
   (rejected: loses the lint coverage W3-U10 added for #200, trading one gap for another).
 - **Blast radius if wrong:** ~8s per PR persists until the settings decision. Trivially reversible —
   moving the steps to their own job is one commit, and becomes correct the moment the contexts change.
-- **Status:** UNCONFIRMED (re-examined 2026-09-22, U-575, Opus under `/reconcile`) — **still open;
-  do not conflate with U-508's discharge.** The human did make a `required_status_checks.contexts`
-  change on 2026-09-16, adding `lint` and `cargo-deny` — but that discharged U-508's blocker, not
-  this one. Neither new context is a channel for a parallel feature-builds job: `lint` is
-  shellcheck/actionlint, `cargo-deny` is the `audit` job's dependency/license/advisory check.
-  Live-verified (`gh api .../branches/main/protection`) that no `build`-type context exists in the
-  required list, and `ci.yml`'s `clippy` job (lines 147, 252, 262, 272, 282) still runs the five
-  feature-config `build` steps inline — they have not moved, and the job's own comment still gives
-  this entry's exact reasoning verbatim. **New supporting evidence, not present when this entry was
-  written:** the build steps measure 2-10s each, *cheaper* than the `clippy` step beside them, and
-  `clippy` itself (~39s) is not on the critical path (the `tests` job runs ~2m36s) — so today's
-  placement costs close to nothing in practice, which further weakens the case for spending a
-  settings change on this. **Settled by:** a `required_status_checks.contexts` change adding a
-  feature-builds-specific context (not `lint`/`cargo-deny`). **Owner:** the human.
-  Superseded text, kept because this file is cumulative: *"UNCONFIRMED (re-examined U-507,
-  2026-09-13) — U-516 does NOT discharge this one. Its move works because a checkout-only check
-  needs no parallelism; these builds do, and parallelism needs a separate job, hence a new check
-  name, hence a `required_status_checks.contexts` change. Settled by: that settings change. Owner:
-  the human."*
+- **Status:** **CONFIRMED as-is** (2026-09-22, the human, presented with U-575's evidence) — the
+  human was shown the mechanism (a parallel job needs a new required-context settings change,
+  which is outward-facing and not an agent's to make unilaterally) and the updated cost (build
+  steps measure 2-10s each, off the `tests` job's critical path, so today's placement costs close
+  to nothing) and chose to leave the builds inside `clippy` rather than spend a branch-protection
+  settings change to chase a latency win that no longer meaningfully exists. Not left open for a
+  future settings change — a real ruling, not a deferral.
+  Superseded text, kept because this file is cumulative: *"UNCONFIRMED (re-examined 2026-09-22,
+  U-575, Opus under `/reconcile`) — still open; do not conflate with U-508's discharge. The human
+  did make a `required_status_checks.contexts` change on 2026-09-16, adding `lint` and
+  `cargo-deny` — but that discharged U-508's blocker, not this one. Neither new context is a
+  channel for a parallel feature-builds job: `lint` is shellcheck/actionlint, `cargo-deny` is the
+  `audit` job's dependency/license/advisory check. Live-verified (`gh api
+  .../branches/main/protection`) that no `build`-type context exists in the required list, and
+  `ci.yml`'s `clippy` job (lines 147, 252, 262, 272, 282) still runs the five feature-config
+  `build` steps inline — they have not moved, and the job's own comment still gives this entry's
+  exact reasoning verbatim. New supporting evidence, not present when this entry was written: the
+  build steps measure 2-10s each, cheaper than the `clippy` step beside them, and `clippy` itself
+  (~39s) is not on the critical path (the `tests` job runs ~2m36s) — so today's placement costs
+  close to nothing in practice, which further weakens the case for spending a settings change on
+  this. Settled by: a `required_status_checks.contexts` change adding a feature-builds-specific
+  context (not `lint`/`cargo-deny`). Owner: the human."*
 
 ## U-504 — #216: the mutation ratchet extended to `handlers/context.rs` (2026-09-13, lane-2)
 
