@@ -3901,3 +3901,43 @@ cause is elsewhere would have been the wrong fix. No production-logic change; co
 **Blast radius if this decision is later found wrong:** none for production behavior (no
 code changed) — worst case is the corrected comment itself needing a further correction,
 same as the one it replaced.
+
+## U-575 — U-508 and U-513 re-examined after U-562 (2026-09-22, decided by Opus under `/reconcile`)
+
+Both entries are reversible, code-only choices — no public contract, no schema, no auth model, no
+external dependency — so both were analyzed by a fresh Opus agent and settled without escalation,
+each independently re-deriving the live branch-protection setting rather than trusting the prior
+framing.
+
+**CONFIRMED — U-508 ("PR-blocking" means runs-and-can-fail, not listed-in-branch-protection).**
+The blocker this entry escalated to the human — add the `lint` context to
+`required_status_checks.contexts` — was discharged on 2026-09-16. Verified live:
+`gh api repos/…/branches/main/protection --jq '.required_status_checks.contexts | sort'` returns
+`["cargo-deny","clippy","conformance (spec fixtures)","lint","rustfmt","tests"]`; `lint.yml`'s job
+publishes a check named `lint`, exactly matching; the workflow's own header now states the check
+blocks merges. The original ask is literally satisfied.
+
+**Reaffirmed UNCONFIRMED — U-513 (builds stay in the required `clippy` job rather than moving to
+a parallel job).** Not discharged by the same event, despite U-513's own text calling out the
+coupling with U-508 ("one settings change... would unblock two improvements, not one") — that
+framing predicted the *same* change would settle both, and it did not: 2026-09-16 added `lint`
+(shell/workflow linting) and `cargo-deny` (dependency/advisory auditing), neither a channel a
+parallel feature-builds job could publish to. `ci.yml`'s `clippy` job still runs the five
+feature-config build steps inline (lines 147, 252, 262, 272, 282), and its own comment still gives
+U-513's exact reasoning. New evidence found during this pass, not available when U-513 was
+written: those build steps measure 2-10s each — cheaper than `clippy` itself — and sit off the
+critical path (`tests` runs ~2m36s vs. `clippy`'s ~39s), so the status quo's cost is closer to
+zero than the ~8s the original entry weighed against. This reinforces the original choice rather
+than reopening it. **Settled by:** a future `required_status_checks.contexts` change that adds a
+context a feature-builds job could publish — not by `lint` or `cargo-deny`. **Owner:** the human.
+
+**The finding worth keeping.** Two entries citing the same blocker and the same coupling do not
+necessarily close on the same trigger. A settings change landing was not itself sufficient
+evidence — it had to be checked against what *specifically* changed, not just that something did.
+Reconciling both together, rather than flipping U-513 on U-508's evidence, is the same discipline
+U-556's AC6 case existed to enforce.
+
+**Blast radius if this decision is later found wrong:** none — no settings or code were changed by
+this pass, only the record of the two entries' status. Both remain trivially correctable: U-508
+back to PARTIAL if the setting is ever found to have reverted (the new drift-detection job in
+U-562 would itself catch that), or U-513 to CONFIRMED the day a feature-builds context is added.
