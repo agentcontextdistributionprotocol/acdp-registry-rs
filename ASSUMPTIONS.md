@@ -2818,8 +2818,18 @@ than assumed.
   every PR waiting forever.
 - **Blast radius if wrong:** the gate advises instead of blocking until one API call is made. Loud,
   not silent: the limitation is in the workflow header, the log entry, the PR body and `done`.
-- **Status:** PARTIAL (U-507, 2026-09-13) — the *technique* is now proven by U-516: a checkout-only gate
-  runs inside `ci.yml`'s `fmt` job (published `rustfmt`, a required context) and blocks merges with no settings change. `lint` itself is still a separate workflow publishing a non-required `lint` context, so the original ask is undischarged.
+- **Status:** **CONFIRMED** (2026-09-22, U-575, Opus under `/reconcile`) — the settings change
+  landed. Live-verified via `gh api repos/…/branches/main/protection
+  --jq '.required_status_checks.contexts | sort'`: `["cargo-deny","clippy","conformance (spec
+  fixtures)","lint","rustfmt","tests"]`. `lint` is present; `.github/workflows/lint.yml`'s job
+  publishes a check named exactly `lint` (its own header now states outright: *"THIS CHECK BLOCKS
+  MERGES"*), and `ci.yml:42-46` corroborates the setting changed 2026-09-16. The original ask —
+  "the new `lint` context must be added to `required_status_checks`" — is now literally true.
+  Superseded text, kept because this file is cumulative: *"PARTIAL (U-507, 2026-09-13) — the
+  technique is now proven by U-516: a checkout-only gate runs inside `ci.yml`'s `fmt` job
+  (published `rustfmt`, a required context) and blocks merges with no settings change. `lint`
+  itself is still a separate workflow publishing a non-required `lint` context, so the original
+  ask is undischarged."*
 
 ## U-508 — a separate lint.yml rather than jobs inside ci.yml
 
@@ -3014,8 +3024,25 @@ still open, and this is the outcome:
   (rejected: loses the lint coverage W3-U10 added for #200, trading one gap for another).
 - **Blast radius if wrong:** ~8s per PR persists until the settings decision. Trivially reversible —
   moving the steps to their own job is one commit, and becomes correct the moment the contexts change.
-- **Status:** UNCONFIRMED (re-examined U-507, 2026-09-13) — **U-516 does NOT discharge this one.** Its
-  move works because a checkout-only check needs no parallelism; these builds do, and parallelism needs a separate job, hence a new check name, hence a `required_status_checks.contexts` change. **Settled by:** that settings change. **Owner:** the human.
+- **Status:** UNCONFIRMED (re-examined 2026-09-22, U-575, Opus under `/reconcile`) — **still open;
+  do not conflate with U-508's discharge.** The human did make a `required_status_checks.contexts`
+  change on 2026-09-16, adding `lint` and `cargo-deny` — but that discharged U-508's blocker, not
+  this one. Neither new context is a channel for a parallel feature-builds job: `lint` is
+  shellcheck/actionlint, `cargo-deny` is the `audit` job's dependency/license/advisory check.
+  Live-verified (`gh api .../branches/main/protection`) that no `build`-type context exists in the
+  required list, and `ci.yml`'s `clippy` job (lines 147, 252, 262, 272, 282) still runs the five
+  feature-config `build` steps inline — they have not moved, and the job's own comment still gives
+  this entry's exact reasoning verbatim. **New supporting evidence, not present when this entry was
+  written:** the build steps measure 2-10s each, *cheaper* than the `clippy` step beside them, and
+  `clippy` itself (~39s) is not on the critical path (the `tests` job runs ~2m36s) — so today's
+  placement costs close to nothing in practice, which further weakens the case for spending a
+  settings change on this. **Settled by:** a `required_status_checks.contexts` change adding a
+  feature-builds-specific context (not `lint`/`cargo-deny`). **Owner:** the human.
+  Superseded text, kept because this file is cumulative: *"UNCONFIRMED (re-examined U-507,
+  2026-09-13) — U-516 does NOT discharge this one. Its move works because a checkout-only check
+  needs no parallelism; these builds do, and parallelism needs a separate job, hence a new check
+  name, hence a `required_status_checks.contexts` change. Settled by: that settings change. Owner:
+  the human."*
 
 ## U-504 — #216: the mutation ratchet extended to `handlers/context.rs` (2026-09-13, lane-2)
 
@@ -4565,3 +4592,41 @@ owner should make — but recorded so it is not read as settled. **Settled by:**
 choosing one.
 
 - **Status:** CONFIRMED (2026-09-19) — census and triage are evidence, not judgement calls.
+
+## U-575 — U-508 and U-513, re-examined after U-562 (2026-09-22, Opus under `/reconcile`)
+
+**Trigger.** U-561's census (immediately above) named U-513 as waiting on "the settings decision
+that is U-562 — which is itself blocked on a token nobody has granted, so it cannot fire." U-562
+merged as PR #332 (`e9e8f39`, 2026-09-21): `acdp-deps-bot`'s installation was granted
+`administration: read`, and `.github/workflows/branch-protection-drift.yml` now reads
+`main`'s live `required_status_checks.contexts` on a schedule and fails on drift from a pinned
+baseline. That baseline is `["cargo-deny","clippy","conformance (spec fixtures)","lint","rustfmt",
+"tests"]` — a superset of the four in force when U-508 and U-513 were written. Both entries were
+re-examined against that fact, each by a fresh, independent Opus agent instructed to re-derive the
+live setting itself rather than trust this framing. Both are reversible, code-only calls — no
+public contract, no schema, no auth model, no external dependency — so both are Opus's to settle,
+not the human's.
+
+**U-508 — CONFIRMED.** The added context is `lint`, which is exactly what this entry named as its
+unmet ask. Independently re-verified: `lint.yml`'s job publishes a check named `lint`, that name
+is in the live required list, and the workflow's own header now says outright that the check
+blocks merges. The settings change happened 2026-09-16 (`ci.yml:42-46`) — six days before this
+reconciliation pass, undocumented until now because nothing had re-read this entry since.
+
+**U-513 — stays UNCONFIRMED, and this is the finding worth keeping.** The two entries share one
+sentence in U-513's own text — *"one settings change... would unblock two improvements, not
+one"* — which reads today as a trap: 2026-09-16's change added **two** new contexts, `lint` and
+`cargo-deny`, and it would have been easy to see two new contexts land and mark both entries
+settled by the same event. They are not the same event. `cargo-deny` is the `audit` job's
+dependency/advisory check; neither it nor `lint` is a channel a parallel feature-builds job could
+publish to. The build steps U-513 is about are still inline inside `clippy` (`ci.yml` lines 147,
+252, 262, 272, 282), unmoved, and the job's own live comment still states U-513's reasoning
+verbatim — a required context that stops reporting leaves every PR waiting forever. The
+independent analysis also surfaced evidence that did not exist when U-513 was written: the build
+steps measured at 2-10s each, cheaper than the `clippy` step beside them and off the critical path
+(`tests` runs ~2m36s), so the ~8s figure the original entry weighed against is now known to
+overstate the cost of doing nothing. That strengthens, not weakens, the case for leaving U-513
+exactly where U-507 left it.
+
+**Blast radius if this reconciliation is wrong:** none beyond documentation accuracy — the
+underlying settings and code were not touched by this pass, only the record of them.
