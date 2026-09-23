@@ -21,6 +21,61 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.1.5
+
+Bumps `acdp` 0.13.1 → 0.14.1 and adopts ACDP spec pin `16211e6` → `9deb7e7`. Three behavior
+changes reach the wire; all are conformance fixes closing gaps against RFC-ACDP-0014, not new
+features.
+
+**Wire change: a new publish under the interim `acdp:key-revocation` custom type is now rejected
+(400 `schema_violation`).**
+
+| you publish | before 0.1.5 | 0.1.5 |
+|---|---|---|
+| `context_type: "key-revocation"` (standard form) | accepted | accepted — **unchanged** |
+| `context_type: "acdp:key-revocation"` (interim form), schema-valid | **accepted** | **400 `schema_violation`** |
+| `context_type: "acdp:key-revocation"`, schema-invalid | 400 `schema_violation` | 400 `schema_violation` — unchanged |
+
+This registry has always advertised `acdp_version >= 0.5.0` (see `acdp_version_claim()` in
+`crates/acdp-registry-server/src/main.rs`), which RFC-ACDP-0014 §10 requires to retire the interim
+form outright — but the retirement gate itself only shipped in the `acdp` SDK at 0.14.0,
+so before this release a schema-valid interim-form publish was accepted despite the registry's own
+advertised version. A body already published under the interim form before you upgrade is
+unaffected and keeps being served normally — this is non-retroactive.
+
+**Who needs to act:** only a publisher still emitting `acdp:key-revocation`. Switch to the standard
+`key-revocation` context_type; nothing else about the record shape changes.
+
+**Wire change: superseding a key-revocation record with a non-revocation body is now its own
+rejection reason.**
+
+| supersession attempt | before 0.1.5 | 0.1.5 |
+|---|---|---|
+| non-revocation predecessor → revocation successor | accepted — unchanged | accepted — **unchanged** |
+| revocation (or interim-form) predecessor → revocation successor | accepted — unchanged | accepted — **unchanged** |
+| revocation (or interim-form) predecessor → **non-revocation** successor | not specifically checked | **400 `superseded_target`, `details.reason: "revocation_type_mismatch"`** |
+
+RFC-ACDP-0014 §4's 0.5.0 amendment. `RevocationTypeMismatch` did not exist as a rejection reason
+before the 0.14.0 SDK; the closest earlier behavior fell through to whatever generic supersession
+handling applied, not this specific check. **Who needs to act:** only a client that supersedes a
+key-revocation record with a body that is not itself a revocation — branch on
+`error.details.reason == "revocation_type_mismatch"` if you need to distinguish this case from
+other `superseded_target` rejections.
+
+**Billing-visible change: a `did:web` publish that fails late (a store error, a duplicate-publish
+race) is now charged.** This was the last of four publish branches (did:web, did:key, pinned,
+playground-unpinned) where a late failure was silently uncharged; the other three already charged
+on late failure. No client action needed — this only affects an already-failing request, and only
+whether it counts against the publish budget.
+
+**Billing-visible change, `did:key` and pinned publish only: a validly-signed but schema-invalid
+publish is now an uncharged rejection.** Before 0.1.5 this specific case (signature/hash correct,
+body schema-invalid) was charged before being rejected; now the rejection happens during identity
+proof, before the charge is armed. **Who needs to act:** nobody. This only removes a charge from an
+already-rejected request; every other did:key/pinned rejection reason is unaffected.
+
+---
+
 ## 0.1.4
 
 **Fix: `registry.tls.enabled = true` now works. It aborted the process at startup before this
