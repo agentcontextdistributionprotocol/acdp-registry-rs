@@ -1,5 +1,13 @@
 
 
+## [0.1.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.1.4...acdp-registry-sqlite/v0.1.5) - 2026-09-23
+
+### Other
+
+- correct stale mutation-scope citations and the store.rs:1285 concurrent-publish comment (U-574) ([#329](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/329))
+- *(mutants)* widen the mutation scope 213 -> 351 with sqlite/store.rs (U-552) ([#326](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/326))
+
+
 ## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.1.3...acdp-registry-sqlite/v0.1.4) - 2026-09-16
 
 ### Other

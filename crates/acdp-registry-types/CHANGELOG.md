@@ -1,5 +1,12 @@
 
 
+## [0.1.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.1.4...acdp-registry-types/v0.1.5) - 2026-09-23
+
+### Other
+
+- Adopt acdp-rs's Proven/commit_proven publish-identity split (closes #336) ([#341](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/341))
+
+
 ## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.1.3...acdp-registry-types/v0.1.4) - 2026-09-16
 
 ### Fixed
