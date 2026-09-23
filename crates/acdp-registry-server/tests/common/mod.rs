@@ -352,6 +352,31 @@ impl SeededHarness {
             None,
         ));
     }
+
+    /// Direct access to the underlying store, bypassing the HTTP surface
+    /// and every publish-time check the SDK's `commit_proven`/validator
+    /// pipeline runs — including checks a fixture's own precondition would
+    /// otherwise trip.
+    ///
+    /// `rev-003`/`rev-004` (RFC-ACDP-0014 §10, acdp-registry-rs#336
+    /// follow-up) need this: their preconditions are a context published
+    /// under the interim `acdp:key-revocation` form, which this registry
+    /// (always `acdp_version >= 0.5.0`, see `acdp_version_claim`'s doc
+    /// comment in `main.rs`) now correctly REFUSES to accept as a new
+    /// publish (`rev-003` scenario Q). There is no version of this
+    /// registry's own HTTP surface that could ever produce that state --
+    /// on a real deployment it can only arise from data published before
+    /// an upgrade, or migrated in. `RegistryStore::put` is the SDK's own
+    /// documented seam for exactly this ("store an immutable Body under a
+    /// registry-assigned CtxId", no validation performed), the same
+    /// primitive a real store backend uses to persist an already-verified
+    /// publish -- so seeding through it exercises the real serving path
+    /// for everything downstream of persistence (GET, search, lineage
+    /// walk, and -- for `rev-003` P -- a real HTTP supersession attempt
+    /// against the seeded predecessor).
+    pub fn store(&self) -> &SqliteStore {
+        self.server.store()
+    }
 }
 
 /// Shared `RegistryServer` construction + `with_*` wiring, mirroring the

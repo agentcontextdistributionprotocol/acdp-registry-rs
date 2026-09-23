@@ -647,9 +647,11 @@ use acdp::crypto::SigningKey;
 use acdp::producer::Producer;
 #[cfg(feature = "playground")]
 use acdp::registry::RegistryServer;
+use acdp::registry::RegistryStore;
 use acdp::types::capabilities::{CapabilitiesDocument, Limits};
 use acdp::types::primitives::{AgentDid, ContentHash, ContextType, CtxId, LineageId, Visibility};
 use acdp::types::publish::{PublishRequest, PublishResponse};
+use acdp::types::Body as AcdpBody;
 use acdp::types::{DataRef, DataRefType, EmbeddedContent, EmbeddedEncoding};
 use acdp::AnchorEntry;
 #[cfg(feature = "playground")]
@@ -2652,9 +2654,20 @@ fn unseeded_precondition_reason(fx: &Value) -> Option<&'static str> {
     }
     if fx.get("setup").is_some()
         || fx.get("preconditions").is_some()
-        || fx
-            .get("input")
-            .is_some_and(|i| i.get("precondition").is_some() || i.get("preconditions").is_some())
+        || fx.get("input").is_some_and(|i| {
+            i.get("precondition").is_some()
+                || i.get("preconditions").is_some()
+                // `rev-004`'s spelling: `input.existing_context` -- a whole
+                // pre-existing stored `Body` its three scenarios read back
+                // (direct GET, search, lineage walk), never publish. No
+                // Shape recognizes this key, so without this arm a fresh,
+                // unseeded replay harness answers every scenario 404 and
+                // the fixture fails for a reason with nothing to do with
+                // §10 retirement. Real coverage:
+                // `rev004_interim_form_bodies_remain_served_unfiltered`,
+                // which seeds the identical body via `SeededHarness::store`.
+                || i.get("existing_context").is_some()
+        })
     {
         return Some("requires pre-seeded registry state");
     }
@@ -2693,6 +2706,16 @@ fn path_has_placeholder(path: &str) -> bool {
 fn extract(fx: &Value) -> Extracted {
     if targets_unadvertised_profile(fx) {
         return Extracted::Skip("fixture targets a profile this harness does not advertise");
+    }
+    if fx
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| PROSE_SIGNATURE_FIXTURES.contains(&id))
+    {
+        return Extracted::Skip(
+            "fixture's signature.value is prose describing a signature, not one -- see \
+             PROSE_SIGNATURE_FIXTURES",
+        );
     }
     if let Some(reason) = unseeded_precondition_reason(fx) {
         return Extracted::Skip(reason);
@@ -2811,6 +2834,30 @@ fn divergent_code(fixture_id: Option<&str>) -> Option<&'static str> {
         .find(|(fid, _, _)| *fid == id)
         .map(|(_, actual, _)| *actual)
 }
+
+/// Fixtures whose `signature.value` is prose on every scenario, not bytes --
+/// e.g. `"<valid signature by K2 over this body's content_hash>"` -- because
+/// the property under test is behavioral (a §4/§10 accept/reject rule), not
+/// the signature itself. `rev-003`'s own `notes` field says so directly: "No
+/// test_keypair: behavioral end to end, like rev-002 and rev-003".
+///
+/// This is a different failure mode from anything `CODE_DIVERGENCES` or
+/// `unseeded_precondition_reason` exists for. It is not a wrong-but-stable
+/// code (there is no "actual code" to pin -- the request never reaches
+/// signature verification's *intended* outcome at all, it fails *every*
+/// scenario, positive and negative alike, because the bytes are not a
+/// signature). It is not an unseeded precondition either (`rev-003`'s
+/// scenarios up through N are fully self-contained; O/P/R additionally need
+/// a seeded predecessor, but that is not why they'd fail here). No amount of
+/// widening either mechanism makes this fixture replayable by literal
+/// substitution -- the harness would have to forge a real signature over
+/// spec-authored placeholder bytes, which defeats the point of checking one.
+///
+/// Real coverage: `rev003_publish_time_rejection_matrix`, which builds every
+/// one of the fixture's 18 scenarios through `Producer` (so every request
+/// carries a real signature the harness's own pinned key can verify) and
+/// asserts the fixture's expected status/code on each.
+const PROSE_SIGNATURE_FIXTURES: &[&str] = &["rev-003"];
 
 fn extract_shapes(fx: &Value) -> Extracted {
     // Shape A: top-level `request` + `expected`.
@@ -9675,6 +9722,8 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
         "rev",
         &[CoverageMechanism::Direct(&[
             "rev001_key_revocation_context_golden_accepted_and_self_signed_rejected",
+            "rev003_publish_time_rejection_matrix",
+            "rev004_interim_form_bodies_remain_served_unfiltered",
         ])],
     ),
     (
@@ -9932,11 +9981,12 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// Total fixtures in the pinned spec's `schemas/conformance`, as an **equality**.
 ///
 /// This is the ratchet that would have caught `err-002`: the count was 143
-/// before the `16211e6` bump and is 144 after. A `>=` floor passes the very
-/// scanner that is silently missing items, so a 145th fixture must fail the
-/// build and force a human to classify it — which is precisely what did not
-/// happen when `err-002` arrived inside an already-covered family.
-const TOTAL_FIXTURES_AT_PIN: usize = 144;
+/// before the `16211e6` bump and 144 after. It caught the next one too: 144
+/// before the `9deb7e7` bump (rev-003, rev-004 added; rev-002 only modified,
+/// not counted again) and 146 after. A `>=` floor passes the very scanner
+/// that is silently missing items, so a 147th fixture must fail the build
+/// and force a human to classify it.
+const TOTAL_FIXTURES_AT_PIN: usize = 146;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
@@ -10051,6 +10101,8 @@ const DIRECT_FNS: &[(&str, fn())] = &[
     direct_fn!(sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected),
     direct_fn!(did_key_golden_vector_accepted_and_gated),
     direct_fn!(rev001_key_revocation_context_golden_accepted_and_self_signed_rejected),
+    direct_fn!(rev003_publish_time_rejection_matrix),
+    direct_fn!(rev004_interim_form_bodies_remain_served_unfiltered),
     direct_fn!(dk001_002_004_did_key_resolution_negatives_hit_the_resolver),
     direct_fn!(did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets),
     direct_fn!(err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing),
@@ -11662,6 +11714,644 @@ async fn rev001_key_revocation_context_golden_accepted_and_self_signed_rejected(
     assert_eq!(
         body["error"]["code"], "key_not_authorized",
         "rev-001 self-signed variant body = {body}"
+    );
+}
+
+// rev-003/rev-004 share one producer identity and one pair of test keys.
+// K1 reuses rev-001's revoked-key seed for thematic continuity; K2 is
+// local to these two tests (rev-001 never needs K2's raw bytes -- it only
+// verifies the fixture's own pinned signature against K2's PUBLIC key, and
+// replays the fixture's body verbatim).
+const REV003_K1_SEED: [u8; 32] = [0u8; 32];
+const REV003_K2_SEED: [u8; 32] = [201u8; 32];
+const REV003_AGENT_ID: &str = "did:web:agents.example.com:test-producer";
+const REV003_K1_KEY_ID: &str = "did:web:agents.example.com:test-producer#key-1";
+const REV003_K2_KEY_ID: &str = "did:web:agents.example.com:test-producer#key-2";
+
+/// A `0.5.0`-advertising registry supporting both `did:web` and `did:key`,
+/// for `rev-003`/`rev-004` below. RFC-ACDP-0014 §4/§10's (0.5.0) amendments
+/// (`interim_form_retirement_gate`, the predecessor-keyed
+/// `revocation_type_mismatch` check, both in `acdp-server`'s
+/// `validator.rs`) key off `capabilities.acdp_version >= 0.5.0`.
+fn rev003_caps() -> CapabilitiesDocument {
+    let mut c = caps();
+    c.acdp_version = "0.5.0".into();
+    c.supported_did_methods = vec!["did:web".into(), "did:key".into()];
+    c
+}
+
+/// A [`common::SeededHarness`] pinning exactly ONE key for
+/// `REV003_AGENT_ID`, `pinned_only` (strict) -- mirroring
+/// `pinned_producer_harness`'s reasoning exactly (`SeededHarness`, not the
+/// bare-`Router` form that function returns, because scenario P and
+/// `rev-004` need `.store()` to seed a precondition this registry's own
+/// publish path can no longer produce -- see `AcdpBody` usage below).
+///
+/// **One key, not two.** `PlaygroundConfig::pinned_for` (`acdp-registry-
+/// types::config`) models KEY ROTATION -- exactly one entry is "the"
+/// pinned key for a DID at any `now`, chosen by latest `valid_from` -- not
+/// "every entry simultaneously valid", which is what a real DID document's
+/// multi-`assertionMethod` shape would need to pin BOTH K1 and K2 at once.
+/// Measured, not assumed: pinning both with `valid_from: None` (open,
+/// tied) made `max_by_key` resolve to whichever was LAST in the `Vec`, so
+/// the other key's every signature failed verification before RFC-ACDP-
+/// 0014 §5 step 2 was ever reached. Scenario I needs K1 to verify as a
+/// currently-authorized signer -- the realistic just-stolen-key case -- so
+/// it gets its OWN K1-only harness below, mirroring rev-001's own
+/// `app`/`app_k1` split for the identical reason.
+async fn rev003_harness(pub_b64: &str) -> common::SeededHarness {
+    let mut cfg = config();
+    cfg.playground.pinned_keys = vec![PinnedAgentKey {
+        agent_did: REV003_AGENT_ID.into(),
+        public_key_b64: pub_b64.into(),
+        algorithm: "ed25519".into(),
+        valid_from: None,
+        valid_until: None,
+    }];
+    cfg.playground.pinned_only = true;
+    common::SeededHarness::new(cfg, rev003_caps(), AUTHORITY).await
+}
+
+/// **rev-003 (RFC-ACDP-0014 §4/§5, and their (0.5.0) §4/§10 amendments —
+/// acdp-registry-rs#336 follow-up, closing the `predecessor_admission` gap
+/// `ASSUMPTIONS.md` names: "Settled by: either a conformance fixture
+/// exercising the RFC-ACDP-0014 §4 reject path (upstream spec issue #57)
+/// ... Falsifiable now: if either exists, this closes.").**
+///
+/// Eighteen scenarios (A-R). `acdp-server` 0.14.0 (already adopted,
+/// acdp-registry-rs#341) already implements every obligation this fixture
+/// pins -- the §4/§5 shape gate and BOTH (0.5.0) amendments (the interim-
+/// form retirement gate and the predecessor-keyed `revocation_type_mismatch`
+/// supersession check, both in `acdp-server`'s `validator.rs`) -- so nothing
+/// here changes registry behavior; it proves the behavior end to end
+/// through THIS registry's own HTTP surface and storage, the same purpose
+/// `rev-001` serves for the §4/§5 golden path.
+///
+/// Sixteen of eighteen scenarios run directly below. Two do not, each for a
+/// reason recorded rather than silently skipped:
+///
+///   * **H, M** (registry-attested revocation): the fixture's own `harness`
+///     field marks both SELF-TEST ONLY — "a registry that does not offer
+///     registry-attested revocation at all is conformant and has nothing to
+///     exercise here." This registry has no such authoring path (nothing
+///     beyond the wire-string mapping at `handlers/context.rs`); it has
+///     never claimed the §6 recovery path, so the escape hatch applies.
+///
+/// Scenario **P** needs a predecessor published under the interim
+/// `acdp:key-revocation` form — which THIS registry's own publish path can
+/// now never produce (it always advertises `acdp_version >= 0.5.0`, see
+/// `acdp_version_claim`'s doc comment in `main.rs`; scenario Q, below, is
+/// the proof that path refuses it). Seeded directly via
+/// `SeededHarness::store()` instead — the fixture's own note names exactly
+/// this as plausible: "on a registry that only began advertising 0.5.0
+/// after the predecessor was published under the interim form on an
+/// earlier ... registry generation." The supersession attempt itself — the
+/// actual rule under test — is a real HTTP POST like every other scenario;
+/// only the precondition is seeded directly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rev003_publish_time_rejection_matrix() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping rev-003 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "rev-003") else {
+        return;
+    };
+    assert_eq!(
+        fx["scenarios"].as_array().map(|a| a.len()),
+        Some(18),
+        "rev-003 must carry exactly 18 scenarios (A-R) at the pinned spec revision: {fx}"
+    );
+
+    let k1 = SigningKey::from_bytes(&REV003_K1_SEED);
+    let k2 = SigningKey::from_bytes(&REV003_K2_SEED);
+    let k1_pub_b64 = STANDARD.encode(k1.verifying_key_bytes());
+    let k2_pub_b64 = STANDARD.encode(k2.verifying_key_bytes());
+    let k1_fingerprint = acdp::crypto::fingerprint_ed25519(&k1.verifying_key_bytes());
+
+    let harness = rev003_harness(&k2_pub_b64).await;
+    let producer_k2 = Producer::new(
+        k2,
+        AgentDid::new(REV003_AGENT_ID.to_string()),
+        REV003_K2_KEY_ID,
+    );
+    let producer_k1 = Producer::new(
+        k1,
+        AgentDid::new(REV003_AGENT_ID.to_string()),
+        REV003_K1_KEY_ID,
+    );
+
+    let base_metadata = json!({
+        "revoked_key_fingerprint": k1_fingerprint,
+        "compromised_since": "2026-05-01T00:00:00.000Z",
+    });
+
+    // ---- A-G, K, L, N: metadata/visibility shape variations, all
+    //      producer-signed by K2, all differing from control K in exactly
+    //      one respect (mirroring the fixture's own `differs_from_control`
+    //      discipline) — one data table, one loop, rather than ten
+    //      near-identical functions (dk-002's precedent).
+    struct ShapeCase {
+        letter: &'static str,
+        visibility: Visibility,
+        audience: Option<Vec<AgentDid>>,
+        metadata: Value,
+        accept: bool,
+    }
+    let cases = [
+        ShapeCase {
+            letter: "A",
+            visibility: Visibility::Restricted,
+            audience: Some(vec![AgentDid::new(
+                "did:web:consumers.example.com:ops-team".to_string(),
+            )]),
+            metadata: base_metadata.clone(),
+            accept: false,
+        },
+        ShapeCase {
+            letter: "B",
+            visibility: Visibility::Public,
+            audience: None,
+            metadata: json!({"compromised_since": "2026-05-01T00:00:00.000Z"}),
+            accept: false,
+        },
+        ShapeCase {
+            letter: "C",
+            visibility: Visibility::Public,
+            audience: None,
+            metadata: json!({
+                "revoked_key_fingerprint": "sha256:139E3940E64B5491",
+                "compromised_since": "2026-05-01T00:00:00.000Z",
+            }),
+            accept: false,
+        },
+        ShapeCase {
+            letter: "D",
+            visibility: Visibility::Public,
+            audience: None,
+            metadata: json!({"revoked_key_fingerprint": k1_fingerprint}),
+            accept: false,
+        },
+        ShapeCase {
+            letter: "E",
+            visibility: Visibility::Public,
+            audience: None,
+            metadata: json!({
+                "revoked_key_fingerprint": k1_fingerprint,
+                "compromised_since": "2026-05-01T00:00:00Z",
+            }),
+            accept: false,
+        },
+        ShapeCase {
+            letter: "F",
+            visibility: Visibility::Public,
+            audience: None,
+            metadata: json!({
+                "revoked_key_fingerprint": k1_fingerprint,
+                "compromised_since": "2026-05-01T00:00:00.000Z",
+                "reason": "x".repeat(1025),
+            }),
+            accept: false,
+        },
+        ShapeCase {
+            letter: "G",
+            visibility: Visibility::Public,
+            audience: None,
+            metadata: json!({
+                "revoked_key_fingerprint": k1_fingerprint,
+                "compromised_since": "2026-05-01T00:00:00.000Z",
+                "revoked_key_controller": "did:web:agents.example.com:other-producer",
+            }),
+            accept: false,
+        },
+        ShapeCase {
+            letter: "K",
+            visibility: Visibility::Public,
+            audience: None,
+            metadata: base_metadata.clone(),
+            accept: true,
+        },
+        ShapeCase {
+            letter: "L",
+            visibility: Visibility::Public,
+            audience: None,
+            metadata: json!({
+                "revoked_key_fingerprint": k1_fingerprint,
+                "compromised_since": "2026-05-01T00:00:00.000Z",
+                "revoked_key_controller": REV003_AGENT_ID,
+                "revoked_key_id": REV003_K1_KEY_ID,
+                "reason": "laptop theft; private key material presumed exfiltrated",
+            }),
+            accept: true,
+        },
+        ShapeCase {
+            letter: "N",
+            visibility: Visibility::Public,
+            audience: None,
+            metadata: json!({
+                "revoked_key_fingerprint": k1_fingerprint,
+                "compromised_since": "2026-05-01T00:00:00.000Z",
+                "reason": "x".repeat(1024),
+            }),
+            accept: true,
+        },
+    ];
+
+    for case in cases {
+        let mut builder = producer_k2
+            .publish_request()
+            .title("rev-003 key-1 compromised")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(case.visibility)
+            .metadata(case.metadata)
+            .acdp_version("0.3.0");
+        if let Some(audience) = case.audience {
+            builder = builder.audience(audience);
+        }
+        let req = builder
+            .build()
+            .unwrap_or_else(|e| panic!("rev-003 {}: request build failed: {e}", case.letter));
+        let (status, body) =
+            post_publish_json(&harness.router, serde_json::to_value(&req).unwrap()).await;
+        if case.accept {
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "rev-003 {}: must be accepted, body = {body}",
+                case.letter
+            );
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "rev-003 {}: must be rejected 400, body = {body}",
+                case.letter
+            );
+            assert_eq!(
+                body["error"]["code"], "schema_violation",
+                "rev-003 {}: body = {body}",
+                case.letter
+            );
+        }
+    }
+
+    // ---- I: self-signed by the revoked key (did:web). K1 is still
+    //      authorized -- the realistic just-stolen-key case -- so the
+    //      generic authorization check passes and only RFC-ACDP-0014 §5
+    //      step 2's fingerprint comparison can reject. A SEPARATE, K1-only
+    //      harness (see `rev003_harness`'s doc comment for why the main
+    //      one, pinning K2, cannot also authorize K1).
+    let harness_k1 = rev003_harness(&k1_pub_b64).await;
+    let self_signed_i = producer_k1
+        .publish_request()
+        .title("rev-003 key-1 compromised (self-signed)")
+        .context_type(ContextType::KeyRevocation)
+        .visibility(Visibility::Public)
+        .metadata(base_metadata.clone())
+        .acdp_version("0.3.0")
+        .build()
+        .unwrap();
+    let (status, body) = post_publish_json(
+        &harness_k1.router,
+        serde_json::to_value(&self_signed_i).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "rev-003 I: body = {body}");
+    assert_eq!(
+        body["error"]["code"], "key_not_authorized",
+        "rev-003 I: body = {body}"
+    );
+
+    // ---- J: self-signed by the revoked key (did:key). did:key's identity
+    //      IS the key, so a did:key producer can never issue a
+    //      producer-signed revocation of itself — this is the only shape
+    //      such a publish can take.
+    const REV003_DK_SEED: [u8; 32] = [202u8; 32];
+    let dk_fingerprint = acdp::crypto::fingerprint_ed25519(
+        &SigningKey::from_bytes(&REV003_DK_SEED).verifying_key_bytes(),
+    );
+    let did_key_producer = Producer::new_did_key(SigningKey::from_bytes(&REV003_DK_SEED));
+    let self_signed_j = did_key_producer
+        .publish_request()
+        .title("rev-003 did:key identity key compromised (self-signed)")
+        .context_type(ContextType::KeyRevocation)
+        .visibility(Visibility::Public)
+        .metadata(json!({
+            "revoked_key_fingerprint": dk_fingerprint,
+            "compromised_since": "2026-05-01T00:00:00.000Z",
+        }))
+        .acdp_version("0.3.0")
+        .build()
+        .unwrap();
+    let (status, body) = post_publish_json(
+        &harness.router,
+        serde_json::to_value(&self_signed_j).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "rev-003 J: body = {body}");
+    assert_eq!(
+        body["error"]["code"], "key_not_authorized",
+        "rev-003 J: body = {body}"
+    );
+
+    // ---- O, R share one real (HTTP-published) key-revocation predecessor:
+    //      O supersedes it with a non-revocation type (MUST reject), R with
+    //      a matching key-revocation type (MUST accept) — the fixture's own
+    //      control/positive pairing. O's rejected attempt never commits, so
+    //      R can reuse the same predecessor at version 2.
+    let v1_for_or = producer_k2
+        .publish_request()
+        .title("rev-003 O/R predecessor")
+        .context_type(ContextType::KeyRevocation)
+        .visibility(Visibility::Public)
+        .metadata(base_metadata.clone())
+        .acdp_version("0.3.0")
+        .build()
+        .unwrap();
+    let (status, body) =
+        post_publish_json(&harness.router, serde_json::to_value(&v1_for_or).unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "rev-003 O/R predecessor seed: body = {body}"
+    );
+    let or_ctx_id = CtxId(body["ctx_id"].as_str().unwrap().to_string());
+    let or_lineage_id = LineageId(body["lineage_id"].as_str().unwrap().to_string());
+
+    let widened_metadata = json!({
+        "revoked_key_fingerprint": k1_fingerprint,
+        "compromised_since": "2026-04-01T00:00:00.000Z",
+    });
+
+    let o_req = producer_k2
+        .supersede(or_ctx_id.clone())
+        .title("rev-003 O: widened, wrong type")
+        .version(2)
+        .context_type(ContextType::Analysis)
+        .visibility(Visibility::Public)
+        .metadata(widened_metadata.clone())
+        .acdp_version("0.5.0")
+        .expected_lineage_id(or_lineage_id.clone())
+        .build()
+        .unwrap();
+    let (status, body) =
+        post_publish_json(&harness.router, serde_json::to_value(&o_req).unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "rev-003 O: body = {body}");
+    assert_eq!(
+        body["error"]["code"], "superseded_target",
+        "rev-003 O: body = {body}"
+    );
+    assert_eq!(
+        body["error"]["details"]["reason"], "revocation_type_mismatch",
+        "rev-003 O: body = {body}"
+    );
+
+    let r_req = producer_k2
+        .supersede(or_ctx_id.clone())
+        .title("rev-003 R: widened, same type")
+        .version(2)
+        .context_type(ContextType::KeyRevocation)
+        .visibility(Visibility::Public)
+        .metadata(widened_metadata.clone())
+        .acdp_version("0.5.0")
+        .expected_lineage_id(or_lineage_id.clone())
+        .build()
+        .unwrap();
+    let (status, body) =
+        post_publish_json(&harness.router, serde_json::to_value(&r_req).unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "rev-003 R: body = {body}");
+
+    // ---- Q: (0.5.0) a NEW publish under the retired interim form.
+    let q_req = producer_k2
+        .publish_request()
+        .title("rev-003 Q: interim form, new publish")
+        .context_type(ContextType::Custom(
+            ContextType::KEY_REVOCATION_INTERIM.to_string(),
+        ))
+        .visibility(Visibility::Public)
+        .metadata(base_metadata.clone())
+        .acdp_version("0.3.0")
+        .build()
+        .unwrap();
+    let (status, body) =
+        post_publish_json(&harness.router, serde_json::to_value(&q_req).unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "rev-003 Q: body = {body}");
+    assert_eq!(
+        body["error"]["code"], "schema_violation",
+        "rev-003 Q: body = {body}"
+    );
+
+    // ---- P: (0.5.0) non-revocation supersedes an INTERIM-form predecessor
+    //      — must trip the identical rule as O. This registry's own publish
+    //      path can never create that predecessor (see Q above and
+    //      `SeededHarness::store`'s doc comment), so it is seeded directly;
+    //      the supersession attempt itself is a real HTTP POST.
+    let p_predecessor_req = producer_k2
+        .publish_request()
+        .title("rev-003 P predecessor (interim form)")
+        .context_type(ContextType::Custom(
+            ContextType::KEY_REVOCATION_INTERIM.to_string(),
+        ))
+        .visibility(Visibility::Public)
+        .metadata(base_metadata.clone())
+        .acdp_version("0.2.0")
+        .build()
+        .unwrap();
+    let p_ctx_id = CtxId("acdp://registry.test/55555555-5555-4555-8555-555555555555".to_string());
+    let p_lineage_id = LineageId(format!("lin:sha256:{}", "1".repeat(64)));
+    harness
+        .store()
+        .put(AcdpBody::from_publish_request(
+            &p_predecessor_req,
+            p_ctx_id.clone(),
+            p_lineage_id.clone(),
+            AUTHORITY,
+            chrono::Utc::now(),
+        ))
+        .expect("rev-003 P: seeding the interim-form predecessor must succeed");
+
+    let p_req = producer_k2
+        .supersede(p_ctx_id.clone())
+        .title("rev-003 P: widened, wrong type, interim predecessor")
+        .version(2)
+        .context_type(ContextType::Analysis)
+        .visibility(Visibility::Public)
+        .metadata(widened_metadata)
+        .acdp_version("0.5.0")
+        .expected_lineage_id(p_lineage_id)
+        .build()
+        .unwrap();
+    let (status, body) =
+        post_publish_json(&harness.router, serde_json::to_value(&p_req).unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "rev-003 P: body = {body}");
+    assert_eq!(
+        body["error"]["code"], "superseded_target",
+        "rev-003 P: body = {body}"
+    );
+    assert_eq!(
+        body["error"]["details"]["reason"], "revocation_type_mismatch",
+        "rev-003 P: body = {body}"
+    );
+}
+
+/// **rev-004 (RFC-ACDP-0014 §10's (0.5.0) retirement rule, retrieval half —
+/// acdp-registry-rs#336 follow-up, companion to `rev-003` Q).**
+///
+/// Q pins that a `>=0.5.0` registry refuses a NEW publish under the interim
+/// `acdp:key-revocation` form. `rev-004` pins the other half: nothing about
+/// that refusal licenses filtering, rejecting, or rewriting a body already
+/// published under that form before the registry adopted the refusal. This
+/// registry has never implemented any type-based retrieval filter for
+/// key-revocation contexts, so all three scenarios are expected to pass by
+/// construction; the point of running them for real is to prove that
+/// absence rather than assert it, the same discipline `rev-003` applies to
+/// the (0.5.0) rejections it exercises.
+///
+/// The precondition — a body published under the interim form — has the
+/// same seeding blocker `rev-003` P documents (see that test's doc comment
+/// and `SeededHarness::store`): this registry's own publish path can never
+/// produce it. Seeded directly.
+///
+/// Scenario B (search) asserts the strong positive outcome directly rather
+/// than tolerating the fixture's own `not_implemented` escape hatch for a
+/// core-only registry — `vis006`/`vis003`/`vis007` already prove this
+/// registry's search endpoint is live without advertising
+/// `acdp-registry-discovery` in `profiles`, so the escape hatch never
+/// applies here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rev004_interim_form_bodies_remain_served_unfiltered() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping rev-004 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "rev-004") else {
+        return;
+    };
+    assert_eq!(
+        fx["scenarios"].as_array().map(|a| a.len()),
+        Some(3),
+        "rev-004 must carry exactly 3 scenarios (A, B, C) at the pinned spec revision: {fx}"
+    );
+
+    let k1 = SigningKey::from_bytes(&REV003_K1_SEED);
+    let k2 = SigningKey::from_bytes(&REV003_K2_SEED);
+    let k2_pub_b64 = STANDARD.encode(k2.verifying_key_bytes());
+    let k1_fingerprint = acdp::crypto::fingerprint_ed25519(&k1.verifying_key_bytes());
+
+    let harness = rev003_harness(&k2_pub_b64).await;
+    let producer_k2 = Producer::new(
+        k2,
+        AgentDid::new(REV003_AGENT_ID.to_string()),
+        REV003_K2_KEY_ID,
+    );
+
+    let predecessor_req = producer_k2
+        .publish_request()
+        .title("rev-004 interim-form body")
+        .context_type(ContextType::Custom(
+            ContextType::KEY_REVOCATION_INTERIM.to_string(),
+        ))
+        .visibility(Visibility::Public)
+        .metadata(json!({
+            "revoked_key_fingerprint": k1_fingerprint,
+            "compromised_since": "2026-01-15T00:00:00.000Z",
+        }))
+        .acdp_version("0.2.0")
+        .build()
+        .unwrap();
+    let seeded_ctx_id =
+        CtxId("acdp://registry.test/66666666-6666-4666-8666-666666666666".to_string());
+    let seeded_lineage_id = LineageId(format!("lin:sha256:{}", "4".repeat(64)));
+    harness
+        .store()
+        .put(AcdpBody::from_publish_request(
+            &predecessor_req,
+            seeded_ctx_id.clone(),
+            seeded_lineage_id.clone(),
+            AUTHORITY,
+            chrono::Utc::now(),
+        ))
+        .expect("rev-004: seeding the interim-form body must succeed");
+    let seeded_ctx_id_str = seeded_ctx_id.to_string();
+    let seeded_lineage_id_str = seeded_lineage_id.to_string();
+
+    // A: direct retrieval, unfiltered.
+    let (status, served) = anc_get(
+        &harness.router,
+        &format!("/contexts/{}", pct_encode_path_segment(&seeded_ctx_id_str)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rev-004 A: body = {served}");
+    assert_eq!(
+        served["body"]["type"],
+        ContextType::KEY_REVOCATION_INTERIM,
+        "rev-004 A: a >=0.5.0 registry must keep serving a pre-existing interim-form body \
+         unrewritten -- body = {served}"
+    );
+
+    // B: discoverable via search, keyed on its actual (interim) type
+    //    string -- filtered by agent_id only, so the query never needs to
+    //    URL-encode the type string's colon.
+    let (status, results) = anc_get(
+        &harness.router,
+        &format!(
+            "/contexts/search?agent_id={}",
+            pct_encode_path_segment(REV003_AGENT_ID)
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rev-004 B: body = {results}");
+    let matches = results["matches"]
+        .as_array()
+        .unwrap_or_else(|| panic!("rev-004 B: matches missing or not an array: {results}"));
+    let found = matches
+        .iter()
+        .find(|m| m["ctx_id"] == seeded_ctx_id_str.as_str())
+        .unwrap_or_else(|| {
+            panic!("rev-004 B: seeded interim-form body not found in search results: {matches:?}")
+        });
+    assert_eq!(
+        found["type"],
+        ContextType::KEY_REVOCATION_INTERIM,
+        "rev-004 B: the interim-form body must surface in search, keyed on its actual type \
+         string, not filtered because that string is no longer accepted for NEW publications -- \
+         match = {found}"
+    );
+
+    // C: included in a lineage walk, not skipped.
+    let (status, arr) = anc_get(
+        &harness.router,
+        &format!(
+            "/lineages/{}",
+            pct_encode_path_segment(&seeded_lineage_id_str)
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rev-004 C: body = {arr}");
+    let versions = arr
+        .as_array()
+        .unwrap_or_else(|| panic!("rev-004 C: lineage response must be an array: {arr}"));
+    let found = versions
+        .iter()
+        .find(|v| v["body"]["ctx_id"] == seeded_ctx_id_str.as_str())
+        .unwrap_or_else(|| {
+            panic!("rev-004 C: seeded interim-form body not found in its lineage: {versions:?}")
+        });
+    assert_eq!(
+        found["body"]["type"],
+        ContextType::KEY_REVOCATION_INTERIM,
+        "rev-004 C: the interim-form body must appear in its lineage's version list, with its \
+         stored type unchanged -- version = {found}"
     );
 }
 
@@ -15584,9 +16274,12 @@ async fn no_fixture_declaring_an_endpoint_is_classified_non_http() {
     // The sweep must be shown a positive before its empty result means
     // anything: at pin `16211e6` exactly 65 fixtures declare an endpoint, and
     // a scan that silently matched none of them would report a clean pass.
+    // At pin `9deb7e7`, 66: `rev-003` is new and carries `input.endpoint`
+    // (`rev-004` does not -- its precondition is `input.existing_context`,
+    // no `input.endpoint` key at all).
     assert_eq!(
-        checked, 65,
-        "expected 65 endpoint-declaring fixtures at the pin, scanned {checked} — the \
+        checked, 66,
+        "expected 66 endpoint-declaring fixtures at the pin, scanned {checked} — the \
          scan itself is broken or the spec moved, and either way its empty result \
          would have meant nothing"
     );

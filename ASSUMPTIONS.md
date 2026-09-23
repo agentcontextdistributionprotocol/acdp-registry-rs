@@ -575,7 +575,20 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   silently never be asked to enforce, and nothing in this repo would notice. Low likelihood
   (upstream has its own tests), but the residual is real and is recorded here rather than
   left implicit.
-- **Status:** UNCONFIRMED
+- **Status:** UNCONFIRMED -> CONFIRMED (2026-09-22). Settled exactly as this entry's own
+  "what would settle it" note (`:3433-3437`) specified: upstream spec issue **#57** closed,
+  landing conformance fixture `rev-003-revocation-publish-rejects.json` at spec commit
+  `9deb7e7` (acdp-registry-rs#335), and `crates/acdp-registry-server/tests/conformance.rs`'s
+  `rev003_publish_time_rejection_matrix` scenario **O** is the end-to-end HTTP publish test
+  this entry called for: a real predecessor key-revocation context published via a genuine
+  HTTP `POST`, superseded by a genuine HTTP `POST` whose body's own type is not a revocation,
+  asserting the rejection surfaces as `superseded_target` /
+  `details.reason = "revocation_type_mismatch"` — the admission closure's `Err` propagating
+  through the real `commit_via_store` path, not a store-level unit test standing in for it.
+  Scenario **P** repeats the same assertion against an interim-form (`acdp:key-revocation`)
+  predecessor. The store-level residual this entry recorded (upstream silently dropping
+  `Some(..)`) would now be caught: either scenario would fail loudly, not silently, if that
+  ever happened.
 
 ## Corrupt predecessor `body_json` is reported as `RegistryInternal`, not `SchemaViolation`
 

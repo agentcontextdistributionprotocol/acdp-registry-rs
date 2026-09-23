@@ -4054,3 +4054,127 @@ pinned publish is ever found to be wrongly rejected by `prove_publish_identity_d
 for a reason that is not a genuine identity/schema failure, that is a bug in the SDK's prove
 function or this repo's call site, not a reason to reintroduce a fallback to an unverified commit
 path.
+
+## Spec pin adoption `16211e64` → `9deb7e7` closes RFC-ACDP-0014's 0.5.0 amendments with test-only
+coverage (2026-09-22, decided by Opus, reversible, issue #335, acdp-registry-rs#336 follow-up)
+
+**Trigger.** The human asked to check whether other cross-repo blockers had cleared and, on
+confirming #335 (`chore(spec): adopt ACDP spec @ 9deb7e7`) and #340 (`chore(deps): bump acdp to
+0.14.1`) were both actionable, asked to drive both forward and close #338 (`chore(deps): bump
+acdp to 0.14.0`) as superseded — main already carries 0.14.0 via the fuller U-501-addendum
+adoption above (#341), so #338's diff was a strict subset of work already merged.
+
+**What the pin bump actually is: one commit past the prior pin, not a routine ref update.**
+Commit `9deb7e7` (agentcontextdistributionprotocol/agentcontextdistributionprotocol#70, closing
+upstream spec issues #58/#61) amends RFC-ACDP-0014 with two new normative obligations on the
+`acdp_version >= 0.5.0` line — §10 interim-form retirement (a registry advertising `>=0.5.0` MUST
+reject any NEW publish under the interim `acdp:key-revocation` custom type, unconditionally, but
+keep serving bodies already published under it) and a §4 amendment (having resolved a `supersedes`
+target whose type is `key-revocation`, or the §10 interim form, the registry MUST reject an
+incoming body whose own type is not likewise a revocation — `superseded_target` /
+`revocation_type_mismatch`, a new reason token, `Provisional` on the still-Draft 0.5.0 line). Two
+new conformance fixtures land with it: `rev-003-revocation-publish-rejects.json` (18 scenarios,
+the §4 amendment) and `rev-004-interim-form-retrieval-unaffected.json` (3 scenarios, the §10
+non-retroactivity clause). `rev-002` is modified but only with consumer-side lineage-fold
+scenarios (E-H) — not this registry's obligation.
+
+**This registry always advertises `acdp_version >= 0.5.0`** — confirmed from
+`acdp_version_claim()`'s own doc comment in `crates/acdp-registry-server/src/main.rs`, which
+states the top-level anchors claim folded in is unconditional regardless of config. Both new
+obligations are therefore live today, not hypothetical, and are exactly the closing condition
+`ASSUMPTIONS.md`'s `predecessor_admission` entry (`:560`) had stood open on since U-507: "a
+conformance fixture exercising the RFC-ACDP-0014 §4 reject path (upstream spec issue #57)."
+Spec issue #57 closed the same day as #58/#61, landing `rev-003`.
+
+**Decision: test-coverage-only change, no registry source edits.** Grepping the locally-cached
+`acdp-server-0.14.0` crate source (already adopted via #341) found both obligations already
+implemented — `is_interim_key_revocation_form`, `interim_form_retirement_gate`, and dedicated
+unit tests (`revocation_interim_custom_type_rejected_unconditionally_at_0_5_0`,
+`revocation_superseded_by_non_revocation_rejected_as_revocation_type_mismatch_at_0_5_0` and its
+`_interim_predecessor_at_0_5_0` sibling) in `acdp-server-0.14.0/src/registry/validator.rs`. This
+is a checked fact, not an assumption: the amendment ships pre-implemented in the SDK version this
+registry already depends on, so the only real work is proving it holds through THIS registry's own
+HTTP surface, storage, and playground-pinning harness — not adding logic. Rejected: shipping no
+new tests and trusting the SDK's own unit tests. The `predecessor_admission` entry's whole point
+was that upstream's tests cannot stand in for ours (`ASSUMPTIONS.md:568-570`), and neither can a
+grep of upstream source — only an HTTP-level test through this registry's own router closes that.
+
+**A precondition neither fixture's own HTTP surface can produce, and how it was seeded.**
+`rev-004`'s 3 scenarios, and `rev-003` scenario P, need a context already published under the
+interim `acdp:key-revocation` form — a state this registry's own publish path can no longer create
+(it always advertises `>=0.5.0`, which now rejects exactly that publish per §10). On a real
+deployment that state can only arise pre-upgrade or via migration. `RegistryStore::put` — the
+SDK's own documented low-level persistence seam, no validation performed, the same primitive a
+real store backend uses to persist an already-verified publish — is the correct seam to seed it
+through: it exercises the real serving path for everything downstream of persistence (GET, search,
+lineage walk, and — `rev-003` P — a real HTTP supersession attempt against the seeded
+predecessor). Added `SeededHarness::store()` (`tests/common/mod.rs`) as the accessor.
+
+**A bug this work surfaced and fixed in the test harness itself, not the registry:**
+`PlaygroundConfig::pinned_for`/`pinned_for_at` (`acdp-registry-types/src/config.rs:911-926`) picks
+exactly ONE pinned key per `agent_did` at a given `now`, by `max_by_key` over `valid_from` — it
+models key ROTATION, not "two simultaneously valid keys". An early draft of `rev003_harness`
+pinned both K1 and K2 for the same `agent_did` with `valid_from: None` on both; `max_by_key`'s
+tie-break (last of equal maximals) silently made K2 the only key ever actually honored, so K1's
+scenario (self-signed-by-the-compromised-key, expecting `403 key_not_authorized`) instead got
+`400 invalid_signature` — a wrong-reason pass, the same defect class `CODE_DIVERGENCES` and the
+`pub-006`/`pub-009` doc comment (`conformance.rs:~12291`) both warn about. Fixed by pinning exactly
+one key per harness (mirroring `pinned_producer_harness`'s existing precedent) and giving the K1
+scenario its own separate harness, matching `rev-001`'s established `app`/`app_k1` two-harness
+pattern for the identical reason.
+
+**Generic auto-replay excluded both new fixtures, for two distinct reasons — not one mechanism.**
+The full suite's own `replays_spec_fixtures_when_present` auto-discovers and literally re-POSTs
+any fixture it can extract a shape from; both new fixtures were initially caught by it and failed
+for the wrong reason:
+- `rev-004`'s precondition is spelled `input.existing_context` — a key `unseeded_precondition_reason`
+  didn't yet recognize, so an unseeded harness 404'd on it. Fixed by adding that key alongside the
+  existing `precondition`/`preconditions` recognition, reusing the generic `"requires pre-seeded
+  registry state"` skip reason already used by `ret-002` and the `idem` family — no fixture-specific
+  carve-out needed.
+- `rev-003`'s 18 scenarios all carry `signature.value` as literal prose (its own `notes` field says
+  so directly: "No test_keypair: behavioral end to end") — signature verification fails first on
+  every scenario, accept and reject alike, so no generic replay could ever produce the fixture's
+  intended outcome. This is the `pub-006`/`pub-009` defect class, not `CODE_DIVERGENCES`'s (a
+  fixture that diverges to one specific, stable, different code — not "fails universally for the
+  wrong reason"). `pub-006`/`pub-009` happened to be caught for free by Shape A's existing "publish
+  must expect 400" rule; `rev-003` goes through Shape B, which has no such rule, so it needed an
+  explicit new gate — `PROSE_SIGNATURE_FIXTURES: &[&str] = &["rev-003"]`, checked in `extract()`
+  right after the profile gate.
+
+Neither fixture needed an entry in `UNEXERCISED_FIXTURES`/`EXERCISED_FIXTURES` — coverage for a
+whole family via dedicated direct tests is registered once, at the family level, through the
+`COVERED` table's `CoverageMechanism::Direct` entry for `"rev"` (now listing
+`rev001_key_revocation_context_golden_accepted_and_self_signed_rejected`,
+`rev003_publish_time_rejection_matrix`, `rev004_interim_form_bodies_remain_served_unfiltered`) and
+the matching `DIRECT_FNS` table. Net effect on `REPLAYABLE_FIXTURES_AT_PIN`: unchanged at `22` —
+both new fixtures are excluded, so nothing new is auto-replayed. `TOTAL_FIXTURES_AT_PIN`: `144` →
+`146` (both new files; `rev-002` only modified, not counted again).
+`no_fixture_declaring_an_endpoint_is_classified_non_http`'s scanned count: `65` → `66` (`rev-003`
+newly declares `input.endpoint`; `rev-004` does not — its precondition key is `existing_context`).
+
+**Why this is Opus-reversible, not a Fable/human call.** Every choice above is a test-authoring and
+test-harness decision inside a repo this unit already owns the file for (`conformance.rs` is not
+gated to another unit, unlike the `predecessor_admission` entry's original constraint) — nothing
+here changes registry behavior, a public contract, or a trust boundary; it proves an existing,
+already-shipped contract holds. Reversing any of it (a different seeding seam, a different
+exclusion mechanism) is a same-file edit with the full conformance suite as the check.
+
+**Verification.** Full workspace test suite green (`cargo test --workspace`, 0 failures across 31
+result blocks). `cargo test -p acdp-registry-server --features storage-sqlite,playground --test
+conformance` green at 89/89, with `ACDP_SPEC_DIR` pointed at the pinned spec tree and
+`ACDP_REQUIRE_CONFORMANCE=1` (the hard-failure mode, not the soft skip CI's default local dev
+posture uses). `cargo fmt --check` and `cargo clippy --locked --workspace --all-targets -D
+warnings` clean, plus the two feature configurations that actually compile `conformance.rs`
+(`storage-sqlite` alone, and `storage-sqlite,playground` — the file is `#![cfg(feature =
+"storage-sqlite")]`-gated, so the other six of CI's eight `acdp-registry-server` feature
+combinations never touch it).
+
+**Also resolved as part of this pass:** `ASSUMPTIONS.md`'s `predecessor_admission` entry (`:560`)
+moved UNCONFIRMED → CONFIRMED — `rev003_publish_time_rejection_matrix` scenario O is precisely the
+end-to-end HTTP publish test its own "what would settle it" note called for. #338 closed as
+superseded (comment left, branch deleted) rather than merged — its 0.14.0 bump is a strict subset
+of #341's already-merged, fuller `Proven`/`commit_proven` adoption. #340 (0.14.1 — a real
+`commit_proven` cross-instance authority-check fix, relevant since #341 just adopted
+`commit_proven` in production) reviewed but not yet landed as of this entry; its bot branch is
+stale (based on pre-#341 main) and needs a clean redo on current main, not a direct merge.
