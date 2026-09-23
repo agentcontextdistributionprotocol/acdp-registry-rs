@@ -8199,29 +8199,36 @@ async fn data_ref001_007_publish_path_rejections_enforced() {
                 extensions: Default::default(),
             }
         } else if id == "data-ref-007" {
-            // Spec pin d1f06d0's `acdp-data-ref.schema.json` (schemas/json/
-            // acdp-data-ref.schema.json:108-111, whose own description
-            // names this exact fixture) nests `content_hash` INSIDE
-            // `embedded`, alongside the historical DataRef-top-level
-            // `content_hash` (same schema file, :47-50) -- but the `acdp`
-            // dependency this registry actually runs (this crate's
-            // Cargo.lock) has not caught up to that addition: its
-            // `EmbeddedContent` type is `#[serde(deny_unknown_fields)]`
-            // with only `encoding`/`content` (no `content_hash` field at
-            // all), and `acdp_validation::verify_embedded_hash` reads the
-            // DataRef-level `dr.content_hash`, never a nested
-            // `emb.content_hash`. Splicing the fixture's own JSON verbatim
-            // (nested `embedded.content_hash`) would fail at
-            // *deserialization*, before validation ever runs, with an
-            // "unknown field" `schema_violation` -- the right HTTP status
-            // by accident, but for the wrong reason, not the
-            // `data_ref_hash_mismatch` this fixture pins. So this
-            // reproduces the fixture's own values (the same wrong hash,
-            // the same "hello world" content) at the wire location THIS
-            // implementation's validator actually reads, proving the
-            // intended RFC-ACDP-0002 §6.6 check 8 / §6.7 semantic holds
-            // here, rather than silently masking the schema/dependency
-            // divergence by skipping the fixture.
+            // The fixture's own `description` is explicit and load-bearing:
+            // `content_hash` belongs INSIDE `embedded` (RFC-ACDP-0002 §6.3),
+            // not at the DataRef root (§6.1) -- "PLACEMENT IS LOAD-BEARING
+            // ... An implementation whose `embedded` model lacks the
+            // content_hash member will fail to deserialize this fixture and
+            // reject it with schema_violation, never reaching check 8 --
+            // THAT IS A CONFORMANCE FAILURE, NOT A PASS". At the acdp
+            // 0.14.1 dependency this registry now runs, `EmbeddedContent`
+            // DOES carry `content_hash` (it did not at the older pin this
+            // branch was originally written against), so the fixture's own
+            // nested placement is used directly rather than the DataRef-root
+            // stand-in a stale `EmbeddedContent` once forced.
+            //
+            // Placement is not cosmetic: `acdp_validation::verify_embedded_
+            // hash` (called from `validate_registry_limits_and_crypto` step
+            // 3, before the body-level content_hash recomputation in step 4)
+            // reads ONLY `embedded.content_hash` as of acdp-validation
+            // 0.14.1 -- root-level `DataRef.content_hash` checking was
+            // deliberately reverted upstream (see that crate's CHANGELOG)
+            // after it was found to reject the spec's own canonical
+            // `examples/mixed-data-refs/` example, where root and embedded
+            // hashes legitimately differ. Putting the wrong hash on the
+            // DataRef root (the old workaround) is therefore silently
+            // IGNORED by step 3, and the request falls through to step 4's
+            // body-level `content_hash` check instead, tripping the wrong
+            // error entirely -- `hash_mismatch` (RFC-ACDP-0007 §5), which
+            // the fixture's own description names explicitly as the
+            // "NOT this one" code. Nesting under `embedded` is what step 3
+            // actually reads, restoring the intended `data_ref_hash_mismatch`
+            // outcome.
             let embedded = &fx["input"]["data_ref_under_test"]["embedded"];
             let wrong_hash = embedded["content_hash"].as_str().unwrap_or_else(|| {
                 panic!(
@@ -8246,12 +8253,12 @@ async fn data_ref001_007_publish_path_rejections_enforced() {
                 size_bytes: None,
                 format: None,
                 schema_version: None,
-                content_hash: Some(ContentHash(wrong_hash.to_string())),
+                content_hash: None,
                 location: None,
                 embedded: Some(EmbeddedContent {
                     encoding: EmbeddedEncoding::Utf8,
                     content: Value::String(content.to_string()),
-                    content_hash: None,
+                    content_hash: Some(ContentHash(wrong_hash.to_string())),
                 }),
                 extensions: Default::default(),
             }

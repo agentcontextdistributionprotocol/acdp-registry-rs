@@ -4178,3 +4178,84 @@ of #341's already-merged, fuller `Proven`/`commit_proven` adoption. #340 (0.14.1
 `commit_proven` cross-instance authority-check fix, relevant since #341 just adopted
 `commit_proven` in production) reviewed but not yet landed as of this entry; its bot branch is
 stale (based on pre-#341 main) and needs a clean redo on current main, not a direct merge.
+
+## `acdp` 0.14.0 → 0.14.1 bump (reversible, decided by Opus, issue #340) surfaces and fixes a
+dormant test-harness bug in `data_ref001_007_publish_path_rejections_enforced`
+
+**Trigger.** Second half of the same drive-forward instruction as the entry above. #340's bot
+branch (`deps/acdp-0.14.1`) was stale for the same reason #335's was — based on pre-#341 `main`,
+still diffing from acdp 0.13.1 — so redone the same way: fresh branch off current `main`,
+`Cargo.toml`'s `acdp` version bumped, `cargo update -p acdp --precise 0.14.1` (all twelve
+lockstep-versioned sub-crates move together, confirmed — this is not a partial bump), yielding a
+minimal 2-file, 50-line diff (`Cargo.toml` + `Cargo.lock` only).
+
+**Why worth landing, not just a routine bump.** acdp-server/acdp-validation 0.14.1's own
+CHANGELOG entries are both titled identically: "post-release review of the RFC-0014 wave — 3
+bugs, coverage gaps, doc drift" (acdp-rs#296) — a direct follow-up to the 0.14.0 RFC-ACDP-0014
+§4/§10 enforcement this repo just built `rev-003`/`rev-004` conformance coverage against in the
+entry above. Landing it keeps this repo's dependency current on fixes to the exact feature surface
+it just finished proving.
+
+**A real, silent regression this bump exposed in our own test, not upstream's.**
+`data_ref001_007_publish_path_rejections_enforced` (`conformance.rs`) failed after the bump —
+the only failure in the entire workspace (`cargo test --workspace --no-fail-fast`, 30 other result
+blocks green). Root-caused rather than papered over:
+
+- The `data-ref-007` fixture is explicit and load-bearing about where its deliberately-wrong hash
+  belongs: `embedded.content_hash` (RFC-ACDP-0002 §6.3), not the DataRef root (§6.1) — its own
+  description warns in so many words that getting this wrong is "A CONFORMANCE FAILURE, NOT A
+  PASS" even when the HTTP status still comes back right.
+- This test's `data-ref-007` branch put the wrong hash on the DataRef **root** field instead,
+  with a doc comment explaining why: at the (older) pin this branch was originally written
+  against, `EmbeddedContent` had no `content_hash` member at all, so nesting it there would have
+  failed to deserialize before validation ever ran.
+- That premise was **already false** before this bump — `acdp-validation` 0.14.0 (adopted via
+  #341, acdp-rs#288) added `EmbeddedContent.content_hash` months of repo-time before this session.
+  The workaround kept passing anyway, by accident: `acdp_validation::verify_embedded_hash` in
+  0.14.0 *also* still checked the DataRef-root field as a fallback (undocumented as a
+  since-reverted behavior at the time), so the root-level wrong hash was still being caught by
+  the intended check, for the wrong structural reason.
+- 0.14.1's #296 review removed that root-level fallback from `verify_embedded_hash` entirely
+  (per `acdp-validation`'s own doc comment on the function: it was "found to reject the spec's
+  own canonical `examples/mixed-data-refs/` example" — root and embedded hashes legitimately
+  differ there, and the RFC only requires checking `embedded.content_hash`). With the fallback
+  gone, our root-placed wrong hash was silently ignored by step 3
+  (`validate_registry_limits_and_crypto`'s embedded-hash check), and the request fell through to
+  step 4 (body-level `content_hash` recomputation) — which **also** failed, coincidentally, for an
+  unrelated, pre-existing reason: `publish_with_data_ref`'s helper builds a valid base request via
+  `RequestBuilder::build()`, then splices the fixture's `DataRef` onto the resulting struct
+  literal afterward (deliberately, to get schema-malformed `DataRef`s past client-side
+  `validate_data_ref` and onto the wire, so the REGISTRY's own rejection is what's tested) — which
+  leaves the base's `content_hash`/signature stale relative to the spliced-in `data_refs` for
+  every one of the seven scenarios. Harmless for the other six, whose own (schema- or
+  embedded-hash-level) rejection always fired first, before that staleness could matter; exposed
+  for the first time on `data-ref-007` once step 3 stopped catching it. Two independent,
+  pre-existing defects, only one of which needed fixing to restore this fixture's intended
+  outcome — a wrong-reason PASS turning into a wrong-reason FAIL when upstream's shape changed
+  underneath it, exactly the defect class this file's own `CODE_DIVERGENCES`/`pub-006`/`pub-009`
+  precedent exists to name and eliminate.
+
+**Fix.** Moved the wrong hash from `DataRef.content_hash` (root) to
+`DataRef.embedded.content_hash` (nested), matching the fixture's own explicit placement — now
+correctly caught again at step 3 with `data_ref_hash_mismatch`, before step 4 is ever reached, so
+`publish_with_data_ref`'s stale-content_hash-after-splice behavior remains irrelevant for all
+seven `data-ref-*` scenarios exactly as it always was meant to be. Did **not** touch
+`publish_with_data_ref` itself — its splice-after-build design is deliberate and correct for its
+actual job (getting schema-malformed data onto the wire past client-side validation); the latent
+"step 4 would also be wrong if ever reached" property is now correctly unreachable again for
+every fixture this test covers, not eliminated as a general hazard. If a future data-ref fixture
+needs the registry to reach step 4 with a spliced `DataRef` in play, that helper's staleness
+becomes live again and would need revisiting then, not preemptively here.
+
+**Why Opus, not Fable/human.** A test-only fix inside a file this repo already owns, restoring
+intended coverage after a dependency-version behavior change — no registry behavior, public
+contract, or trust boundary changed. The `hash_mismatch`/`data_ref_hash_mismatch` distinction
+itself is upstream's own, unchanged by this fix.
+
+**Verification.** `cargo test --workspace --no-fail-fast`: 31 result blocks, 0 failures. `cargo
+fmt --check` clean. `cargo clippy -D warnings` clean across all 9 of this crate's CI-enumerated
+feature configurations that build (`sqlite` default, `postgres`, `memory`, `sqlite,playground`,
+`pg,playground`, `memory,playground`, no backend, `playground` no backend, plus
+`acdp-registry-types --no-default-features`) — `conformance.rs` itself is
+`#![cfg(feature = "storage-sqlite")]`-gated, so only the two `storage-sqlite`-inclusive
+configurations actually compile it; the fix does not touch any other crate.
