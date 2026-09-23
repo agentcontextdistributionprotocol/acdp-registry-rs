@@ -1,5 +1,19 @@
 
 
+## [0.1.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.1.4...acdp-registry-server/v0.1.5) - 2026-09-23
+
+### Other
+
+- *(deps)* bump acdp to 0.14.1, fix dormant data-ref-007 test bug it exposed ([#340](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/340))
+- *(spec)* adopt ACDP spec @ 9deb7e7, close RFC-ACDP-0014 0.5.0 conformance gap ([#335](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/335))
+- Adopt acdp-rs's Proven/commit_proven publish-identity split (closes #336) ([#341](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/341))
+- correct stale mutation-scope citations and the store.rs:1285 concurrent-publish comment (U-574) ([#329](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/329))
+- *(mutants)* widen the mutation scope 213 -> 351 with sqlite/store.rs (U-552) ([#326](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/326))
+- *(tls)* assert the resolved provider property and carry the child's output into the diagnostic (U-560) ([#327](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/327))
+- *(tls)* assert a real TLS 1.3 handshake, not a bare TCP connect (U-556) ([#324](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/324))
+- stop transcribing branch protection; delete one loaded gh api command (U-559) ([#325](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/325))
+
+
 ## [0.1.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.1.3...acdp-registry-server/v0.1.4) - 2026-09-16
 
 ### Added
