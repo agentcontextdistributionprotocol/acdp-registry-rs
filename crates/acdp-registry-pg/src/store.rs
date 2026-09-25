@@ -98,7 +98,13 @@ impl PgStore {
 #[async_trait]
 impl ExtendedRegistryStore for PgStore {
     async fn migrate(&self) -> Result<(), AcdpError> {
+        // N-1 rollback safety: a rolling upgrade means an older binary can be
+        // live against a database a newer binary already migrated. Applied
+        // migrations are still checksum-verified — only the "database is
+        // ahead of me" case is tolerated. Requires migrations to stay
+        // additive; see CONTRIBUTING.md's Migrations section.
         sqlx::migrate!("./migrations")
+            .set_ignore_missing(true)
             .run(&self.pool)
             .await
             .map_err(|e| AcdpError::RegistryInternal(format!("migrate: {e}")))?;
