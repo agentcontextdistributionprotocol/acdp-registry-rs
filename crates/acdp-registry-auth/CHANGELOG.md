@@ -1,5 +1,12 @@
 
 
+## [0.1.6](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-auth/v0.1.5...acdp-registry-auth/v0.1.6) - 2026-09-25
+
+### Other
+
+- update Cargo.toml dependencies
+
+
 ## [0.1.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-auth/v0.1.4...acdp-registry-auth/v0.1.5) - 2026-09-23
 
 ### Other

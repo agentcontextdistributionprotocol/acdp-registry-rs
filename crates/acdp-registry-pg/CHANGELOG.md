@@ -1,5 +1,12 @@
 
 
+## [0.1.6](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-pg/v0.1.5...acdp-registry-pg/v0.1.6) - 2026-09-25
+
+### Fixed
+
+- *(pg)* tolerate N-1 rollback in the Postgres migration runner ([#345](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/345))
+
+
 ## [0.1.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-pg/v0.1.4...acdp-registry-pg/v0.1.5) - 2026-09-23
 
 ### Other
