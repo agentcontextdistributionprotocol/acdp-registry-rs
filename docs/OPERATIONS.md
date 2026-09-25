@@ -117,6 +117,15 @@ already-migrated database is a no-op. To add one, drop a new sequential SQL file
 into `crates/acdp-registry-<backend>/migrations/` and let CI cover the upgrade
 path. Never edit an applied migration.
 
+**Rolling back a release (Postgres).** The Postgres migrator tolerates a
+database that is *ahead* of the running binary — it can roll back one release
+without crash-looping, because migrations are required to stay additive (see
+CONTRIBUTING.md). Applied migrations remain checksum-verified, so a corrupted
+or edited migration still fails startup. The orphaned table/columns from the
+newer migration are left in place and simply unused by the older binary; to
+fully retire a migration, delete its row from `_sqlx_migrations` and drop its
+objects by hand.
+
 ## Admin endpoints
 
 All six are bearer-gated against `auth.admin_tokens` (constant-time compare;

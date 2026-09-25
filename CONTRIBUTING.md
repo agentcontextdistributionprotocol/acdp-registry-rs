@@ -139,6 +139,11 @@ rather than restating them.
 - Never edit an applied migration; add a new one.
 - Each migration must be idempotent (`CREATE TABLE IF NOT EXISTS`, `ON CONFLICT
   DO NOTHING`, etc.).
+- Postgres migrations must stay additive (new tables/columns, no drops that an
+  older binary's queries depend on) — `PgStore::migrate` runs with
+  `ignore_missing(true)` so a binary one release behind the database keeps
+  serving during a rolling upgrade. A migration that breaks the binary one
+  version behind it must say so in the release notes.
 
 ## Adopting a new ACDP spec revision
 
