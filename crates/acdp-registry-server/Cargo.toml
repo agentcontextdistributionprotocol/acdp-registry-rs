@@ -80,7 +80,7 @@ uuid           = { workspace = true }
 # Serialize PG integration tests so they don't fight over the shared
 # truncate-and-test database. SQLite tests use disposable tempfiles so
 # they don't need this.
-serial_test    = "3"
+serial_test    = "4"
 # U-521 option B: generate the did:web fixture's CA+leaf chain at test runtime
 # instead of committing PEM files. `.gitignore:39-43` forbids TLS material
 # repo-wide (`*.pem`/`*.crt`/`*.key`) with its only negation an empty
