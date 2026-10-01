@@ -56,7 +56,7 @@ jobs:
       # 0.9.0. A linter whose version floats with the image is a gate that can
       # go red on a commit that touched nothing, and can pass locally while
       # failing here. install-action is already used and SHA-pinned in ci.yml.
-      - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: shellcheck@0.11.0
 
