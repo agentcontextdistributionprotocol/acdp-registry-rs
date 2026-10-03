@@ -1173,6 +1173,7 @@ mod tests {
     /// — same ids, same order — or it silently misleads them.
     #[test]
     fn advertisable_profiles_json_matches_const() {
+        // Reads the workspace's `docs/` at runtime, so it assumes the repo layout.
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/advertisable-profiles.json"
@@ -1188,7 +1189,7 @@ mod tests {
         assert_eq!(
             got, REGISTRY_ADVERTISABLE_PROFILES,
             "docs/advertisable-profiles.json drifted from REGISTRY_ADVERTISABLE_PROFILES; \
-             regenerate its `profiles` array from the const"
+             update its `profiles` array to match the const"
         );
         assert!(
             doc["description"].as_str().is_some_and(|d| !d.is_empty()),

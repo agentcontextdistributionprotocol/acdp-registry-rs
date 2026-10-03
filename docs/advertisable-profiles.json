@@ -1,5 +1,5 @@
 {
-  "description": "Profile ids a registry built from this tree may advertise in [registry].profiles. Generated from REGISTRY_ADVERTISABLE_PROFILES in crates/acdp-registry-types/src/config.rs; a unit test keeps the two identical.",
+  "description": "Profile ids a registry built from this tree may advertise in [registry].profiles. Mirrors REGISTRY_ADVERTISABLE_PROFILES in crates/acdp-registry-types/src/config.rs; a unit test keeps the two identical.",
   "profiles": [
     "acdp-registry-core",
     "acdp-registry-discovery",

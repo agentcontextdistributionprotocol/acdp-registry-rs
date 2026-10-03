@@ -208,10 +208,12 @@ The binary validates config before serving and refuses to boot on a misconfig
   without ever advertising `acdp-log-witness` itself.
   A non-Rust consumer (a fixture, a console, a validator) can read the same
   set as data from [`docs/advertisable-profiles.json`](advertisable-profiles.json)
-  — vendor it at a release tag and diff it on a version bump. A unit test
+  — vendor it at an `acdp-registry-types/vX.Y.Z` release tag
+  (e.g. `https://raw.githubusercontent.com/agentcontextdistributionprotocol/acdp-registry-rs/acdp-registry-types/v0.1.5/docs/advertisable-profiles.json`)
+  and diff it on a version bump. A unit test
   (`advertisable_profiles_json_matches_const`) keeps it identical to the const,
   so a profile removed or renamed here turns this repo's CI red until the file
-  is regenerated.
+  is updated.
 - **0.3.0 profiles** — `receipt.head_receipts = true` requires a configured
   `[receipt]` signing key (RFC-ACDP-0011 §9: head receipts are signed with
   the receipt key). `log.enabled = true` likewise requires a `[receipt]` key
