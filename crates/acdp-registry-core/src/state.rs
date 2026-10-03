@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use acdp::client::CrossRegistryResolver;
 use acdp::registry::RegistryServer;
 use acdp_registry_auth::AuthService;
-use acdp_registry_store::ExtendedRegistryStore;
+use acdp_registry_store::{ExtendedRegistryStore, SharedRateLimitBackend};
 use acdp_registry_types::{PlaygroundConfig, RegistryConfig};
 use acdp_registry_webhook::WebhookEmitter;
 
@@ -50,6 +50,10 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// of a botnet, which the global ceiling then bounds). `None` when
     /// `[rate_limit] enabled = false` or both budgets are `0`.
     pub auth_ip_limiter: Option<Arc<AgentRateLimiter>>,
+    /// What the `/auth/*` middleware charges. Today the in-memory limiter
+    /// above; kept alongside it because a layered backend needs the in-memory
+    /// limiter as its first layer.
+    pub auth_limit_backend: Option<Arc<dyn SharedRateLimitBackend>>,
     /// FEAT-06: parsed `[rate_limit] trusted_proxies` CIDRs. Empty (the
     /// default) means `X-Forwarded-For` is never trusted and the TCP socket
     /// peer is always used as the client IP.
@@ -137,6 +141,9 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             } else {
                 None
             };
+        let auth_limit_backend: Option<Arc<dyn SharedRateLimitBackend>> = auth_ip_limiter
+            .clone()
+            .map(|l| l as Arc<dyn SharedRateLimitBackend>);
         let trusted_proxies = TrustedProxies::parse_lossy(&rl.trusted_proxies);
         // FEAT-10: install the process-global recorder when metrics are
         // enabled. Idempotent — many in-process test harnesses share one.
@@ -157,6 +164,7 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             rate_limiter,
             challenge_rate_limiter,
             auth_ip_limiter,
+            auth_limit_backend,
             trusted_proxies,
             metrics,
             registry_did_document,

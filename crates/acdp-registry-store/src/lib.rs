@@ -8,6 +8,7 @@ pub mod cursor;
 pub mod fulltext;
 pub mod lifecycle;
 pub mod log;
+pub mod rate_limit;
 
 /// Cross-backend parity assertions shared by every backend's test suite.
 /// Gated so nothing here ships in a normal build; see the module docs for
@@ -26,6 +27,7 @@ use async_trait::async_trait;
 
 pub use cursor::{decode_cursor, encode_cursor};
 pub use log::{build_leaf_record, LogEntryRecord};
+pub use rate_limit::{LimitDecision, SharedLimitScope, SharedRateLimitBackend};
 
 /// Cursor-keyed page returned by [`ExtendedRegistryStore::list_contexts`].
 #[derive(Debug, Clone)]
