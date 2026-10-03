@@ -10,13 +10,17 @@
 //! # Hot row
 //!
 //! `auth_global` is a single row updated by every `/auth/*` request fleet-wide,
-//! a genuine serialization point. Each update holds the row lock for roughly
-//! 0.5–2 ms (less on the UNLOGGED table), so one row sustains on the order of
-//! 500–2000 updates/s — an estimate, not a measurement. The shipped
-//! `global_per_minute = 6000` is ~100 updates/s. Sharding the global counter into
-//! N summed rows is deliberately not built: it would break the single-statement
-//! exactness and is not warranted until `global_per_minute` reaches the tens of
-//! thousands across several replicas.
+//! a genuine serialization point. Measured (2026-10-03, `pgbench` running this
+//! statement against one row, PostgreSQL 18 in Docker on an Apple-silicon laptop,
+//! no network hop): ~34k updates/s at 8 clients and ~26k/s at 32 on the UNLOGGED
+//! table, versus ~3.3k/s and ~2.6k/s for the same table LOGGED — so UNLOGGED is
+//! worth roughly 10x on the hot row. The shipped `global_per_minute = 6000` is
+//! ~100 updates/s. A real deployment adds a network round trip per check and
+//! shares the database with publish traffic, so treat the figures as an upper
+//! bound, not a capacity promise. Sharding the global counter into N summed rows
+//! is deliberately not built: it would break the single-statement exactness and
+//! is not warranted until `global_per_minute` reaches the tens of thousands
+//! across several replicas.
 //!
 //! # Differences from the in-memory limiter
 //!

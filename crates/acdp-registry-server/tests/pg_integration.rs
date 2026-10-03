@@ -1124,16 +1124,26 @@ async fn replica(url: &str, cfg: &RegistryConfig) -> axum::Router {
     shared_limiter_router(url, cfg.clone(), shared).await.1
 }
 
-/// NOTE: the `auth_global` row is shared by every test and every test binary
-/// that talks to this database. `cargo test -p acdp-registry-pg` also touches it
-/// (`global_and_per_ip_scopes_do_not_share_a_bucket`), so these proofs assume the
-/// two commands run one after the other, as `ci.yml` does — not concurrently.
-///
+/// The `auth_global` row is shared by every test and every test binary that
+/// talks to this database; `cargo test -p acdp-registry-pg` also touches it
+/// (`global_and_per_ip_scopes_do_not_share_a_bucket`). A session-level advisory
+/// lock, held by the returned connection for the life of the proof, keeps the two
+/// from interleaving. The constant must match `GLOBAL_ROW_LOCK` in
+/// `acdp-registry-pg/tests/rate_limit_backend.rs`.
+const GLOBAL_ROW_LOCK: i64 = 0x0AC0_9F06_0003;
+
 /// Start each proof early enough in a 60s window that its sub-second burst stays
 /// inside one window, and reset the global counter row (it is shared by every
 /// test and key-independent, so a prior test's hits would otherwise count).
-async fn fresh_global_window(url: &str) {
+/// Hold the returned guard until the proof ends.
+async fn fresh_global_window(url: &str) -> sqlx::pool::PoolConnection<sqlx::Postgres> {
     let pool = PgStore::connect(url, 2).await.unwrap().pool().clone();
+    let mut guard = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(GLOBAL_ROW_LOCK)
+        .execute(&mut *guard)
+        .await
+        .unwrap();
     let secs: i64 = sqlx::query_scalar("SELECT floor(EXTRACT(EPOCH FROM now()))::bigint % 60")
         .fetch_one(&pool)
         .await
@@ -1145,6 +1155,7 @@ async fn fresh_global_window(url: &str) {
         .execute(&pool)
         .await
         .unwrap();
+    guard
 }
 
 /// Alternate `peers` across the two routers (request i goes to router i % 2,
@@ -1167,7 +1178,7 @@ async fn admitted_across(a: &axum::Router, b: &axum::Router, peers: &[String], n
 #[serial]
 async fn two_routers_sharing_one_pool_enforce_one_per_ip_budget() {
     let Some(url) = pg_url_or_skip() else { return };
-    fresh_global_window(&url).await;
+    let _global_row = fresh_global_window(&url).await;
     let cfg = shared_limiter_cfg(6, 1_000_000);
     let (a, b) = (replica(&url, &cfg).await, replica(&url, &cfg).await);
     // Alternating 12 requests puts 6 on each router: each in-memory limiter
@@ -1184,7 +1195,7 @@ async fn two_routers_sharing_one_pool_enforce_one_per_ip_budget() {
 #[serial]
 async fn two_routers_sharing_one_pool_enforce_one_global_budget() {
     let Some(url) = pg_url_or_skip() else { return };
-    fresh_global_window(&url).await;
+    let _global_row = fresh_global_window(&url).await;
     let cfg = shared_limiter_cfg(100, 4);
     let (a, b) = (replica(&url, &cfg).await, replica(&url, &cfg).await);
     // Two distinct IPs (one per router), so no per-IP budget is near its limit;
@@ -1204,7 +1215,7 @@ async fn two_routers_sharing_one_pool_enforce_one_global_budget() {
 #[serial]
 async fn memory_backend_admits_twice_the_budget_across_two_routers() {
     let Some(url) = pg_url_or_skip() else { return };
-    fresh_global_window(&url).await;
+    let _global_row = fresh_global_window(&url).await;
     let mut cfg = shared_limiter_cfg(6, 1_000_000);
     cfg.rate_limit.backend = SharedLimitBackendKind::Memory;
     let (a, b) = (replica(&url, &cfg).await, replica(&url, &cfg).await);

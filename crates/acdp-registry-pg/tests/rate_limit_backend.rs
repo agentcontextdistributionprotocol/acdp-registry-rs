@@ -57,6 +57,23 @@ fn backend(pool: &PgPool, per_ip: u32, global: u32) -> PgRateLimitBackend {
     PgRateLimitBackend::new(pool.clone(), per_ip, global, TIMEOUT)
 }
 
+/// Serialises work on the shared, key-independent `auth_global` row across test
+/// binaries: `acdp-registry-server`'s `pg_integration` multi-replica proofs reset
+/// and drain the same row, so a hit from here in the middle of one would corrupt
+/// its count. Session-level advisory lock; released when the returned connection
+/// is dropped. The constant must match `GLOBAL_ROW_LOCK` in `pg_integration.rs`.
+const GLOBAL_ROW_LOCK: i64 = 0x0AC0_9F06_0003;
+
+async fn lock_global_row(pool: &PgPool) -> sqlx::pool::PoolConnection<sqlx::Postgres> {
+    let mut conn = pool.acquire().await.expect("acquire lock connection");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(GLOBAL_ROW_LOCK)
+        .execute(&mut *conn)
+        .await
+        .expect("advisory lock");
+    conn
+}
+
 fn key() -> String {
     format!("test-{}", uuid::Uuid::new_v4())
 }
@@ -204,6 +221,7 @@ async fn global_and_per_ip_scopes_do_not_share_a_bucket() {
     // check the Global scope ignores the caller's key.
     let b = backend(&pool, 1, 1_000_000);
     let k = key();
+    let _global_row = lock_global_row(&pool).await;
     assert_eq!(
         b.check(SharedLimitScope::PerIp, &k).await,
         LimitDecision::Allow

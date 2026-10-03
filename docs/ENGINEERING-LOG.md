@@ -75,10 +75,13 @@ startup validation, wiring and a pruner. Then a two-routers-one-database proof.
   thousands of requests a minute across several replicas); an index on `window_start` (defeats HOT
   updates).
 
-**Not measured.** The `auth_global` hot row is estimated, not benchmarked, at roughly 500–2000
-updates/s against the default ~100/s. There is no multi-replica deployment to measure, which is the
-premise of the feature. `acdp_registry_rate_limit_shared_seconds` exists so it can be checked in
-production.
+**Measured, with caveats.** The `auth_global` hot row was first estimated at roughly 500–2000
+updates/s. A `pgbench` run of the exact upsert against one row (PostgreSQL 18 in Docker on a laptop,
+no network hop) gave ~34k updates/s at 8 clients and ~26k/s at 32 on the `UNLOGGED` table, against
+~3.3k/s and ~2.6k/s for the same table `LOGGED` — about 10x, which also confirms the `UNLOGGED`
+choice. The default load is ~100 updates/s. A real deployment adds a network round trip and shares the
+database with publish traffic, so these are upper bounds; `acdp_registry_rate_limit_shared_seconds`
+exists to check the real figure in production.
 
 <!-- U-501 addendum — acdp-registry-rs#336, adopting acdp-rs's Proven/commit_proven split -->
 
