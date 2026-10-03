@@ -21,7 +21,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use acdp_registry_store::ExtendedRegistryStore;
+use acdp_registry_store::{
+    ExtendedRegistryStore, LimitDecision, SharedLimitScope, SharedRateLimitBackend,
+};
 use acdp_registry_types::RegistryError;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
@@ -473,7 +475,7 @@ async fn auth_rate_limit<S: ExtendedRegistryStore + 'static>(
     req: Request,
     next: Next,
 ) -> Response {
-    let Some(limiter) = &state.auth_ip_limiter else {
+    let Some(backend) = &state.auth_limit_backend else {
         return next.run(req).await;
     };
     let peer = req
@@ -492,24 +494,67 @@ async fn auth_rate_limit<S: ExtendedRegistryStore + 'static>(
     // the per-IP budget. Mirrors the challenge handler's global-then-key
     // ordering.
     if rl.global_per_minute > 0 {
-        if let Err(retry_after_seconds) = limiter.check_global() {
-            metrics::record_rate_limit_rejection(metrics::RateLimitScope::AuthGlobal);
-            return RegistryError::RateLimited {
-                retry_after_seconds,
-            }
-            .into_response();
+        if let Some(denied) = charge_auth_limit(
+            backend.as_ref(),
+            SharedLimitScope::Global,
+            "",
+            metrics::RateLimitScope::AuthGlobal,
+        )
+        .await
+        {
+            return denied;
         }
     }
     if rl.per_ip_per_minute > 0 {
-        if let Err(retry_after_seconds) = limiter.check(&ip.to_string()) {
-            metrics::record_rate_limit_rejection(metrics::RateLimitScope::AuthPerIp);
-            return RegistryError::RateLimited {
-                retry_after_seconds,
-            }
-            .into_response();
+        if let Some(denied) = charge_auth_limit(
+            backend.as_ref(),
+            SharedLimitScope::PerIp,
+            &ip.to_string(),
+            metrics::RateLimitScope::AuthPerIp,
+        )
+        .await
+        {
+            return denied;
         }
     }
     next.run(req).await
+}
+
+/// Charge one `/auth/*` request to `backend`. `Some(response)` is the 429 to
+/// return; `None` means admit.
+///
+/// `Unavailable` admits: the `/auth/*` limiter bounds resource use rather than
+/// guarding a secret, so a backend that cannot answer must not take the
+/// handshake down with it. The in-memory backend never returns it; this is the
+/// last-resort arm for a backend that can.
+async fn charge_auth_limit(
+    backend: &dyn SharedRateLimitBackend,
+    scope: SharedLimitScope,
+    key: &str,
+    metric_scope: metrics::RateLimitScope,
+) -> Option<Response> {
+    match backend.check(scope, key).await {
+        LimitDecision::Allow => None,
+        LimitDecision::Deny {
+            retry_after_seconds,
+        } => {
+            metrics::record_rate_limit_rejection(metric_scope);
+            Some(
+                RegistryError::RateLimited {
+                    retry_after_seconds,
+                }
+                .into_response(),
+            )
+        }
+        LimitDecision::Unavailable => {
+            tracing::warn!(
+                backend = backend.backend_name(),
+                scope = scope.label(),
+                "auth rate-limit backend unavailable; admitting request"
+            );
+            None
+        }
+    }
 }
 
 /// SEC-02: build a CORS layer driven by `[registry.cors] allowed_origins`.
@@ -571,6 +616,51 @@ fn admin_router<S: ExtendedRegistryStore + 'static>() -> Router<Arc<AppState<S>>
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
+
+    /// A backend that returns a fixed decision, for the middleware's mapping.
+    struct Fixed(LimitDecision);
+
+    #[async_trait]
+    impl SharedRateLimitBackend for Fixed {
+        async fn check(&self, _: SharedLimitScope, _: &str) -> LimitDecision {
+            self.0
+        }
+        fn backend_name(&self) -> &'static str {
+            "fixed"
+        }
+    }
+
+    #[tokio::test]
+    async fn charge_auth_limit_admits_on_allow_and_unavailable() {
+        for d in [LimitDecision::Allow, LimitDecision::Unavailable] {
+            let r = charge_auth_limit(
+                &Fixed(d),
+                SharedLimitScope::PerIp,
+                "k",
+                metrics::RateLimitScope::AuthPerIp,
+            )
+            .await;
+            assert!(r.is_none(), "{d:?} must admit");
+        }
+    }
+
+    #[tokio::test]
+    async fn charge_auth_limit_denies_with_429_and_exact_retry_after() {
+        let r = charge_auth_limit(
+            &Fixed(LimitDecision::Deny {
+                retry_after_seconds: 17,
+            }),
+            SharedLimitScope::Global,
+            "",
+            metrics::RateLimitScope::AuthGlobal,
+        )
+        .await
+        .expect("Deny must produce a response");
+        assert_eq!(r.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(r.headers().get("retry-after").unwrap(), "17");
+    }
+
     use super::*;
     use axum::body::Body;
     use axum::http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};

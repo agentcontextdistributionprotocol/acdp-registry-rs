@@ -12,10 +12,19 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use acdp_registry_store::{LimitDecision, SharedLimitScope, SharedRateLimitBackend};
+use async_trait::async_trait;
+
 const WINDOW: Duration = Duration::from_secs(60);
 /// Opportunistic prune threshold — keeps the agent map from growing without
 /// bound when many distinct agents publish once and never return.
 const PRUNE_AT: usize = 4096;
+
+/// Seconds a rejected client should wait: the remainder of the window, floored
+/// at 1 so a client never sees `Retry-After: 0`.
+fn retry_after_secs(elapsed: Duration) -> u64 {
+    WINDOW.saturating_sub(elapsed).as_secs().max(1)
+}
 
 struct Bucket {
     window_start: Instant,
@@ -75,7 +84,7 @@ impl AgentRateLimiter {
         }
         if b.count >= self.global_limit {
             let elapsed = now.duration_since(b.window_start);
-            return Err(WINDOW.saturating_sub(elapsed).as_secs().max(1));
+            return Err(retry_after_secs(elapsed));
         }
         b.count += 1;
         Ok(())
@@ -113,7 +122,7 @@ impl AgentRateLimiter {
             let elapsed = now.duration_since(bucket.window_start);
             // Mirrors `check_at` exactly, including the 1s floor so a client
             // never sees `Retry-After: 0`.
-            return Err(WINDOW.saturating_sub(elapsed).as_secs().max(1));
+            return Err(retry_after_secs(elapsed));
         }
         Ok(())
     }
@@ -175,11 +184,34 @@ impl AgentRateLimiter {
         if bucket.count >= self.limit {
             let elapsed = now.duration_since(bucket.window_start);
             // At least 1s so a client never sees `Retry-After: 0`.
-            let retry = WINDOW.saturating_sub(elapsed).as_secs().max(1);
-            return Err(retry);
+            return Err(retry_after_secs(elapsed));
         }
         bucket.count += 1;
         Ok(())
+    }
+}
+
+/// The in-process `/auth/*` backend. Never yields, never holds the `std`
+/// mutexes across an await, and never reports `Unavailable`.
+#[async_trait]
+impl SharedRateLimitBackend for AgentRateLimiter {
+    async fn check(&self, scope: SharedLimitScope, key: &str) -> LimitDecision {
+        // The inherent `check`/`check_global` shadow-collide with this trait
+        // method's name; call them by path.
+        let outcome = match scope {
+            SharedLimitScope::Global => AgentRateLimiter::check_global(self),
+            SharedLimitScope::PerIp => AgentRateLimiter::check(self, key),
+        };
+        match outcome {
+            Ok(()) => LimitDecision::Allow,
+            Err(retry_after_seconds) => LimitDecision::Deny {
+                retry_after_seconds,
+            },
+        }
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "memory"
     }
 }
 
@@ -430,6 +462,120 @@ pub fn canonical_ip(ip: IpAddr) -> IpAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- FEAT-06 item 3, Phase 1: the SharedRateLimitBackend seam ---------
+
+    #[tokio::test]
+    async fn shared_backend_per_ip_matches_check() {
+        let direct = AgentRateLimiter::new(2);
+        let seam = AgentRateLimiter::new(2);
+        for _ in 0..4 {
+            let want = match AgentRateLimiter::check(&direct, "1.2.3.4") {
+                Ok(()) => LimitDecision::Allow,
+                Err(retry_after_seconds) => LimitDecision::Deny {
+                    retry_after_seconds,
+                },
+            };
+            let got =
+                SharedRateLimitBackend::check(&seam, SharedLimitScope::PerIp, "1.2.3.4").await;
+            // Both limiters were created within the same instant of wall time, so
+            // the allow/deny sequence must match exactly; the retry value is the
+            // same function of elapsed time, bounded to one window.
+            match (want, got) {
+                (LimitDecision::Allow, LimitDecision::Allow) => {}
+                (
+                    LimitDecision::Deny {
+                        retry_after_seconds: a,
+                    },
+                    LimitDecision::Deny {
+                        retry_after_seconds: b,
+                    },
+                ) => assert!((59..=60).contains(&a) && (59..=60).contains(&b)),
+                other => panic!("trait and inherent diverged: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_backend_global_matches_check_global() {
+        let l = AgentRateLimiter::with_global_ceiling(100, 2);
+        for _ in 0..2 {
+            assert_eq!(
+                SharedRateLimitBackend::check(&l, SharedLimitScope::Global, "").await,
+                LimitDecision::Allow
+            );
+        }
+        match SharedRateLimitBackend::check(&l, SharedLimitScope::Global, "").await {
+            LimitDecision::Deny {
+                retry_after_seconds,
+            } => {
+                assert!((59..=60).contains(&retry_after_seconds))
+            }
+            other => panic!("expected Deny past the global ceiling, got {other:?}"),
+        }
+        // The inherent method agrees: the seam charged the same bucket.
+        assert!(l.check_global().is_err());
+    }
+
+    #[tokio::test]
+    async fn shared_backend_global_ignores_key_and_per_ip_ignores_global() {
+        // Global ceiling of 1; per-IP budget large. Checking per-IP must not
+        // spend the global bucket, and the Global key must be irrelevant.
+        let l = AgentRateLimiter::with_global_ceiling(100, 1);
+        for _ in 0..5 {
+            assert_eq!(
+                SharedRateLimitBackend::check(&l, SharedLimitScope::PerIp, "9.9.9.9").await,
+                LimitDecision::Allow
+            );
+        }
+        assert_eq!(
+            SharedRateLimitBackend::check(&l, SharedLimitScope::Global, "ignored").await,
+            LimitDecision::Allow
+        );
+        assert!(matches!(
+            SharedRateLimitBackend::check(&l, SharedLimitScope::Global, "other").await,
+            LimitDecision::Deny { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn in_memory_backend_never_reports_unavailable() {
+        let l = AgentRateLimiter::with_global_ceiling(1, 1);
+        for scope in [SharedLimitScope::PerIp, SharedLimitScope::Global] {
+            for _ in 0..5 {
+                let d = SharedRateLimitBackend::check(&l, scope, "k").await;
+                assert_ne!(d, LimitDecision::Unavailable, "{scope:?}");
+            }
+        }
+        assert_eq!(l.backend_name(), "memory");
+    }
+
+    #[test]
+    fn retry_after_secs_floors_at_one() {
+        // 59s elapsed => 1s remaining: the floor is not what produces the 1.
+        assert_eq!(retry_after_secs(Duration::from_secs(59)), 1);
+        // Full window and beyond => 0 remaining, floored to 1, never 0.
+        assert_eq!(retry_after_secs(WINDOW), 1);
+        assert_eq!(retry_after_secs(WINDOW + Duration::from_secs(30)), 1);
+        // Mid-window: the remainder, which `.max(1)` must not disturb.
+        assert_eq!(retry_after_secs(Duration::from_secs(0)), 60);
+        assert_eq!(retry_after_secs(Duration::from_secs(45)), 15);
+        // Sub-second remainder truncates to 0 before the floor lifts it.
+        assert_eq!(retry_after_secs(Duration::from_millis(59_500)), 1);
+    }
+
+    #[test]
+    fn shared_limit_scope_labels_match_metric_scope_labels() {
+        use crate::metrics::RateLimitScope;
+        assert_eq!(
+            SharedLimitScope::PerIp.label(),
+            RateLimitScope::AuthPerIp.label()
+        );
+        assert_eq!(
+            SharedLimitScope::Global.label(),
+            RateLimitScope::AuthGlobal.label()
+        );
+    }
 
     // ---- A1: peek / record ----------------------------------------------
     //
