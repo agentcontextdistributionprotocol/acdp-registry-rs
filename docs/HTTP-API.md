@@ -282,6 +282,8 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_lifecycle_event_total` | counter | `event`, `outcome` | Retract / republish outcomes. |
 | `acdp_registry_witness_cosignatures_total` | counter | `outcome` | Witness cosignatures `aggregated` / `rejected` / `store_error`. |
 | `acdp_registry_rate_limit_rejections_total` | counter | `scope` | 429s by scope (`auth_per_ip`, `auth_global`, `challenge_per_agent`, `challenge_global`, `publish_per_agent`, `lifecycle_per_agent`). |
+| `acdp_registry_rate_limit_shared_total` | counter | `scope`, `outcome` | Round trips to the shared (cluster-wide) `/auth/*` limiter backend: `scope` is `auth_per_ip` or `auth_global`, `outcome` is `allow`, `deny` or `unavailable`. Counts which layer answered; a client-visible 429 still increments the rejections counter above. Emitted only when a shared backend is configured. |
+| `acdp_registry_rate_limit_shared_seconds` | histogram | `scope` | Latency of those round trips. The series to watch to confirm the shared limiter's database load assumption (see `docs/OPERATIONS.md`). |
 
 > **`scope` changed meaning for global challenge rejections (H-A/P4).** Until
 > this change, a `/auth/challenge` rejection caused by the process-global
