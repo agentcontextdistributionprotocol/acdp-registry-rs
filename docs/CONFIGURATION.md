@@ -370,8 +370,8 @@ global ceilings are counted in the registry's own Postgres database (table
 `rate_limit_windows`, an `UNLOGGED` table) so they hold across replicas instead
 of per replica. The in-memory limiter stays in front as a pre-filter, with the
 same limits: a request it rejects never touches the database, so database writes
-are bounded by the in-memory limits (at most `2 × global_per_minute` statements a
-minute per replica) however large a flood is, and enabling the shared backend can
+are bounded by the in-memory limits (at most `2 × global_per_minute` statements per
+60-second window per replica) however large a flood is, and enabling the shared backend can
 only tighten enforcement relative to per-process limiting. Startup refuses the
 combination unless `storage.backend = "postgres"`, `enabled = true` and
 `global_per_minute > 0` (the global ceiling is what bounds database load when an

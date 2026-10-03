@@ -34,8 +34,11 @@ and [OPERATIONS.md · Rate limiting](OPERATIONS.md#rate-limiting). It is only us
 replica, and is refused at startup unless `storage.backend = "postgres"`.
 
 On Postgres, upgrading applies migration `014` (a new, additive `rate_limit_windows` table; nothing an
-older binary reads). The previous release tolerates a database ahead of it (#345), so rolling the
-binary back needs no database action.
+older binary reads). 0.1.6 and later tolerate a database that a newer release has already migrated
+(#345), so rolling back *between* such releases needs no database action. **0.1.5 does not:** it
+refuses to start against a database that has applied migration 14. To roll back to 0.1.5, first run
+`DELETE FROM _sqlx_migrations WHERE version = 14;` (the orphaned `rate_limit_windows` table is harmless
+and a later upgrade re-applies the migration idempotently).
 
 **Rollback ordering.** `[rate_limit]` rejects unknown keys, so a config carrying any of the four new
 keys will **not parse** on an older binary. Roll the config back *before* the binary.

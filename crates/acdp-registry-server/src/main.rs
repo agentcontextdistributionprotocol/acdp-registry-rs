@@ -858,9 +858,9 @@ async fn run(cfg: RegistryConfig) -> anyhow::Result<()> {
                 let mut tick = tokio::time::interval(every);
                 loop {
                     tick.tick().await;
-                    // Two windows of slack so a row in the window being counted
-                    // is never deleted from under a live decision.
-                    if let Err(e) = pruner.prune_older_than(120).await {
+                    // Two 60s windows of slack so a row in the window being
+                    // counted is never deleted from under a live decision.
+                    if let Err(e) = pruner.prune_older_than(2 * 60).await {
                         tracing::warn!(error = %e, "rate-limit window pruning failed");
                     }
                 }
