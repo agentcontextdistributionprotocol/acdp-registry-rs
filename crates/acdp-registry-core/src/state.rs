@@ -6,12 +6,14 @@ use acdp::client::CrossRegistryResolver;
 use acdp::registry::RegistryServer;
 use acdp_registry_auth::AuthService;
 use acdp_registry_store::{ExtendedRegistryStore, SharedRateLimitBackend};
+use acdp_registry_types::config::UnavailablePostureConfig;
 use acdp_registry_types::{PlaygroundConfig, RegistryConfig};
 use acdp_registry_webhook::WebhookEmitter;
 
 use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::rate_limit::{AgentRateLimiter, TrustedProxies};
+use crate::rate_limit_shared::{LayeredRateLimiter, UnavailablePosture};
 
 /// Public alias — the value axum actually carries is `Arc<AppState<S>>`.
 pub type AppState<S> = AppStateInner<S>;
@@ -76,6 +78,37 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
 }
 
 impl<S: ExtendedRegistryStore> AppStateInner<S> {
+    /// Route the `/auth/*` ceilings through a shared (cluster-wide) backend.
+    /// A no-op when `shared` is `None`.
+    ///
+    /// **This is where both of the layered limiter's safety properties take
+    /// effect.** The binary hands over the *bare* shared backend; it cannot
+    /// build the layering itself because the in-memory limiter lives inside this
+    /// state. So the shared backend is wrapped here, over the very `Arc` the
+    /// middleware already used — never installed bare, which would silently drop
+    /// the in-memory pre-filter (the database-load bound) and the fail-open
+    /// fallback.
+    pub fn with_shared_auth_limiter(
+        mut self,
+        shared: Option<Arc<dyn SharedRateLimitBackend>>,
+    ) -> Self {
+        let Some(l2) = shared else { return self };
+        let Some(l1) = self.auth_ip_limiter.clone() else {
+            // Startup validation rules this out; never install an unlayered L2.
+            tracing::error!(
+                "shared auth rate limiter configured but the in-memory limiter is disabled; \
+                 leaving per-process limiting in place"
+            );
+            return self;
+        };
+        let posture = match self.config.rate_limit.backend_unavailable {
+            UnavailablePostureConfig::Allow => UnavailablePosture::Allow,
+            UnavailablePostureConfig::Deny => UnavailablePosture::Deny,
+        };
+        self.auth_limit_backend = Some(Arc::new(LayeredRateLimiter::new(l1, l2, posture)));
+        self
+    }
+
     /// Build state with a fresh `playground` cell seeded from
     /// `config.playground`. Centralises the lock setup so test
     /// harnesses don't have to know the cell exists.

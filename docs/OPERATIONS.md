@@ -196,7 +196,7 @@ the key to `false` to return `404` for foreign ids instead.
 
 ## Rate limiting
 
-Per-agent, per-process, in-memory token buckets:
+Per-agent, per-process, in-memory fixed-window counters:
 `limits.publish_rate_per_minute` on `POST /contexts` and
 `limits.challenge_rate_per_minute` on `POST /auth/challenge` (both default 60,
 `0` disables; `429` + `Retry-After` when drained).
@@ -213,10 +213,38 @@ trust model — XFF is never honoured from an untrusted peer). The server is bou
 with `into_make_service_with_connect_info`, so the peer IP is available behind
 `axum_server`.
 
-All of these are per-process. Behind a load balancer set `trusted_proxies` so
-per-IP limits track real clients; the `global_per_minute` ceiling is per replica.
-For a cluster-wide bound, still front the deployment with a shared limiter (or
-proxy-level limits).
+By default all of these are per-process. Behind a load balancer set
+`trusted_proxies` so per-IP limits track real clients; the `global_per_minute`
+ceiling is then per replica. With more than one replica you have three options
+for the `/auth/*` bound:
+
+1. **Gateway / proxy limits** in front of the registry. Required in any case if
+   you need protection against a *volumetric* flood: every limit the registry
+   enforces runs after the request has already reached the registry process.
+2. **`[rate_limit] backend = "postgres"`** — the per-IP and global ceilings are
+   counted once across every replica sharing the database (table
+   `rate_limit_windows`, an `UNLOGGED` table). Postgres storage only; see
+   [CONFIGURATION.md · `[rate_limit]`](CONFIGURATION.md#rate_limit-feat-06) for
+   the keys and the startup checks. The in-memory limiter stays in front as a
+   pre-filter, so a request it rejects never touches the database and database
+   writes stay bounded by the in-memory limits regardless of attacker volume.
+   If the database cannot answer, `backend_unavailable = "allow"` (the default)
+   falls back to per-process limiting rather than failing token issuance;
+   `"deny"` refuses instead. Watch
+   `acdp_registry_rate_limit_shared_total{outcome="unavailable"}` and the
+   `acdp_registry_rate_limit_shared_seconds` latency histogram
+   ([HTTP-API.md · metrics](HTTP-API.md#get-metrics-feat-10)): the single
+   `auth_global` row is updated by every `/auth/*` request fleet-wide, so its
+   latency is the figure to check before raising `global_per_minute` into the
+   tens of thousands across several replicas.
+3. **Accept per-replica bounds.** Each replica enforces its own limits, so the
+   effective cluster-wide ceiling is `replicas × global_per_minute`.
+
+The Postgres backend is a fairness and abuse bound, **not** a DDoS defence: do
+not rely on it instead of an edge limiter. It is also not needed on a single
+replica — every deployment recipe in this repo runs exactly one. Its counters are
+ephemeral by design (the table is `UNLOGGED`): after a database crash or standby
+promotion one window's budget resets once.
 
 ## Metrics
 

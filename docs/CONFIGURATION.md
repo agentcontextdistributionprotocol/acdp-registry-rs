@@ -341,7 +341,7 @@ See [WEBHOOKS.md](WEBHOOKS.md).
 | `publish_rate_per_minute` | u32 | `60` | Per-agent `POST /contexts` cap; `0` disables. In-memory, per-process. |
 | `challenge_rate_per_minute` | u32 | `60` | Per-agent `POST /auth/challenge` cap; `0` disables. In-memory, per-process. |
 
-> These are per-process in-memory token buckets — see
+> These are per-process in-memory fixed-window counters — see
 > [OPERATIONS.md · Rate limiting](OPERATIONS.md#rate-limiting) for the
 > multi-replica caveat.
 
@@ -360,6 +360,28 @@ attacker-independent.
 | `per_ip_per_minute` | u32 | `60` | Per-resolved-client-IP cap on `/auth/*`; `0` disables the per-IP bound. |
 | `global_per_minute` | u32 | `6000` | Whole-process ceiling across all IPs; `0` disables it. Bounds a source-IP-rotating flood. |
 | `trusted_proxies` | list\<CIDR\> | `[]` | Reverse-proxy CIDRs whose `X-Forwarded-For` is trusted. Empty = never trust XFF. |
+| `backend` | `"memory"` \| `"postgres"` | `"memory"` | Where the two ceilings above are counted. `memory`: per process (each replica counts for itself). `postgres`: counted once across every replica sharing the database — see **Shared backend** below. |
+| `backend_unavailable` | `"allow"` \| `"deny"` | `"allow"` | Only with `backend = "postgres"`. What to do when the database cannot answer a check: `allow` falls back to the per-process limit; `deny` refuses with `429` + `Retry-After: 5`. |
+| `backend_timeout_ms` | u64 | `250` | Only with `backend = "postgres"`. Per-check timeout against the database; must be `> 0`. |
+| `backend_prune_seconds` | u64 | `300` | Only with `backend = "postgres"`. How often stale counter rows are deleted; must be `> 0`. |
+
+**Shared backend (multi-replica).** With `backend = "postgres"`, the per-IP and
+global ceilings are counted in the registry's own Postgres database (table
+`rate_limit_windows`, an `UNLOGGED` table) so they hold across replicas instead
+of per replica. The in-memory limiter stays in front as a pre-filter, with the
+same limits: a request it rejects never touches the database, so database writes
+are bounded by the in-memory limits (at most `2 × global_per_minute` statements per
+limiter window per replica) however large a flood is, and enabling the shared backend can
+only tighten enforcement relative to per-process limiting. Startup refuses the
+combination unless `storage.backend = "postgres"`, `enabled = true` and
+`global_per_minute > 0` (the global ceiling is what bounds database load when an
+attacker rotates source IPs), and refuses a zero `backend_timeout_ms` or
+`backend_prune_seconds`. If the database cannot answer, `backend_unavailable`
+decides: the default `allow` degrades to exactly today's per-process limiting
+rather than turning a database blip into a token-issuance outage; a stalled check
+adds up to `backend_timeout_ms` to a request (two checks per `/auth/*` request).
+The counters are ephemeral: after a database crash or standby promotion one
+window's budget resets once. Nothing here is needed on a single replica.
 
 **Client-IP resolution & the trusted-proxy decision (security).** The client
 IP defaults to the TCP socket peer. `X-Forwarded-For` is caller-supplied and

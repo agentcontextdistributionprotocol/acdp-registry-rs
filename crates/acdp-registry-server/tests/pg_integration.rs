@@ -891,3 +891,333 @@ async fn pg_anchors_two_entries_preserve_order() {
          would actually move it and get caught here)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FEAT-06 item 3, Phase 5: the shared `/auth/*` limiter is wired through
+// `with_shared_auth_limiter`. These prove the WIRING (the layered composition,
+// the posture, the row landing in the table); Phase 3 owns the SQL semantics.
+// ---------------------------------------------------------------------------
+
+use acdp_registry_pg::PgRateLimitBackend;
+use acdp_registry_store::SharedRateLimitBackend;
+use acdp_registry_types::config::{SharedLimitBackendKind, UnavailablePostureConfig};
+
+/// A config with auth on (so `/auth/challenge` exists), the per-agent challenge
+/// budget off (so only the `/auth/*` limiter is exercised), and the shared
+/// backend selected.
+fn shared_limiter_cfg(per_ip: u32, global: u32) -> RegistryConfig {
+    let mut cfg = config(false);
+    cfg.auth.enabled = true;
+    cfg.limits.challenge_rate_per_minute = 0;
+    cfg.rate_limit.per_ip_per_minute = per_ip;
+    cfg.rate_limit.global_per_minute = global;
+    cfg.rate_limit.backend = SharedLimitBackendKind::Postgres;
+    cfg
+}
+
+/// Build state over a real `PgStore` and install `shared` through the builder
+/// under test. Returns the state's backend name and the router.
+async fn shared_limiter_router(
+    url: &str,
+    cfg: RegistryConfig,
+    shared: Option<Arc<dyn SharedRateLimitBackend>>,
+) -> (&'static str, axum::Router) {
+    let store = PgStore::connect(url, 4).await.unwrap();
+    store.migrate().await.unwrap();
+    let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
+    let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+    let signer = JwtSigner::new(
+        JwtSecret::from_bytes(&[42u8; 32]),
+        format!("did:web:{AUTHORITY}"),
+        AUTHORITY.into(),
+        30,
+    );
+    let auth = Arc::new(AuthService::new(
+        cfg.auth.clone(),
+        challenges,
+        signer,
+        Arc::new(WebResolver::new()),
+        AUTHORITY.into(),
+    ));
+    let state = AppStateInner::new(server, auth, None, cfg, None).with_shared_auth_limiter(shared);
+    let name = state
+        .auth_limit_backend
+        .as_ref()
+        .expect("the /auth/* limiter is enabled")
+        .backend_name();
+    (name, build_router(state))
+}
+
+/// A `/auth/challenge` request from `peer` (an IPv6 literal, no brackets).
+fn challenge_from_v6(peer: &str) -> Request<Body> {
+    use axum::extract::ConnectInfo;
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/auth/challenge")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"agent_id": "did:web:agents.test:flooder"}).to_string(),
+        ))
+        .unwrap();
+    let addr: std::net::SocketAddr = format!("[{peer}]:40000").parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+    req
+}
+
+/// A peer address no other run has used, so its row is fresh in the shared,
+/// persistent (UNLOGGED) table.
+fn unique_v6() -> String {
+    let u = uuid::Uuid::new_v4();
+    let b = u.as_bytes();
+    format!(
+        "2001:db8:{:x}:{:x}::{:x}",
+        u16::from_be_bytes([b[0], b[1]]),
+        u16::from_be_bytes([b[2], b[3]]),
+        u16::from_be_bytes([b[4], b[5]]),
+    )
+}
+
+async fn status_of(app: &axum::Router, req: Request<Body>) -> StatusCode {
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn shared_limiter_is_layered_and_counts_in_postgres() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let cfg = shared_limiter_cfg(2, 1_000_000);
+    let pool = PgStore::connect(&url, 4).await.unwrap().pool().clone();
+    let backend: Arc<dyn SharedRateLimitBackend> = Arc::new(PgRateLimitBackend::new(
+        pool.clone(),
+        cfg.rate_limit.per_ip_per_minute,
+        cfg.rate_limit.global_per_minute,
+        std::time::Duration::from_secs(5),
+    ));
+    let (name, app) = shared_limiter_router(&url, cfg, Some(backend)).await;
+    // The builder wrapped the shared backend; installing it bare would drop
+    // the in-memory pre-filter and the fail-open fallback.
+    assert_eq!(name, "layered");
+
+    let ip = unique_v6();
+    assert_eq!(
+        status_of(&app, challenge_from_v6(&ip)).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status_of(&app, challenge_from_v6(&ip)).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status_of(&app, challenge_from_v6(&ip)).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // Proves the request reached Postgres, not only the in-memory layer.
+    let hits: i32 = sqlx::query_scalar(
+        "SELECT hits FROM rate_limit_windows WHERE scope = 'auth_per_ip' AND bucket_key = $1",
+    )
+    .bind(&ip)
+    .fetch_one(&pool)
+    .await
+    .expect("the per-IP window row exists in Postgres");
+    assert_eq!(
+        hits, 2,
+        "two admitted requests were counted by the shared backend"
+    );
+}
+
+/// An unreachable shared backend, with the default `allow` posture, degrades to
+/// per-process limiting rather than refusing token issuance.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn shared_limiter_fails_open_to_the_in_memory_limit() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let cfg = shared_limiter_cfg(3, 1_000_000);
+    let dead = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(200))
+        .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+        .unwrap();
+    let backend: Arc<dyn SharedRateLimitBackend> = Arc::new(PgRateLimitBackend::new(
+        dead,
+        3,
+        1_000_000,
+        std::time::Duration::from_millis(300),
+    ));
+    let (name, app) = shared_limiter_router(&url, cfg, Some(backend)).await;
+    assert_eq!(name, "layered");
+    let ip = unique_v6();
+    for i in 1..=3 {
+        assert_eq!(
+            status_of(&app, challenge_from_v6(&ip)).await,
+            StatusCode::OK,
+            "request {i}: the database is down but the posture is `allow`"
+        );
+    }
+    // Fail-open is not "no limiting": the in-memory layer still enforces.
+    assert_eq!(
+        status_of(&app, challenge_from_v6(&ip)).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn shared_limiter_denies_when_unavailable_under_the_deny_posture() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let mut cfg = shared_limiter_cfg(100, 1_000_000);
+    cfg.rate_limit.backend_unavailable = UnavailablePostureConfig::Deny;
+    let dead = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(200))
+        .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+        .unwrap();
+    let backend: Arc<dyn SharedRateLimitBackend> = Arc::new(PgRateLimitBackend::new(
+        dead,
+        100,
+        1_000_000,
+        std::time::Duration::from_millis(300),
+    ));
+    let (_, app) = shared_limiter_router(&url, cfg, Some(backend)).await;
+    let resp = app
+        .clone()
+        .oneshot(challenge_from_v6(&unique_v6()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(resp.headers().get("retry-after").unwrap(), "5");
+}
+
+/// `backend = "memory"` (the default) installs no shared layer: the state keeps
+/// the bare in-memory limiter Phase 1 introduced.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn memory_backend_keeps_the_bare_in_memory_limiter() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let mut cfg = shared_limiter_cfg(2, 1_000_000);
+    cfg.rate_limit.backend = SharedLimitBackendKind::Memory;
+    let (name, _) = shared_limiter_router(&url, cfg, None).await;
+    assert_eq!(name, "memory");
+}
+
+// ---------------------------------------------------------------------------
+// FEAT-06 item 3, Phase 6: the multi-replica proof. Two routers, each built from
+// its OWN `PgStore` connection and its OWN in-memory limiter (what a second
+// replica structurally is), against one database. The assertion no
+// single-process test can make: the combined admitted count is one budget, not
+// two.
+// ---------------------------------------------------------------------------
+
+/// One replica: its own store/pool, its own in-memory limiter, and — when the
+/// config selects `postgres` — a shared backend over a pool of its own (`main.rs`
+/// reuses the store's pool; a separate one is equivalent for this proof).
+async fn replica(url: &str, cfg: &RegistryConfig) -> axum::Router {
+    let shared: Option<Arc<dyn SharedRateLimitBackend>> =
+        if cfg.rate_limit.backend == SharedLimitBackendKind::Postgres {
+            let store = PgStore::connect(url, 4).await.unwrap();
+            Some(Arc::new(PgRateLimitBackend::new(
+                store.pool().clone(),
+                cfg.rate_limit.per_ip_per_minute,
+                cfg.rate_limit.global_per_minute,
+                std::time::Duration::from_secs(5),
+            )))
+        } else {
+            None
+        };
+    shared_limiter_router(url, cfg.clone(), shared).await.1
+}
+
+/// NOTE: the `auth_global` row is shared by every test and every test binary
+/// that talks to this database. `cargo test -p acdp-registry-pg` also touches it
+/// (`global_and_per_ip_scopes_do_not_share_a_bucket`), so these proofs assume the
+/// two commands run one after the other, as `ci.yml` does — not concurrently.
+///
+/// Start each proof early enough in a 60s window that its sub-second burst stays
+/// inside one window, and reset the global counter row (it is shared by every
+/// test and key-independent, so a prior test's hits would otherwise count).
+async fn fresh_global_window(url: &str) {
+    let pool = PgStore::connect(url, 2).await.unwrap().pool().clone();
+    let secs: i64 = sqlx::query_scalar("SELECT floor(EXTRACT(EPOCH FROM now()))::bigint % 60")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    if secs >= 54 {
+        tokio::time::sleep(std::time::Duration::from_secs((60 - secs) as u64 + 1)).await;
+    }
+    sqlx::query("DELETE FROM rate_limit_windows WHERE scope = 'auth_global'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// Alternate `peers` across the two routers (request i goes to router i % 2,
+/// from peer i % peers.len()), returning how many were admitted.
+async fn admitted_across(a: &axum::Router, b: &axum::Router, peers: &[String], n: usize) -> usize {
+    let mut ok = 0;
+    for i in 0..n {
+        let router = if i % 2 == 0 { a } else { b };
+        let status = status_of(router, challenge_from_v6(&peers[i % peers.len()])).await;
+        match status {
+            StatusCode::OK => ok += 1,
+            StatusCode::TOO_MANY_REQUESTS => {}
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    ok
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn two_routers_sharing_one_pool_enforce_one_per_ip_budget() {
+    let Some(url) = pg_url_or_skip() else { return };
+    fresh_global_window(&url).await;
+    let cfg = shared_limiter_cfg(6, 1_000_000);
+    let (a, b) = (replica(&url, &cfg).await, replica(&url, &cfg).await);
+    // Alternating 12 requests puts 6 on each router: each in-memory limiter
+    // (limit 6) never trips on its own, so only the shared backend can cap the
+    // total.
+    let admitted = admitted_across(&a, &b, &[unique_v6()], 12).await;
+    assert_eq!(
+        admitted, 6,
+        "one budget of 6 across both replicas, not 2 x 6"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn two_routers_sharing_one_pool_enforce_one_global_budget() {
+    let Some(url) = pg_url_or_skip() else { return };
+    fresh_global_window(&url).await;
+    let cfg = shared_limiter_cfg(100, 4);
+    let (a, b) = (replica(&url, &cfg).await, replica(&url, &cfg).await);
+    // Two distinct IPs (one per router), so no per-IP budget is near its limit;
+    // only the cluster-wide global ceiling can stop the 5th request.
+    let peers = [unique_v6(), unique_v6()];
+    let admitted = admitted_across(&a, &b, &peers, 8).await;
+    assert_eq!(
+        admitted, 4,
+        "one global ceiling of 4 across both replicas, not 2 x 4"
+    );
+}
+
+/// Negative control: with the in-memory backend the same scenario admits TWICE
+/// the budget. Without it the two tests above could be satisfied by a limiter
+/// that is simply broken and rejects too early.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn memory_backend_admits_twice_the_budget_across_two_routers() {
+    let Some(url) = pg_url_or_skip() else { return };
+    fresh_global_window(&url).await;
+    let mut cfg = shared_limiter_cfg(6, 1_000_000);
+    cfg.rate_limit.backend = SharedLimitBackendKind::Memory;
+    let (a, b) = (replica(&url, &cfg).await, replica(&url, &cfg).await);
+    let admitted = admitted_across(&a, &b, &[unique_v6()], 12).await;
+    assert_eq!(admitted, 12, "per-replica counters: each admits its own 6");
+
+    let mut cfg = shared_limiter_cfg(100, 4);
+    cfg.rate_limit.backend = SharedLimitBackendKind::Memory;
+    let (a, b) = (replica(&url, &cfg).await, replica(&url, &cfg).await);
+    let peers = [unique_v6(), unique_v6()];
+    assert_eq!(
+        admitted_across(&a, &b, &peers, 8).await,
+        8,
+        "each replica's global ceiling of 4"
+    );
+}

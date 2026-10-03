@@ -21,6 +21,30 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.1.6
+
+**No action needed on upgrade. One optional feature, and one rollback ordering note.**
+
+`[rate_limit]` gains four keys — `backend`, `backend_unavailable`, `backend_timeout_ms`,
+`backend_prune_seconds` — all defaulted. Every config that parses today still parses and behaves
+identically: the default `backend = "memory"` is the existing per-process limiter. Setting
+`backend = "postgres"` counts the `/auth/*` per-IP and global ceilings across replicas in the
+registry's own database; see [CONFIGURATION.md · `[rate_limit]`](CONFIGURATION.md#rate_limit-feat-06)
+and [OPERATIONS.md · Rate limiting](OPERATIONS.md#rate-limiting). It is only useful with more than one
+replica, and is refused at startup unless `storage.backend = "postgres"`.
+
+On Postgres, upgrading applies migration `014` (a new, additive `rate_limit_windows` table; nothing an
+older binary reads). 0.1.6 and later tolerate a database that a newer release has already migrated
+(#345), so rolling back *between* such releases needs no database action. **0.1.5 does not:** it
+refuses to start against a database that has applied migration 14. To roll back to 0.1.5, first run
+`DELETE FROM _sqlx_migrations WHERE version = 14;` (the orphaned `rate_limit_windows` table is harmless
+and a later upgrade re-applies the migration idempotently).
+
+**Rollback ordering.** `[rate_limit]` rejects unknown keys, so a config carrying any of the four new
+keys will **not parse** on an older binary. Roll the config back *before* the binary.
+
+---
+
 ## 0.1.5
 
 Bumps `acdp` 0.13.1 → 0.14.1 and adopts ACDP spec pin `16211e6` → `9deb7e7`. Three behavior

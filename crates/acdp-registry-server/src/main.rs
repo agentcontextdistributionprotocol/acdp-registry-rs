@@ -68,6 +68,7 @@ use acdp_registry_auth::{AuthService, ChallengeStore, JwtSecret, JwtSigner, Revo
 use acdp_registry_auth::{InMemoryChallengeStore, InMemoryRevocationStore};
 use acdp_registry_core::{build_router, AppStateInner};
 use acdp_registry_store::ExtendedRegistryStore;
+use acdp_registry_types::config::SharedLimitBackendKind;
 use acdp_registry_types::{RegistryConfig, StorageBackend, REGISTRY_ADVERTISABLE_PROFILES};
 use acdp_registry_webhook::WebhookEmitter;
 
@@ -608,6 +609,7 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
              enable the limiter or drop the trusted_proxies list"
         );
     }
+    validate_shared_rate_limit(cfg)?;
     if cfg.metrics.enabled {
         // #162: the `/metrics` gate applies only when the TRIMMED token is
         // non-empty (`crates/acdp-registry-core/src/metrics.rs:122-123`), so a
@@ -705,6 +707,50 @@ fn resolve_bind_addr(bind: &str, port: u16) -> anyhow::Result<SocketAddr> {
         .map_err(|e| anyhow::anyhow!("bind address {bind:?} port {port}: {e}"))
 }
 
+/// FEAT-06 item 3: refuse every incoherent `[rate_limit] backend = "postgres"`
+/// combination at startup, each naming its fix. A shared limiter an operator
+/// asked for and did not get should fail the boot, not be discovered later from
+/// a metric that never moves.
+fn validate_shared_rate_limit(cfg: &RegistryConfig) -> anyhow::Result<()> {
+    let rl = &cfg.rate_limit;
+    if rl.backend != SharedLimitBackendKind::Postgres {
+        return Ok(());
+    }
+    if !matches!(cfg.storage.backend, StorageBackend::Postgres) {
+        anyhow::bail!(
+            "rate_limit.backend = \"postgres\" requires storage.backend = \"postgres\" (the \
+             shared counters live in the registry's own database); set storage.backend to \
+             postgres or rate_limit.backend to \"memory\""
+        );
+    }
+    if !rl.enabled {
+        anyhow::bail!(
+            "rate_limit.backend = \"postgres\" is configured but rate_limit.enabled=false; \
+             enable the limiter or set rate_limit.backend to \"memory\""
+        );
+    }
+    if rl.global_per_minute == 0 {
+        anyhow::bail!(
+            "rate_limit.backend = \"postgres\" requires rate_limit.global_per_minute > 0: the \
+             global ceiling is what bounds database writes when an attacker rotates source IPs \
+             (and with both budgets at 0 the backend would never be consulted)"
+        );
+    }
+    if rl.backend_timeout_ms == 0 {
+        anyhow::bail!(
+            "rate_limit.backend_timeout_ms = 0 would make every shared check time out and \
+             silently disable the shared limiter; set a positive value (default 250)"
+        );
+    }
+    if rl.backend_prune_seconds == 0 {
+        anyhow::bail!(
+            "rate_limit.backend_prune_seconds = 0 is not a valid prune interval; set a positive \
+             value (default 300)"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(feature = "storage-sqlite")]
 async fn run(cfg: RegistryConfig) -> anyhow::Result<()> {
     use acdp_registry_auth::{SqliteChallengeStore, SqliteRevocationStore};
@@ -750,7 +796,7 @@ async fn run(cfg: RegistryConfig) -> anyhow::Result<()> {
     // tokens whose jti has been tombstoned here.
     let revocations: Arc<dyn RevocationStore> =
         Arc::new(SqliteRevocationStore::new(store.pool().clone()));
-    serve_with_store(cfg, store, challenges, Some(revocations)).await
+    serve_with_store(cfg, store, challenges, Some(revocations), None).await
 }
 
 #[cfg(all(feature = "storage-pg", not(feature = "storage-sqlite")))]
@@ -794,7 +840,43 @@ async fn run(cfg: RegistryConfig) -> anyhow::Result<()> {
     let challenges: Arc<dyn ChallengeStore> = Arc::new(PgChallengeStore::new(store.pool().clone()));
     let revocations: Arc<dyn RevocationStore> =
         Arc::new(PgRevocationStore::new(store.pool().clone()));
-    serve_with_store(cfg, store, challenges, Some(revocations)).await
+    // FEAT-06 item 3: cluster-wide `/auth/*` limiting over the same pool, plus
+    // the task that prunes its stale rows. Validation has already refused every
+    // configuration that wants this on a non-Postgres or disabled limiter.
+    let shared_auth_limiter: Option<Arc<dyn acdp_registry_store::SharedRateLimitBackend>> =
+        if cfg.rate_limit.enabled && cfg.rate_limit.backend == SharedLimitBackendKind::Postgres {
+            let rl = &cfg.rate_limit;
+            let backend = Arc::new(acdp_registry_pg::PgRateLimitBackend::new(
+                store.pool().clone(),
+                rl.per_ip_per_minute,
+                rl.global_per_minute,
+                std::time::Duration::from_millis(rl.backend_timeout_ms),
+            ));
+            let pruner = backend.clone();
+            let every = std::time::Duration::from_secs(rl.backend_prune_seconds);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(every);
+                loop {
+                    tick.tick().await;
+                    // Two 60s windows of slack so a row in the window being
+                    // counted is never deleted from under a live decision.
+                    if let Err(e) = pruner.prune_older_than(2 * 60).await {
+                        tracing::warn!(error = %e, "rate-limit window pruning failed");
+                    }
+                }
+            });
+            Some(backend)
+        } else {
+            None
+        };
+    serve_with_store(
+        cfg,
+        store,
+        challenges,
+        Some(revocations),
+        shared_auth_limiter,
+    )
+    .await
 }
 
 #[cfg(all(
@@ -811,7 +893,7 @@ async fn run(cfg: RegistryConfig) -> anyhow::Result<()> {
     store.migrate().await?;
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
     let revocations: Arc<dyn RevocationStore> = Arc::new(InMemoryRevocationStore::new());
-    serve_with_store(cfg, store, challenges, Some(revocations)).await
+    serve_with_store(cfg, store, challenges, Some(revocations), None).await
 }
 
 #[cfg(not(any(
@@ -831,6 +913,7 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     store: S,
     challenges: Arc<dyn ChallengeStore>,
     revocations: Option<Arc<dyn RevocationStore>>,
+    shared_auth_limiter: Option<Arc<dyn acdp_registry_store::SharedRateLimitBackend>>,
 ) -> anyhow::Result<()> {
     // Capabilities + RegistryServer.
     let caps = build_capabilities(&cfg);
@@ -1012,7 +1095,8 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     // Compose state + router. The constructor seeds `playground` —
     // the live-mutable cell backing `POST /admin/pinned-keys/reload`
     // (plan §2) — from `cfg.playground`.
-    let state = AppStateInner::new(server, auth, webhook, cfg.clone(), cross_registry);
+    let state = AppStateInner::new(server, auth, webhook, cfg.clone(), cross_registry)
+        .with_shared_auth_limiter(shared_auth_limiter);
 
     // RFC-ACDP-0015 §6.1 witness-cosignature aggregation: one background
     // poller per configured witness fetches its cosignature feed over the
@@ -1313,6 +1397,83 @@ mod tests {
     use super::*;
     use acdp_registry_types::RegistryConfig;
     use base64::Engine as _;
+
+    /// A Postgres-storage config selecting the shared `/auth/*` limiter.
+    fn shared_limiter_cfg() -> RegistryConfig {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.storage.backend = StorageBackend::Postgres;
+        cfg.storage.postgres_url = Some("postgres://u:p@h/db".into());
+        cfg.rate_limit.backend = SharedLimitBackendKind::Postgres;
+        cfg
+    }
+
+    fn rejection(cfg: &RegistryConfig) -> String {
+        validate_shared_rate_limit(cfg)
+            .expect_err("this combination must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn shared_limiter_requires_postgres_storage() {
+        let mut cfg = shared_limiter_cfg();
+        cfg.storage.backend = StorageBackend::Sqlite;
+        assert!(rejection(&cfg).contains("requires storage.backend"));
+        cfg.storage.backend = StorageBackend::Memory;
+        assert!(rejection(&cfg).contains("requires storage.backend"));
+    }
+
+    #[test]
+    fn shared_limiter_refuses_a_disabled_limiter() {
+        let mut cfg = shared_limiter_cfg();
+        cfg.rate_limit.enabled = false;
+        assert!(rejection(&cfg).contains("rate_limit.enabled=false"));
+    }
+
+    #[test]
+    fn shared_limiter_refuses_a_zero_global_budget() {
+        let mut cfg = shared_limiter_cfg();
+        cfg.rate_limit.global_per_minute = 0;
+        assert!(rejection(&cfg).contains("global_per_minute > 0"));
+        // Both budgets off is the same refusal (global is the binding rule).
+        cfg.rate_limit.per_ip_per_minute = 0;
+        assert!(rejection(&cfg).contains("global_per_minute > 0"));
+    }
+
+    #[test]
+    fn shared_limiter_refuses_zero_timeout_and_zero_prune_interval() {
+        let mut cfg = shared_limiter_cfg();
+        cfg.rate_limit.backend_timeout_ms = 0;
+        assert!(rejection(&cfg).contains("backend_timeout_ms"));
+        let mut cfg = shared_limiter_cfg();
+        cfg.rate_limit.backend_prune_seconds = 0;
+        assert!(rejection(&cfg).contains("backend_prune_seconds"));
+    }
+
+    /// The rules are reached from `validate_config` itself, not only callable.
+    #[test]
+    fn validate_config_runs_the_shared_limiter_rules() {
+        let mut cfg = shared_limiter_cfg();
+        cfg.storage.backend = StorageBackend::Sqlite;
+        let err = validate_config(&cfg).expect_err("refused at startup");
+        assert!(
+            err.to_string().contains("requires storage.backend"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn shared_limiter_accepts_the_coherent_configs() {
+        // Not satisfiable by a blanket refusal: the memory default on any
+        // storage, and postgres-on-postgres, both pass.
+        let mut memory_on_sqlite = RegistryConfig::defaults();
+        memory_on_sqlite.storage.backend = StorageBackend::Sqlite;
+        assert!(validate_shared_rate_limit(&memory_on_sqlite).is_ok());
+        assert!(validate_shared_rate_limit(&shared_limiter_cfg()).is_ok());
+        // A zero timeout is only a problem when the shared backend is in use.
+        let mut dormant = RegistryConfig::defaults();
+        dormant.rate_limit.backend_timeout_ms = 0;
+        assert!(validate_shared_rate_limit(&dormant).is_ok());
+    }
 
     fn cfg_with_auth(secret: &str, allow_ephemeral: bool) -> RegistryConfig {
         let mut cfg = RegistryConfig::defaults();
