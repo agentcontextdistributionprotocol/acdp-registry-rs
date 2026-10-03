@@ -226,7 +226,33 @@ jobs:
               echo "ERROR: healthz version '$VERSION' does not carry +g${{ steps.sha.outputs.short }}"
               exit 1 ;;
           esac
-          docker rm -f registry pg
+          # FEAT-06 item 3: the real Postgres startup path. The unit and
+          # integration suites build the shared /auth/* limiter by hand; only
+          # this boots the binary's own `run()` (backend construction, the
+          # pruner task, env-override parsing of the new keys). One challenge
+          # request must leave a counter row for each scope in the database.
+          docker rm -f registry
+          docker run -d --name registry-shared --network acdp-smoke -p 8444:8443 \
+            -v "$PWD/docker/config.docker.toml:/app/config.toml:ro" \
+            -e ACDP_REGISTRY_CONFIG=/app/config.toml \
+            -e ACDP_REGISTRY_STORAGE__POSTGRES_URL=postgres://acdp:acdp@pg:5432/acdp_registry \
+            -e ACDP_REGISTRY_RATE_LIMIT__BACKEND=postgres \
+            -e ACDP_REGISTRY_AUTH__ENABLED=true \
+            -e ACDP_REGISTRY_AUTH__JWT_SECRET="$(openssl rand -base64 32)" \
+            acdp-registry:smoke
+          curl --fail --silent --show-error --retry 15 --retry-delay 2 --retry-all-errors \
+            http://localhost:8444/healthz -o /dev/null
+          curl --fail --silent --show-error -X POST http://localhost:8444/auth/challenge \
+            -H 'content-type: application/json' \
+            -d '{"agent_id":"did:web:agents.test:smoke"}' -o /dev/null
+          SCOPES="$(docker exec pg psql -U acdp -d acdp_registry -tAc \
+            'SELECT scope FROM rate_limit_windows ORDER BY scope')"
+          docker logs registry-shared
+          [ "$SCOPES" = "$(printf 'auth_global\nauth_per_ip')" ] || {
+            echo "ERROR: expected one rate_limit_windows row per scope, got: '$SCOPES'"
+            exit 1
+          }
+          docker rm -f registry-shared pg
           docker network rm acdp-smoke
 
       # ── #266: the DOCUMENTED recipe, not a reimplementation of it ──────────

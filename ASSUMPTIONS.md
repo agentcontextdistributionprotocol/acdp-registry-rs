@@ -4699,7 +4699,7 @@ underlying settings and code were not touched by this pass, only the record of t
 
 ## FEAT-06 item 3, Phase 3 — Postgres rate-limit windows: hot-row headroom and UNLOGGED
 - **Plan:** plans/rate-limit-shared-backend.md (Phase 3, Q4 and Q9)
-- **Assumed:** (Q4) ~100 updates/s on the single `auth_global` row (the shipped `global_per_minute = 6000`) is 5–20% of what one HOT-updated row sustains (~500–2000/s), holding to ~5+ replicas. A reasoned estimate, not a measurement: no multi-replica deployment exists to measure.
+- **Assumed:** (Q4) ~100 updates/s on the single `auth_global` row (the shipped `global_per_minute = 6000`) is 5–20% of what one HOT-updated row sustains (~500–2000/s), holding to ~5+ replicas. **Update 2026-10-03:** measured with pgbench (PG 18 in Docker, no network hop): ~34k/s (8 clients) and ~26k/s (32) UNLOGGED vs ~3.3k/s and ~2.6k/s LOGGED — the estimate was conservative by >10x and UNLOGGED is worth ~10x; real deployments (network RTT, shared load) will be lower, so still unconfirmed against production.
 - **Chose:** (Q9) `CREATE UNLOGGED TABLE rate_limit_windows` (renamed from `auth_rate_limit_windows`, since other scopes may share it), following the plan's Fable round-3 recommendation. No sharding of the global counter; no index beyond the primary key.
 - **Alternatives:** a LOGGED table (adds a WAL fsync to every row-lock hold); sharding the global row into N summed rows (breaks single-statement exactness); an index on `window_start` (defeats HOT updates).
 - **Blast radius if wrong:** UNLOGGED contents are lost on crash recovery or standby promotion — one window's budget resets once. A wrong hot-row estimate shows up as latency on `acdp_registry_rate_limit_shared_seconds{scope="auth_global"}` (added in Phase 4) and is fixable without a schema change; undoing UNLOGGED itself needs migration 015 (the migration is checksummed and uneditable).
@@ -4723,8 +4723,8 @@ underlying settings and code were not touched by this pass, only the record of t
 
 ## FEAT-06 item 3, Phase 6 — multi-replica proof test hygiene
 - **Plan:** plans/rate-limit-shared-backend.md (Phase 6)
-- **Assumed:** CI runs `cargo test -p acdp-registry-pg` and the `pg_integration` suite sequentially against one database (as `ci.yml` does), so the shared, key-independent `auth_global` row can be reset at the start of each global-budget proof instead of keyed per test.
+- **Assumed:** CI runs `cargo test -p acdp-registry-pg` and the `pg_integration` suite sequentially against one database (as `ci.yml` does), so the shared, key-independent `auth_global` row can be reset at the start of each global-budget proof instead of keyed per test. **Update 2026-10-03:** no longer assumed — both test binaries now serialise on a session-level `pg_advisory_lock` around global-row work (8/8 concurrent runs green; 6/8 failed before).
 - **Chose:** `DELETE` the `auth_global` row and skip near a window boundary at the start of each proof, rather than a UUID key (the global scope has exactly one row by design, so no per-test key exists).
 - **Alternatives:** a shared `pg_advisory_lock` across both test binaries; a per-test throwaway database.
-- **Blast radius if wrong:** test flakiness only, when the two Postgres commands are run concurrently (observed locally when forced); no production effect.
+- **Blast radius if wrong:** test flakiness only; no production effect.
 - **Status:** UNCONFIRMED
