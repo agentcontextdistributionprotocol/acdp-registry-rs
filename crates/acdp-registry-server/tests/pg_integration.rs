@@ -1106,8 +1106,8 @@ async fn memory_backend_keeps_the_bare_in_memory_limiter() {
 // ---------------------------------------------------------------------------
 
 /// One replica: its own store/pool, its own in-memory limiter, and — when the
-/// config selects `postgres` — a shared backend over its own pool, built the way
-/// `main.rs` builds it.
+/// config selects `postgres` — a shared backend over a pool of its own (`main.rs`
+/// reuses the store's pool; a separate one is equivalent for this proof).
 async fn replica(url: &str, cfg: &RegistryConfig) -> axum::Router {
     let shared: Option<Arc<dyn SharedRateLimitBackend>> =
         if cfg.rate_limit.backend == SharedLimitBackendKind::Postgres {
@@ -1124,6 +1124,11 @@ async fn replica(url: &str, cfg: &RegistryConfig) -> axum::Router {
     shared_limiter_router(url, cfg.clone(), shared).await.1
 }
 
+/// NOTE: the `auth_global` row is shared by every test and every test binary
+/// that talks to this database. `cargo test -p acdp-registry-pg` also touches it
+/// (`global_and_per_ip_scopes_do_not_share_a_bucket`), so these proofs assume the
+/// two commands run one after the other, as `ci.yml` does — not concurrently.
+///
 /// Start each proof early enough in a 60s window that its sub-second burst stays
 /// inside one window, and reset the global counter row (it is shared by every
 /// test and key-independent, so a prior test's hits would otherwise count).

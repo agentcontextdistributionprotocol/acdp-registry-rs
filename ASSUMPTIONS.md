@@ -4720,3 +4720,11 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** a new `[rate_limit.shared]` section; silent fallback to memory; client-clock pruning.
 - **Blast radius if wrong:** pre-GA config surface — key names/defaults can still change, but once operators adopt them a rename is a breaking config change (and `deny_unknown_fields` makes a new config unparseable on an old binary, noted in UPGRADING).
 - **Status:** UNCONFIRMED
+
+## FEAT-06 item 3, Phase 6 — multi-replica proof test hygiene
+- **Plan:** plans/rate-limit-shared-backend.md (Phase 6)
+- **Assumed:** CI runs `cargo test -p acdp-registry-pg` and the `pg_integration` suite sequentially against one database (as `ci.yml` does), so the shared, key-independent `auth_global` row can be reset at the start of each global-budget proof instead of keyed per test.
+- **Chose:** `DELETE` the `auth_global` row and skip near a window boundary at the start of each proof, rather than a UUID key (the global scope has exactly one row by design, so no per-test key exists).
+- **Alternatives:** a shared `pg_advisory_lock` across both test binaries; a per-test throwaway database.
+- **Blast radius if wrong:** test flakiness only, when the two Postgres commands are run concurrently (observed locally when forced); no production effect.
+- **Status:** UNCONFIRMED

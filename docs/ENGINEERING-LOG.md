@@ -60,7 +60,7 @@ startup validation, wiring and a pruner. Then a two-routers-one-database proof.
   it; `a_stale_window_never_rolls_the_counter_backwards` goes red under the naive form.
 - *The in-memory limiter is a permanent pre-filter, not an optimisation.* Asked first, with the same
   limits, it makes the database's write rate a function of the configured limits instead of attacker
-  volume (at most `2 × global_per_minute` statements per window per replica) and means enabling the
+  volume (at most `2 × global_per_minute` statements per in-memory limiter window per replica) and means enabling the
   shared backend can only tighten enforcement. That bound needs the global budget on, so startup
   refuses `backend = "postgres"` with `global_per_minute = 0` — a condition the first draft of the
   claim omitted and a review caught.
