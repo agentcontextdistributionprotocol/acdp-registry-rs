@@ -4712,3 +4712,11 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** L2-only (DB write rate becomes attacker-controlled); a separate larger L1 budget; fail-closed default.
 - **Blast radius if wrong:** the posture is flipped by config (Phase 5) with a restart and no code change; the 5s unavailable `Retry-After` is a constant to retune. The 2x bound is derived, not load-tested.
 - **Status:** UNCONFIRMED
+
+## FEAT-06 item 3, Phase 5 — config surface, startup validation and wiring
+- **Plan:** plans/rate-limit-shared-backend.md (Phase 5, Q5)
+- **Assumed:** extending `[rate_limit]` (rather than adding a section) is the right home for the four new keys, and failing the boot is better than silently degrading to in-memory when `backend = "postgres"` is set on non-Postgres storage.
+- **Chose:** `backend` / `backend_unavailable` / `backend_timeout_ms` (250) / `backend_prune_seconds` (300), all defaulted; validation refuses postgres backend with non-Postgres storage, a disabled limiter, `global_per_minute == 0` (broader than the plan's "both zero", because Phase 4's database-load bound needs the global budget), zero timeout, zero prune interval — the last two only when the shared backend is selected, so a dormant key cannot block a boot. The pruner deletes windows older than 120s by the database clock. Documented in docs/CONFIGURATION.md and a new `## 0.1.6` section of docs/UPGRADING.md (the next release; 0.1.5 is already released).
+- **Alternatives:** a new `[rate_limit.shared]` section; silent fallback to memory; client-clock pruning.
+- **Blast radius if wrong:** pre-GA config surface — key names/defaults can still change, but once operators adopt them a rename is a breaking config change (and `deny_unknown_fields` makes a new config unparseable on an old binary, noted in UPGRADING).
+- **Status:** UNCONFIRMED

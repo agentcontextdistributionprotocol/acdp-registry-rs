@@ -88,14 +88,20 @@ impl PgRateLimitBackend {
         }
     }
 
-    /// Delete windows that started before `before_epoch` (epoch seconds).
-    /// Table-wide: the return value counts every stale row, whoever wrote it.
-    pub async fn prune(&self, before_epoch: i64) -> Result<u64, sqlx::Error> {
-        sqlx::query("DELETE FROM rate_limit_windows WHERE window_start < $1")
-            .bind(before_epoch)
-            .execute(&self.pool)
-            .await
-            .map(|r| r.rows_affected())
+    /// Delete windows that started more than `max_age_secs` before now, by the
+    /// **database** clock: these are the rows the checks write with the
+    /// database's clock, so a client-side cutoff from a fast host clock could
+    /// prune a window that is still live. Table-wide: the return value counts
+    /// every stale row, whoever wrote it.
+    pub async fn prune_older_than(&self, max_age_secs: i64) -> Result<u64, sqlx::Error> {
+        sqlx::query(
+            "DELETE FROM rate_limit_windows \
+             WHERE window_start < floor(EXTRACT(EPOCH FROM now()))::bigint - $1",
+        )
+        .bind(max_age_secs)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected())
     }
 
     async fn run(&self, scope: SharedLimitScope, key: &str) -> Result<LimitDecision, sqlx::Error> {

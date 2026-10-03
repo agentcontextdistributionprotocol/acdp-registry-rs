@@ -731,6 +731,53 @@ pub struct RateLimitConfig {
     /// untrusted range lets clients on it spoof their source IP.
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    /// Where the two `/auth/*` ceilings are counted. `memory` (default): per
+    /// process, each replica enforces its own counters. `postgres`: counted
+    /// once across every replica sharing the database, with the in-memory
+    /// limiter kept in front as a pre-filter. Requires `storage.backend =
+    /// "postgres"`, `enabled = true` and a non-zero `global_per_minute`.
+    #[serde(default)]
+    pub backend: SharedLimitBackendKind,
+    /// What to do when the shared backend cannot answer: `allow` (default)
+    /// falls back to the per-process limit the in-memory layer already
+    /// enforced; `deny` refuses the request with a short `Retry-After`.
+    #[serde(default)]
+    pub backend_unavailable: UnavailablePostureConfig,
+    /// Per-check timeout against the shared backend, in milliseconds. A stall
+    /// costs up to this per check (two checks per `/auth/*` request) before
+    /// the unavailable posture applies. Must be non-zero.
+    #[serde(default = "default_backend_timeout_ms")]
+    pub backend_timeout_ms: u64,
+    /// How often, in seconds, the shared backend's stale rows are pruned.
+    /// Must be non-zero.
+    #[serde(default = "default_backend_prune_seconds")]
+    pub backend_prune_seconds: u64,
+}
+
+/// Where the `/auth/*` ceilings are counted. See [`RateLimitConfig::backend`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SharedLimitBackendKind {
+    #[default]
+    Memory,
+    Postgres,
+}
+
+/// Posture when the shared backend is unavailable. See
+/// [`RateLimitConfig::backend_unavailable`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnavailablePostureConfig {
+    #[default]
+    Allow,
+    Deny,
+}
+
+fn default_backend_timeout_ms() -> u64 {
+    250
+}
+fn default_backend_prune_seconds() -> u64 {
+    300
 }
 
 fn default_per_ip_per_minute() -> u32 {
@@ -747,6 +794,10 @@ impl Default for RateLimitConfig {
             per_ip_per_minute: default_per_ip_per_minute(),
             global_per_minute: default_global_per_minute(),
             trusted_proxies: Vec::new(),
+            backend: SharedLimitBackendKind::default(),
+            backend_unavailable: UnavailablePostureConfig::default(),
+            backend_timeout_ms: default_backend_timeout_ms(),
+            backend_prune_seconds: default_backend_prune_seconds(),
         }
     }
 }
@@ -1166,6 +1217,51 @@ fn current_unix_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_limit_shared_backend_keys_default_for_an_old_config() {
+        // A file with only the pre-existing keys must parse and behave as before.
+        let rl: RateLimitConfig = toml::from_str(
+            "enabled = true\nper_ip_per_minute = 60\nglobal_per_minute = 6000\ntrusted_proxies = []",
+        )
+        .unwrap();
+        assert_eq!(rl.backend, SharedLimitBackendKind::Memory);
+        assert_eq!(rl.backend_unavailable, UnavailablePostureConfig::Allow);
+        assert_eq!(rl.backend_timeout_ms, 250);
+        assert_eq!(rl.backend_prune_seconds, 300);
+        let d = RateLimitConfig::default();
+        assert_eq!(
+            (d.backend, d.backend_unavailable),
+            (rl.backend, rl.backend_unavailable)
+        );
+    }
+
+    #[test]
+    fn rate_limit_shared_backend_enums_take_two_lowercase_spellings_and_reject_a_third() {
+        for (v, want) in [
+            ("memory", SharedLimitBackendKind::Memory),
+            ("postgres", SharedLimitBackendKind::Postgres),
+        ] {
+            let rl: RateLimitConfig = toml::from_str(&format!("backend = \"{v}\"")).unwrap();
+            assert_eq!(rl.backend, want);
+        }
+        for (v, want) in [
+            ("allow", UnavailablePostureConfig::Allow),
+            ("deny", UnavailablePostureConfig::Deny),
+        ] {
+            let rl: RateLimitConfig =
+                toml::from_str(&format!("backend_unavailable = \"{v}\"")).unwrap();
+            assert_eq!(rl.backend_unavailable, want);
+        }
+        assert!(toml::from_str::<RateLimitConfig>("backend = \"redis\"").is_err());
+        assert!(toml::from_str::<RateLimitConfig>("backend_unavailable = \"maybe\"").is_err());
+        assert!(
+            toml::from_str::<RateLimitConfig>("backend = \"Postgres\"").is_err(),
+            "lowercase only"
+        );
+        // deny_unknown_fields is intact.
+        assert!(toml::from_str::<RateLimitConfig>("backend_typo = 1").is_err());
+    }
 
     /// `docs/advertisable-profiles.json` is the machine-readable copy of
     /// [`REGISTRY_ADVERTISABLE_PROFILES`] that non-Rust consumers vendor (#347).

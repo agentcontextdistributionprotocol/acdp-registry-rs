@@ -96,6 +96,7 @@ fn metrics_config() -> RegistryConfig {
             per_ip_per_minute: 1,
             global_per_minute: 0,
             trusted_proxies: vec![],
+            ..RateLimitConfig::default()
         },
         metrics: MetricsConfig {
             enabled: true,

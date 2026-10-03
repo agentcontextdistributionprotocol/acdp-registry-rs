@@ -345,7 +345,7 @@ async fn prune_removes_only_stale_windows() {
             .await
             .unwrap();
     }
-    b.prune(now - 300).await.expect("prune");
+    b.prune_older_than(300).await.expect("prune");
     // Assert on this test's own rows, never on `prune`'s table-wide count.
     let exists = |k: String| {
         let pool = pool.clone();
