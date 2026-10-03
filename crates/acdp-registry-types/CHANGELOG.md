@@ -1,5 +1,16 @@
 
 
+## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.1.5...acdp-registry-types/v0.2.0) - 2026-10-03
+
+### Added
+
+- *(auth)* wire the shared /auth/* rate limiter and prove it across replicas ([#356](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/356))
+
+### Other
+
+- publish REGISTRY_ADVERTISABLE_PROFILES as docs/advertisable-profiles.json ([#353](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/353))
+
+
 ## [0.1.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.1.4...acdp-registry-types/v0.1.5) - 2026-09-23
 
 ### Other
