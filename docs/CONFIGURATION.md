@@ -341,7 +341,7 @@ See [WEBHOOKS.md](WEBHOOKS.md).
 | `publish_rate_per_minute` | u32 | `60` | Per-agent `POST /contexts` cap; `0` disables. In-memory, per-process. |
 | `challenge_rate_per_minute` | u32 | `60` | Per-agent `POST /auth/challenge` cap; `0` disables. In-memory, per-process. |
 
-> These are per-process in-memory token buckets — see
+> These are per-process in-memory fixed-window counters — see
 > [OPERATIONS.md · Rate limiting](OPERATIONS.md#rate-limiting) for the
 > multi-replica caveat.
 

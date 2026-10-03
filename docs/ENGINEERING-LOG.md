@@ -31,6 +31,55 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+### FEAT-06 item 3 — a shared `/auth/*` limiter, built ahead of need (#344)
+
+`[rate_limit]` could only count per process. With more than one replica the per-IP budget and the
+global ceiling were each multiplied by the replica count, and the docs' answer was "front the
+deployment with a shared limiter". `[rate_limit] backend = "postgres"` now counts both ceilings once
+across replicas, in the registry's own database.
+
+**Built ahead of need, on purpose, and recorded as such.** Every deployment recipe in this repo runs
+exactly one instance (`docker/docker-compose.yml` cannot bind a second; `docker/RAILWAY.md` has no
+replica story; there are no Kubernetes manifests), so nothing deployed today benefits. The plan's last
+review recommended shipping only the migration-runner rollback fix and deferring the rest; the work
+was done anyway at the maintainer's explicit request. Nothing here is urgent, and a single-replica
+operator should leave `backend = "memory"`.
+
+**What was built, in order.** A narrow `SharedRateLimitBackend` seam (two `/auth/*` scopes only; the
+per-agent publish and challenge budgets stay per-process) with the in-memory limiter as the first
+implementation. A `PgRateLimitBackend` over the existing pool: one atomic
+`INSERT … ON CONFLICT DO UPDATE` per check, the database as the clock, an `UNLOGGED` table named
+`rate_limit_windows`. A `LayeredRateLimiter` putting the in-memory limiter in front. Config keys,
+startup validation, wiring and a pruner. Then a two-routers-one-database proof.
+
+**Decisions worth keeping.**
+
+- *The window roll is monotonic.* The naive `window_start = EXCLUDED.window_start` has a real bug: a
+  statement whose `now()` was fixed before it queued on the hot row's lock can roll the window
+  *backwards* and hand the next request a fresh budget. `GREATEST` plus an `EXCLUDED > b` test fixes
+  it; `a_stale_window_never_rolls_the_counter_backwards` goes red under the naive form.
+- *The in-memory limiter is a permanent pre-filter, not an optimisation.* Asked first, with the same
+  limits, it makes the database's write rate a function of the configured limits instead of attacker
+  volume (at most `2 × global_per_minute` statements per window per replica) and means enabling the
+  shared backend can only tighten enforcement. That bound needs the global budget on, so startup
+  refuses `backend = "postgres"` with `global_per_minute = 0` — a condition the first draft of the
+  claim omitted and a review caught.
+- *Fail open, config-flippable.* An unreachable database degrades to per-process limiting, because
+  `/auth/*` limiting is a resource bound with no brute-forceable secret behind it, and refusing token
+  issuance on a database blip is the worse failure. `backend_unavailable = "deny"` flips it.
+- *`UNLOGGED`.* Removes the commit fsync from the hot-row lock hold. The cost is one window's budget
+  resetting after a crash or a standby promotion.
+- *Rejected:* an L2-only limiter (database load becomes attacker-controlled); a Redis dependency
+  (none exists in the repo; Postgres already carries the BUG-06 challenge and revocation stores);
+  sharding the global counter (breaks single-statement exactness; not warranted below tens of
+  thousands of requests a minute across several replicas); an index on `window_start` (defeats HOT
+  updates).
+
+**Not measured.** The `auth_global` hot row is estimated, not benchmarked, at roughly 500–2000
+updates/s against the default ~100/s. There is no multi-replica deployment to measure, which is the
+premise of the feature. `acdp_registry_rate_limit_shared_seconds` exists so it can be checked in
+production.
+
 <!-- U-501 addendum — acdp-registry-rs#336, adopting acdp-rs's Proven/commit_proven split -->
 
 ### U-501 addendum — the did:web gap closes, and a plan's acceptance criterion doesn't survive contact with the shipped API

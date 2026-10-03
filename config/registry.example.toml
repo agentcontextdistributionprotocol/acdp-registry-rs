@@ -137,6 +137,15 @@ global_per_minute = 6000
 # addresses of proxies you operate — a wrong entry lets clients spoof their IP.
 #   trusted_proxies = ["10.0.0.0/8"]
 trusted_proxies = []
+# Where the two ceilings above are counted. "memory" (default): per process.
+# "postgres": counted once across every replica sharing the database — only
+# useful with more than one replica, and refused at startup unless
+# storage.backend = "postgres", enabled = true and global_per_minute > 0.
+# See docs/OPERATIONS.md (Rate limiting) before enabling it.
+#   backend = "postgres"
+#   backend_unavailable = "allow"   # or "deny": what to do if the database cannot answer
+#   backend_timeout_ms = 250        # per-check timeout; must be > 0
+#   backend_prune_seconds = 300     # stale-row pruning interval; must be > 0
 
 [metrics]
 # FEAT-10: Prometheus /metrics endpoint (text exposition, version 0.0.4).
