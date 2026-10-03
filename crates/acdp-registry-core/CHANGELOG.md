@@ -1,5 +1,17 @@
 
 
+## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.1.5...acdp-registry-core/v0.2.0) - 2026-10-03
+
+### Added
+
+- *(auth)* wire the shared /auth/* rate limiter and prove it across replicas ([#356](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/356))
+- *(auth)* Postgres rate-limit backend and layered limiter (not yet wired) ([#355](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/355))
+
+### Other
+
+- *(auth)* route /auth/* limiting through a SharedRateLimitBackend seam ([#352](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/352))
+
+
 ## [0.1.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.1.4...acdp-registry-core/v0.1.5) - 2026-09-23
 
 ### Other

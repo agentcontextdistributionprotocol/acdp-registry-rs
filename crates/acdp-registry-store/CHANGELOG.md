@@ -1,5 +1,12 @@
 
 
+## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.1.5...acdp-registry-store/v0.2.0) - 2026-10-03
+
+### Other
+
+- *(auth)* route /auth/* limiting through a SharedRateLimitBackend seam ([#352](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/352))
+
+
 ## [0.1.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.1.4...acdp-registry-store/v0.1.5) - 2026-09-23
 
 ### Other
