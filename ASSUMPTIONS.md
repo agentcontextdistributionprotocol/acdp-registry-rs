@@ -4696,3 +4696,11 @@ exactly where U-507 left it.
 
 **Blast radius if this reconciliation is wrong:** none beyond documentation accuracy — the
 underlying settings and code were not touched by this pass, only the record of them.
+
+## FEAT-06 item 3, Phase 3 — Postgres rate-limit windows: hot-row headroom and UNLOGGED
+- **Plan:** plans/rate-limit-shared-backend.md (Phase 3, Q4 and Q9)
+- **Assumed:** (Q4) ~100 updates/s on the single `auth_global` row (the shipped `global_per_minute = 6000`) is 5–20% of what one HOT-updated row sustains (~500–2000/s), holding to ~5+ replicas. A reasoned estimate, not a measurement: no multi-replica deployment exists to measure.
+- **Chose:** (Q9) `CREATE UNLOGGED TABLE rate_limit_windows` (renamed from `auth_rate_limit_windows`, since other scopes may share it), following the plan's Fable round-3 recommendation. No sharding of the global counter; no index beyond the primary key.
+- **Alternatives:** a LOGGED table (adds a WAL fsync to every row-lock hold); sharding the global row into N summed rows (breaks single-statement exactness); an index on `window_start` (defeats HOT updates).
+- **Blast radius if wrong:** UNLOGGED contents are lost on crash recovery or standby promotion — one window's budget resets once. A wrong hot-row estimate shows up as latency on `acdp_registry_rate_limit_shared_seconds{scope="auth_global"}` (added in Phase 4) and is fixable without a schema change; undoing UNLOGGED itself needs migration 015 (the migration is checksummed and uneditable).
+- **Status:** UNCONFIRMED
