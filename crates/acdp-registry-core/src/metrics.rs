@@ -39,6 +39,8 @@ pub const LIFECYCLE_EVENT_TOTAL: &str = "acdp_registry_lifecycle_event_total";
 pub const LOG_LEAVES_TOTAL: &str = "acdp_registry_log_leaves_total";
 pub const WITNESS_COSIGNATURES_TOTAL: &str = "acdp_registry_witness_cosignatures_total";
 pub const RATE_LIMIT_REJECTIONS_TOTAL: &str = "acdp_registry_rate_limit_rejections_total";
+pub const RATE_LIMIT_SHARED_TOTAL: &str = "acdp_registry_rate_limit_shared_total";
+pub const RATE_LIMIT_SHARED_SECONDS: &str = "acdp_registry_rate_limit_shared_seconds";
 
 /// Process-global recorder handle. `metrics-exporter-prometheus` installs a
 /// single global recorder; a second install returns an error. A `OnceLock`
@@ -240,6 +242,38 @@ rate_limit_scopes! {
     ChallengeGlobal   => "challenge_global",
     PublishPerAgent   => "publish_per_agent",
     LifecyclePerAgent => "lifecycle_per_agent",
+}
+
+/// What the shared (cluster-wide) rate-limit backend answered. A closed enum,
+/// like [`RateLimitScope`], so the `outcome` label cannot grow a typo or an
+/// unbounded value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedOutcome {
+    Allow,
+    Deny,
+    Unavailable,
+}
+
+impl SharedOutcome {
+    /// The Prometheus `outcome` label value.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// One round trip to the shared rate-limit backend: counted by `scope` and
+/// `outcome`, and its latency observed by `scope`. The latency histogram is what
+/// makes the database-load assumption behind the shared limiter falsifiable in
+/// production. Neither label is ever an IP: that would be unbounded cardinality
+/// keyed by an attacker.
+pub fn record_shared_rate_limit(scope: &'static str, outcome: SharedOutcome, seconds: f64) {
+    metrics::counter!(RATE_LIMIT_SHARED_TOTAL, "scope" => scope, "outcome" => outcome.label())
+        .increment(1);
+    metrics::histogram!(RATE_LIMIT_SHARED_SECONDS, "scope" => scope).record(seconds);
 }
 
 /// A request rejected with 429 by the rate limiter, labelled by scope.
