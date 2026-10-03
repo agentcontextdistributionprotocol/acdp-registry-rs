@@ -329,6 +329,8 @@ impl RegistrySection {
 /// spec's `registries/profiles.json` and asserts exact equality, so a
 /// future spec change (e.g. an eighth registry profile) turns CI red
 /// instead of silently drifting out of sync with this list.
+/// The same set is published as data in `docs/advertisable-profiles.json`; the
+/// test `advertisable_profiles_json_matches_const` fails if the two diverge.
 pub const REGISTRY_ADVERTISABLE_PROFILES: &[&str] = &[
     "acdp-registry-core",
     "acdp-registry-discovery",
@@ -1164,6 +1166,45 @@ fn current_unix_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `docs/advertisable-profiles.json` is the machine-readable copy of
+    /// [`REGISTRY_ADVERTISABLE_PROFILES`] that non-Rust consumers vendor (#347).
+    /// A consumer diffs it on a version bump, so it must equal the const exactly
+    /// — same ids, same order — or it silently misleads them.
+    #[test]
+    fn advertisable_profiles_json_matches_const() {
+        // Reads the workspace's `docs/` at runtime, so it assumes the repo layout.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/advertisable-profiles.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let doc: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        let got: Vec<&str> = doc["profiles"]
+            .as_array()
+            .expect("`profiles` is an array")
+            .iter()
+            .map(|v| v.as_str().expect("profile ids are strings"))
+            .collect();
+        assert_eq!(
+            got, REGISTRY_ADVERTISABLE_PROFILES,
+            "docs/advertisable-profiles.json drifted from REGISTRY_ADVERTISABLE_PROFILES; \
+             update its `profiles` array to match the const"
+        );
+        assert!(
+            doc["description"].as_str().is_some_and(|d| !d.is_empty()),
+            "`description` must stay, so a vendored copy explains itself"
+        );
+    }
+
+    #[test]
+    fn advertisable_profiles_are_unique_registry_ids() {
+        let mut seen = std::collections::HashSet::new();
+        for id in REGISTRY_ADVERTISABLE_PROFILES {
+            assert!(id.starts_with("acdp-registry-"), "{id}");
+            assert!(seen.insert(*id), "duplicate {id}");
+        }
+    }
 
     fn pinned(did: &str, b64: &str) -> PinnedAgentKey {
         PinnedAgentKey {
