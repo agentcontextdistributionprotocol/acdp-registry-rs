@@ -21,7 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## 0.1.6
+## 0.2.0
 
 **No action needed on upgrade. One optional feature, and one rollback ordering note.**
 
@@ -34,7 +34,7 @@ and [OPERATIONS.md · Rate limiting](OPERATIONS.md#rate-limiting). It is only us
 replica, and is refused at startup unless `storage.backend = "postgres"`.
 
 On Postgres, upgrading applies migration `014` (a new, additive `rate_limit_windows` table; nothing an
-older binary reads). 0.1.6 and later tolerate a database that a newer release has already migrated
+older binary reads). 0.2.0 and later tolerate a database that a newer release has already migrated
 (#345), so rolling back *between* such releases needs no database action. **0.1.5 does not:** it
 refuses to start against a database that has applied migration 14. To roll back to 0.1.5, first run
 `DELETE FROM _sqlx_migrations WHERE version = 14;` (the orphaned `rate_limit_windows` table is harmless
