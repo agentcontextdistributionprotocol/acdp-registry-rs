@@ -18,7 +18,11 @@
 //!   L2 statements ≤ 2 × global_per_minute          (12 000/min at the defaults)
 //!   ```
 //!
-//!   however large the flood and however many source IPs it rotates through.
+//!   however large the flood and however many source IPs it rotates through —
+//!   **provided `global_per_minute > 0`**. With the global budget off, only the
+//!   per-IP term remains, `per_ip_per_minute × distinct-IPs-admitted`, which an
+//!   attacker rotating IPs controls; startup validation must therefore refuse a
+//!   shared backend with `global_per_minute = 0`.
 //!   L1 and L2 carry the same limits, so L1 is never looser than the cluster
 //!   bound: enabling the shared backend can only tighten enforcement relative
 //!   to per-process limiting, never loosen it.
@@ -130,15 +134,15 @@ impl SharedRateLimitBackend for LayeredRateLimiter {
         let seconds = started.elapsed().as_secs_f64();
         match answer {
             LimitDecision::Allow => {
-                record_shared_rate_limit(scope.label(), SharedOutcome::Allow, seconds);
+                record_shared_rate_limit(scope, SharedOutcome::Allow, seconds);
                 LimitDecision::Allow
             }
             deny @ LimitDecision::Deny { .. } => {
-                record_shared_rate_limit(scope.label(), SharedOutcome::Deny, seconds);
+                record_shared_rate_limit(scope, SharedOutcome::Deny, seconds);
                 deny
             }
             LimitDecision::Unavailable => {
-                record_shared_rate_limit(scope.label(), SharedOutcome::Unavailable, seconds);
+                record_shared_rate_limit(scope, SharedOutcome::Unavailable, seconds);
                 self.note_unavailable(scope);
                 match self.on_unavailable {
                     UnavailablePosture::Allow => LimitDecision::Allow,
@@ -401,6 +405,7 @@ mod tests {
         for line in [
             r#"acdp_registry_rate_limit_shared_total{scope="auth_per_ip",outcome="allow"} 1"#,
             r#"acdp_registry_rate_limit_shared_total{scope="auth_global",outcome="deny"} 1"#,
+            r#"acdp_registry_rate_limit_shared_seconds_count{scope="auth_global"} 1"#,
             r#"acdp_registry_rate_limit_shared_total{scope="auth_per_ip",outcome="unavailable"} 1"#,
         ] {
             assert!(text.contains(line), "missing `{line}` in:\n{text}");

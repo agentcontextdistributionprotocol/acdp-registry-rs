@@ -270,7 +270,12 @@ impl SharedOutcome {
 /// makes the database-load assumption behind the shared limiter falsifiable in
 /// production. Neither label is ever an IP: that would be unbounded cardinality
 /// keyed by an attacker.
-pub fn record_shared_rate_limit(scope: &'static str, outcome: SharedOutcome, seconds: f64) {
+pub fn record_shared_rate_limit(
+    scope: acdp_registry_store::SharedLimitScope,
+    outcome: SharedOutcome,
+    seconds: f64,
+) {
+    let scope = scope.label();
     metrics::counter!(RATE_LIMIT_SHARED_TOTAL, "scope" => scope, "outcome" => outcome.label())
         .increment(1);
     metrics::histogram!(RATE_LIMIT_SHARED_SECONDS, "scope" => scope).record(seconds);

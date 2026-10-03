@@ -4707,7 +4707,7 @@ underlying settings and code were not touched by this pass, only the record of t
 
 ## FEAT-06 item 3, Phase 4 — layered limiter: fail-open posture and the DB-amplification bound
 - **Plan:** plans/rate-limit-shared-backend.md (Phase 4, Q2 and Q3)
-- **Assumed:** (Q2) `/auth/*` limiting is a resource bound, not a brute-force guard, so an unreachable shared backend should degrade to per-process enforcement (L1 keeps running) instead of refusing token issuance; (Q3) an in-memory L1 pre-filter with the same limits as L2 bounds database statements per replica to <= 2 x global_per_minute regardless of attacker volume.
+- **Assumed:** (Q2) `/auth/*` limiting is a resource bound, not a brute-force guard, so an unreachable shared backend should degrade to per-process enforcement (L1 keeps running) instead of refusing token issuance; (Q3) an in-memory L1 pre-filter with the same limits as L2 bounds database statements per replica to <= 2 x global_per_minute regardless of attacker volume — only while `global_per_minute > 0`; Phase 5 startup validation must refuse a shared backend with it at 0 (per-IP x rotating IPs is attacker-controlled).
 - **Chose:** `LayeredRateLimiter` (L1 first, short-circuit on Deny; `Unavailable` resolved by a posture, default Allow, `Deny` returns `Retry-After: 5`); metrics as two new names (`acdp_registry_rate_limit_shared_{total,seconds}`), not new `RateLimitScope` variants.
 - **Alternatives:** L2-only (DB write rate becomes attacker-controlled); a separate larger L1 budget; fail-closed default.
 - **Blast radius if wrong:** the posture is flipped by config (Phase 5) with a restart and no code change; the 5s unavailable `Retry-After` is a constant to retune. The 2x bound is derived, not load-tested.
