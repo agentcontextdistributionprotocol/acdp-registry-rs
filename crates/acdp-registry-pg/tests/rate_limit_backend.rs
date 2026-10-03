@@ -38,7 +38,19 @@ fn pg_url_or_skip() -> Option<String> {
 async fn pool(url: &str) -> PgPool {
     let store = PgStore::connect(url, 24).await.expect("pg connect");
     store.migrate().await.expect("pg migrate");
-    store.pool().clone()
+    let pool = store.pool().clone();
+    avoid_window_boundary(&pool).await;
+    pool
+}
+
+/// The database clock cannot be injected, so a 60s window boundary landing
+/// inside a test's check sequence would flip its assertions. Start each test
+/// early enough in a window that its few hundred milliseconds stay inside it.
+async fn avoid_window_boundary(pool: &PgPool) {
+    let secs_in_window = db_now(pool).await % 60;
+    if secs_in_window >= 56 {
+        tokio::time::sleep(Duration::from_secs((60 - secs_in_window) as u64 + 1)).await;
+    }
 }
 
 fn backend(pool: &PgPool, per_ip: u32, global: u32) -> PgRateLimitBackend {
