@@ -206,6 +206,12 @@ The binary validates config before serving and refuses to boot on a misconfig
   a dedicated message: a witness is not a registry (RFC-ACDP-0015 §6.1) — a
   registry MAY aggregate cosignatures under `acdp-registry-transparency-log`
   without ever advertising `acdp-log-witness` itself.
+  A non-Rust consumer (a fixture, a console, a validator) can read the same
+  set as data from [`docs/advertisable-profiles.json`](advertisable-profiles.json)
+  — vendor it at a release tag and diff it on a version bump. A unit test
+  (`advertisable_profiles_json_matches_const`) keeps it identical to the const,
+  so a profile removed or renamed here turns this repo's CI red until the file
+  is regenerated.
 - **0.3.0 profiles** — `receipt.head_receipts = true` requires a configured
   `[receipt]` signing key (RFC-ACDP-0011 §9: head receipts are signed with
   the receipt key). `log.enabled = true` likewise requires a `[receipt]` key
