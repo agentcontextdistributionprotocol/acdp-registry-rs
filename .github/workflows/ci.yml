@@ -463,9 +463,9 @@ jobs:
                  "or delete it and update COVERED/PARTIAL_DIRECT."
             exit 1
           fi
-      # What this step covers (measured 2026-10-03, 111 tests):
-      #   * 90 in the binary's unit tests: 74 config-validation tests from
-      #     main.rs's inline module, plus 16 under `memory_ext::tests` that
+      # What this step covers (measured 2026-10-03 with `-- --list`, 118 tests):
+      #   * 91 in the binary's unit tests: 75 from main.rs's inline `tests`
+      #     module (config validation), plus 16 under `memory_ext::tests` that
       #     exercise MemoryStore itself — the shared parity suite
       #     (`acdp_registry_store::parity`: data-period filters, retraction
       #     coherence), trait round-trips (put/get, supersession,
@@ -474,7 +474,7 @@ jobs:
       #     arm) and pinned gaps (no list_contexts, no log or
       #     witness storage, untenanted, and a MEASURED full-text divergence
       #     from the SQL backends: substring match, no stemming/stopwords).
-      #   * 21 in integration files: conformance_gate 17,
+      #   * 27 in integration files: conformance_gate 23,
       #     anchors_uri_never_dereferenced 2, tls_startup 2.
       #   * 6 integration files are cfg-gated away and report 0 tests each:
       #     caps_visibility, conformance, http_integration,

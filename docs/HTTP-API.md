@@ -970,6 +970,7 @@ documents only the registry's HTTP-status projection of them.
 | 409 | `invalid_lifecycle_transition` | Double retract, or republish of a never-retracted context (RFC-ACDP-0013 §6 step 4). |
 | 413 | `payload_too_large` | Body over `max_payload_bytes`. |
 | 413 | `embedded_too_large` | Embedded data over `max_embedded_bytes`. |
+| 415 | `unsupported_media_type` | A body-bearing request (`POST /contexts`, the lifecycle and admin lifecycle routes, `/auth/*`) whose `Content-Type` is present but neither `application/json` nor `application/*+json` (parameters such as `charset` are ignored). An absent `Content-Type` is accepted on those routes except `/auth/*`, where it is also a 415. Minted by this registry: outside the canonical RFC-ACDP-0007 §5 code list, so an `acdp` client sees it as an untyped registry error. |
 | 429 | `rate_limited` | Publish/challenge bucket drained; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
 | 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*` and lifecycle endpoints when their profiles are not enabled). |

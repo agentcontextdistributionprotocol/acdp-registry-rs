@@ -4768,3 +4768,11 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Blast radius if wrong:** a docs guard fails a release PR until a doc edit lands; no runtime effect.
 - **Status:** CONFIRMED — decided by Opus at `/reconcile` (reversible tier).
 - **Reconciled 2026-10-04:** (a), (b), (c) CONFIRMED. Line-pin matcher gaps — a backticked range, `` `f.rs`:9 ``, non-`.rs` extensions, and a `:8080`-style port false positive — DEFERRED as optional hardening; trigger: any such pin appears in a scanned file. Verify `conformance_gate` (the RAILWAY major.minor guard) on the first release-plz PR. See DECISIONS.md "Reconcile 2026-10-04 — hardening-remaining Phases 7-8".
+
+## Docs refresh Phase 0 — relative-link guard
+- **Plan:** plans/docs-refresh-2026-10.md (Phase 0)
+- **Assumed:** (a) `every_relative_doc_link_resolves` checks same-file `#fragment` links against the file's own headings (stricter than dropping them); (b) GitHub slugs are approximated as: lowercase, keep letters/digits/`_`/`-`/space, spaces to `-`, duplicates `-N`; HTML in headings and `<a id>` anchors are not modelled and fail loudly; (c) a leading `/` in a relative link resolves to the repo root; (d) `DECISIONS.md` and `ASSUMPTIONS.md` stay excluded because they cite gitignored `plans/` files; (e) wire codes in `extract.rs` come from `json_code`, `query_code` and `code: "..."` literals, so a code minted by another route there is not seen.
+- **Chose:** a pure extractor over `git ls-files` markdown, with an exact-count wire-code check and negative controls on synthetic text.
+- **Alternatives:** a Python lint step outside `cargo test`; dropping same-file fragments.
+- **Blast radius if wrong:** a docs-only test goes red on a valid link or misses a bad one; no runtime effect. Known low gaps: multi-line code spans, next-line reference destinations, `A`,`A`,`A-1` slug sequence, hand-built `service_unavailable` envelope not scanned.
+- **Status:** UNCONFIRMED

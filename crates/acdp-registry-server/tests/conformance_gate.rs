@@ -20,17 +20,20 @@ fn require_mode_implies_the_conformance_suite_is_compiled_in() {
     }
 }
 
-/// Wire codes the two producing functions in `acdp-registry-types/src/error.rs`
-/// can emit, extracted from TEXT so that the guard over them is falsifiable here.
+/// Wire codes the named producing functions in `src` can emit, extracted from
+/// TEXT so that the guard over them is falsifiable here. For
+/// `acdp-registry-types/src/error.rs` those are `wire_code`/`acdp_wire_code`; for
+/// `acdp-registry-core/src/extract.rs` (the extractor rejections, which never
+/// pass through `RegistryError`) they are `json_code`/`query_code`.
 ///
-/// Scans ONLY the two functions that produce wire codes, taking every string
+/// Scans ONLY the functions that produce wire codes, taking every string
 /// literal inside them. Scanning `=> "..."` alone was the first attempt and it was
 /// wrong: a long match pattern uses a block body, so
 /// `SchemaViolation | InvalidBody | MissingField => { "schema_violation" }` has no
 /// `=> "`. The count guard at the call site is what caught that.
-fn wire_codes_in(src: &str, origin: &str) -> Vec<String> {
+fn wire_codes_in(src: &str, origin: &str, fn_names: &[&str]) -> Vec<String> {
     let mut codes: Vec<String> = Vec::new();
-    for fn_name in ["fn wire_code", "fn acdp_wire_code"] {
+    for fn_name in fn_names {
         let start = src
             .find(fn_name)
             .unwrap_or_else(|| panic!("{fn_name} not found in {origin}"));
@@ -57,10 +60,20 @@ fn wire_codes_in(src: &str, origin: &str) -> Vec<String> {
     codes
 }
 
-/// Wire codes `acdp-registry-types/src/error.rs` emits today. A ratchet, not a
-/// floor -- see the assertion that reads it for why an exact number is affordable
-/// here, and for what the floor it replaced let through.
-const EXPECTED_WIRE_CODES: usize = 24;
+/// The producing functions in `acdp-registry-types/src/error.rs`.
+const ERROR_RS_CODE_FNS: [&str; 2] = ["fn wire_code", "fn acdp_wire_code"];
+
+/// The producing functions in `acdp-registry-core/src/extract.rs`.
+const EXTRACT_RS_CODE_FNS: [&str; 2] = ["fn json_code", "fn query_code"];
+
+/// Wire codes `error.rs` and `extract.rs` emit today, as one de-duplicated set.
+/// A ratchet, not a floor -- see the assertion that reads it for why an exact
+/// number is affordable here, and for what the floor it replaced let through.
+///
+/// WAS 24, from `error.rs` alone. That left the extractor rejections unscanned,
+/// and `unsupported_media_type` (the 415 minted in `extract.rs`, #247) appeared
+/// nowhere in docs/HTTP-API.md while this guard stayed green.
+const EXPECTED_WIRE_CODES: usize = 25;
 
 /// The exact wire-code count must FAIL when the scanner loses a code — otherwise it
 /// is a number nobody has shown to do anything.
@@ -85,7 +98,7 @@ fn acdp_wire_code(err: &AcdpError) -> &'static str {
     }
 }
 "#;
-    let found = wire_codes_in(SRC, "<synthetic>");
+    let found = wire_codes_in(SRC, "<synthetic>", &ERROR_RS_CODE_FNS);
     assert_eq!(
         found.len(),
         4,
@@ -97,7 +110,7 @@ fn acdp_wire_code(err: &AcdpError) -> &'static str {
     // replaced did not -- 3 of 4 satisfies any threshold the full set satisfies,
     // which is the entire defect this unit is about.
     let one_gone = SRC.replace("        Self::Rate => \"rate_limited\",\n", "");
-    let fewer = wire_codes_in(&one_gone, "<synthetic>");
+    let fewer = wire_codes_in(&one_gone, "<synthetic>", &ERROR_RS_CODE_FNS);
     assert_eq!(
         fewer.len(),
         3,
@@ -113,6 +126,53 @@ fn acdp_wire_code(err: &AcdpError) -> &'static str {
         "so an exact assertion against the full count goes RED on this input, \
          which is precisely what `codes.len() >= 15` did not do"
     );
+
+    // The scanner reads WHICHEVER functions it is told to: with `extract.rs`'s
+    // names it finds the extractor's codes, and with `error.rs`'s names it does
+    // not -- which is how the 415 went unscanned before.
+    const EXTRACT_SRC: &str = r#"
+fn json_code(rej: &JsonRejection) -> &'static str {
+    match rej {
+        JsonRejection::MissingJsonContentType(_) => "unsupported_media_type",
+        _ => "schema_violation",
+    }
+}
+fn query_code(_rej: &QueryRejection) -> &'static str {
+    "schema_violation"
+}
+"#;
+    assert_eq!(
+        wire_codes_in(EXTRACT_SRC, "<synthetic>", &EXTRACT_RS_CODE_FNS),
+        vec![
+            "unsupported_media_type".to_string(),
+            "schema_violation".to_string()
+        ]
+    );
+    assert!(
+        !wire_codes_in(EXTRACT_SRC, "<synthetic>", &EXTRACT_RS_CODE_FNS[1..])
+            .contains(&"unsupported_media_type".to_string()),
+        "dropping `json_code` from the scanned set must lose the 415 code"
+    );
+    assert_eq!(
+        code_field_literals(
+            "Err(AcdpRejection { code: \"unsupported_media_type\", message: m })\n\
+             let code: &str = x;\n"
+        ),
+        vec!["unsupported_media_type".to_string()],
+        "only `code: \"...\"` struct-field literals count, not a `code:` binding"
+    );
+}
+
+/// Every `code: "<wire_code>"` struct-field literal in `src` -- the rejections
+/// `extract.rs` builds in place (`AcdpBytes`) rather than through `json_code`,
+/// so a code minted only there is scanned too.
+fn code_field_literals(src: &str) -> Vec<String> {
+    src.split("code: \"")
+        .skip(1)
+        .filter_map(|tail| tail.split('"').next())
+        .filter(|c| c.len() >= 4 && c.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_'))
+        .map(str::to_string)
+        .collect()
 }
 
 /// CHARTER Rule 48: a documentation artifact no command can check is a defect
@@ -129,8 +189,9 @@ fn acdp_wire_code(err: &AcdpError) -> &'static str {
 ///
 /// Correcting the table by hand would have left the same defect for the next
 /// arm added to `error.rs`. So the set is DERIVED here instead: every
-/// `=> "wire_code"` arm in `acdp-registry-types/src/error.rs` must appear
-/// somewhere in `docs/HTTP-API.md`.
+/// `=> "wire_code"` arm in `acdp-registry-types/src/error.rs`, and every code the
+/// extractor rejections in `acdp-registry-core/src/extract.rs` mint (they never
+/// pass through `RegistryError`), must appear somewhere in `docs/HTTP-API.md`.
 ///
 /// Deliberately a substring check, not a table parse. The point is that the
 /// code is *reachable* from the document at all; pinning the table's exact
@@ -153,7 +214,33 @@ fn every_wire_code_the_code_emits_is_documented() {
     // attempt and it was wrong: a long match pattern uses a block body, so
     // `SchemaViolation | InvalidBody | MissingField => { "schema_violation" }`
     // has no `=> "`. The guard below is what caught that.
-    let mut codes = wire_codes_in(&src, &error_rs.display().to_string());
+    let mut codes = wire_codes_in(&src, &error_rs.display().to_string(), &ERROR_RS_CODE_FNS);
+
+    // The extractor rejections answer before any handler runs, so their codes
+    // never reach `RegistryError::wire_code`. Scanned separately: both the
+    // mapping functions and every `code: "..."` literal built in place.
+    let extract_rs = root.join("crates/acdp-registry-core/src/extract.rs");
+    let extract_src = std::fs::read_to_string(&extract_rs)
+        .unwrap_or_else(|e| panic!("read {}: {e}", extract_rs.display()));
+    let extract_codes: Vec<String> = wire_codes_in(
+        &extract_src,
+        &extract_rs.display().to_string(),
+        &EXTRACT_RS_CODE_FNS,
+    )
+    .into_iter()
+    .chain(code_field_literals(&extract_src))
+    .collect();
+    assert!(
+        extract_codes.iter().any(|c| c == "unsupported_media_type"),
+        "the extract.rs scan did not find `unsupported_media_type`, which \
+         `json_code` and `AcdpBytes` certainly emit -- the scan is broken: \
+         {extract_codes:?}"
+    );
+    for c in extract_codes {
+        if !codes.contains(&c) {
+            codes.push(c);
+        }
+    }
     codes.sort();
 
     // Guard the GENERATOR, not just its output: a scanner that silently matched
@@ -173,8 +260,8 @@ fn every_wire_code_the_code_emits_is_documented() {
     assert_eq!(
         codes.len(),
         EXPECTED_WIRE_CODES,
-        "wire-code extraction found {} codes in {}, expected exactly \
-         {EXPECTED_WIRE_CODES}. If you ADDED a wire code: update this constant and \
+        "wire-code extraction found {} codes in {} and extract.rs, expected \
+         exactly {EXPECTED_WIRE_CODES}. If you ADDED a wire code: update this constant and \
          add the code to the status table in docs/HTTP-API.md -- enforcing that \
          pairing is what this test is for. If you did not, the scanner is broken and \
          the documentation check below would pass for every code it can no longer \
@@ -197,10 +284,10 @@ fn every_wire_code_the_code_emits_is_documented() {
     let undocumented: Vec<&String> = codes.iter().filter(|c| !doc.contains(c.as_str())).collect();
     assert!(
         undocumented.is_empty(),
-        "these wire codes can be emitted by acdp-registry-types/src/error.rs but \
-         appear NOWHERE in docs/HTTP-API.md: {undocumented:?}\n\
+        "these wire codes can be emitted by acdp-registry-types/src/error.rs or \
+         acdp-registry-core/src/extract.rs but appear NOWHERE in docs/HTTP-API.md: {undocumented:?}\n\
          Add them to the \"Status / code table\" with the HTTP status from \
-         `http_status()`. A client cannot handle a code it has never been told \
+         `http_status()` (`status_for_code` for an extract.rs code). A client cannot handle a code it has never been told \
          about, and a hand-kept table has no signal for the arm that was never \
          added — which is why this check is derived rather than maintained."
     );
@@ -2841,4 +2928,543 @@ fn configuration_rate_limit_caveat_names_the_backend() {
              are shared across replicas:\n{q}"
         );
     }
+}
+
+// ---- docs-refresh Phase 0: relative doc links resolve ----------------------
+
+/// Tracked markdown the relative-link guard does NOT read, each with its reason.
+/// A trailing `/` is a directory prefix; one `*` matches exactly one path
+/// segment. Every entry must still match a tracked file (asserted), so an
+/// exclusion cannot outlive what it excludes and quietly cover something new.
+const LINK_GUARD_EXCLUDED: [(&str, &str); 5] = [
+    (
+        "plans/",
+        "planning notes: gitignored apart from a few tracked cross-repo notes, \
+         never published, and they cite gitignored plan files by path",
+    ),
+    (
+        "crates/*/CHANGELOG.md",
+        "generated by release-plz from commit subjects; its links are the \
+         absolute compare/PR URLs it writes itself",
+    ),
+    (
+        "DECISIONS.md",
+        "workflow ledger appended by the plan/reconcile process; it cites \
+         gitignored plans/ files",
+    ),
+    (
+        "ASSUMPTIONS.md",
+        "workflow ledger appended by the plan/reconcile process; it cites \
+         gitignored plans/ files",
+    ),
+    (
+        "docs/ENGINEERING-LOG.md",
+        "a dated record that is never edited after the fact; it carries 4 \
+         relative links written against an older layout that no longer resolve",
+    ),
+];
+
+/// True when tracked `path` is covered by one `LINK_GUARD_EXCLUDED` pattern.
+fn link_guard_excludes(path: &str, pattern: &str) -> bool {
+    if let Some(dir) = pattern.strip_suffix('/') {
+        return path.starts_with(&format!("{dir}/"));
+    }
+    match pattern.split_once('*') {
+        Some((pre, suf)) => {
+            path.len() >= pre.len() + suf.len()
+                && path.starts_with(pre)
+                && path.ends_with(suf)
+                && !path[pre.len()..path.len() - suf.len()].contains('/')
+        }
+        None => path == pattern,
+    }
+}
+
+/// The fence a line could open or close: its character and run length, when
+/// its first non-blank characters are three or more backticks or tildes.
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let t = line.trim_start();
+    let c = t.chars().next()?;
+    if c != '`' && c != '~' {
+        return None;
+    }
+    let n = t.chars().take_while(|&x| x == c).count();
+    (n >= 3).then_some((c, n))
+}
+
+/// The lines of `text` outside fenced code blocks, numbered from 1. A fence
+/// closes only on a run of the SAME character at least as long with nothing
+/// after it, so a "```text" line inside a "~~~" block does not end the block.
+fn unfenced_lines(text: &str) -> Vec<(usize, &str)> {
+    let mut open: Option<(char, usize)> = None;
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        match (open, fence_marker(line)) {
+            (None, Some(m)) => open = Some(m),
+            (Some((c, n)), Some((c2, n2)))
+                if c == c2 && n2 >= n && line.trim().chars().all(|x| x == c) =>
+            {
+                open = None
+            }
+            (Some(_), _) => {}
+            (None, None) => out.push((i + 1, line)),
+        }
+    }
+    out
+}
+
+/// `line` with every inline code span replaced by a space. A span opens on a
+/// run of N backticks and closes on the next run of exactly N; a run with no
+/// partner is literal text, as in CommonMark.
+fn strip_code_spans(line: &str) -> String {
+    let b = line.as_bytes();
+    let run_at = |j: usize| b[j..].iter().take_while(|&&x| x == b'`').count();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'`' {
+            let ch = line[i..].chars().next().expect("i is on a char boundary");
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        let n = run_at(i);
+        let mut j = i + n;
+        let mut close = None;
+        while j < b.len() {
+            if b[j] == b'`' {
+                let m = run_at(j);
+                if m == n {
+                    close = Some(j);
+                    break;
+                }
+                j += m;
+            } else {
+                j += 1;
+            }
+        }
+        match close {
+            Some(j) => {
+                out.push(' ');
+                i = j + n;
+            }
+            None => {
+                out.push_str(&line[i..i + n]);
+                i += n;
+            }
+        }
+    }
+    out
+}
+
+/// The link destination at the start of `s`: the `<...>` contents when
+/// bracketed, else everything up to the first whitespace or `)`.
+fn link_destination(s: &str) -> Option<String> {
+    let d = match s.strip_prefix('<') {
+        Some(rest) => rest.split('>').next().unwrap_or(""),
+        None => s
+            .split(|c: char| c.is_whitespace() || c == ')')
+            .next()
+            .unwrap_or(""),
+    };
+    (!d.is_empty()).then(|| d.to_string())
+}
+
+/// Every non-external link target in markdown `text`, as (1-based line,
+/// target): inline links and images (`[t](u)`, `![a](u)`) and reference
+/// definitions (`[label]: u`). Fenced blocks and inline code are skipped, since
+/// a link-shaped example there is not a link; `http:`, `https:` and `mailto:`
+/// targets are dropped. A same-file `#fragment` IS returned -- it is checked
+/// against the file's own headings, which a renamed heading breaks just as
+/// surely as it breaks a cross-file link.
+fn relative_links(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (n, raw) in unfenced_lines(text) {
+        let line = strip_code_spans(raw);
+        let mut targets: Vec<Option<String>> =
+            line.split("](").skip(1).map(link_destination).collect();
+        let t = line.trim_start();
+        if t.starts_with('[') && !t.starts_with("[^") && line.len() - t.len() <= 3 {
+            if let Some(close) = t.find("]:") {
+                if !t[1..close].contains(']') {
+                    targets.push(link_destination(t[close + 2..].trim_start()));
+                }
+            }
+        }
+        for target in targets.into_iter().flatten() {
+            let lower = target.to_ascii_lowercase();
+            if ["http://", "https://", "mailto:"]
+                .iter()
+                .any(|s| lower.starts_with(s))
+            {
+                continue;
+            }
+            out.push((n, target));
+        }
+    }
+    out
+}
+
+/// GitHub's anchor for a heading: link destinations dropped (the RENDERED text
+/// is what gets slugged), lowercased, every character that is not a letter,
+/// digit, `_`, `-` or space removed -- backticks and other punctuation included
+/// -- and each space turned into `-`. So `A & B — C` becomes `a--b--c`: the `&`
+/// and the em dash vanish and the spaces on either side of them remain.
+fn github_slug(heading: &str) -> String {
+    let mut text = String::new();
+    let mut rest = heading;
+    while let Some(i) = rest.find("](") {
+        text.push_str(&rest[..i]);
+        rest = match rest[i..].find(')') {
+            Some(j) => &rest[i + j + 1..],
+            None => "",
+        };
+    }
+    text.push_str(rest);
+    text.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | ' '))
+        .map(|c| if c == ' ' { '-' } else { c })
+        .collect()
+}
+
+/// The anchors GitHub generates for `text`'s ATX headings, in document order.
+/// A repeated slug gets `-1`, `-2`, …; a `#` line inside a fenced block is not
+/// a heading. An optional closing `#` sequence is not part of the text.
+fn heading_anchors(text: &str) -> Vec<String> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for (_, line) in unfenced_lines(text) {
+        let hashes = line.chars().take_while(|&c| c == '#').count();
+        if !(1..=6).contains(&hashes) {
+            continue;
+        }
+        let rest = &line[hashes..];
+        if !(rest.is_empty() || rest.starts_with([' ', '\t'])) {
+            continue;
+        }
+        let mut content = rest.trim();
+        let unclosed = content.trim_end_matches('#');
+        if unclosed.is_empty() || unclosed.ends_with([' ', '\t']) {
+            content = unclosed.trim_end();
+        }
+        let slug = github_slug(content);
+        let k = seen.entry(slug.clone()).or_insert(0);
+        out.push(if *k == 0 { slug } else { format!("{slug}-{k}") });
+        *k += 1;
+    }
+    out
+}
+
+/// `%XX` escapes decoded; anything else, including a malformed escape, kept.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `target`, relative to the directory of repo-relative `from`, as a
+/// repo-relative path (a leading `/` is the repository root, as GitHub renders
+/// it); `None` if it climbs above the root.
+fn resolve_relative(from: &str, target: &str) -> Option<String> {
+    let mut parts: Vec<&str> = from.split('/').collect();
+    parts.pop();
+    let target = match target.strip_prefix('/') {
+        Some(abs) => {
+            parts.clear();
+            abs
+        }
+        None => target,
+    };
+    for seg in target.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            s => parts.push(s),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// Every broken relative link in the markdown file `source` (repo-relative)
+/// whose text is `text`. A target must be a git-TRACKED file or directory --
+/// a file that exists only on the author's disk renders as a 404 on GitHub and
+/// on the website -- and a `#fragment` on a `.md` target must equal one of that
+/// file's GitHub heading anchors. `read` yields a tracked target's text. Pure
+/// over its inputs, so the negative controls drive it with synthetic files.
+fn relative_link_violations(
+    source: &str,
+    text: &str,
+    tracked: &std::collections::BTreeSet<String>,
+    read: &dyn Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (line, target) in relative_links(text) {
+        let (path, frag) = match target.split_once('#') {
+            Some((p, f)) => (p, Some(f)),
+            None => (target.as_str(), None),
+        };
+        let path = percent_decode(path);
+        let resolved = if path.is_empty() {
+            Some(source.to_string())
+        } else {
+            resolve_relative(source, &path)
+        };
+        let Some(resolved) = resolved else {
+            out.push(format!(
+                "{source} line {line}: `{target}` climbs above the repository root"
+            ));
+            continue;
+        };
+        let is_file = tracked.contains(&resolved);
+        let dir_prefix = format!("{resolved}/");
+        let is_dir = resolved.is_empty() || tracked.iter().any(|t| t.starts_with(&dir_prefix));
+        if !is_file && !is_dir {
+            out.push(format!(
+                "{source} line {line}: `{target}` -> `{resolved}` is not a tracked file \
+                 or directory"
+            ));
+            continue;
+        }
+        let Some(frag) = frag.filter(|f| !f.is_empty()) else {
+            continue;
+        };
+        if !(is_file && resolved.ends_with(".md")) {
+            continue;
+        }
+        let Some(target_text) = (if resolved == source {
+            Some(text.to_string())
+        } else {
+            read(&resolved)
+        }) else {
+            out.push(format!(
+                "{source} line {line}: `{target}` -> `{resolved}` is tracked but unreadable"
+            ));
+            continue;
+        };
+        let frag = percent_decode(frag);
+        if !heading_anchors(&target_text).contains(&frag) {
+            out.push(format!(
+                "{source} line {line}: `{target}` -> `{resolved}` has no heading whose \
+                 GitHub anchor is `#{frag}`"
+            ));
+        }
+    }
+    out
+}
+
+/// No relative link in tracked documentation is dead. Before this guard,
+/// nothing checked them: four links in `docs/ENGINEERING-LOG.md` had been dead
+/// since files moved, and a renamed heading silently orphans every
+/// `FILE.md#anchor` pointing at it -- the docs index links into HTTP-API.md
+/// sections by anchor.
+///
+/// Scope: every git-tracked `*.md` minus `LINK_GUARD_EXCLUDED` (each entry with
+/// its reason). Stated limits: no network (external URLs are another guard's
+/// business); a fragment on a non-markdown target (`file.rs#L10`) is not
+/// checked; explicit HTML anchors (`<a id>`) are not recognised as targets,
+/// so using one fails here loudly rather than passing unchecked; the slug rules
+/// are GitHub's ASCII-and-Unicode-letter rules, not every edge of its renderer
+/// (HTML inside a heading, for one).
+#[test]
+fn every_relative_doc_link_resolves() {
+    let root = repo_root();
+    let tracked: std::collections::BTreeSet<String> =
+        git_tracked_paths(&root).into_iter().collect();
+
+    for (pattern, reason) in LINK_GUARD_EXCLUDED {
+        assert!(
+            tracked.iter().any(|p| link_guard_excludes(p, pattern)),
+            "LINK_GUARD_EXCLUDED entry `{pattern}` ({reason}) matches no tracked file: \
+             drop it, so it cannot later exclude something new by accident"
+        );
+    }
+    let excluded = |p: &str| {
+        LINK_GUARD_EXCLUDED
+            .iter()
+            .any(|(pattern, _)| link_guard_excludes(p, pattern))
+    };
+    let scope: Vec<&String> = tracked
+        .iter()
+        .filter(|p| p.ends_with(".md") && !excluded(p.as_str()))
+        .collect();
+
+    // Vacuity guard by NAMED members, not a count: the scope must hold the files
+    // operators read, and the extractor must find two specific real links, one
+    // with an anchor -- a broken enumeration or extractor fails here instead of
+    // passing everything.
+    for must in [
+        "README.md",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "docs/README.md",
+        "docs/HTTP-API.md",
+        "docker/RAILWAY.md",
+    ] {
+        assert!(
+            scope.iter().any(|p| p.as_str() == must),
+            "relative-link scope lost {must}: {scope:?}"
+        );
+    }
+    assert!(
+        !scope
+            .iter()
+            .any(|p| p.as_str() == "docs/ENGINEERING-LOG.md"),
+        "the dated engineering log must stay out of scope"
+    );
+
+    let read = |p: &str| std::fs::read_to_string(root.join(p)).ok();
+    let mut links: Vec<(String, String)> = Vec::new();
+    let mut broken: Vec<String> = Vec::new();
+    for source in &scope {
+        let text =
+            read(source).unwrap_or_else(|| panic!("{source} is tracked but not readable on disk"));
+        links.extend(
+            relative_links(&text)
+                .into_iter()
+                .map(|(_, t)| (source.to_string(), t)),
+        );
+        broken.extend(relative_link_violations(source, &text, &tracked, &read));
+    }
+    for (source, target) in [
+        ("docs/README.md", "HTTP-API.md#error-envelope"),
+        ("CHANGELOG.md", "docs/UPGRADING.md"),
+    ] {
+        assert!(
+            links.iter().any(|(s, t)| s == source && t == target),
+            "the extractor no longer finds the link {source} -> {target}; either it \
+             broke or the link moved (then name another real one here)"
+        );
+    }
+
+    assert!(
+        broken.is_empty(),
+        "dead relative links in tracked documentation:\n  {}\n\
+         Point each at a tracked file and an existing heading. Anchors follow \
+         GitHub's slug: lowercase, punctuation (including `&`, `.`, `/`, backticks \
+         and em dashes) dropped, spaces become `-`, repeats get `-1`, `-2`.",
+        broken.join("\n  ")
+    );
+}
+
+/// The link guard's matcher must reject each kind of dead link and must ignore
+/// what is not a link -- on synthetic files, so every case is attributable.
+#[test]
+fn the_relative_link_guard_rejects_what_it_must_and_ignores_what_it_should() {
+    let files: std::collections::HashMap<&str, &str> = [
+        (
+            "docs/b.md",
+            "# Intro\n\
+             ## Setup\n\
+             ## Setup\n\
+             ## A & B — C\n\
+             ```\n\
+             # Not A Heading\n\
+             ```\n\
+             ## `code` and [link](z.md) heading ##\n\
+             ### GET /contexts/{ctx_id}\n\
+             ## Café\n",
+        ),
+        ("README.md", "# Root\n"),
+        ("untracked.md", "# On disk only\n"),
+    ]
+    .into_iter()
+    .collect();
+    let tracked: std::collections::BTreeSet<String> =
+        ["docs/a.md", "docs/b.md", "README.md", "img/x.png"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    let read = |p: &str| files.get(p).map(|s| s.to_string());
+    let check = |text: &str| relative_link_violations("docs/a.md", text, &tracked, &read);
+
+    // Every one of these resolves.
+    let good = "# Here\n\
+                [b](b.md) and [b](b.md#setup) and [dup](b.md#setup-1)\n\
+                [amp and dash](b.md#a--b--c) [code](b.md#code-and-link-heading)\n\
+                [route](b.md#get-contextsctx_id) [pct](b.md#caf%C3%A9)\n\
+                [root](../README.md) ![img](../img/x.png) [dir](../img/) [self](#here)\n\
+                [ext](https://example.com/nope.md) [mail](mailto:a@example.com)\n\
+                [ref]: b.md#intro\n\
+                [^note]: not a link target\n\
+                not a link: `[x](missing.md)` nor ``[y](`missing.md`)``\n\
+                ~~~\n\
+                [fenced](missing.md)\n\
+                ```text\n\
+                [still fenced](missing.md)\n\
+                ~~~\n";
+    assert_eq!(
+        check(good),
+        Vec::<String>::new(),
+        "valid links, code spans and fenced examples must all pass"
+    );
+    assert_eq!(
+        relative_links(good).len(),
+        12,
+        "the extractor must see all 12 real non-external links above and nothing \
+         inside code: {:?}",
+        relative_links(good)
+    );
+
+    // Each of these is dead in exactly one way.
+    for (label, bad) in [
+        ("missing file", "[x](nope.md)"),
+        ("missing anchor", "[x](b.md#nope)"),
+        (
+            "untracked target that exists on disk",
+            "[x](../untracked.md)",
+        ),
+        (
+            "anchor of a fenced pseudo-heading",
+            "[x](b.md#not-a-heading)",
+        ),
+        ("third duplicate that does not exist", "[x](b.md#setup-2)"),
+        ("self anchor that does not exist", "[x](#nope)"),
+        ("climbs above the root", "[x](../../outside.md)"),
+        ("reference definition to a missing file", "[r]: gone.md"),
+        ("image that is not tracked", "![i](../img/y.png)"),
+    ] {
+        let found = check(bad);
+        assert_eq!(
+            found.len(),
+            1,
+            "{label}: `{bad}` must produce exactly one violation, got {found:?}"
+        );
+    }
+
+    // The slug rules themselves, against the cases the plan names.
+    assert_eq!(github_slug("A & B — C"), "a--b--c");
+    assert_eq!(github_slug("`POST /auth/challenge`"), "post-authchallenge");
+    assert_eq!(github_slug("Error envelope"), "error-envelope");
+    assert_eq!(
+        heading_anchors("# X\n## X\n## X ##\n#NoSpace\n"),
+        vec!["x", "x-1", "x-2"]
+    );
+    assert!(link_guard_excludes(
+        "crates/acdp-registry-core/CHANGELOG.md",
+        "crates/*/CHANGELOG.md"
+    ));
+    assert!(!link_guard_excludes(
+        "crates/a/b/CHANGELOG.md",
+        "crates/*/CHANGELOG.md"
+    ));
+    assert!(link_guard_excludes("plans/cross-repo/x.md", "plans/"));
+    assert!(!link_guard_excludes("plansx.md", "plans/"));
 }
