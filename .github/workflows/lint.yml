@@ -244,3 +244,14 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/required_checks_guard.py --self-test
           python3 .github/scripts/required_checks_guard.py --check
+
+      # The daily drift job (branch-protection-drift.yml) runs on a schedule, so a bug
+      # in its comparison would otherwise surface only as a wrong verdict on main --
+      # or never, if the bug makes it pass. Its logic is a script so it can be
+      # exercised HERE, on every PR, over fixture JSON: each class of drift (context,
+      # app_id, strict, enforce_admins, ruleset enforcement/include/exclude/rules/
+      # bypass, duplicate and extra tag rulesets) must be reported at the right level,
+      # and matching settings must pass. No token and no network needed.
+      - name: protection-drift self-test
+        if: '!cancelled()'
+        run: bash .github/scripts/protection-drift.sh --self-test

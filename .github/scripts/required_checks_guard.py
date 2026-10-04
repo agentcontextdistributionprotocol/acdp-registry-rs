@@ -61,8 +61,13 @@ ACTIONS_APP_ID = 15368
 BASELINE_REL = os.path.join(".github", "required-checks.json")
 WORKFLOWS_REL = os.path.join(".github", "workflows")
 
-TOP_LEVEL_REQUIRED = ("strict", "required", "advisory_pending")
+TOP_LEVEL_REQUIRED = ("strict", "required", "advisory_pending",
+                      "enforce_admins", "pending_settings", "tag_ruleset")
 TOP_LEVEL_ALLOWED = set(TOP_LEVEL_REQUIRED) | {"_comment"}
+# `tag_ruleset` is shaped like the rulesets API body (rules as bare type names), so
+# protection-drift.sh can print a ready-to-run POST/PUT derived from this file.
+TAG_RULESET_KEYS = {"name", "target", "enforcement", "conditions", "rules", "bypass_actors"}
+RULESET_ENFORCEMENTS = ("active", "evaluate", "disabled")
 PR_TYPES_NEEDED = {"opened", "synchronize", "reopened"}
 FORBIDDEN_PR_FILTERS = ("paths", "paths-ignore", "branches-ignore")
 
@@ -251,7 +256,62 @@ def _validate_baseline(data):
         if ctx in seen:
             errors.append("`%s` is listed more than once across `required` / `advisory_pending`" % ctx)
         seen.add(ctx)
+
+    for key in ("enforce_admins", "pending_settings"):
+        if key in data and not isinstance(data[key], bool):
+            errors.append("`%s` must be true or false" % key)
+    if "tag_ruleset" in data:
+        errors.extend(_validate_tag_ruleset(data["tag_ruleset"]))
     return errors, names
+
+
+def _is_str_list(value, non_empty):
+    return (isinstance(value, list) and all(isinstance(v, str) and v for v in value)
+            and (bool(value) or not non_empty))
+
+
+def _validate_tag_ruleset(rs):
+    """Shape of the expected tag ruleset that protection-drift.sh compares against."""
+    if not isinstance(rs, dict):
+        return ["`tag_ruleset` must be an object"]
+    errors = []
+    missing = sorted(TAG_RULESET_KEYS - set(rs))
+    extra = sorted(set(rs) - TAG_RULESET_KEYS)
+    if missing:
+        errors.append("`tag_ruleset` is missing %s" % ", ".join(missing))
+    if extra:
+        errors.append("`tag_ruleset` has unknown key(s) %s (it is POSTed as-is by the drift fix command)"
+                      % ", ".join(extra))
+    if "name" in rs and (not isinstance(rs["name"], str) or not rs["name"]):
+        errors.append("`tag_ruleset.name` must be a non-empty string")
+    if "target" in rs and rs["target"] != "tag":
+        errors.append("`tag_ruleset.target` must be \"tag\"")
+    if "enforcement" in rs and rs["enforcement"] not in RULESET_ENFORCEMENTS:
+        errors.append("`tag_ruleset.enforcement` must be one of %s" % ", ".join(RULESET_ENFORCEMENTS))
+    if "conditions" in rs:
+        ref = (rs["conditions"] or {}).get("ref_name") if isinstance(rs["conditions"], dict) else None
+        if not isinstance(ref, dict) or set(ref) != {"include", "exclude"}:
+            errors.append("`tag_ruleset.conditions` must be {\"ref_name\": {\"include\": [...], \"exclude\": [...]}}")
+        else:
+            if not _is_str_list(ref["include"], non_empty=True):
+                errors.append("`tag_ruleset.conditions.ref_name.include` must be a non-empty list of strings")
+            if not _is_str_list(ref["exclude"], non_empty=False):
+                errors.append("`tag_ruleset.conditions.ref_name.exclude` must be a list of strings")
+    if "rules" in rs:
+        rules = rs["rules"]
+        if not _is_str_list(rules, non_empty=True) or len(set(rules)) != len(rules):
+            errors.append("`tag_ruleset.rules` must be a non-empty list of distinct rule TYPE names "
+                          "(e.g. \"creation\"), not rule objects")
+    if "bypass_actors" in rs:
+        actors = rs["bypass_actors"]
+        ok = isinstance(actors, list) and all(
+            isinstance(a, dict) and set(a) == {"actor_id", "actor_type", "bypass_mode"}
+            and (a["actor_id"] is None or (isinstance(a["actor_id"], int) and not isinstance(a["actor_id"], bool)))
+            and isinstance(a["actor_type"], str) and isinstance(a["bypass_mode"], str)
+            for a in actors)
+        if not ok:
+            errors.append("`tag_ruleset.bypass_actors` must be a list of {actor_id, actor_type, bypass_mode}")
+    return errors
 
 
 def check(root):
@@ -329,7 +389,21 @@ GOOD_BASELINE = {
     "required": [{"context": "rustfmt", "app_id": ACTIONS_APP_ID},
                  {"context": "lint", "app_id": ACTIONS_APP_ID}],
     "advisory_pending": ["msrv"],
+    "enforce_admins": True,
+    "pending_settings": True,
+    "tag_ruleset": {
+        "name": "protect-release-tags", "target": "tag", "enforcement": "active",
+        "conditions": {"ref_name": {"include": ["~ALL"], "exclude": []}},
+        "rules": ["creation", "update", "deletion", "non_fast_forward"],
+        "bypass_actors": [{"actor_id": 4260407, "actor_type": "Integration", "bypass_mode": "always"}],
+    },
 }
+
+
+def _with_rs(**changes):
+    b = json.loads(json.dumps(GOOD_BASELINE))
+    b["tag_ruleset"].update(changes)
+    return b
 
 
 def _fixture(tmp, files, baseline):
@@ -403,6 +477,18 @@ jobs:
         ("unknown top-level key", base, _with(stric=True), "unknown key `stric`"),
         ("duplicate name across lists", base, _with(advisory_pending=["msrv", "lint"]), "`lint` is listed more than once"),
         ("invalid JSON", base, "{not json", "cannot read"),
+        ("missing `enforce_admins`", base, {k: v for k, v in GOOD_BASELINE.items() if k != "enforce_admins"},
+         "missing key `enforce_admins`"),
+        ("non-bool `pending_settings`", base, _with(pending_settings="yes"), "`pending_settings` must be true or false"),
+        ("tag_ruleset targeting branches", base, _with_rs(target="branch"), "`tag_ruleset.target` must be \"tag\""),
+        ("tag_ruleset unknown enforcement", base, _with_rs(enforcement="on"), "`tag_ruleset.enforcement` must be one of"),
+        ("tag_ruleset rules as API objects", base, _with_rs(rules=[{"type": "creation"}]), "rule TYPE names"),
+        ("tag_ruleset duplicate rule", base, _with_rs(rules=["creation", "creation"]), "rule TYPE names"),
+        ("tag_ruleset empty include", base, _with_rs(conditions={"ref_name": {"include": [], "exclude": []}}),
+         "include` must be a non-empty list"),
+        ("tag_ruleset unknown key", base, _with_rs(id=7), "`tag_ruleset` has unknown key(s) id"),
+        ("tag_ruleset malformed bypass actor", base, _with_rs(bypass_actors=[{"actor_id": "4260407"}]),
+         "`tag_ruleset.bypass_actors` must be"),
         ("job-level if:", dict(base, **{"ci.yml": _ci_job("    if: github.event_name == 'pull_request'\n")}),
          GOOD_BASELINE, "job-level `if:`"),
         ("needs:", dict(base, **{"ci.yml": _ci_job("    needs: fmt\n")}), GOOD_BASELINE, "has `needs:`"),

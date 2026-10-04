@@ -22,6 +22,17 @@
 # bare `.contexts` list: an unpinned context is satisfied by ANY app with statuses:write,
 # and `strict=false` would quietly let stale-base PRs merge; neither shows in `.contexts`.
 #
+# ALSO enforce_admins AND THE TAG RULESET. The same file records the expected
+# `enforce_admins` flag and the `protect-release-tags` tag ruleset; a silent admin override
+# or a disabled/loosened ruleset is the same class of quiet settings regression. Both are
+# applied by the maintainer by hand, so while the baseline says `pending_settings: true`
+# their mismatch is a ::warning:: and only context/strict drift fails; flipping it to false
+# makes them hard failures. The comparison lives in .github/scripts/protection-drift.sh, not
+# here, so lint can run its --self-test over fixture JSON on every PR. To prove the hard-fail
+# path RED against the live settings without merging a red main, dispatch this workflow on a
+# branch whose baseline sets `pending_settings: false`:
+#   gh workflow run branch-protection-drift.yml --ref <branch>
+#
 # NOT ON pull_request. Branch protection changes through the GitHub UI, not through a PR
 # to this repo, so a PR-triggered run has nothing to catch here -- a scheduled ratchet is
 # the right shape, same reasoning as mutants.yml.
@@ -36,7 +47,9 @@
 # there is one fewer credential to rotate.
 #
 # The minted token is narrowed with explicit `permission-*` inputs to exactly what this job
-# reads (administration:read for /protection, metadata:read for the repo itself). Without
+# reads (administration:read for /protection, metadata:read for the repo and its rulesets
+# -- GET /rulesets is a metadata read). The ruleset's `bypass_actors` may not be returned to
+# a read-only token; the script then reports the bypass list as unverifiable. Without
 # them it inherits EVERY permission the installation holds -- including the bot's
 # `contents: write` -- for a job that only ever reads.
 name: branch-protection-drift
@@ -72,33 +85,9 @@ jobs:
           permission-administration: read
           permission-metadata: read
 
-      - name: Compare live required checks against .github/required-checks.json
+      # All logic, fix commands and the pending_settings rule are in the script; a failed GET
+      # is reported as "could not read", never as "nothing configured".
+      - name: Compare live protection against .github/required-checks.json
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-        run: |
-          set -euo pipefail
-
-          # Both sides normalised to {strict, checks: [{context, app_id}] sorted by context},
-          # printed with SORTED KEYS (-S): `gh --jq` (gojq) emits object keys sorted while jq
-          # keeps insertion order, so without -S identical settings compare unequal -- found
-          # by running this against the live setting. Array order does not matter; app_id does.
-          expected="$(jq -cS '{strict, checks: (.required | map({context, app_id}) | sort_by(.context))}' \
-            .github/required-checks.json)"
-          actual="$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" \
-            --jq '.required_status_checks | {strict, checks: (.checks | map({context, app_id}) | sort_by(.context))}')"
-          actual="$(printf '%s' "$actual" | jq -cS .)"
-
-          if [ "$actual" != "$expected" ]; then
-            echo "::error::main's required status checks (context + app_id) or strict flag drifted from .github/required-checks.json."
-            echo "  expected: $expected"
-            echo "  actual:   $actual"
-            echo
-            echo "If the live setting is right, update .github/required-checks.json in a PR"
-            echo "(lint's required-checks guard validates every name). If the file is right,"
-            echo "restore the setting -- pinned, read-modify-write, never POST .../contexts:"
-            echo "  jq '{strict, checks: .required}' .github/required-checks.json \\"
-            echo "    | gh api --method PATCH repos/${GITHUB_REPOSITORY}/branches/main/protection/required_status_checks --input -"
-            exit 1
-          fi
-
-          echo "required_status_checks unchanged: $actual"
+        run: bash .github/scripts/protection-drift.sh --fetch
