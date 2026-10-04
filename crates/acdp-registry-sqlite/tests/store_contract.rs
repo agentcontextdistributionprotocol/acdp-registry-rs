@@ -929,6 +929,77 @@ mod lifecycle {
             "append-only history carries exactly the winner"
         );
     }
+
+    /// #373: `has_lifecycle_state` is what the server's startup refusal
+    /// reads, so each of its two sources must trip it on its own, and a
+    /// store with ordinary (non-lifecycle) contexts must not.
+    ///
+    /// The republish step is the load-bearing one: a republished context
+    /// has `retracted = 0` but keeps both events, and RFC-ACDP-0013 §6 still
+    /// forbids a non-advertising registry from emitting them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn has_lifecycle_state_sees_events_and_the_retracted_flag() {
+        let (store, _tmp) = store().await;
+        assert!(
+            !store.has_lifecycle_state().await.unwrap(),
+            "a freshly migrated store has no lifecycle state"
+        );
+
+        let actor = AgentDid::new("did:web:agents.test:contract-64".to_string());
+        let (ctx_id, _) = published_ctx(&store, 64, "lifecycle state probe").await;
+        assert!(
+            !store.has_lifecycle_state().await.unwrap(),
+            "an ordinary published context is not lifecycle state"
+        );
+
+        store
+            .commit_lifecycle_event(&event(&actor, &ctx_id, LifecycleEventType::Retracted, None))
+            .expect("retract applied");
+        assert!(
+            store.has_lifecycle_state().await.unwrap(),
+            "a retracted context is lifecycle state"
+        );
+
+        store
+            .commit_lifecycle_event(&event(
+                &actor,
+                &ctx_id,
+                LifecycleEventType::Republished,
+                None,
+            ))
+            .expect("republish applied");
+        assert!(
+            !matches!(
+                store.get(&ctx_id).unwrap().unwrap().registry_state.status,
+                Status::Retracted
+            ),
+            "precondition: the context is no longer retracted"
+        );
+        assert!(
+            store.has_lifecycle_state().await.unwrap(),
+            "a republished context keeps its events, which are still lifecycle state"
+        );
+    }
+
+    /// #373: the `retracted` flag alone (no event row — a partial restore or
+    /// hand-edited database) still trips the probe. Without this, a body
+    /// that only checked `lifecycle_events` would pass the test above.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn has_lifecycle_state_sees_a_retracted_flag_without_events() {
+        let (store, _tmp) = store().await;
+        let (ctx_id, _) = published_ctx(&store, 65, "flag only").await;
+        sqlx::query("UPDATE contexts SET retracted = 1 WHERE ctx_id = ?")
+            .bind(ctx_id.as_str())
+            .execute(store.pool())
+            .await
+            .expect("set the flag directly");
+        let (events,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM lifecycle_events")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(events, 0, "precondition: no event rows at all");
+        assert!(store.has_lifecycle_state().await.unwrap());
+    }
 }
 
 // ─── ACDP 0.3.0: transparency log (RFC-ACDP-0012) ──────────────────────────

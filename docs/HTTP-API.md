@@ -562,8 +562,9 @@ idempotency and the response shape are normative in
 [RFC-ACDP-0013 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0013-lifecycle-events.md#4-lifecycle-event-object),
 [§5](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0013-lifecycle-events.md#5-event-signing-construction) and
 [§6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints); the handler follows
-§6 in order. (Its one known deviation — lifecycle data still served after the
-flag is turned off — is in [CONFIGURATION.md](CONFIGURATION.md#lifecycle-acdp-030).)
+§6 in order. A registry with the flag off never serves lifecycle state: it
+refuses to start over a store that holds any (see
+[CONFIGURATION.md](CONFIGURATION.md#lifecycle-acdp-030)).
 What is specific to this registry:
 
 - **Gate.** Mounted always; a registry without `lifecycle.enabled = true`

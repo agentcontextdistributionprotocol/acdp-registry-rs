@@ -316,6 +316,12 @@ first boot against it; there is no online restore path.
    starting — see the [runbook below](#runbook-transparency-log-inconsistency).
 4. **Start the registry and watch the first boot.** Migrations run before the
    listener binds, so a schema failure is a startup failure, not a 500 later.
+   So is restoring a backup that holds lifecycle state (retractions or their
+   events, from a time `[lifecycle]` was enabled) under a config with
+   `[lifecycle] enabled = false`: RFC-ACDP-0013 §6 forbids serving that state
+   without the profile, so the binary logs at `ERROR` and exits non-zero. Set
+   the flag to match the backup — see
+   [CONFIGURATION.md `[lifecycle]`](CONFIGURATION.md#lifecycle-acdp-030).
 5. **Verify readiness, not liveness.** `GET /healthz` reports storage
    readiness and answers `503` if the backend is not usable; `GET /livez` says
    only that the process is up and will answer `200` against a broken database.

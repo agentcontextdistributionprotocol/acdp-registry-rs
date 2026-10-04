@@ -1076,7 +1076,10 @@ impl Default for ReceiptConfig {
 ///
 /// When disabled (the default), both endpoints return
 /// `not_implemented` (HTTP 501) and neither `lifecycle_events` nor the
-/// `retracted` status is ever emitted (§6).
+/// `retracted` status is ever emitted (§6). That holds because the server
+/// binary refuses to start with this flag off over a store that holds
+/// lifecycle state (`ExtendedRegistryStore::has_lifecycle_state`, #373);
+/// the read paths themselves do not consult the flag.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleConfig {

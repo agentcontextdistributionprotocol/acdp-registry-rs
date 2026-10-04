@@ -326,6 +326,20 @@ impl ExtendedRegistryStore for PgStore {
         events_for_ctx(&self.pool, ctx_id).await
     }
 
+    /// Both sources (see the trait docs): a republished context keeps its
+    /// events with `retracted = FALSE`, so the events probe is what catches
+    /// it.
+    async fn has_lifecycle_state(&self) -> Result<bool, AcdpError> {
+        let (found,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM lifecycle_events) \
+             OR EXISTS(SELECT 1 FROM contexts WHERE retracted)",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AcdpError::RegistryInternal(format!("has_lifecycle_state: {e}")))?;
+        Ok(found)
+    }
+
     // ── Transparency log reads (RFC-ACDP-0012) ─────────────────────────
 
     async fn log_tree_size(&self) -> Result<u64, AcdpError> {

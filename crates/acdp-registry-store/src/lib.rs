@@ -142,6 +142,40 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
             .unwrap_or_default())
     }
 
+    /// Whether this store holds ANY RFC-ACDP-0013 lifecycle state: at least
+    /// one stored lifecycle event, or at least one context marked
+    /// `retracted`.
+    ///
+    /// # Why this exists
+    ///
+    /// RFC-ACDP-0013 §6: a registry that does not advertise
+    /// `acdp-registry-lifecycle` MUST NOT emit `lifecycle_events` or the
+    /// `retracted` status, and there is no carve-out for state written while
+    /// the profile WAS advertised. The read paths project stored lifecycle
+    /// state unconditionally, so a deployment that turned `[lifecycle]` off
+    /// after accepting events would serve it anyway. The server binary calls
+    /// this once at startup and refuses to start in that combination rather
+    /// than serve the violation (or silently un-retract withdrawn content by
+    /// stripping it).
+    ///
+    /// # Both sources, not one
+    ///
+    /// Implementations MUST check the event store AND the retracted flag. A
+    /// republished context keeps its events but is no longer retracted, so
+    /// the flag alone misses it; a row whose flag is set with no surviving
+    /// event (a partial restore, manual SQL) is missed by the events alone.
+    ///
+    /// # The default
+    ///
+    /// `Ok(false)`: a backend that persists nothing across restarts (the
+    /// in-memory store) can never carry lifecycle state into a process
+    /// started with the flag off. A durable backend that stores lifecycle
+    /// state MUST override this, or the startup refusal cannot see it. Added
+    /// as a defaulted method so existing implementors keep compiling.
+    async fn has_lifecycle_state(&self) -> Result<bool, AcdpError> {
+        Ok(false)
+    }
+
     // ── Transparency log reads (ACDP 0.3, RFC-ACDP-0012) ──────────────
     //
     // Leaves are APPENDED only inside `RegistryStore::commit_publish`
