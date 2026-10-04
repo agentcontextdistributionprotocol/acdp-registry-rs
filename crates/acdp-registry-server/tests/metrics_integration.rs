@@ -134,6 +134,21 @@ async fn harness_with_caps(
     caps: CapabilitiesDocument,
     lifecycle: bool,
 ) -> Harness {
+    harness_with_caps_seeded(cfg, caps, lifecycle, None).await.0
+}
+
+/// [`harness_with_caps`], optionally with one public context already
+/// published by the did:key producer for `seed` -- written straight through
+/// the SDK, before the router exists, so it touches no metric series (this
+/// binary's counters are process-global and
+/// `publish_total{outcome="inserted"} == 2` is pinned elsewhere) and no rate
+/// limit bucket. Returns the seeded ctx_id.
+async fn harness_with_caps_seeded(
+    cfg: RegistryConfig,
+    caps: CapabilitiesDocument,
+    lifecycle: bool,
+    seed: Option<u8>,
+) -> (Harness, Option<String>) {
     let db = tempfile::Builder::new()
         .prefix("acdp-metrics-")
         .tempdir()
@@ -149,6 +164,25 @@ async fn harness_with_caps(
         server
     };
     let server = Arc::new(server);
+    let seeded = match seed {
+        None => None,
+        Some(seed) => {
+            let req = Producer::new_did_key(SigningKey::from_bytes(&[seed; 32]))
+                .publish_request()
+                .title("metrics seeded context")
+                .context_type(ContextType::DataSnapshot)
+                .visibility(Visibility::Public)
+                .build()
+                .unwrap();
+            let server2 = server.clone();
+            let resp =
+                tokio::task::spawn_blocking(move || server2.publish_verified_did_key(&req, None))
+                    .await
+                    .unwrap()
+                    .expect("seed publish");
+            Some(resp.ctx_id.as_str().to_string())
+        }
+    };
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
     let secret = JwtSecret::from_bytes(&[42u8; 32]);
     let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
@@ -161,10 +195,13 @@ async fn harness_with_caps(
         AUTHORITY.into(),
     ));
     let state = AppStateInner::new(server, auth, None, cfg, None);
-    Harness {
-        router: build_router(state),
-        _db: db,
-    }
+    (
+        Harness {
+            router: build_router(state),
+            _db: db,
+        },
+        seeded,
+    )
 }
 
 fn producer(seed: u8) -> Producer {
@@ -1141,34 +1178,37 @@ async fn a_rejected_lifecycle_transition_is_counted_under_its_wire_code() {
 /// #375: an over-budget actor's valid retract is a 429 counted under
 /// `scope="lifecycle_per_agent"`.
 ///
-/// **No publish, deliberately** (same reason as the test above: this binary's
-/// counters are process-global and `publish_total{outcome="inserted"} == 2` is
-/// pinned elsewhere). The budget is spent instead by a validly signed retract
-/// of a context that does not exist. Since #375 that request is charged: its
-/// signature verifies for its actor, and the 404 comes after. So with a budget of
-/// 1, the second valid retract is over budget. That also makes this test
-/// fail if the verified-charge path stops arming. No other test in this binary
-/// emits `lifecycle_per_agent`, so the count is exact.
+/// **No HTTP publish, deliberately** (same reason as the test above: this
+/// binary's counters are process-global and
+/// `publish_total{outcome="inserted"} == 2` is pinned elsewhere). The context
+/// is seeded straight through the SDK instead, and the budget is spent by the
+/// producer's own valid retract of it: that proves, so it is charged. With a
+/// budget of 1, the second valid retract is then over budget. That also makes
+/// this test fail if the verified-charge path stops arming. (#393: before the
+/// prove/commit split this spent the unit with a retract of a context that
+/// does not exist; that is now refused at prove, before any signature check,
+/// and so is no longer charged.) No other test in this binary emits
+/// `lifecycle_per_agent`, so the count is exact.
 #[tokio::test]
 async fn an_over_budget_lifecycle_actor_is_counted_under_lifecycle_per_agent() {
     let mut cfg = metrics_config();
     cfg.lifecycle.enabled = true;
     cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
     cfg.limits.publish_rate_per_minute = 1;
-    let h = harness_with_caps(cfg, caps_lifecycle(), true).await;
+    let (h, ctx_id) = harness_with_caps_seeded(cfg, caps_lifecycle(), true, Some(78)).await;
+    let ctx_id = ctx_id.expect("seeded context");
 
-    let ghost = format!("acdp://{AUTHORITY}/{}", uuid::Uuid::new_v4());
     let (status, v) = post_retract(
         &h.router,
-        &ghost,
-        &signed_lifecycle_event(78, &ghost, "retracted", "spend the unit"),
+        &ctx_id,
+        &signed_lifecycle_event(78, &ctx_id, "retracted", "spend the unit"),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "first retract: {v}");
+    assert_eq!(status, StatusCode::OK, "first retract: {v}");
     let (status, v) = post_retract(
         &h.router,
-        &ghost,
-        &signed_lifecycle_event(78, &ghost, "retracted", "over budget"),
+        &ctx_id,
+        &signed_lifecycle_event(78, &ctx_id, "retracted", "over budget"),
     )
     .await;
     assert_eq!(

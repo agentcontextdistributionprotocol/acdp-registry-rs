@@ -11594,8 +11594,9 @@ async fn a_did_web_retract_retracts_rather_than_republishing() {
 // `event.actor`. They used to CHARGE that bucket (`limiter.check`) before the
 // signature was looked at, so anyone could drain agent A's publish budget by
 // POSTing unsigned events naming A. Now the pre-pipeline step is a read-only
-// `peek` and the charge is armed only once the signature verifies for
-// `event.actor`. Every test here measures the budget through PUBLISH, the
+// `peek` and the charge is armed only once the event is proven -- since #393,
+// between the SDK's `prove_lifecycle_identity*` and `commit_lifecycle_proven`
+// (acdp 0.14.4), where the actor is the verified producer. Every test here measures the budget through PUBLISH, the
 // thing an attacker would actually be denying, rather than through the
 // lifecycle endpoint itself.
 // ---------------------------------------------------------------------------
@@ -11738,11 +11739,41 @@ async fn a_valid_double_retract_409_is_charged() {
     );
 }
 
-/// BINDING REVISION 5 (plan issues-371-376): a validly signed event whose
-/// actor is NOT the context's producer is refused, and charged to the ACTOR
-/// who proved key possession -- never to the producer it targeted.
+/// A byte-identical replay of a verified event (same `event_id`) proves again
+/// and is charged to its actor, even though the commit appends nothing (the
+/// store's idempotent retry) -- the same rule publish applies to replays
+/// (`an_idempotent_replay_is_charged_like_any_other_successful_publish`).
+/// Fails if the charge is keyed on a fresh append rather than on the proof.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_valid_event_by_a_non_producer_is_charged_to_the_actor() {
+async fn a_replayed_valid_retract_is_charged() {
+    let h = lifecycle_harness_with_rate(3).await;
+    let a = did_key_producer(90);
+    let (_, ctx) = publish_as(&h, &a, "lc393 replay").await;
+    let ctx_id = ctx.unwrap();
+    let env = signed_event_envelope(90, &ctx_id, "retracted", None);
+    for attempt in ["first", "replay"] {
+        let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &env).await;
+        assert_eq!(status, StatusCode::OK, "{attempt}: {v}");
+        assert_eq!(v["registry_state"]["status"], "retracted", "{attempt}: {v}");
+    }
+    assert_eq!(
+        publish_as(&h, &a, "lc393 replay 2").await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "publish + retract + replayed retract = 3 units: the replay must have been charged"
+    );
+}
+
+/// A validly signed event whose actor is NOT the context's producer is
+/// refused 403 and charged to NOBODY: never to the producer it targeted, and
+/// (#393) not to its actor either. Since acdp 0.14.4 the charge arms between
+/// the SDK's prove and commit, and prove refuses an actor ≠ producer (§6
+/// step 3) before it verifies the signature, so B's key possession is never
+/// established. (#375's pre-flight verified B's signature itself and charged
+/// B -- BINDING REVISION 5 -- at the cost of a second verification.) Fails if
+/// the charge is armed before the proof (B pays) or keyed by the context's
+/// producer (A pays).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_event_by_a_non_producer_is_charged_to_nobody() {
     let h = lifecycle_harness_with_rate(2).await;
     let a = did_key_producer(84);
     let b = did_key_producer(85);
@@ -11757,8 +11788,14 @@ async fn a_valid_event_by_a_non_producer_is_charged_to_the_actor() {
 
     assert_eq!(
         publish_as(&h, &b, "lc375 other 2").await.0,
+        StatusCode::OK,
+        "B's event never proved (actor ≠ producer is refused before the \
+         signature is verified), so it must not have spent B's second unit"
+    );
+    assert_eq!(
+        publish_as(&h, &b, "lc375 other 3").await.0,
         StatusCode::TOO_MANY_REQUESTS,
-        "B's verified (if unauthorized) event must be charged to B"
+        "B's budget is live: two publishes spend it"
     );
     assert_eq!(
         publish_as(&h, &a, "lc375 owner 2").await.0,
@@ -11808,8 +11845,9 @@ async fn an_over_budget_actor_gets_429_on_a_valid_retract() {
     );
 }
 
-/// The did:web arm: the pre-flight verifies through the shared resolver, so
-/// an unsigned did:web retract is not charged and a valid one is.
+/// The did:web arm: the SDK's `prove_lifecycle_identity` verifies through the
+/// shared resolver, so an unsigned did:web retract is not charged and a valid
+/// one is.
 #[tokio::test(flavor = "multi_thread")]
 async fn did_web_lifecycle_charges_only_verified_events() {
     let addr = didweb::spawn_didweb_server().await;
@@ -11852,8 +11890,8 @@ async fn did_web_lifecycle_charges_only_verified_events() {
     );
 }
 
-/// The pre-flight sits BELOW the tenant gate: a validly signed retract that
-/// the tenant gate refuses (404) is not charged. Fails if the verify/arm is
+/// The prove/arm sits BELOW the tenant gate: a validly signed retract that
+/// the tenant gate refuses (404) is not charged. Fails if a verify-and-arm is
 /// moved above step 5.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_valid_event_refused_by_the_tenant_gate_is_not_charged() {
@@ -11888,8 +11926,8 @@ async fn a_valid_event_refused_by_the_tenant_gate_is_not_charged() {
     );
 }
 
-/// The pre-flight sits BELOW the bearer check: a validly signed retract sent
-/// with an invalid bearer (403) is not charged. Fails if the verify/arm is
+/// The prove/arm sits BELOW the bearer check: a validly signed retract sent
+/// with an invalid bearer (403) is not charged. Fails if a verify-and-arm is
 /// moved above `caller_from_headers`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_valid_event_refused_for_a_bad_bearer_is_not_charged() {

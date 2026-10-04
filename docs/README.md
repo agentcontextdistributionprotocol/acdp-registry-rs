@@ -55,7 +55,7 @@ verification, SSRF defenses, or the canonical error-code registry lives in the
 | The `AcdpError` ↔ RFC-ACDP-0007 §5 wire-code registry, retry guidance | [acdp-rs · Errors & Retries](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/errors.md) |
 | SSRF defenses, HTTPS/size/redirect caps, algorithm-downgrade rejection (`WebResolver`) | [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md) |
 | The three-layer model (what is hashed/signed/mutable) | [acdp-rs · Architecture](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/architecture.md) |
-| API reference for the `acdp` crate | [docs.rs/acdp 0.14.3](https://docs.rs/acdp/0.14.3/acdp/) |
+| API reference for the `acdp` crate | [docs.rs/acdp 0.14.4](https://docs.rs/acdp/0.14.4/acdp/) |
 | The IANA-style registries (profiles, error codes, lifecycle event types, signature algorithms) | [spec · registries](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/registries) |
 | Normative protocol rules | [RFC set](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs) |
 
@@ -90,8 +90,8 @@ starting with `/` is served from the website's root, where it 404s.
   `8a888edaa15c4475bbaeccff45567921e3153730` (the guides refresh, not yet in a
   tag). Never `main`.
 - **SDK API:** docs.rs with an explicit version matching `Cargo.lock`, e.g.
-  `https://docs.rs/acdp/0.14.3/acdp/`. For re-exported modules use the
-  sub-crate path (`https://docs.rs/acdp-client/0.14.3/acdp_client/verified/`);
+  `https://docs.rs/acdp/0.14.4/acdp/`. For re-exported modules use the
+  sub-crate path (`https://docs.rs/acdp-client/0.14.4/acdp_client/verified/`);
   the `acdp/client/...` form does not exist on docs.rs.
 - **Links to this repository** may use `main` (they are copied as written;
   `main` is the revision these docs describe).

@@ -129,10 +129,13 @@ the same way: before signature verification they only *peek* at the bucket
 created), and the request is charged once its signer is proven (see
 [`POST /contexts`](#post-contexts) and
 [the lifecycle endpoints](#post-contextsctx_idretract-post-contextsctx_idrepublish-acdp-030)).
-A lifecycle request is charged to its event `actor` once the event signature
-verifies for that actor, and from then on on every exit, including a `409`
-and a store error. An unsigned or mis-signed event naming an agent therefore
-spends nothing from that agent's budget, and does not create a bucket.
+A lifecycle request is charged to its event `actor` once the event is proven
+— the context is visible to the caller, the actor is its producer, and the
+event signature verifies — and from then on on every exit, including a `409`,
+a store error and a byte-identical replay. An unsigned or mis-signed event
+naming an agent therefore spends nothing from that agent's budget, and does
+not create a bucket; nor does an event refused before its signature is
+checked (an unknown or invisible context, an actor that is not the producer).
 Because the pre-verification peek answers for whatever agent a request names,
 the `429`s it returns are counted before verification: an unauthenticated
 caller naming an agent that is already over budget increments the
@@ -574,11 +577,13 @@ What is specific to this registry:
 - **Rate limit.** Per-agent limiting draws on the same bucket as publish
   (`limits.publish_rate_per_minute`), keyed by the event `actor`. After the
   shape and path checks the handler only *peeks* at the bucket (an actor
-  already over budget gets `429`). After the tenant gate it verifies the
-  event signature against the `actor` itself, and only when that succeeds is
-  the request charged — on every exit from then on, including a `409` and a
-  `403` for an actor that is not the producer. An unsigned or mis-signed
-  event is never charged. See [Rate limits](#rate-limits-429).
+  already over budget gets `429`). After the tenant gate and the bearer
+  check, the `acdp` SDK proves the event (visibility, event validation,
+  actor == producer, signature) before it commits anything, and the request
+  is charged between the two — on every exit from then on, including a `409`
+  and a byte-identical replay. An event that fails to prove (unsigned,
+  mis-signed, an unknown or invisible context, a `403` for an actor that is
+  not the producer) is never charged. See [Rate limits](#rate-limits-429).
 - **Response.** `200` with the post-transition full-retrieval envelope
   (`body` + `registry_state`, `status` re-derived, `lifecycle_events`
   including the new event).

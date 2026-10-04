@@ -109,10 +109,12 @@ verifies.** `POST /contexts/{ctx_id}/retract` and `/republish` draw on the per-a
 keyed by the event `actor`. Before this release they charged that bucket before looking at the
 signature, so while `[lifecycle] enabled` was on anyone could drain an agent's publish budget with
 unsigned events naming it, and add a bucket per invented actor. Now an unsigned or mis-signed event
-costs the named agent nothing and creates no bucket. A validly signed event is charged to its actor
-on every outcome: success, `409 invalid_lifecycle_transition`, a store error, and a `403` because the
-actor is not the context's producer. An actor already over budget still gets `429` before
-verification, as at publish. **Who needs to act:** nobody. No response code, header, config key or
+costs the named agent nothing and creates no bucket. An event the `acdp` SDK proves (visible
+context, actor is the producer, signature verifies) is charged to its actor on every outcome:
+success, `409 invalid_lifecycle_transition`, a store error, and a byte-identical replay. An event
+refused before its signature is checked — an unknown or invisible context, or a `403` because the
+actor is not the context's producer — is charged to nobody (#393). An actor already over budget
+still gets `429` before verification, as at publish. **Who needs to act:** nobody. No response code, header, config key or
 metric label changed. If you alert on `acdp_registry_rate_limit_rejections_total{scope="lifecycle_per_agent"}`,
 note that it can still be raised by unauthenticated requests naming an agent that is already over
 budget.
@@ -149,6 +151,11 @@ strip or overwrite any client-supplied value. See [MULTI-TENANCY.md](MULTI-TENAN
   uncorroborated is refused with 403, not ignored, in every mode including auth-off.
 - **Rollback:** 0.2.0 refuses unknown `[auth]` keys. Remove `tenant_header_trust` from the config
   file and `ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST` from the environment before rolling back.
+
+**`acdp` SDK 0.14.3 → 0.14.4.** No status code, `error.code` or config key moved. Ed25519
+signatures are now verified strictly (small-order public keys and nonce points are refused), on
+every path that verifies one: publish, lifecycle events, the auth challenge. No honest key is
+small-order. The lifecycle prove/commit split it adds is what the #393 charging rule above uses.
 
 ---
 
