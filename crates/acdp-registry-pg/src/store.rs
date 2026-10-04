@@ -1570,18 +1570,6 @@ async fn insert_body<'c>(
     .await
     .map_err(map_sqlx_err)?;
 
-    sqlx::query(
-        "INSERT INTO lineages (lineage_id, first_version_ctx, latest_ctx) \
-         VALUES ($1, $2, $3) \
-         ON CONFLICT (lineage_id) DO UPDATE SET latest_ctx = EXCLUDED.latest_ctx",
-    )
-    .bind(body.lineage_id.as_str())
-    .bind(body.ctx_id.as_str())
-    .bind(body.ctx_id.as_str())
-    .execute(&mut **tx)
-    .await
-    .map_err(map_sqlx_err)?;
-
     Ok(())
 }
 
