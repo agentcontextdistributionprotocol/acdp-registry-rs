@@ -23,7 +23,11 @@ The committed baseline for `main`'s protection is
 - `strict` — a PR branch must be up to date with `main` before it merges.
 - `advisory_pending` — checks that run on every PR but do not block. A red advisory
   check leaves the merge button green, which is why some gates are run twice (see the
-  upgrade-notes gate under [Release flow](#release-flow)).
+  upgrade-notes gate under [Release flow](#release-flow)). Most of these are waiting to be
+  promoted by the [runbook](#runbook-enforce_admins-the-tag-ruleset-and-promoting-advisory-checks).
+  `cargo-vet` is the exception: it stays advisory until a maintainer deliberately promotes
+  it in a PR of its own, and the runbook excludes it (see
+  [Supply-chain audits](#supply-chain-audits-cargo-vet)).
 - `enforce_admins`, `tag_ruleset`, `pending_settings` — the settings a maintainer
   applies by hand; see [Current protection settings](#current-protection-settings).
 
@@ -126,7 +130,8 @@ mutating ones (every `--method POST`, `PATCH`, `PUT` or `DELETE`) have not yet b
 against this repository.
 
 **Order matters: settings first, then the baseline PR.** Prepare a PR that moves the
-`advisory_pending` names into `required` (each with `"app_id": 15368`) and sets
+`advisory_pending` names **except `cargo-vet`** into `required` (each with
+`"app_id": 15368`), leaves `cargo-vet` in `advisory_pending`, and sets
 `pending_settings` to `false`, but merge it only *after* the settings are applied, so its
 own head shows the promoted checks reporting. Until it merges, the drift job reports the
 promoted checks as "already required live but still advisory_pending" — a warning, not a
@@ -199,12 +204,16 @@ gh api --method POST $R/git/refs \
 # 3. enforce_admins, through its dedicated endpoint.
 gh api --method POST $R/branches/main/protection/enforce_admins --jq .enabled
 
-# 4. Promote the advisory checks: live checks + the baseline's advisory_pending,
-#    every one pinned (unique_by makes a re-run harmless). Inspect the body first.
+# 4. Promote the advisory checks: live checks + the baseline's advisory_pending
+#    MINUS the names in KEEP_ADVISORY, every one pinned (unique_by makes a re-run
+#    harmless). cargo-vet stays advisory: promoting it would block every Dependabot
+#    and bump-acdp PR until someone regenerates the exemptions. Inspect the body
+#    first: it must not contain cargo-vet.
+KEEP_ADVISORY='["cargo-vet"]'
 gh api $R/branches/main/protection/required_status_checks \
-  | jq --slurpfile b .github/required-checks.json \
+  | jq --slurpfile b .github/required-checks.json --argjson keep "$KEEP_ADVISORY" \
       '{strict, checks: (((.checks | map({context, app_id}))
-                         + ($b[0].advisory_pending | map({context: ., app_id: 15368})))
+                         + ($b[0].advisory_pending - $keep | map({context: ., app_id: 15368})))
                          | unique_by(.context))}' \
   > "$SNAP/rsc-new.json"
 jq . "$SNAP/rsc-new.json"
@@ -381,7 +390,13 @@ cargo vet --locked                # what CI runs
 
 `cargo vet regenerate exemptions` also drops exemptions that an audit now covers. Run
 `cargo vet regenerate imports` occasionally to pick up new imported audits, acdp-rs's
-included, and commit the changed `imports.lock`. To record a real review instead, use
+included. The import tracks acdp-rs's `main` on purpose, so `imports.lock` is where new
+trust arrives. **Review its diff like an audit before committing it**, whether it came
+from `regenerate imports` or from a plain `cargo vet` without `--locked`. Check which
+audits are new or changed and who certified them (`who`, `criteria`, version or delta,
+and whether the notes say what was read). Check every new wildcard audit and
+`[[publisher.*]]` or trusted-publisher entry: it vouches for future versions too. Check
+that no import silently replaced an exemption you meant to keep reviewing. To record a real review instead, use
 `cargo vet certify <crate> <version>` (or a delta from an audited version). The notes
 should say what was read and what is not claimed, as acdp-rs's worksheets do. Each
 `acdp` bump changes the `acdp-*` versions, so a `bump-acdp` PR always needs the
@@ -390,9 +405,15 @@ regenerate step until those crates are trusted some other way (for example a
 
 The cargo-vet version is pinned in `ci.yml` (installed with `cargo install --locked`
 because the pinned `taiki-e/install-action` has no manifest for it). Keep it in step with
-acdp-rs's pin, so both repositories read the same `imports.lock` format. Promoting
-`cargo-vet` to required follows the runbook above. Do it only once a red vet on a
-dependency PR has a cheap, documented fix, which the commands above provide.
+acdp-rs's pin, so both repositories read the same `imports.lock` format.
+
+`cargo-vet` stays **advisory** until a maintainer decides otherwise. The runbook's
+promotion step leaves it out on purpose. While the `acdp-*` crates and most of the graph
+are exempted, every Dependabot and `bump-acdp` PR would be blocked until someone ran
+`cargo vet regenerate exemptions`. Promoting it is a separate, deliberate change. Remove
+`cargo-vet` from `KEEP_ADVISORY` in step 4. Move it from `advisory_pending` to `required`
+in the baseline in the same PR. Have a plan for the `acdp-*` bumps first, such as a
+`cargo vet trust` entry or a regenerate step in `bump-acdp.yml`.
 
 ## Mutation oracle
 

@@ -66,7 +66,8 @@ cargo deny check
 
 # Supply-chain review coverage (advisory in CI). A new or bumped dependency
 # needs an audit or an exemption; see docs/MAINTAINING.md
-# "Supply-chain audits (cargo vet)". Install: cargo install --locked cargo-vet
+# "Supply-chain audits (cargo vet)". Install the version CI pins:
+#   cargo install --locked cargo-vet --version 0.10.2
 cargo vet --locked
 
 # Spec conformance — replays HTTP-shaped fixtures from the ACDP spec

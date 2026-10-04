@@ -734,10 +734,11 @@ jobs:
   # answers a different question: known advisories, licenses, bans, sources.
   #
   # ADVISORY: `cargo-vet` is in `advisory_pending`, not `required`, in
-  # .github/required-checks.json. A dependency bump that is not yet vetted
-  # reddens this job without blocking the merge; see docs/MAINTAINING.md
-  # "Supply-chain audits (cargo vet)" for the certify/exempt workflow and
-  # what promoting it to required would take.
+  # .github/required-checks.json, and the promotion runbook in
+  # docs/MAINTAINING.md EXCLUDES it (KEEP_ADVISORY), so it stays advisory
+  # until a maintainer promotes it deliberately. A dependency bump that is not
+  # yet vetted reddens this job without blocking the merge; see
+  # docs/MAINTAINING.md "Supply-chain audits (cargo vet)".
   #
   # INSTALL: compiled from crates.io with `--locked` at an exact version. The
   # SHA-pinned install-action used elsewhere has no manifest for 0.10.2 (only
