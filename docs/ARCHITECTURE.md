@@ -68,6 +68,16 @@ top of the upstream sync trait:
 - Tenant binding — `set_tenant_of_ctx` / `tenant_of_ctx` / `tenants_of_ctxs`,
   plus the durable revocation cursors used by federation. See
   [MULTI-TENANCY.md](MULTI-TENANCY.md).
+- `search_in_tenant(params, requester, public_arm_open, tenant)` — search with
+  the tenant predicate in the same SQL statement as the keyset cursor and the
+  count, so a tenant-scoped page, cursor and `total_estimate` only ever see that
+  tenant's rows. The search handler calls it whenever a tenant is asserted. The
+  default implementation (untenanted backends) returns an empty page for any
+  tenant but `default`; SQLite and Postgres override it.
+- `visible_ctx_ids(ctx_ids, requester, tenant, public_arm_open)` — which of a
+  batch of ids the caller may *retrieve* (RFC-ACDP-0008 §4.5 retrieve rules,
+  not search rules, plus the tenant gate), in one query on the SQL backends.
+  `/log/entries` uses it to decide which leaves to echo.
 
 The sync `RegistryStore` methods inherited from `acdp` are required so the
 upstream `RegistryServer::publish_verified` algorithm runs unchanged. The

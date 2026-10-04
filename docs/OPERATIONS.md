@@ -302,15 +302,18 @@ first boot against it; there is no online restore path.
    partially-populated one — the migrations are not written to merge two
    datasets). SQLite: put the `.db`, `.db-wal` and `.db-shm` files back
    together, as a set.
-3. **Start the registry and watch the first boot.** Migrations run before the
+3. **If `[log]` is enabled, settle the log instance before the first boot.**
+   A restore from any backup older than the last publish rolls the log back,
+   and the first `GET /log/checkpoint` after boot signs the restored tree under
+   whatever `log_id` is configured. If the restored tree may be smaller than a
+   checkpoint the registry already served, change `[log] instance` *before*
+   starting — see the [runbook below](#runbook-transparency-log-inconsistency).
+4. **Start the registry and watch the first boot.** Migrations run before the
    listener binds, so a schema failure is a startup failure, not a 500 later.
-4. **Verify readiness, not liveness.** `GET /healthz` reports storage
+5. **Verify readiness, not liveness.** `GET /healthz` reports storage
    readiness and answers `503` if the backend is not usable; `GET /livez` says
    only that the process is up and will answer `200` against a broken database.
    Check `/healthz`.
-5. **Re-check the transparency log if it is enabled** — see the runbook below.
-   A restore that rolls the log back to an earlier state is exactly the
-   condition a consistency proof is designed to expose.
 
 **What a restore does not bring back.** The webhook delivery queue is in-memory
 and bounded, with no outbox and no replay. Every event queued and not yet
@@ -333,7 +336,7 @@ rate limiter. Four bounds are worth knowing before they find you:
 |-------|-------|---------------------------|
 | Webhook queue | `webhook.queue_capacity` | The queue is bounded and delivery is fire-and-forget. When it is full the event is **dropped** with a `warn` log (`webhook queue full; event dropped`) — the publish itself still succeeds. There is no Prometheus gauge for depth; `GET /admin/status` reports `queue_in_flight` and `queue_capacity`, and that plus the warn log is the whole signal. |
 | Transparency log proofs | `[log]` | Tree computation is **O(n) per request** over the stored leaf hashes (only the current head root is cached). `/log/proof` and `/log/checkpoint` therefore get steadily more expensive as the log grows, and they are unauthenticated for hash-only queries. Rate-limit them deliberately rather than discovering the cost. |
-| Search page size | clamped in both stores | A caller-supplied `limit` is clamped to 100. A page can also come back **shorter** than requested — see [MULTI-TENANCY.md](MULTI-TENANCY.md) on the refill cap. Short is not "end of results"; page until `next_cursor` is absent. |
+| Search page size | clamped in both stores | A caller-supplied `limit` is clamped to 100. A page can also come back **shorter** than requested when the request uses `?visibility=`, which is applied after the query (tenant scoping is not: it runs in SQL) — see [MULTI-TENANCY.md](MULTI-TENANCY.md#how-the-binding-is-stored-and-filtered) on the refill cap. Short is not "end of results"; page until `next_cursor` is absent. |
 | Storage pool | `storage.max_connections` (default 20) | Requests queue on the sqlx pool. `/healthz` issues a storage health query of its own, so it reports `degraded` + `503` once the pool can no longer serve one — which is the intended behaviour for a load balancer, and the reason `/livez` exists separately and never touches storage. |
 
 Sizing the webhook queue is a trade between memory and loss: it holds whole
@@ -356,33 +359,79 @@ changed**: rows removed, reordered, or rewritten. The realistic causes are a
 database restore that rolled the log back, a partial restore that mixed two
 datasets, or direct writes to the log table.
 
+**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
+(pinned spec): a registry whose tree is lost **MUST NOT serve a reconstructed
+history under the same `log_id`**; it MUST start a new instantiation with a new
+`<instance>` component, and SHOULD publish an operational notice. "Serve" here
+includes reads: `GET /log/checkpoint` is public and signs the current tree on
+demand, so a registry that merely boots on a rolled-back database is already
+signing the reconstructed history under the old `log_id`. (That reading of
+"serve" is this runbook's, not the RFC's wording.) Restoring an older backup
+and carrying on under the same `log_id` is therefore not a valid recovery
+unless step 4 shows the restored tree is consistent with everything already
+served.
+
+This registry's `log_id` is `did:web:<authority>/log/<instance>`, where
+`<instance>` is `[log] instance` (default `"1"`; env
+`ACDP_REGISTRY_LOG__INSTANCE`; must match `[a-z0-9-]{1,32}`, checked at
+startup). Changing it is a config change and a restart — no migration, no
+manual SQL. What it does to existing data, which you should state in your
+notice:
+
+- **The surviving leaves become the new log's history.** `log_leaves` has no
+  instance or `log_id` column, so nothing is deleted or renumbered: the rows
+  still present keep `leaf_index` 0 onward, the new log's first checkpoint
+  commits to all of them (`tree_size` is the row count), and new publishes
+  append after them. Under the new `log_id` those positions say nothing about
+  when the entries were first published; the new log anchors them only from
+  its own first checkpoint.
+- **Witness cosignatures stop matching.** `log_witness_cosignatures` rows are
+  keyed by `log_id`; the old rows stay in the table but are never attached to
+  a new-log checkpoint, and the registry polls each `[[witnesses]]` entry for
+  the new `log_id`. The new log starts un-witnessed until the witnesses cosign
+  it, so tell their operators.
+- **Old proofs do not carry over.** Consistency proofs exist only within one
+  `log_id`. Inclusion proofs and checkpoints consumers retained for the old
+  `log_id` cannot be checked against the new one. That break is the intended,
+  visible signal.
+
 **Do, in order:**
 
 1. **Preserve the evidence before touching anything.** Snapshot the database and
    keep the failing checkpoint pair (`first`, `second`) and both responses. A
    second restore attempt destroys the only record of what the log claimed.
-2. **Establish which direction it moved.** Fetch `GET /log/checkpoint` and
-   compare `tree_size` against the retained checkpoint. A *smaller* current
-   `tree_size` is a rollback — almost always a restore from an older backup. An
-   equal-or-larger size with a non-verifying proof is a rewrite, which is more
-   serious.
-3. **Stop publishing.** Every new entry appended on top of a rewritten log
-   extends the divergence and enlarges the set of checkpoints that can never be
-   reconciled. The registry has no mechanism to repair a log in place, and none
-   to reconcile two histories.
-4. **If it was a rollback from a restore:** restore forward to the most recent
-   good backup instead. Entries published between the two backups are not
-   recoverable from the registry — they have to be re-published by their
-   producers, which mints new entries at new positions. Say so explicitly to
-   consumers; their retained inclusion proofs for the lost entries will not
-   verify against the new log.
-5. **If it was not a restore:** treat it as a possible compromise of whatever
+2. **Take the registry out of service** (stop it, or remove it from the load
+   balancer so clients cannot reach `/log/*`). Every checkpoint it serves on the
+   bad tree, and every entry appended on top of it, widens the set of
+   checkpoints that can never be reconciled. The registry has no mechanism to
+   repair a log in place, and none to reconcile two histories.
+3. **Find the largest checkpoint the registry may have served** under the
+   current `log_id`: from your monitors, a witness, a consumer report, or the
+   pre-incident database (its `SELECT COUNT(*) FROM log_leaves` is the
+   `tree_size` it was serving). Compare it with the tree you are about to serve
+   (the same count on the database you will run).
+4. **Decide the instance.** Keep the current `log_id` only if the tree you will
+   serve is at least as large as the largest served checkpoint **and** a
+   consistency proof from that checkpoint to the new head verifies (fetch
+   `GET /log/proof?first=<served>&second=<current>` with the registry reachable
+   only by you, and check the proof with any RFC 6962 consistency-proof verifier;
+   the response shape is RFC-ACDP-0012 §8.2 and the verification algorithm §9.2). The proof needs the root of a checkpoint you actually retained (monitor or witness), not just a row count. Otherwise — the restored tree is smaller, the root differs, or
+   you cannot show either way — **set a new `[log] instance`** (for example
+   `"1"` → `"2"`) before the registry is reachable again. On a public registry
+   you can rarely rule out an unseen checkpoint, so expect to change it after
+   any rollback. (This is operator guidance, stricter than §7.4's wording.)
+5. **If it was a rollback from a restore:** contexts published after the backup
+   are gone from this registry, along with their leaves. Their producers have
+   to re-publish them, which mints new `ctx_id`s and new leaves in the new log.
+   Say so explicitly to consumers.
+6. **If it was not a restore:** treat it as a possible compromise of whatever
    has write access to the log table, and follow the rotation steps below. A
    rewrite that nobody performed deliberately means something else can write
-   there.
-6. **Tell the monitors.** A consistency failure is the signal the transparency
-   log exists to produce; a registry that resolves one silently has removed the
-   only reason a consumer would trust it. Publish what happened, the affected
+   there. The instance decision in step 4 applies here too.
+7. **Tell the monitors and witnesses** (the operational notice §7.4 asks for).
+   A consistency failure is the signal the transparency log exists to produce;
+   a registry that resolves one silently has removed the only reason a consumer
+   would trust it. Publish what happened, the old and new `log_id`, the affected
    `tree_size` range, and whether entries were lost.
 
 ## Key rotation

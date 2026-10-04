@@ -209,7 +209,7 @@ The binary validates config before serving and refuses to boot on a misconfig
   A non-Rust consumer (a fixture, a console, a validator) can read the same
   set as data from [`docs/advertisable-profiles.json`](advertisable-profiles.json)
   — vendor it at an `acdp-registry-types/vX.Y.Z` release tag
-  (e.g. `https://raw.githubusercontent.com/agentcontextdistributionprotocol/acdp-registry-rs/acdp-registry-types/v0.1.5/docs/advertisable-profiles.json`)
+  (e.g. `https://raw.githubusercontent.com/agentcontextdistributionprotocol/acdp-registry-rs/acdp-registry-types/v0.2.0/docs/advertisable-profiles.json`)
   and diff it on a version bump. A unit test
   (`advertisable_profiles_json_matches_const`) keeps it identical to the const,
   so a profile removed or renamed here turns this repo's CI red until the file
@@ -530,6 +530,12 @@ lifecycle endpoints. If you need the emission to stop, the events have to go —
 turning the flag off is not sufficient. `HTTP-API.md`'s wording is the accurate
 one: it describes the emission as a property of the data, not of the flag.
 
+**Deviation from [RFC-ACDP-0013 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints)
+(pinned spec):** a registry that does not advertise `acdp-registry-lifecycle`
+MUST NOT emit `lifecycle_events` or the `retracted` status. This registry does
+emit both after the flag is turned off, as described above. That is a known
+gap in the code, not a supported or conformant configuration.
+
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Opt into the RFC-ACDP-0013 endpoint surface and status semantics. |
@@ -565,8 +571,17 @@ Storage: leaves live in the `log_leaves` table — dense 0-based
 JCS-canonical leaf bytes** plus their `sha256:` leaf hash, so every leaf
 is byte-exactly reproducible forever. Roots and proofs are recomputed per
 request from the ordered leaf hashes (O(n); the head root is cached).
-Contexts published *before* enablement are not backfilled automatically;
-per §7.3 their history would be time-unanchored anyway.
+Contexts published *before* enablement are not backfilled: no leaf is ever
+appended for them, and there is no backfill command.
+
+**Deviation from a SHOULD in [RFC-ACDP-0012 §7.3](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0012-transparency-log.md#73-backfill)
+(pinned spec):** a registry enabling the profile SHOULD backfill leaves for
+contexts published before enablement (after backfilling their receipts, which
+[RFC-ACDP-0010 §7](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0010-registry-receipts.md#7-issuance)
+likewise says SHOULD happen and this registry also does not do — see
+[RECEIPTS.md](RECEIPTS.md#backfill-policy-none)). Backfilled leaves would be
+time-unanchored under §7.3 anyway, so what is missing is their inclusion in the
+log, not a timing guarantee.
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|

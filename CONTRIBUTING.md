@@ -75,13 +75,14 @@ ACDP_REQUIRE_CONFORMANCE=1 ACDP_SPEC_DIR=/path/to/spec/checkout \
     --test conformance --test conformance_gate -- --nocapture
 ```
 
-CI's `conformance` job checks out the spec at a SHA pinned in
-`.github/workflows/ci.yml` (the `conformance` job's `ref:`), so a push to the
-spec repo cannot silently change this repo's CI result. When adopting new
-fixtures, bump that SHA deliberately in its own commit. The bump can be
-driven by running the `bump spec` workflow from the Actions tab (optionally
-with an explicit SHA), which opens a PR for review rather than committing
-directly.
+CI's `conformance` job checks out the spec at the revision pinned in
+`.spec-pin` (the only place the SHA is written; `ci.yml` reads it from there),
+so a push to the spec repo cannot silently change this repo's CI result. When
+adopting new fixtures, bump the pin deliberately in its own PR — see
+[Adopting a new ACDP spec revision](#adopting-a-new-acdp-spec-revision). The
+bump can be driven by running the `bump spec` workflow from the Actions tab
+(optionally with an explicit SHA), which opens a PR for review rather than
+committing directly.
 
 CI also measures coverage with `cargo llvm-cov` (summary on the run page, lcov
 artifact attached) and smoke-tests the Docker image on every PR — it builds the
@@ -122,7 +123,19 @@ and version bumps from these prefixes:
 
 ## Adding a new endpoint
 
-See `CLAUDE.md` → "Adding a new endpoint" for the four-step recipe.
+Four steps; steps 2–4 are enforced by a test that fails the build if skipped:
+
+1. Write the handler in `crates/acdp-registry-core/src/handlers/`, returning
+   `RegistryError` so failures get the wire envelope.
+2. Mount it in the core router (`crates/acdp-registry-core/src/lib.rs`) in the
+   group whose layers it needs (data plane, `/auth/*`, admin, or auxiliary).
+3. Classify its cache posture in `DATA_PLANE_ROUTES` or `NON_DATA_ROUTES`
+   (`crates/acdp-registry-server/tests/http_integration.rs`);
+   `every_route_in_the_core_router_is_classified` fails on an unclassified route.
+4. Document the route, and any new wire code, in
+   [`docs/HTTP-API.md`](docs/HTTP-API.md); `every_mounted_route_is_documented`
+   and `every_wire_code_the_code_emits_is_documented`
+   (`crates/acdp-registry-server/tests/conformance_gate.rs`) fail otherwise.
 
 ## Documentation
 
@@ -143,7 +156,9 @@ rather than restating them.
   older binary's queries depend on) — `PgStore::migrate` runs with
   `ignore_missing(true)` so a binary one release behind the database keeps
   serving during a rolling upgrade. A migration that breaks the binary one
-  version behind it must say so in the release notes.
+  version behind it must say so in that version's section of
+  [`docs/UPGRADING.md`](docs/UPGRADING.md) (release notes are generated from
+  commit subjects and cannot carry it).
 
 ## Adopting a new ACDP spec revision
 
