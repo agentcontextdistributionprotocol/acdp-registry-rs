@@ -137,6 +137,17 @@ async fn a_desynced_retraction_is_not_served_as_active() {
     parity::assert_desynced_retraction_is_not_served_active(&store, "pg", &ctx_id).await;
 }
 
+/// #390: mirror of the SQLite call. Only the "sees it" direction is asserted:
+/// this database is shared and accretes retractions across tests and runs, so
+/// a fresh-store-reports-false leg cannot hold here (the isolated
+/// `store_contract.rs` suite owns that direction).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_lifecycle_state_probe_sees_a_retraction() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    parity::assert_lifecycle_state_probe_sees_retraction(&store, "pg").await;
+}
+
 /// B7: pin that `contexts.version` is `bigint`.
 ///
 /// SQLite bound `version` `as i64` (lossless for a `u32`); Postgres bound it
