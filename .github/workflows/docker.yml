@@ -28,6 +28,13 @@ concurrency:
 
 jobs:
   build:
+    # An explicit check name: without one the check is the bare job id `build`,
+    # which says nothing about what it ran and is a name any future job could
+    # collide with. Listed in .github/required-checks.json, so lint's
+    # required-checks guard fails if this is renamed -- change the baseline and
+    # branch protection in the same window, or a required context stops
+    # reporting and every PR blocks forever.
+    name: docker (build + smoke)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -114,8 +121,9 @@ jobs:
       # artifact -- same audience, same moment -- and because it runs on
       # pull_request, so the release PR (where the version bump actually happens)
       # is gated before it merges.
-      # This copy REPORTS; it does not block. `build` is not in main's
-      # required_status_checks.contexts, so a failure here leaves the merge
+      # This copy REPORTS; it does not block. `docker (build + smoke)` is not
+      # in main's required status checks (it is `advisory_pending` in
+      # .github/required-checks.json), so a failure here leaves the merge
       # button green. The blocking copy is in ci.yml's `fmt` job, whose check
       # name `rustfmt` IS required -- see the rationale there (U-516). This copy
       # is kept because docker.yml also runs on the `acdp-registry-server/v*` tag

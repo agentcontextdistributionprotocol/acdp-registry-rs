@@ -1,0 +1,13 @@
+{
+  "_comment": "The committed baseline for main's branch protection. `required` must equal the live required_status_checks.checks (context AND app_id) and `strict` the live strict flag; branch-protection-drift.yml compares them daily. `advisory_pending` are checks that run on every PR but are not yet required. Every name here is validated at PR time by .github/scripts/required_checks_guard.py (lint job): renaming one of these jobs fails `lint` instead of silently orphaning a required context. 15368 is GitHub Actions' app id.",
+  "strict": true,
+  "required": [
+    {"context": "rustfmt", "app_id": 15368},
+    {"context": "clippy", "app_id": 15368},
+    {"context": "tests", "app_id": 15368},
+    {"context": "conformance (spec fixtures)", "app_id": 15368},
+    {"context": "cargo-deny", "app_id": 15368},
+    {"context": "lint", "app_id": 15368}
+  ],
+  "advisory_pending": ["msrv", "rustdoc", "coverage", "docker (build + smoke)"]
+}

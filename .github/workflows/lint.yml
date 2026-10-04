@@ -22,15 +22,18 @@ name: lint
 #     yanked-crate ratchet. A stale sentence misleads a reader; a stale
 #     command acts.
 #
-# The required contexts are not transcribed here, for the same reason. Read them
-# from the source, which cannot be out of date:
+# The required contexts are not transcribed here, for the same reason. Their one
+# committed copy is .github/required-checks.json -- compared against the live
+# setting daily by branch-protection-drift.yml -- and the live source is:
 #
 #   gh api repos/{owner}/{repo}/branches/main/protection \
-#     --jq .required_status_checks.contexts
+#     --jq .required_status_checks.checks
 #
-# Do NOT rename this job, or any job in ci.yml, without updating branch
-# protection in the same change: a required context that stops reporting leaves
-# every PR waiting forever on a check that will never arrive.
+# Do NOT rename this job, or any job named in .github/required-checks.json,
+# without updating branch protection in the same change: a required context
+# that stops reporting leaves every PR waiting forever on a check that will
+# never arrive. The `required-checks guard` step below makes such a rename fail
+# THIS job, in the PR that does it, instead of surfacing as a stuck merge.
 
 on:
   pull_request:
@@ -222,3 +225,22 @@ jobs:
           echo "workflow files: $(git ls-files '.github/workflows/*' | wc -l | tr -d ' ')"
           git ls-files '.github/workflows/*' | sed 's/^/  /'
           actionlint -color
+
+      # Every check name in .github/required-checks.json (required AND
+      # advisory_pending) must resolve to exactly one PR-triggered job that can
+      # neither skip (no job `if:`/`needs:`), swallow a failure
+      # (`continue-on-error`), nor report under a different name (matrix,
+      # `${{ }}` in `name:`), and every required entry must pin app_id. A
+      # rename that would orphan a required context goes red HERE, in the PR
+      # that does it. Reasoning and the full rule list are in the script.
+      #
+      # python3 + PyYAML (both on the runner, as the composite-action step above
+      # relies on) so this runs unchanged on macOS. Self-test FIRST, as with
+      # assert-upgrade-notes.sh: the verdict on the real baseline is only worth
+      # trusting once the negative controls have shown the guard can still fail.
+      - name: required-checks guard
+        if: '!cancelled()'
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/required_checks_guard.py --self-test
+          python3 .github/scripts/required_checks_guard.py --check
