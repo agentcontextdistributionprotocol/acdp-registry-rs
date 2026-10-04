@@ -618,9 +618,11 @@
 //! **Required-checks status:** `conformance (spec fixtures)` IS among this repo's
 //! required status-check contexts on branch protection. The full list is not
 //! transcribed here -- it is state owned by repo settings, and the copy that used
-//! to sit on this line went stale when that setting changed. Read it with
+//! to sit on this line went stale when that setting changed. Its one committed copy
+//! is `.github/required-checks.json` (compared to the live setting daily by
+//! `branch-protection-drift.yml`); read the live list with
 //! `gh api repos/{owner}/{repo}/branches/main/protection
-//! --jq .required_status_checks.contexts`. REG-10 Phase 11 recorded a
+//! --jq .required_status_checks.checks`. REG-10 Phase 11 recorded a
 //! recommendation to add it (it was advisory-only then) and left the branch-protection
 //! change itself to a repo admin, since executing that change is out of scope for any
 //! single diff to this file; a repo admin actioned it on 2026-09-01 (`ASSUMPTIONS.md`'s

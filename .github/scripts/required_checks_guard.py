@@ -38,9 +38,10 @@ Modes:
                each rejection rule fires, plus a positive control that passes.
                A gate that cannot fail is not a gate.
 
-python3 + PyYAML only (both are on ubuntu-latest and on a stock macOS dev box);
-no third-party installs, so the lint gate stays runnable locally. Python 3.9
-compatible. Note PyYAML reads a bare `on:` key as boolean True.
+python3 + PyYAML only. PyYAML is preinstalled on ubuntu-latest but NOT on a stock
+macOS python3: run `pip3 install --user pyyaml` once to use it locally -- the same
+requirement as lint.yml's existing composite-action step. Python 3.9 compatible.
+Note PyYAML reads a bare `on:` key as boolean True.
 """
 
 import fnmatch
@@ -86,6 +87,26 @@ def _triggers(doc):
     return {}
 
 
+def _branches_include(branch, patterns):
+    """GitHub's `branches:` filter semantics: patterns are evaluated in order and
+    the LAST one that matches wins -- a `!pattern` that matches excludes the
+    branch, a later positive pattern that matches re-includes it. So
+    ['*', '!main'] excludes main and ['!main', 'main'] includes it. A branch no
+    pattern matches is excluded. (fnmatch's `*` also crosses `/`, unlike
+    GitHub's; that only matters for branch names with a slash, and `main` has
+    none.)
+    """
+    included = False
+    for pat in patterns:
+        pat = str(pat)
+        if pat.startswith("!"):
+            if fnmatch.fnmatchcase(branch, pat[1:]):
+                included = False
+        elif fnmatch.fnmatchcase(branch, pat):
+            included = True
+    return included
+
+
 def _pr_trigger_problems(triggers):
     """Problems that keep a pull_request-triggered check off some PRs to main.
 
@@ -107,7 +128,7 @@ def _pr_trigger_problems(triggers):
         branches = cfg["branches"] or []
         if isinstance(branches, str):
             branches = [branches]
-        if not any(fnmatch.fnmatchcase("main", str(b)) for b in branches):
+        if not _branches_include("main", branches):
             problems.append("`on.pull_request.branches` does not match `main`")
     if "types" in cfg:
         types = cfg["types"] or []
@@ -506,6 +527,21 @@ jobs:
          GOOD_BASELINE, "`on.pull_request.paths-ignore` is set"),
         ("branches-ignore filter", dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches-ignore: ['x']}}")}),
          GOOD_BASELINE, "`on.pull_request.branches-ignore` is set"),
+        ("branches ['*', '!main'] excludes main (last match wins)",
+         dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches: ['*', '!main']}}")}),
+         GOOD_BASELINE, "does not match `main`"),
+        ("branches ['**', '!ma*'] excludes main",
+         dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches: ['**', '!ma*']}}")}),
+         GOOD_BASELINE, "does not match `main`"),
+        ("branches ['main'] passes",
+         dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches: ['main']}}")}),
+         GOOD_BASELINE, None),
+        ("branches ['**'] passes",
+         dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches: ['**']}}")}),
+         GOOD_BASELINE, None),
+        ("branches ['!main', 'main'] passes (a later positive re-includes)",
+         dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches: ['!main', 'main']}}")}),
+         GOOD_BASELINE, None),
         ("branches filter that excludes main", dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches: [develop]}}")}),
          GOOD_BASELINE, "does not match `main`"),
         ("types filter without synchronize", dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {types: [opened]}}")}),

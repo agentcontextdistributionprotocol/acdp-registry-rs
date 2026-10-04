@@ -235,9 +235,10 @@ jobs:
       # that does it. Reasoning and the full rule list are in the script.
       #
       # python3 + PyYAML (both on the runner, as the composite-action step above
-      # relies on) so this runs unchanged on macOS. Self-test FIRST, as with
-      # assert-upgrade-notes.sh: the verdict on the real baseline is only worth
-      # trusting once the negative controls have shown the guard can still fail.
+      # relies on); locally, a stock macOS python3 needs `pip3 install --user
+      # pyyaml`. Self-test FIRST, as with assert-upgrade-notes.sh: the verdict on
+      # the real baseline is only worth trusting once the negative controls have
+      # shown the guard can still fail.
       - name: required-checks guard
         if: '!cancelled()'
         run: |
