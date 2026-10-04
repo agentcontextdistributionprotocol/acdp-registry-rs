@@ -4403,3 +4403,148 @@ a scanned file. Follow-up: verify `conformance_gate` (RAILWAY major.minor guard)
 release-plz PR.
 
 **Resulting status:** CONFIRMED.
+
+## Reconcile 2026-10-04 — Docs refresh Phase 0: relative-link guard (2026-10-04, decided by Opus under `/reconcile`, reversible tier)
+
+**Original assumption** (`ASSUMPTIONS.md` "Docs refresh Phase 0"): (a) same-file `#fragment` links
+are checked against the file's own headings; (b) GitHub slugs are approximated (lowercase, keep
+letters/digits/`_`/`-`/space, spaces to `-`, duplicates `-N`); (c) a leading `/` resolves to the
+repo root; (d) DECISIONS.md and ASSUMPTIONS.md stay excluded because they cite gitignored `plans/`
+files; (e) the wire-code scanner reads `json_code`, `query_code` and `code: "..."` literals only.
+
+**Analysis.** The approximation was compared with github-slugger 2.0.0 over every heading in scope
+and matches on all of them. It diverges on the duplicate sequence `A`,`A`,`A-1` and on setext,
+indented and `_emphasis_` headings — none of which occurs in a scanned file. (c) is true for
+GitHub, but the website serves a leading-`/` link from the SITE root, where it 404s, so a link
+that passes the guard is still dead for half the readers. (d): the exclusion is right, but the
+reason is incomplete — the two ledgers are append-only and their entries quote link-shaped text
+(including examples of links a guard rejects), so even without `plans/` citations they could not
+be held to the guard without rewriting history. (e): the hand-built `service_unavailable`
+envelope is outside the scanner's patterns; that is a code-comment/scanner question, filed.
+
+**Verdict.** (a), (b), (e) CONFIRMED; slug divergences DEFERRED, trigger: such a heading appears in
+a scanned file. (c) CHANGED: `relative_link_violations` now rejects every leading-`/` link, with
+negative controls `[x](/README.md)` and `[r]: /docs/b.md#intro`. (d) reason CHANGED, exclusion
+kept: `LINK_GUARD_EXCLUDED` now says "append-only ledger … quote link-shaped text". Scanner gap →
+#376.
+
+**Resulting status:** CONFIRMED (partial) — see deferred items.
+
+## Reconcile 2026-10-04 — Docs refresh Phases 1-2: false-claim fixes and log runbook (2026-10-04, decided by Opus under `/reconcile`, reversible tier)
+
+**Original assumption** (`ASSUMPTIONS.md` "Docs refresh Phases 1-2"): (a) after an `[log] instance`
+change the surviving leaves become the new log's history, anchored only from its first checkpoint;
+(b) "expect a new instance after any rollback" is guidance stricter than RFC-0012 §7.4; (c) acdp
+0.14.2's error-chain change only makes upstream messages more specific; (d)
+`ACDP_REGISTRY_LOG__INSTANCE` follows the env naming rule; (e) the Link-convention block was
+deferred to Phase 5.
+
+**Analysis.** (a) and (b) are inferences the spec leaves open: §7.4 does not say whether a new
+instantiation may start non-empty, and the runbook's reading is by analogy with §7.3 — the doc
+now says so. (c): acdp-rs c2a1dca walks the reqwest error chain into the message; whether that
+text reaches this registry's wire (`KeyResolution`/`CrossRegistry*` strings) was never measured
+and nothing observable depends on it yet. (d): the key mapping holds, but the env source is built
+with `try_parsing(true)`, so a numeric-looking value is parsed as a number before it becomes a
+string. Measured through `RegistryConfig::load` (config 0.15.27): `01`→`1`, `1e3`→`1000`,
+`+1`→`1`, `nan`→`NaN` (fails the `[a-z0-9-]{1,32}` check), while `2a`, `r2`, `007b` pass through.
+An operator rolling back with `ACDP_REGISTRY_LOG__INSTANCE=01` would silently keep `log_id`
+`…/log/1` — exactly what the runbook exists to prevent. (e): the block exists in docs/README.md.
+
+**Verdict.** (a), (b) CONFIRMED as inferences (doc now labels them). (c) DEFERRED, trigger: the
+first user-visible message change. (d) mapping CONFIRMED, doc CHANGED: docs/OPERATIONS.md says to
+prefer TOML or use a value containing a letter (e.g. `r2`), and to confirm the `log_id` in
+`GET /log/checkpoint` changed. (e) CONFIRMED. Code-vs-spec follow-ups filed: #372
+(`bearer-jwt` identifier), #373 (lifecycle data served while disabled), #374 (lax `X-Tenant-Id`),
+#375 (lifecycle limiter charge before verification).
+
+**Resulting status:** CONFIRMED (partial) — see deferred items.
+
+## Reconcile 2026-10-04 — Docs refresh Phase 3: shared limiter, Content-Type rules, `q=`, poller, rollback, publish split (2026-10-04, decided by Opus under `/reconcile`, reversible tier)
+
+**Original assumption** (`ASSUMPTIONS.md` "Docs refresh Phase 3"): (a)
+`ACDP_REGISTRY_RATE_LIMIT__BACKEND` maps to `rate_limit.backend`; (b) an older binary refuses a
+SQLite database migrated by a newer one; (c) case-insensitive Content-Type matching was NOT claimed
+for `/auth/*` because only `AcdpBytes` lowercases; (d) the lifecycle per-agent charge before
+signature verification is documented as current behaviour; (e) a `3xx` revocation feed is a failed
+tick.
+
+**Analysis.** (a), (e) hold on reading the config loader and `fetch_once`. (b): sqlx 0.8.6 returns
+`VersionMissing` for an applied migration unknown to the binary unless `ignore_missing` is set,
+and the SQLite `migrate` does not set it. (d) is a behaviour question, filed. (c)'s premise is
+wrong: axum 0.8.9's `json_content_type` parses the header through `mime`, which lowercases type
+and subtype, so `/auth/*` is case-insensitive as well. Probed: `APPLICATION/ACDP+JSON` passes the
+media-type gate on both `POST /contexts` (400, downstream schema error) and `POST /auth/challenge`
+(200).
+
+**Verdict.** (a), (b), (d), (e) CONFIRMED; (d)'s fix → #375. (c) premise CHANGED:
+`APPLICATION/ACDP+JSON` added to the `the_two_media_type_gates_agree` matrix so the two gates
+stay pinned together on case. The docs made no case claim, so no doc edit.
+
+**Resulting status:** CONFIRMED.
+
+## Reconcile 2026-10-04 — Docs refresh Phase 4: maintainer page (2026-10-04, decided by Opus under `/reconcile`, reversible tier)
+
+**Original assumption** (`ASSUMPTIONS.md` "Docs refresh Phase 4"): (a) the protection snapshot in
+docs/MAINTAINING.md holds at merge; (b) the runbook's mutating GitHub API calls behave as the REST
+reference describes (dry read only); (c) `ACDP_BOT_APP_ID` is the `acdp-deps-bot` App; (d) classic
+protection is kept for acdp-ci's auto-merge; (e) the acdp-ci `standardize.sh` hazard as read at
+308a592; (f) the bump-spec paragraph was conditional on the Phase 6 guard.
+
+**Analysis.** (a), (c), (d), (e) re-check against their sources; (f) is resolved — the guard now
+exists. (b) cannot be proved without executing mutating calls against live protection, which is
+only appropriate inside a planned settings window; the read against the REST reference is all a
+dry pass can give.
+
+**Verdict.** (a), (c), (d), (e), (f) CONFIRMED. (b) CONFIRMED as a dry read; proof DEFERRED to the
+first real apply, trigger: the Phase 6 settings window of the hardening plan. The failing weekly
+mutants run → #371.
+
+**Resulting status:** CONFIRMED (partial) — see deferred items.
+
+## Reconcile 2026-10-04 — Docs refresh Phase 5: pinned pointers instead of RFC/SDK restatements (2026-10-04, decided by Opus under `/reconcile`, reversible tier)
+
+**Original assumption** (`ASSUMPTIONS.md` "Docs refresh Phase 5"): (a) cited anchors were slugged
+locally, not resolved by GitHub; (b) guides pinned to `8a888ed…` (in no tag), README crate root
+to `acdp-v0.14.3`; (c) repo-root and `tree/<pin>` directory links count as pinned; (d) the
+HTTP-API status table keeps its HTTP column; (e) the 415 row's "non-canonical" claim was false and
+corrected; (f) the anchors version gate covers four publish branches.
+
+**Analysis.** All 32 sibling anchors resolve under github-slugger at their pinned revisions. (b)
+holds; `8a888ed` is still in no acdp-rs tag, so the guide pins stay SHAs until one is cut. (c)-(f)
+re-check against the guard and the code. The inaccurate `docs/registry.md` claims in acdp-rs
+(rate limiting, profile list) belong to that repository.
+
+**Verdict.** CONFIRMED. Trigger: acdp-rs cuts a tag containing `8a888ed` → re-point the guide
+links to it. acdp-rs#328 for the `docs/registry.md` claims (no edit here).
+
+**Resulting status:** CONFIRMED.
+
+## Reconcile 2026-10-04 — Docs refresh Phase 6: sibling links stay pinned (2026-10-04, decided by Opus under `/reconcile`, reversible tier)
+
+**Original assumption** (`ASSUMPTIONS.md` "Docs refresh Phase 6"): (a) a sibling URL counts only
+with its `http(s)://` scheme; (b) inline-only is enforced on the assumption that the website
+rewriter handles only inline links (not read); (c) the docs.rs rule covers `acdp`/`acdp-*` with a
+concrete version; (d) the `docs.rs/crate/<name>/…` form is not inspected; (e) config/docker files
+are scanned line by line; (f) exclusions reuse `LINK_GUARD_EXCLUDED`; (g) the re-point recipe was
+exercised on a simulated bump only.
+
+**Analysis.** Several real link shapes slipped past the matcher: GitHub serves `www.github.com`
+and autolinks scheme-less `www.github.com/…`; `HEAD` moves like `main`; GitHub matches the
+`blob|tree|raw` segment case-insensitively; docs.rs serves `acdp_client` as `acdp-client`; and
+`docs.rs/crate/<name>/latest` follows latest. Each is cheap to close with a control. (b): the
+website's rewrite-links.mjs (rule 1) copies absolute URLs verbatim whatever the link form and
+rewrites only relative links (to `blob/main`), so the rewriter rationale was wrong — inline-only
+still earns its place as a consistency rule (one form to scan and re-point). The same reading
+corrects "this repo's `main` links are rewritten": they are copied as written. (g): the recipe
+does not rewrite `raw.githubusercontent.com` spec URLs; none exist, and the guard would still
+fail on one.
+
+**Verdict.** (a), (c), (d) CHANGED to fixes: `www.` stripped and scheme-less `www.` scanned (link
+text and glued hosts ignored), `HEAD` rejected like `main`/`master`, case-insensitive kind
+segment, `_`→`-` in docs.rs crate names, `docs.rs/crate/<name>/<ver>` classified — each with a
+negative control, plus an `http://…/blob/main` bad case and a scheme-less `www.` case in a config
+comment. (b) rationale CHANGED in the guard messages, `LinkForm`/`THIS_REPO` docs and
+docs/README.md "Link convention". (e), (f) CONFIRMED. (g) CONFIRMED within its limits, DEFERRED
+to the first real spec bump.
+
+**Resulting status:** CONFIRMED (partial) — see deferred items.

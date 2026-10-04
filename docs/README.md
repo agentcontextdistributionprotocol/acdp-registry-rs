@@ -71,9 +71,12 @@ that guide names.
 ### Link convention
 
 Every link to a sibling repository is **pinned** and written **inline**
-(`[text](url)`), never reference-style and never as a relative `../` path —
-the website rewriter skips reference-style links, and relative paths break on
-both GitHub and the website.
+(`[text](url)`), never reference-style and never as a relative `../` path.
+Inline-only is a consistency rule — one form to scan and to re-point on a bump
+— not a workaround: the website copies absolute URLs verbatim and rewrites
+only relative links (to this repository's `blob/main`). Relative `../` paths
+into a sibling break on both GitHub and the website, and a relative link
+starting with `/` is served from the website's root, where it 404s.
 
 - **Spec (RFCs, `registries/`, schemas, `VERSIONING.md`):**
   `https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/<ref>/rfcs/RFC-ACDP-00NN-<slug>.md#<anchor>`, where `<ref>` is
@@ -89,7 +92,8 @@ both GitHub and the website.
   `https://docs.rs/acdp/0.14.3/acdp/`. For re-exported modules use the
   sub-crate path (`https://docs.rs/acdp-client/0.14.3/acdp_client/verified/`);
   the `acdp/client/...` form does not exist on docs.rs.
-- **Links to this repository** may use `main`.
+- **Links to this repository** may use `main` (they are copied as written;
+  `main` is the revision these docs describe).
 
 **Re-pointing on a spec bump.** A PR that changes `ref:` in `.spec-pin` must
 replace the old SHA in every pinned spec link in the same PR, and re-check

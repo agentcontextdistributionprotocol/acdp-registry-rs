@@ -2949,13 +2949,15 @@ const LINK_GUARD_EXCLUDED: [(&str, &str); 5] = [
     ),
     (
         "DECISIONS.md",
-        "workflow ledger appended by the plan/reconcile process; it cites \
-         gitignored plans/ files",
+        "append-only workflow ledger: its entries are never edited after the \
+         fact and quote link-shaped text (paths, gitignored plans/ files, \
+         examples of the very links a guard rejects)",
     ),
     (
         "ASSUMPTIONS.md",
-        "workflow ledger appended by the plan/reconcile process; it cites \
-         gitignored plans/ files",
+        "append-only workflow ledger: its entries are never edited after the \
+         fact and quote link-shaped text (paths, gitignored plans/ files, \
+         examples of the very links a guard rejects)",
     ),
     (
         "docs/ENGINEERING-LOG.md",
@@ -3180,7 +3182,8 @@ fn percent_decode(s: &str) -> String {
 
 /// `target`, relative to the directory of repo-relative `from`, as a
 /// repo-relative path (a leading `/` is the repository root, as GitHub renders
-/// it); `None` if it climbs above the root.
+/// it -- though `relative_link_violations` rejects such links before resolving
+/// them); `None` if it climbs above the root.
 fn resolve_relative(from: &str, target: &str) -> Option<String> {
     let mut parts: Vec<&str> = from.split('/').collect();
     parts.pop();
@@ -3217,6 +3220,15 @@ fn relative_link_violations(
 ) -> Vec<String> {
     let mut out = Vec::new();
     for (line, target) in relative_links(text) {
+        // GitHub resolves a leading `/` against the repository root, but the
+        // website serves it from the SITE root, where it 404s.
+        if target.starts_with('/') {
+            out.push(format!(
+                "{source} line {line}: `{target}` starts with `/`; the website serves \
+                 it from the site root (a 404) -- write it relative to this file"
+            ));
+            continue;
+        }
         let (path, frag) = match target.split_once('#') {
             Some((p, f)) => (p, Some(f)),
             None => (target.as_str(), None),
@@ -3440,6 +3452,9 @@ fn the_relative_link_guard_rejects_what_it_must_and_ignores_what_it_should() {
         ("climbs above the root", "[x](../../outside.md)"),
         ("reference definition to a missing file", "[r]: gone.md"),
         ("image that is not tracked", "![i](../img/y.png)"),
+        // Resolves on GitHub (repo root) -- rejected for the website alone.
+        ("leading `/` to a tracked file", "[x](/README.md)"),
+        ("leading `/` reference definition", "[r]: /docs/b.md#intro"),
     ] {
         let found = check(bad);
         assert_eq!(
@@ -3483,7 +3498,8 @@ fn the_relative_link_guard_rejects_what_it_must_and_ignores_what_it_should() {
 
 /// The GitHub organisation every sibling repository lives in.
 const ACDP_ORG: &str = "agentcontextdistributionprotocol";
-/// This repository: its links may use `main` (the website rewrites them).
+/// This repository: its links may use `main`, the revision these docs describe
+/// (the website copies absolute URLs verbatim; it rewrites only relative links).
 const THIS_REPO: &str = "acdp-registry-rs";
 /// The spec repository. Its links must use the `.spec-pin` `ref:` value.
 const SPEC_REPO: &str = "agentcontextdistributionprotocol";
@@ -3509,19 +3525,23 @@ enum SiblingTarget {
     /// Any other URL into an org repository (the repo root, issues, releases):
     /// nothing to pin.
     Unpinned { repo: String },
-    /// `docs.rs/<acdp or acdp-*>/<version?>/...`.
+    /// `docs.rs/<acdp or acdp-*>/<version?>/...` or
+    /// `docs.rs/crate/<acdp or acdp-*>/<version?>/...`; an `_` in the crate name
+    /// is read as `-` (docs.rs serves both spellings).
     DocsRs {
         krate: String,
         version: Option<String>,
     },
 }
 
-/// How a URL is written in markdown.
+/// How a URL is written in markdown. Sibling links must be `Inline`: a
+/// consistency rule (one form to scan and re-point), not a website workaround --
+/// the website copies absolute URLs verbatim whatever their form.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum LinkForm {
-    /// `[text](url)` -- the only form the website rewriter handles.
+    /// `[text](url)`.
     Inline,
-    /// `[label]: url` -- skipped by the website rewriter.
+    /// `[label]: url`.
     ReferenceDefinition,
     /// Anything else: a bare URL, an autolink, an HTML attribute.
     Bare,
@@ -3576,9 +3596,13 @@ fn split_ref(segs: &[&str]) -> (String, String) {
 /// Classifies one URL, or `None` when it is neither a URL into an org
 /// repository nor an `acdp*` docs.rs URL.
 fn classify_sibling_url(url: &str) -> Option<SiblingTarget> {
-    let bare = url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
+    let lower = url.to_ascii_lowercase();
+    let mut bare = url;
+    for prefix in ["https://", "http://", "www."] {
+        if lower[url.len() - bare.len()..].starts_with(prefix) {
+            bare = &bare[prefix.len()..];
+        }
+    }
     // The fragment and query are not part of the ref or path.
     let bare = bare.split(['#', '?']).next().unwrap_or("");
     let segs: Vec<&str> = bare.split('/').collect();
@@ -3598,8 +3622,10 @@ fn classify_sibling_url(url: &str) -> Option<SiblingTarget> {
                     path,
                 });
             }
-            match rest.first() {
-                Some(&("blob" | "tree" | "raw")) => {
+            // GitHub matches the kind segment case-insensitively (`/BLOB/main/`
+            // serves the same file), so the guard must too.
+            match rest.first().map(|k| k.to_ascii_lowercase()).as_deref() {
+                Some("blob" | "tree" | "raw") => {
                     let (git_ref, path) = split_ref(&rest[1..]);
                     Some(SiblingTarget::AtRef {
                         repo,
@@ -3611,11 +3637,21 @@ fn classify_sibling_url(url: &str) -> Option<SiblingTarget> {
             }
         }
         "docs.rs" => {
-            let krate = segs.get(1)?.to_ascii_lowercase();
+            // `docs.rs/crate/<name>/<version>` is the crate-info form of
+            // `docs.rs/<name>/<version>`; both follow `latest` without a version.
+            let at = if segs.get(1).is_some_and(|s| s.eq_ignore_ascii_case("crate")) {
+                2
+            } else {
+                1
+            };
+            let krate = segs.get(at)?.to_ascii_lowercase().replace('_', "-");
             if !(krate == "acdp" || krate.starts_with("acdp-")) {
                 return None;
             }
-            let version = segs.get(2).filter(|v| !v.is_empty()).map(|v| v.to_string());
+            let version = segs
+                .get(at + 1)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_string());
             Some(SiblingTarget::DocsRs { krate, version })
         }
         _ => None,
@@ -3646,25 +3682,44 @@ fn sibling_links(text: &str, markdown: bool) -> Vec<SiblingLink> {
         // ASCII lowercasing keeps byte offsets, so positions found in `lower`
         // index `line` too.
         let lower = line.to_ascii_lowercase();
-        // (scheme start, host start) of every URL whose host is one of `hosts`.
+        // (start, host start, has scheme) of every URL whose host is one of `hosts`.
         // A URL needs its `http(s)://` scheme: link TEXT such as
         // `[docs.rs/acdp 0.14.3](...)` names a host without being a link, and
         // the scheme also anchors the host, so `gist.github.com/` is not
         // mistaken for `github.com/`.
-        let mut starts: Vec<(usize, usize)> = Vec::new();
+        // The one scheme-less exception: GitHub autolinks `www.<host>/...`, so a
+        // `www.` prefix (with or without a scheme) is a URL too.
+        let host_at = |at: usize| {
+            let h = lower[at..].strip_prefix("www.").unwrap_or(&lower[at..]);
+            hosts.iter().any(|x| h.starts_with(x))
+        };
+        let mut starts: Vec<(usize, usize, bool)> = Vec::new();
         for scheme in ["https://", "http://"] {
             let mut from = 0;
             while let Some(i) = lower[from..].find(scheme) {
                 let start = from + i;
                 let at = start + scheme.len();
-                if hosts.iter().any(|h| lower[at..].starts_with(h)) {
-                    starts.push((start, at));
+                if host_at(at) {
+                    starts.push((start, at, true));
                 }
                 from = at;
             }
         }
+        let mut from = 0;
+        while let Some(i) = lower[from..].find("www.") {
+            let start = from + i;
+            // Not after `://` (seen above) nor inside a longer host name.
+            let glued = lower[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '/'));
+            if !glued && host_at(start) {
+                starts.push((start, start, false));
+            }
+            from = start + 4;
+        }
         starts.sort_unstable();
-        for (start, at) in starts {
+        for (start, at, has_scheme) in starts {
             let end = line[at..]
                 .find(|c: char| {
                     c.is_whitespace()
@@ -3679,6 +3734,11 @@ fn sibling_links(text: &str, markdown: bool) -> Vec<SiblingLink> {
                 continue;
             };
             let end = at + url.len();
+            // Scheme-less text that is itself a link's TEXT (`[www.github.com/x](u)`)
+            // is not a URL; the destination `u` is scanned on its own.
+            if !has_scheme && line[end..].starts_with("](") {
+                continue;
+            }
             let before = &line[..start];
             let def_prefix = before.trim_end().trim_end_matches('<').trim_end();
             let def_line = def_prefix.trim_start();
@@ -3706,9 +3766,10 @@ fn sibling_links(text: &str, markdown: bool) -> Vec<SiblingLink> {
 /// Why one sibling link breaks the pinning rules, or `None` when it is fine.
 /// `spec_ref` is the `ref:` value of `.spec-pin`.
 fn sibling_link_problem(link: &SiblingLink, markdown: bool, spec_ref: &str) -> Option<String> {
+    // `HEAD` is the default branch by another name: it moves just like `main`.
     let is_branch = |r: &str| {
         let last = r.rsplit('/').next().unwrap_or(r).to_ascii_lowercase();
-        last == "main" || last == "master"
+        matches!(last.as_str(), "main" | "master" | "head")
     };
     let repo = match &link.target {
         SiblingTarget::AtRef { repo, .. } | SiblingTarget::Unpinned { repo } => Some(repo),
@@ -3720,11 +3781,12 @@ fn sibling_link_problem(link: &SiblingLink, markdown: bool, spec_ref: &str) -> O
     if markdown && repo.is_some() && link.form != LinkForm::Inline {
         return Some(if link.form == LinkForm::ReferenceDefinition {
             "is a reference-style definition; sibling links must be inline `[text](url)` \
-             (the website rewriter skips reference-style links)"
+             (a consistency rule: one form to scan and re-point on a bump)"
                 .to_string()
         } else {
-            "is not an inline `[text](url)` link (bare URL, autolink or HTML); the \
-             website rewriter only rewrites inline links"
+            "is not an inline `[text](url)` link (bare URL, autolink or HTML); sibling \
+             links are inline only, so every pinned link has one form to scan and \
+             re-point on a bump"
                 .to_string()
         });
     }
@@ -3824,7 +3886,7 @@ fn spec_pin_ref_and_repo(spec_pin: &str) -> (String, String) {
 /// convention"): links to THIS repository are free; the spec must be at the
 /// `.spec-pin` ref (or SPEC_DOCS_REF on `docs/` pages); acdp-rs at an
 /// `acdp-v<X.Y.Z>` tag or a full SHA; any other sibling at anything but
-/// `main`/`master`; docs.rs `acdp*` links carry a concrete version; and every
+/// `main`/`master`/`HEAD`; docs.rs `acdp*` links carry a concrete version; and every
 /// sibling URL in markdown is an inline link.
 ///
 /// A `.spec-pin` bump therefore fails this test until the pinned spec links are
@@ -3967,6 +4029,18 @@ fn the_sibling_link_guard_rejects_what_it_must_and_ignores_what_it_should() {
         format!("in code: `{sdk}/blob/main/docs/x.md` and ``[x]({spec}/blob/main/rfcs)``"),
         format!("```\n[fenced]({sdk}/blob/main/docs/x.md)\n```"),
         format!("~~~text\n{spec}/blob/main/rfcs\n~~~"),
+        // Positive twins of the www / HEAD / case / underscore / crate-form rules.
+        "[w](https://www.github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.14.3/x.md)"
+            .to_string(),
+        format!("[own head]({gh}/acdp-registry-rs/BLOB/HEAD/README.md)"),
+        "[u](https://docs.rs/acdp_client/0.14.3/acdp_client/) \
+         [c](https://docs.rs/crate/acdp/0.14.3)"
+            .to_string(),
+        // Scheme-less `www.` as link TEXT is not a URL; glued into a longer
+        // host it is not this host.
+        "[www.github.com/agentcontextdistributionprotocol/acdp-rs](https://docs.rs/acdp/0.14.3/acdp/) \
+         see notwww.github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/x"
+            .to_string(),
     ];
     for g in &good {
         assert_eq!(
@@ -3977,9 +4051,9 @@ fn the_sibling_link_guard_rejects_what_it_must_and_ignores_what_it_should() {
     }
     assert_eq!(
         sibling_links(&good.join("\n"), true).len(),
-        14,
-        "the scanner must see the 14 sibling/acdp docs.rs URLs above (not serde, not \
-         the gist host, nothing in code): {:?}",
+        19,
+        "the scanner must see the 19 sibling/acdp docs.rs URLs above (not serde, not \
+         the gist host, not link text or a glued host, nothing in code): {:?}",
         sibling_links(&good.join("\n"), true)
     );
 
@@ -4047,6 +4121,43 @@ fn the_sibling_link_guard_rejects_what_it_must_and_ignores_what_it_should() {
             "docs.rs crate root",
             "[x](https://docs.rs/acdp)".to_string(),
         ),
+        (
+            "http scheme, blob main",
+            "[x](http://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/x.md)"
+                .to_string(),
+        ),
+        (
+            "www host, blob main",
+            "[x](https://www.github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/x.md)"
+                .to_string(),
+        ),
+        (
+            "scheme-less www autolink",
+            "see www.github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.14.3/x.md"
+                .to_string(),
+        ),
+        (
+            "other sibling HEAD",
+            format!("[x]({gh}/acdp-ci/blob/HEAD/README.md)"),
+        ),
+        ("sdk HEAD", format!("[x]({sdk}/tree/HEAD/docs)")),
+        ("upper-case BLOB main", format!("[x]({sdk}/BLOB/main/x.md)")),
+        (
+            "mixed-case Tree main",
+            format!("[x]({gh}/acdp-ci/Tree/main)"),
+        ),
+        (
+            "underscore crate name, latest",
+            "[x](https://docs.rs/acdp_client/latest/acdp_client/)".to_string(),
+        ),
+        (
+            "docs.rs/crate form, latest",
+            "[x](https://docs.rs/crate/acdp/latest)".to_string(),
+        ),
+        (
+            "docs.rs/crate form, no version",
+            "[x](https://docs.rs/crate/acdp-client)".to_string(),
+        ),
     ];
     for (label, b) in &bad {
         let found = check("docs/a.md", b);
@@ -4073,6 +4184,15 @@ fn the_sibling_link_guard_rejects_what_it_must_and_ignores_what_it_should() {
     assert_eq!(
         check("docker/x.sh", &format!("# `{spec}/blob/main/rfcs`")).len(),
         1
+    );
+    assert_eq!(
+        check(
+            "config/a.toml",
+            "# www.github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/x"
+        )
+        .len(),
+        1,
+        "a scheme-less www URL in a comment is still read by someone"
     );
 
     // .spec-pin parsing on the real file's shape: the 64-hex digest is not the ref.
