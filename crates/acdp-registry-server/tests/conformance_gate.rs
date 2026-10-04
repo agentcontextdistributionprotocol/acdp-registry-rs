@@ -293,6 +293,159 @@ fn every_wire_code_the_code_emits_is_documented() {
     );
 }
 
+/// The two shapes a hand-built error envelope takes in this codebase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvelopeSiteKind {
+    /// A `"code":` JSON key -- `json!({"error": {"code": "..."}})`.
+    JsonKey,
+    /// A `code: "..."` struct-field literal -- `AcdpRejection { code: "..." }`.
+    StructField,
+}
+
+/// Every line of `src` that mints a wire code by hand rather than through
+/// `RegistryError` / `extract.rs`'s code functions: a `"code":` JSON key or a
+/// `code: "` struct-field literal. Returns `(1-based line, kind)`.
+///
+/// Full-line comments (`//`, `///`, `//!`) are skipped, so prose that QUOTES an
+/// envelope is not a site. Text, not a parse -- a pure function precisely so the
+/// guard below can be falsified against synthetic source.
+fn hand_built_envelope_sites(src: &str) -> Vec<(usize, EnvelopeSiteKind)> {
+    fn followed_by(rest: &str, want: char) -> bool {
+        rest.trim_start().starts_with(want)
+    }
+    let mut sites = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        if line
+            .match_indices("\"code\"")
+            .any(|(at, m)| followed_by(&line[at + m.len()..], ':'))
+        {
+            sites.push((i + 1, EnvelopeSiteKind::JsonKey));
+        }
+        if line.match_indices("code").any(|(at, m)| {
+            let before_ok = !line[..at].chars().next_back().is_some_and(is_ident_char);
+            let after = line[at + m.len()..].trim_start();
+            before_ok
+                && after
+                    .strip_prefix(':')
+                    .is_some_and(|tail| !tail.starts_with(':') && followed_by(tail, '"'))
+        }) {
+            sites.push((i + 1, EnvelopeSiteKind::StructField));
+        }
+    }
+    sites
+}
+
+/// The one file allowed to build a `code: "..."` literal in place: the
+/// extractor rejections, whose codes `every_wire_code_the_code_emits_is_documented`
+/// scans via `code_field_literals`.
+const STRUCT_FIELD_CODE_ALLOWED_IN: &str = "crates/acdp-registry-core/src/extract.rs";
+
+/// #376: `POST /auth/token/revoke` hand-built
+/// `json!({"error": {"code": "service_unavailable"}})` -- a 503 with a code that
+/// is in no RFC-ACDP-0007 §5 table and that `every_wire_code_the_code_emits_is_documented`
+/// could not see, because that guard scans only `error.rs` and `extract.rs`. Its
+/// exact count (`EXPECTED_WIRE_CODES`) is only as good as the claim that those
+/// two files are where codes come from; this test is what makes that claim
+/// checked rather than assumed.
+///
+/// Walks every `crates/*/src` file, drops `#[cfg(test)]` regions (unstripped if
+/// `strip_cfg_test` declines -- the loud direction), and fails on any `"code":`
+/// key anywhere and on any `code: "` literal outside `extract.rs`.
+#[test]
+fn no_wire_code_is_minted_outside_the_scanned_files() {
+    // Falsify the scanner first, against synthetic source.
+    let clean = "fn f() -> Result<(), RegistryError> {\n    Err(RegistryError::Acdp(e))\n}\n";
+    assert!(
+        hand_built_envelope_sites(clean).is_empty(),
+        "clean source must yield no site"
+    );
+    let dirty = clean.replace(
+        "    Err(RegistryError::Acdp(e))\n",
+        "    Json(json!({\"error\":{\"code\":\"x\"}}))\n",
+    );
+    assert_eq!(
+        hand_built_envelope_sites(&dirty),
+        vec![(2, EnvelopeSiteKind::JsonKey)],
+        "inserting one hand-built envelope must yield exactly one hit"
+    );
+    assert_eq!(
+        hand_built_envelope_sites("    let r = AcdpRejection { code: \"x\", message };\n"),
+        vec![(1, EnvelopeSiteKind::StructField)],
+        "a `code: \"` struct-field literal is a site"
+    );
+    assert!(
+        hand_built_envelope_sites(
+            "/// answers `{\"code\": \"x\"}`\nlet code: &str = c;\nfoo::code::bar(\"y\");\nerrcode: \"z\"\n"
+        )
+        .is_empty(),
+        "comments, a `code:` binding, a `code::` path and a longer identifier are not sites"
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for crate_dir in std::fs::read_dir(root.join("crates"))
+        .expect("read crates/")
+        .flatten()
+    {
+        let src = crate_dir.path().join("src");
+        if src.is_dir() {
+            rust_source_files_with_paths(&src, &mut files);
+        }
+    }
+    // Same enumeration check as the env-var sweep: a walk that silently drops
+    // files would make "no hits" vacuous.
+    let tracked_src = git_tracked_paths(&root)
+        .into_iter()
+        .filter(|p| p.starts_with("crates/") && p.ends_with(".rs") && p.contains("/src/"))
+        .count();
+    assert_eq!(
+        files.len(),
+        tracked_src,
+        "the crates/*/src walk found {} .rs files and git tracks {}",
+        files.len(),
+        tracked_src
+    );
+
+    let mut violations: Vec<String> = Vec::new();
+    let mut allowed_struct_fields = 0usize;
+    for (path, text) in &files {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let scanned = strip_cfg_test(text).unwrap_or_else(|| text.clone());
+        for (line, kind) in hand_built_envelope_sites(&scanned) {
+            if kind == EnvelopeSiteKind::StructField && rel == STRUCT_FIELD_CODE_ALLOWED_IN {
+                allowed_struct_fields += 1;
+                continue;
+            }
+            // Line numbers are of the cfg(test)-stripped text; the path is exact.
+            violations.push(format!("{rel} (stripped line {line}): {kind:?}"));
+        }
+    }
+    assert!(
+        allowed_struct_fields > 0,
+        "found no `code: \"` literal in {STRUCT_FIELD_CODE_ALLOWED_IN}, which builds \
+         `unsupported_media_type` and `payload_too_large` in place -- the scan is broken"
+    );
+    assert!(
+        violations.is_empty(),
+        "these sites mint a wire code by hand, outside error.rs/extract.rs, so \
+         `every_wire_code_the_code_emits_is_documented` cannot see the code: \
+         {violations:#?}\n\
+         Return a `RegistryError` (its `wire_code`/`http_status` table is the one \
+         scanned) instead of building the envelope in place."
+    );
+}
+
 /// CHARTER Rule 48 again, for the other hand-kept set in the docs: the route
 /// tables. `README.md` listed `/healthz` as "Storage liveness" and carried no
 /// `/livez` row at all after #239 split the two — a route can be mounted and
@@ -571,6 +724,17 @@ fn strip_cfg_test(src: &str) -> Option<String> {
 /// being written, caught only because the caller pins the variable set by
 /// equality rather than by a lower bound.
 fn rust_source_file_texts(dir: &std::path::Path, out: &mut Vec<String>) {
+    let mut with_paths = Vec::new();
+    rust_source_files_with_paths(dir, &mut with_paths);
+    out.extend(with_paths.into_iter().map(|(_, text)| text));
+}
+
+/// [`rust_source_file_texts`], keeping each file's path -- for guards whose
+/// failure message has to say WHERE, not just what.
+fn rust_source_files_with_paths(
+    dir: &std::path::Path,
+    out: &mut Vec<(std::path::PathBuf, String)>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -580,10 +744,10 @@ fn rust_source_file_texts(dir: &std::path::Path, out: &mut Vec<String>) {
             if path.file_name().is_some_and(|n| n == "target") {
                 continue;
             }
-            rust_source_file_texts(&path, out);
+            rust_source_files_with_paths(&path, out);
         } else if path.extension().is_some_and(|e| e == "rs") {
             if let Ok(s) = std::fs::read_to_string(&path) {
-                out.push(s);
+                out.push((path, s));
             }
         }
     }

@@ -711,8 +711,10 @@ on the resolved verification method (downgrade defense). Response:
 ### `POST /auth/token/revoke`
 
 Body `{ "jti": "<token id>" }`. Requires `Authorization: Bearer <jwt>`; the
-caller's DID must own the `jti`. `204` on success. `503` if no revocation store
-is configured. See [AUTHENTICATION.md](AUTHENTICATION.md#token-revocation).
+caller's DID must own the `jti`. `204` on success. `501 not_implemented` if no
+revocation store is configured — unreachable from the shipped binary, which
+always wires one; only a library embedder building its own `AppState` can hit
+it. See [AUTHENTICATION.md](AUTHENTICATION.md#token-revocation).
 
 ---
 

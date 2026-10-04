@@ -158,9 +158,10 @@ pub async fn jwks<S: ExtendedRegistryStore + 'static>(
 ///
 /// Nothing in this repo wires `/healthz` as a liveness probe today — there is no
 /// `HEALTHCHECK` in the Dockerfile and no k8s manifests — so this is a latent
-/// trap rather than a live bug. The push toward it is prose: `docker/RAILWAY.md`
-/// tells operators to point Railway's healthcheck at `/healthz` and says nothing
-/// about the 503 arm.
+/// trap rather than a live bug. The operator guidance is prose:
+/// `docker/RAILWAY.md` points Railway's healthcheck at `/healthz` (readiness,
+/// which is meant to answer 503 during a DB outage) and directs liveness probes
+/// to `/livez` instead.
 ///
 /// `no-store` from the handler, for the same reason `/healthz` is: a cached 200
 /// from a dead process is precisely the failure a liveness probe exists to rule

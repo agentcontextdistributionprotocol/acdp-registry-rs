@@ -1059,10 +1059,14 @@ const SEARCH_LIMIT_MAX: u32 = 100;
 /// DESIGN-01: the RFC-ACDP-0008 §4.5 *visibility* disclosure predicate now
 /// runs in the store's search SQL (so restricted/private bodies are never
 /// read or decoded, pages fill to `limit` w.r.t. disclosure, and
-/// `resp.total_estimate` carries an honest §4.5-scoped pre-page count). The
-/// *tenant* narrowing below is the last remaining post-query filter — the
-/// upstream `RegistryStore::search` contract carries no tenant, so the
-/// bounded refill loop still compensates for it (SECURITY follow-up #14).
+/// `resp.total_estimate` carries an honest §4.5-scoped pre-page count).
+/// Tenant scoping also runs in SQL: an asserted tenant routes the scan through
+/// `ExtendedRegistryStore::search_in_tenant`, so the keyset cursor and the
+/// count only ever see the caller's own rows (pinned by
+/// `search_reports_a_tenant_scoped_total_estimate` in
+/// `tests/http_integration.rs`). The handler-side `tenants_of_ctxs` filter is
+/// a backstop; the bounded refill compensates only for `?visibility=`
+/// narrowing and that backstop.
 pub async fn search<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
@@ -1214,35 +1218,17 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
                 });
             }
         }
-        // SECURITY follow-up (#14, overlaps DESIGN-01 in plans/defered): the
-        // tenant filter runs HERE, post-query, because the upstream
-        // `RegistryServer::search` / `RegistryStore::search` contract carries no
-        // tenant. The store's `next_cursor` is therefore anchored on the last
-        // RAW scanned row, which may belong to another tenant — so a returned
-        // cursor can disclose a foreign row's `(created_at, ctx_id)`.
-        //
-        // That was previously described here as "a low-grade ordering/existence
-        // oracle ... so no context DATA leaks". Both halves overclaimed. The
-        // cursor is unsigned plaintext base64 of `{mint_ms}:{anchor_ms}:{ctx_id}`,
-        // so a `ctx_id` is not low-grade -- it is a durable identifier, and the
-        // caller can walk cursors to recover foreign `ctx_id`s AND their
-        // ordering, a few rows at a time. NOT at `limit=1`, which an earlier
-        // draft of this comment claimed: measured, the refill loop keeps going
-        // there, so the filter that hides the row also consumes its anchor. The
-        // anchor escapes when the loop stops on a page whose last RAW row is
-        // foreign -- at `limit>=2` on reaching `target`, and at any `limit` once
-        // the loop exhausts `SEARCH_REFILL_MAX_PAGES`, since `cursor` is
-        // assigned before the break. "No context DATA leaks" is true
-        // only of BODIES; identifiers and ordering are data. Omitting
-        // `total_estimate` (A2) moves the population count from O(1) to O(n)
-        // requests; it does NOT close the oracle, and
-        // `search_cursor_oracle_remains_open_for_tenant_scoped_caller` asserts
-        // the residue so that is machine-checked rather than remembered.
-        //
-        // Closing this fully requires
-        // pushing the tenant predicate into the store's search SQL (a
-        // tenant-aware `ExtendedRegistryStore::search`), so the scan — and thus
-        // the cursor — only ever sees the caller's own rows.
+        // The `tenants_of_ctxs` filter just above is a backstop, not the tenant
+        // boundary. With a tenant asserted the scan
+        // above already ran through `search_in_tenant`, whose SQL puts the
+        // tenant predicate in the same statement as the keyset and the count —
+        // so neither `next_cursor` nor `total_estimate` can be anchored on, or
+        // count, a foreign row (`search_reports_a_tenant_scoped_total_estimate`
+        // in `tests/http_integration.rs` pins the count half). The filter
+        // re-checks ownership on what came back, so a
+        // store whose `search_in_tenant` regressed to ignoring the tenant
+        // drops foreign rows here rather than serving them; it does NOT stop
+        // such a regressed store's cursor from anchoring on a foreign row.
         accumulated.extend(matches);
 
         // Refill whenever a handler-side post-filter could have dropped rows

@@ -218,11 +218,12 @@ jobs:
       # WHAT 7 AND 8 DO NOT COVER: four integration-test files are gated to a
       # backend at file level (http_integration.rs, conformance.rs,
       # metrics_integration.rs on storage-sqlite; pg_integration.rs on
-      # storage-pg) and compile to empty harnesses. Measured: 7 test
-      # executables build and 71 tests run, essentially all from main.rs's
-      # inline module plus anchors_uri_never_dereferenced.rs and
-      # conformance_gate.rs, which are ungated. These steps are a compile gate
-      # on the binary, not test coverage.
+      # storage-pg) and compile to empty harnesses; the tests that do compile
+      # under these features come essentially from main.rs's inline module plus the
+      # ungated files (anchors_uri_never_dereferenced.rs, conformance_gate.rs).
+      # These steps only build and lint -- they run no tests -- so they are a
+      # compile gate on the binary, not test coverage. (No counts here: they
+      # drift with every test added and nothing checks them.)
       #
       # EDITING HAZARD, worth more than it looks. Both mutations below were
       # measured, but they answer two different questions, so note the baseline
