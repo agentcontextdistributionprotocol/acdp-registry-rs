@@ -71,6 +71,10 @@ TAG_RULESET_KEYS = {"name", "target", "enforcement", "conditions", "rules", "byp
 RULESET_ENFORCEMENTS = ("active", "evaluate", "disabled")
 PR_TYPES_NEEDED = {"opened", "synchronize", "reopened"}
 FORBIDDEN_PR_FILTERS = ("paths", "paths-ignore", "branches-ignore")
+# Characters whose meaning differs between GitHub's filter-pattern syntax and
+# fnmatch (`?`/`+` are quantifiers in GitHub's). A `branches:` entry using any of
+# them is rejected rather than mis-evaluated -- see _branches_include.
+UNSUPPORTED_BRANCH_PATTERN_CHARS = ("?", "+", "[", "\\")
 
 
 def _triggers(doc):
@@ -92,10 +96,23 @@ def _branches_include(branch, patterns):
     the LAST one that matches wins -- a `!pattern` that matches excludes the
     branch, a later positive pattern that matches re-includes it. So
     ['*', '!main'] excludes main and ['!main', 'main'] includes it. A branch no
-    pattern matches is excluded. (fnmatch's `*` also crosses `/`, unlike
-    GitHub's; that only matters for branch names with a slash, and `main` has
-    none.)
+    pattern matches is excluded.
+
+    fnmatch is only a faithful stand-in for GitHub's filter-pattern syntax on a
+    subset of it. fnmatch's `*` also crosses `/` (GitHub's does not; harmless
+    for `main`, which has no slash), but the two also DISAGREE on other
+    characters: in GitHub's syntax `?` and `+` are quantifiers on the preceding
+    character (`ma?n` matches `mn`/`man`, NOT `main`; `mai+n` matches `main`),
+    while fnmatch reads `?` as "any one character" and `+` as a literal; `[...]`
+    ranges and `\` escapes differ in detail too. Rather than emulate GitHub's
+    matcher, the guard FAILS CLOSED: any pattern containing one of
+    UNSUPPORTED_BRANCH_PATTERN_CHARS raises ValueError, which the caller reports
+    as an 'unsupported pattern' problem. Use `*`, `**` and `!` only.
     """
+    for pat in patterns:
+        bad = sorted(set(str(pat)) & set(UNSUPPORTED_BRANCH_PATTERN_CHARS))
+        if bad:
+            raise ValueError("%r uses %s" % (str(pat), " ".join(bad)))
     included = False
     for pat in patterns:
         pat = str(pat)
@@ -128,8 +145,15 @@ def _pr_trigger_problems(triggers):
         branches = cfg["branches"] or []
         if isinstance(branches, str):
             branches = [branches]
-        if not _branches_include("main", branches):
-            problems.append("`on.pull_request.branches` does not match `main`")
+        try:
+            if not _branches_include("main", branches):
+                problems.append("`on.pull_request.branches` does not match `main`")
+        except ValueError as exc:
+            problems.append(
+                "`on.pull_request.branches` has an unsupported pattern (%s): GitHub's filter "
+                "syntax differs from fnmatch for ? + [ \\, so the guard cannot tell whether "
+                "it matches `main` -- use only `*`, `**` and `!`" % exc
+            )
     if "types" in cfg:
         types = cfg["types"] or []
         if isinstance(types, str):
@@ -542,6 +566,12 @@ jobs:
         ("branches ['!main', 'main'] passes (a later positive re-includes)",
          dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches: ['!main', 'main']}}")}),
          GOOD_BASELINE, None),
+        ("branches ['*', '!mai+n'] rejected (`+` is a GitHub quantifier)",
+         dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches: ['*', '!mai+n']}}")}),
+         GOOD_BASELINE, "unsupported pattern"),
+        ("branches ['ma?n'] rejected (`?` is a GitHub quantifier)",
+         dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches: ['ma?n']}}")}),
+         GOOD_BASELINE, "unsupported pattern"),
         ("branches filter that excludes main", dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {branches: [develop]}}")}),
          GOOD_BASELINE, "does not match `main`"),
         ("types filter without synchronize", dict(base, **{"lint.yml": GOOD_LINT.replace("on: pull_request", "on: {pull_request: {types: [opened]}}")}),

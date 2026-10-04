@@ -279,6 +279,9 @@ values for illustration. Env var = `ACDP_REGISTRY_` + the bracketed path.
 > The storage backend is also chosen at **compile time** via the
 > `acdp-registry-server` Cargo features (`storage-sqlite` default, `storage-pg`,
 > `storage-memory`). The `backend` config key must agree with the built binary.
+> The memory backend is demo/ephemeral only (nothing survives a restart), and
+> its `q=` search is a case-insensitive substring match of the whole query, not
+> the stemmed all-words match of SQLite/Postgres.
 
 ### `[auth]`
 

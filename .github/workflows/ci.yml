@@ -681,26 +681,26 @@ jobs:
       # only ever ratchet DOWN invisibly, since it renders a summary and
       # uploads lcov but asserted nothing about either.
       #
-      # THE FLOOR IS PROVISIONAL. 75 was derived for the OLD denominator
-      # (`--workspace` only; main measured 89.0% on CI with it). Adding the
-      # playground, pg and memory legs changes the denominator, which can
-      # move the percentage either way, so neither 75 nor 89 says anything
-      # about the new number. The rule for the real floor: observe the merged
-      # number on at least 3 CI runs of this job, set the floor to
-      # floor(min) - 1, never above an observed value, and record the three
-      # runs in the commit that changes it. Until then 75 is kept only
-      # because it is the existing floor; it is not a measurement of this
-      # configuration.
+      # THE FLOOR IS 88 = floor(min) - 1 over 5 CI runs of this merged job
+      # (workspace + playground + postgres + memory), computed from each run's
+      # lcov artifact:
+      #   37167246216  89.93%    37166957267  89.93%
+      #   37166931686  89.90%    37166569202  89.90%
+      #   37166325403  89.90%
+      # min 89.90 -> floor 89 -> minus 1 = 88, below every observed value.
+      # Re-derive it the same way (>= 3 runs, floor(min) - 1, record the runs
+      # in the commit) whenever the code tree or the set of legs changes
+      # materially -- the denominator moves with them.
       #
       # Honest scope: this makes the coverage JOB fail below the floor. It
       # does not block a merge, because `coverage` is not a required status
       # check (it is in `advisory_pending` in .github/required-checks.json;
-      # requiring it is a repo setting, raised separately). A floor on an
-      # advisory job is a signal, not a gate.
+      # requiring it is a repo setting, raised separately). Until coverage is
+      # a required check, this floor is a signal, not a gate.
       - name: coverage report (lcov + floor)
         run: |
           cargo llvm-cov report --lcov --output-path lcov.info \
-            --fail-under-lines 75
+            --fail-under-lines 88
       - name: coverage summary
         run: |
           # One append of one block, rather than four opens of the same file.
