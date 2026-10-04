@@ -1,5 +1,12 @@
 
 
+## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-auth/v0.2.0...acdp-registry-auth/v0.3.0) - 2026-10-04
+
+### Other
+
+- make the example config honest, fix residual false doc claims, and guard the class ([#362](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/362))
+
+
 ## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-auth/v0.1.5...acdp-registry-auth/v0.2.0) - 2026-10-03
 
 ### Other

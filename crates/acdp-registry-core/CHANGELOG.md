@@ -1,5 +1,18 @@
 
 
+## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.2.0...acdp-registry-core/v0.3.0) - 2026-10-04
+
+### Fixed
+
+- *(release)* relabel to 0.3.0 and let the Railway guard follow UPGRADING ([#389](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/389))
+- *(tenancy)* honour X-Tenant-Id only from a declared boundary ([#374](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/374)) ([#383](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/383))
+- *(lifecycle)* charge the actor's rate limit only after the signature verifies ([#375](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/375)) ([#379](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/379))
+
+### Other
+
+- stale comments, revoke 501 not_implemented, wire-code envelope scanner ([#376](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/376)) ([#381](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/381))
+
+
 ## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.1.5...acdp-registry-core/v0.2.0) - 2026-10-03
 
 ### Added

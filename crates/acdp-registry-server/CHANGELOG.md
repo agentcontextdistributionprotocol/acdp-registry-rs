@@ -1,5 +1,29 @@
 
 
+## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.2.0...acdp-registry-server/v0.3.0) - 2026-10-04
+
+### Fixed
+
+- *(release)* relabel to 0.3.0 and let the Railway guard follow UPGRADING ([#389](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/389))
+- *(tenancy)* honour X-Tenant-Id only from a declared boundary ([#374](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/374)) ([#383](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/383))
+- *(lifecycle)* refuse to start when lifecycle state exists but [lifecycle] is off ([#373](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/373)) ([#382](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/382))
+- *(capabilities)* advertise read auth as bearer_jwt so acdp.json is schema-valid ([#372](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/372)) ([#380](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/380))
+- *(lifecycle)* charge the actor's rate limit only after the signature verifies ([#375](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/375)) ([#379](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/379))
+- *(mutants)* re-pin the mutation ratchet at scope 346 ([#371](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/371)) ([#378](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/378))
+
+### Other
+
+- *(mutants)* re-pin the ratchet at scope 358 from run 37222567772 ([#395](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/395))
+- stale comments, revoke 501 not_implemented, wire-code envelope scanner ([#376](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/376)) ([#381](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/381))
+- once done ([#377](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/377))
+- *(docs)* fail the build when a sibling-repo link is not pinned ([#370](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/370))
+- *(docs)* guard relative doc links and cover the 415 wire code ([#365](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/365))
+- make the example config honest, fix residual false doc claims, and guard the class ([#362](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/362))
+- *(server)* real tests for the memory backend; one coverage number across playground, pg and memory ([#361](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/361))
+- single-source required checks, guard their names, and extend protection drift ([#360](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/360))
+- *(store)* stop writing the unread lineages table ([#359](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/359))
+
+
 ## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.1.5...acdp-registry-server/v0.2.0) - 2026-10-03
 
 ### Added
