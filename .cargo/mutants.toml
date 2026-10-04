@@ -89,18 +89,27 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 351 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 346 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
-# MEASURED AT c41bf14 (unit U-552), with the command that reproduces it:
+# MEASURED by mutants.yml run 36417581090 (sha 5a6dfd8; re-pinned by #371),
+# whose outcomes.json is committed as
+# docs/mutation-runs/run36417581090-scope-346-outcomes.json.
+# The command that reproduces the split:
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
-#     crates/acdp-registry-core/src/handlers/context.rs   139
+#     crates/acdp-registry-core/src/handlers/context.rs   134
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs              9
 #     crates/acdp-registry-sqlite/src/store.rs            138
 #     ----------------------------------------------------------
-#     total                                               351
+#     total                                               346
+#
+# 351 -> 346 (#341): context.rs 139 -> 134, PURELY SUBTRACTIVE. #341 removed code
+# from `publish_identity_proven_offline`, which deleted five CAUGHT mutants and
+# added none; the seven survivors are the same mutants (three moved lines). The
+# 351 figure was measured at c41bf14 (U-552); the paragraph below is about that
+# widening.
 #
 # The widening is PURELY ADDITIVE: `comm -23` of the sorted 213-mutant list
 # against the 351-mutant one is empty, so no previously-scoped mutant was lost.
@@ -117,8 +126,9 @@ copy_vcs = true
 #
 # At the ~6.2s/mutant marginal cost measured in DECISIONS.md #17 that is ~2.5h,
 # and #216 lists "blocking PRs on a full mutation run" as a non-goal. This is a
-# scheduled job over a bounded set, by design. 351 of 1427 is 24.6%.
-# (Was 213 of 1427 = 14.9% before U-552 added sqlite/src/store.rs.)
+# scheduled job over a bounded set, by design. 346 of 1427 is 24.2% (the 1427 is
+# a66e1f2's figure and was not re-measured after #341). (Was 351 of 1427 = 24.6%
+# before #341, and 213 of 1427 = 14.9% before U-552 added sqlite/src/store.rs.)
 #
 # ---------------------------------------------------------------------------
 # sqlite/src/store.rs — DEFERRED BY U-540, PAID DOWN, AND ADMITTED BY U-552
@@ -150,6 +160,8 @@ copy_vcs = true
 #   killed  923:9   idempotency_evict_expired
 #   carried 994:35  `>` -> `>=`  EQUIVALENT
 #   carried 1306:35 `!=` -> `==` UNREACHABLE-BY-DESIGN (behind BEGIN IMMEDIATE)
+#           (now :1317:35 -- U-574's comment rewrite moved it; the ledger
+#           caught up only in #371)
 #
 # THE BUDGET GOES UP, 5 -> 7, AND THAT IS A RAISE. Saying it "stays the same
 # because the scope grew" would be spin: the number of mutants this repo admits
@@ -174,8 +186,9 @@ copy_vcs = true
 #
 # SUPERSEDED BY U-552 -- the two paragraphs that follow described the DEFERRAL,
 # and there is no longer one: store.rs is in examine_globs above and the
-# committed scope is 351. They are kept because the `--file` mechanic they
-# document is still true and still useful, not because the deferral is.
+# committed scope is 346 (351 until #341). They are kept because the `--file`
+# mechanic they document is still true and still useful, not because the
+# deferral is.
 #
 # You do NOT need this glob to work on those survivors: `--file` UNIONS with
 # this list (demonstrated below), so a local run can target a file without
@@ -246,8 +259,8 @@ copy_vcs = true
 #
 # WHY IT NO LONGER APPLIES: the unit holding context.rs finished and landed. The
 # file is now stable enough to key a budget to, and it is the densest core logic
-# in the core scope — 139 of the 351 mutants, and the home of four of the seven
-# budgeted survivors enumerated in mutants.yml. Excluding it would have left the
+# in the core scope — 134 of the 346 mutants (139 of 351 before #341), and the
+# home of four of the seven budgeted survivors enumerated in mutants.yml. Excluding it would have left the
 # ratchet measuring the thin end of the codebase.
 #
 # THE DRIFT IS ITSELF THE LESSON. Between 5c401db and 60b08b7 context.rs moved

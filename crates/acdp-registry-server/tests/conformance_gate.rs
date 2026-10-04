@@ -2394,6 +2394,155 @@ fn the_declared_prior_ledger_actually_exists() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// THE PRIOR LEDGER MUST CONTAIN EVERY COMMITTED SURVIVOR (#371).
+//
+// This is the classifier's FRESHNESS rule (`classify_removed_survivors.py`, the
+// `STALE PRIOR LEDGER` branch), moved to PR time. Inside the scheduled job that
+// rule only fires when a survivor disappears AND needs pairing. A stale ledger can
+// therefore sit unnoticed for weeks, and the first drift then gets "cannot
+// conclude" instead of an answer.
+//
+// It already happened. #331 moved the store.rs survivor from :1306:35 to :1317:35
+// in MUTANTS_SURVIVORS without committing a new ledger, and u552 kept the old
+// name until #371. This test would have failed #331.
+//
+// The strip rules are the workflow's (`survivors_expected` in mutants.yml's
+// ratchet step): trailing whitespace trimmed, `#` lines and blank lines dropped.
+// Membership is by `scenario.Mutant.name`, the field the classifier reads.
+// ---------------------------------------------------------------------------
+
+/// The committed survivor lines from the `MUTANTS_SURVIVORS: |` block scalar,
+/// with the workflow's strip rules applied. `None` if the key is absent.
+fn committed_survivors(mutants_yml: &str) -> Option<Vec<String>> {
+    let mut lines = mutants_yml.lines();
+    let header = lines
+        .by_ref()
+        .find(|l| l.trim_start().starts_with("MUTANTS_SURVIVORS:"))?;
+    let key_indent = header.len() - header.trim_start().len();
+    let mut out = Vec::new();
+    for line in lines {
+        let indent = line.len() - line.trim_start().len();
+        // A block scalar ends at the first non-blank line indented no deeper
+        // than its key.
+        if !line.trim().is_empty() && indent <= key_indent {
+            break;
+        }
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        out.push(l.to_string());
+    }
+    Some(out)
+}
+
+/// Committed survivor lines that are NOT a `scenario.Mutant.name` in the
+/// ledger. `Err` when either input cannot support a conclusion.
+fn survivors_missing_from_ledger(
+    mutants_yml: &str,
+    ledger_json: &str,
+) -> Result<Vec<String>, String> {
+    let survivors =
+        committed_survivors(mutants_yml).ok_or("mutants.yml does not declare MUTANTS_SURVIVORS")?;
+    if survivors.is_empty() {
+        // An empty list makes "every survivor is in the ledger" vacuously true.
+        return Err("MUTANTS_SURVIVORS parsed to zero lines".to_string());
+    }
+    let doc: serde_json::Value =
+        serde_json::from_str(ledger_json).map_err(|e| format!("ledger is not JSON: {e}"))?;
+    let outcomes = doc
+        .get("outcomes")
+        .and_then(|o| o.as_array())
+        .ok_or("ledger has no `outcomes` array; the report format changed")?;
+    // `scenario` is the bare string "Baseline" for the baseline record, so the
+    // object lookup has to tolerate a non-object.
+    let names: std::collections::HashSet<&str> = outcomes
+        .iter()
+        .filter_map(|o| o.get("scenario")?.get("Mutant")?.get("name")?.as_str())
+        .collect();
+    if names.is_empty() {
+        return Err("ledger contains no mutant records".to_string());
+    }
+    Ok(survivors
+        .into_iter()
+        .filter(|s| !names.contains(s.as_str()))
+        .collect())
+}
+
+#[test]
+fn every_committed_survivor_is_in_the_prior_ledger() {
+    let root = repo_root();
+    let mutants_yml = std::fs::read_to_string(root.join(".github/workflows/mutants.yml"))
+        .expect("read .github/workflows/mutants.yml");
+    let ledger = yaml_scalar(&mutants_yml, "MUTANTS_PRIOR_LEDGER")
+        .expect("mutants.yml declares MUTANTS_PRIOR_LEDGER");
+    let ledger_json = std::fs::read_to_string(root.join(ledger))
+        .unwrap_or_else(|e| panic!("read MUTANTS_PRIOR_LEDGER {ledger}: {e}"));
+
+    let missing = survivors_missing_from_ledger(&mutants_yml, &ledger_json)
+        .unwrap_or_else(|e| panic!("cannot check the prior ledger's freshness: {e}"));
+    assert!(
+        missing.is_empty(),
+        "STALE PRIOR LEDGER: {} committed MUTANTS_SURVIVORS line(s) are not mutant names in \
+         {ledger}:\n  {}\n\nThe scheduled ratchet pairs a drifted survivor against this \
+         ledger, and the classifier refuses a ledger missing any committed line. Commit the \
+         outcomes.json of the run that produced the current MUTANTS_SURVIVORS and point \
+         MUTANTS_PRIOR_LEDGER at it, in the same commit as the survivor-list edit.",
+        missing.len(),
+        missing.join("\n  ")
+    );
+}
+
+/// The guard above must FAIL on a stale ledger, and must not pass vacuously.
+#[test]
+fn the_prior_ledger_freshness_check_is_falsified() {
+    const A: &str = "crates/x/src/a.rs:10:5: replace > with >= in f";
+    const B: &str = "crates/x/src/b.rs:20:9: delete ! in g";
+    let yml = format!(
+        "env:\n  MUTANTS_PRIOR_LEDGER: \"l.json\"\n\n  MUTANTS_SURVIVORS: |\n    \
+         # reason for A\n    {A}\n\n    # reason for B\n    {B}   \n\n  \
+         MUTANTS_TIMEOUT_BUDGET: \"1\"\n"
+    );
+    let ledger = |names: &[&str]| {
+        let mut outcomes = vec![serde_json::json!({"scenario": "Baseline", "summary": "Success"})];
+        outcomes.extend(names.iter().map(
+            |n| serde_json::json!({"scenario": {"Mutant": {"name": n}}, "summary": "MissedMutant"}),
+        ));
+        serde_json::json!({ "outcomes": outcomes }).to_string()
+    };
+
+    // The parser must see exactly the two survivors: comments, blanks and
+    // trailing whitespace stripped, and the block ending at the next key.
+    assert_eq!(
+        committed_survivors(&yml),
+        Some(vec![A.to_string(), B.to_string()]),
+        "the survivor parser does not apply the workflow's strip rules"
+    );
+
+    // Control: a fresh ledger passes.
+    assert_eq!(
+        survivors_missing_from_ledger(&yml, &ledger(&[A, B, "crates/x/src/c.rs:1:1: other"])),
+        Ok(vec![]),
+        "the control (fresh ledger) must be clean, or the cases below prove nothing"
+    );
+
+    // The #331 shape: one survivor line moved and the ledger still has the old name.
+    let stale = ledger(&[A, "crates/x/src/b.rs:9:9: delete ! in g"]);
+    assert_eq!(
+        survivors_missing_from_ledger(&yml, &stale),
+        Ok(vec![B.to_string()]),
+        "a ledger missing a committed survivor was not reported, or the wrong line was named"
+    );
+
+    // Vacuity: no survivors, no ledger records, or no outcomes array must not pass.
+    let empty_list = "env:\n  MUTANTS_SURVIVORS: |\n    # nothing\n  NEXT: \"x\"\n";
+    assert!(survivors_missing_from_ledger(empty_list, &ledger(&[A])).is_err());
+    assert!(survivors_missing_from_ledger("env:\n  OTHER: \"x\"\n", &ledger(&[A])).is_err());
+    assert!(survivors_missing_from_ledger(&yml, &ledger(&[])).is_err());
+    assert!(survivors_missing_from_ledger(&yml, "{\"total_mutants\": 2}").is_err());
+}
+
 #[test]
 fn the_survivor_classifier_is_still_wired_into_the_ratchet() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

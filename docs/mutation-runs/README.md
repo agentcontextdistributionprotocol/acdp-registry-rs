@@ -6,17 +6,27 @@ per-mutant verdicts for 95 of this file's 138 mutants were lost exactly that way
 
 ## Index — which ledgers are CURRENT
 
-**One ledger is CURRENT for the whole CI scope: `u552-union-scope-351-outcomes.json`.**
-Everything below it is history, kept for the reasons each section gives. A reader summing
+**One ledger is CURRENT for the whole CI scope: `run36417581090-scope-346-outcomes.json`.**
+It is the unmodified `outcomes.json` of `mutants.yml` run 36417581090 (sha 5a6dfd8), committed
+by #371. Everything below it is history, kept for the reasons each section gives. A reader summing
 the `u549-*` set gets 19 survivors; a reader summing `u549` + `u550` gets 8; the tranche has
 been at **2** since U-552 paid six of them off with tests. Sum nothing — read the current
 ledger.
 
 | ledger | scope | result | status |
 |---|---|---|---|
-| `u552-union-scope-351-outcomes.json` | **351** — core 213 + `sqlite/src/store.rs` 138 | 219 caught / **7 missed** / 124 unviable / 1 timeout | **CURRENT** |
+| `run36417581090-scope-346-outcomes.json` | **346** — context.rs 134 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 138 | 214 caught / **7 missed** / 124 unviable / 1 timeout | **CURRENT** |
+| `u552-union-scope-351-outcomes.json` | 351 — core 213 + `sqlite/src/store.rs` 138 | 219 caught / 7 missed / 124 unviable / 1 timeout | SUPERSEDED by `run36417581090` |
 | `u551-core-scope-213-outcomes.json` | 213 | 134 caught / 5 missed / 73 unviable / 1 timeout | SUPERSEDED by `u552` |
 | `u549`/`u550` store.rs shards (11 files) | 138, in 8 shards | 8 missed across the set | SUPERSEDED by `u552` |
+
+**`u552` is SUPERSEDED, not VOID.** It was a correct measurement at c41bf14. #341 then
+removed code from `publish_identity_proven_offline` and so deleted five caught mutants
+(context.rs 139 -> 134). The seven survivors are the same mutants, but three of them now sit
+on different lines. One more thing about `u552`: it records the store.rs survivor at
+`:1306:35`, while `MUTANTS_SURVIVORS` had said `:1317:35` since #331. The ledger was stale
+before #341 and nothing noticed. `every_committed_survivor_is_in_the_prior_ledger`
+(`crates/acdp-registry-server/tests/conformance_gate.rs`) now checks this on every PR.
 
 **The `u549`/`u550`/`u551` ledgers are SUPERSEDED, not VOID** — the same distinction the
 shard table below draws, now applied one level up. They were correct measurements of the

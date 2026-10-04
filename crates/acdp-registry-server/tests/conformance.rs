@@ -506,9 +506,10 @@
 //! `cargo-mutants` over `acdp-registry-core`'s `receipt.rs`, `handlers/log.rs` and
 //! `handlers/context.rs`, plus `acdp-registry-sqlite`'s `store.rs` (U-552 widened the scope
 //! to this fourth file), and `.github/workflows/mutants.yml` runs it on a schedule against
-//! a committed survivor budget that fails the job when it is exceeded. Re-measured at
-//! c41bf14 (U-552): **351 mutants**, of which 219 caught / 7 missed / 124 unviable /
-//! 1 timeout. So do not reach for `cargo-mutants` as a thing someone should do one day --
+//! a committed survivor budget that fails the job when it is exceeded. Re-measured by
+//! mutants.yml run 36417581090 (re-pinned by #371): **346 mutants**, of which 214 caught /
+//! 7 missed / 124 unviable / 1 timeout (351 / 219 caught at c41bf14 before #341 removed
+//! five caught mutants). So do not reach for `cargo-mutants` as a thing someone should do one day --
 //! run `cargo mutants`.
 //!
 //! Two limits on that, because a reader who over-trusts this is worse off than one who
@@ -525,7 +526,7 @@
 //! misleading now that a real oracle exists. Retired would have been wrong, for three
 //! measured reasons rather than sentiment:
 //!
-//!   * **Reach.** The oracle covers 351 of 1427 workspace mutants, in four files. The 41
+//!   * **Reach.** The oracle covers 346 of 1427 workspace mutants, in four files. The 41
 //!     functions these guards pin span did resolution, signatures, canonicalisation,
 //!     lineage, capabilities, idempotency, rate limiting, anchors, witness, schema and
 //!     status -- almost all of it outside the oracle's scope, where a gutted test body
