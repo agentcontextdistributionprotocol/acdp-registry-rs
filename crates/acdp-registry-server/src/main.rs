@@ -1405,7 +1405,10 @@ fn acdp_version_claim(cfg: &RegistryConfig) -> &'static str {
 ///
 /// Every `READ_AUTH_METHOD_*` const here is checked against the pinned
 /// schema's item rules by `read_auth_method_ids_satisfy_the_pinned_schema`
-/// in `tests/conformance.rs`, which reads this file's source.
+/// in `tests/conformance.rs`, which reads this file's source. The whole served
+/// `/.well-known/acdp.json` (auth on and off) is validated against the full
+/// pinned schema by `served_capabilities_documents_satisfy_the_pinned_schema`
+/// in the same file, which spawns this binary (#385).
 const READ_AUTH_METHOD_BEARER_JWT: &str = "bearer_jwt";
 
 fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
