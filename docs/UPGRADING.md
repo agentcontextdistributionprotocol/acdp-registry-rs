@@ -23,8 +23,9 @@ belongs in the per-crate changelogs.
 
 ## 0.2.1
 
-**No action needed on upgrade or rollback. One table goes dormant, ahead of its removal, and
-lifecycle requests are charged only once their signature verifies.**
+**No config action needed on upgrade or rollback. One table goes dormant, ahead of its removal,
+lifecycle requests are charged only once their signature verifies, and the advertised read
+authentication method id changes (below).**
 
 **Wire value change (#372): `read_authentication_methods` is now `["bearer_jwt"]`.** With
 `auth.enabled = true`, `GET /.well-known/acdp.json` advertised `["bearer-jwt"]`, which fails the
