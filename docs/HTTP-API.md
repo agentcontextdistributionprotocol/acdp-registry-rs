@@ -100,9 +100,10 @@ empty value — is `415 unsupported_media_type`. The routes differ only on an
 Accepting an absent header on the publish and lifecycle routes is a
 deliberate choice (`POST /contexts` never required it, and rejecting it
 would break every publisher that omits it); `/auth/*` has always required
-it. On every route an oversized body is `413 payload_too_large`, and a query
-string that does not parse (for example `GET /contexts/search?limit=abc`) is
-`400 schema_violation`. These rejections carry the error envelope below, not
+it. On every route an oversized body is `413 payload_too_large`, and a search
+query string that does not parse (for example `GET /contexts/search?limit=abc`)
+is `400 schema_violation` (`GET /admin/contexts` parses its query with plain
+axum, so a malformed one answers axum's plain-text `400`). These rejections carry the error envelope below, not
 plain text. `POST /admin/pinned-keys/reload` takes no body.
 
 ### Rate limits (`429`)
@@ -126,7 +127,13 @@ whichever `rate_limit.backend` is configured. Publish and lifecycle differ in
 **when** they charge: a publish only *peeks* at the bucket before signature
 verification and charges once the signer is proven (see
 [`POST /contexts`](#post-contexts)), while a lifecycle request is charged at
-the check itself, before its event signature is verified. Every `429` is
+the check itself, before its event signature is verified. Consequence: the
+lifecycle routes need no bearer, and the bucket is the same per-agent bucket
+publish uses, keyed by the `actor` the request names; so while
+`[lifecycle] enabled` is on, anyone can send unsigned retract or republish
+requests naming an agent and drain that agent's publish budget (its real
+publishes then answer `429`). This is current behaviour, tracked as a code
+follow-up, not a documented guarantee. Every `429` is
 counted on the rejection counter documented under
 [`GET /metrics`](#get-metrics-feat-10), labelled with the check that refused
 it; a refusal because the shared backend was unavailable counts under that
@@ -468,7 +475,7 @@ Query parameters (all optional):
 
 | Param | Meaning |
 |-------|---------|
-| `q` | Full-text query over `title`, `summary`, `description`, `domain`, `tags` and `agent_id`. On Postgres it is `plainto_tsquery('english', q)`: English stemming (`running` matches "run"), English stopwords dropped, case-folded, every remaining word required (any order), no operator syntax. SQLite (FTS5 `porter` tokenizer plus the same stopword list) is brought to the same contract, and both backends run the same parity test; the two stemmers are different implementations and can still disagree on individual words. A query made only of stopwords (`q=the`) matches nothing on either. The demo `memory` backend differs: one case-insensitive substring match of the whole query, unstemmed, so a multi-word `q` is a contiguous phrase. |
+| `q` | Full-text query over `title`, `summary`, `description`, `domain`, `tags` and `agent_id`. On Postgres it is `plainto_tsquery('english', q)`: English stemming (`running` matches "run"), English stopwords dropped, case-folded, every remaining word required (any order), no operator syntax. SQLite (FTS5 `porter` tokenizer plus the same stopword list) is brought to the same contract, and both backends run the same parity test; the two stemmers are different implementations and can still disagree on individual words. A query made only of stopwords (`q=the`) matches nothing on either. The demo `memory` backend differs: one case-insensitive substring match of the whole query, unstemmed, so a multi-word `q` is a contiguous phrase (matched over all fields joined with spaces, so it can span two fields). |
 | `type` | Context type filter. |
 | `domain`, `tags`, `agent_id`, `schema_uri`, `derived_from` | Exact-match facets. |
 | `status` | Status filter (default `active`). A retracted context matches only `status=retracted` — never the default, nor `superseded`/`expired` even where those facts also hold (RFC-ACDP-0013 §8.2). |

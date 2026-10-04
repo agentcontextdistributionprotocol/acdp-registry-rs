@@ -160,7 +160,8 @@ around those calls:
    - playground, agent with a pinned key → the pinned-signature check, then
      `prove_publish_identity_pinned`;
    - production → `prove_publish_identity`, resolving the `did:web` document;
-   - playground, unpinned agent → `publish_unverified_for_tests`, the SDK's
+   - playground, unpinned agent → (refused outright when `pinned_only` is
+     set) `publish_unverified_for_tests`, the SDK's
      test path that skips the §2.1 signature steps (a protocol violation
      reserved for demos), with idempotency and tenant stamping done around it
      by the handler.
