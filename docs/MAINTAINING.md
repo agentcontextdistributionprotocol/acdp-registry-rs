@@ -340,8 +340,9 @@ Gates a release PR must pass:
 
 [`mutants.yml`](../.github/workflows/mutants.yml) runs `cargo mutants` over the scope
 defined in `.cargo/mutants.toml` on a **Monday cron** (05:17 UTC) and on
-`workflow_dispatch`. It **never runs on PRs**: a PR that changes a scoped file only finds
-out on the following Monday, detached from the change.
+`workflow_dispatch`. The mutation run itself **never runs on PRs** (about two hours); the
+mechanical half of its pins is checked at PR time instead — see
+[PR-time pin check](#pr-time-pin-check-mutants-pins) below.
 
 The gate is exact, not a budget:
 
@@ -369,12 +370,65 @@ survivor against that ledger, and it refuses a ledger that is missing any commit
 `every_committed_survivor_is_in_the_prior_ledger` in
 `crates/acdp-registry-server/tests/conformance_gate.rs` runs the same check on every PR.
 
+### PR-time pin check (`mutants pins`)
+
+Three of the ratchet's pins describe the mutant *listing*, not verdicts, and
+`cargo mutants --list` parses source without building (well under a second).
+[`mutants-pins.yml`](../.github/workflows/mutants-pins.yml) therefore checks them on every
+PR that can move them, so the Monday run is not the first to find out:
+
+1. `MUTANTS_EXPECTED_SCOPE` equals `cargo mutants --list | wc -l`;
+2. the per-file table in `.cargo/mutants.toml` equals the listing's per-file split (and
+   its `total` row equals both the rows' sum and `MUTANTS_EXPECTED_SCOPE`);
+3. every `MUTANTS_SURVIVORS` line, and every `Timeout` mutant recorded in
+   `MUTANTS_PRIOR_LEDGER` (the budgeted one), appears in the listing verbatim. A survivor
+   that only moved is reported with the line it moved to.
+
+The logic is [`.github/scripts/check_mutants_pins.py`](../.github/scripts/check_mutants_pins.py);
+its unit tests (`test_check_mutants_pins.py`) run in the required `tests` job on every PR.
+The job pins cargo-mutants to the version that measured the prior ledger
+(`CARGO_MUTANTS_VERSION`), and after a green check it inserts one blank line at the top of
+`handlers/context.rs` and requires the same check to fail — a falsification against the
+real tree and tool. Run it locally with:
+
+```sh
+cargo mutants --list > /tmp/listing.txt
+python3 .github/scripts/check_mutants_pins.py check --listing /tmp/listing.txt
+```
+
+It cannot see verdicts: a new survivor, or a killed one, still only shows up on the cron.
+When it fails, either make the edit line-neutral in the scoped files or re-pin in the same
+PR: run `gh workflow run mutants.yml --ref <branch>`, commit that run's `outcomes.json` as
+the new `MUTANTS_PRIOR_LEDGER`, and update the scope, the table and `MUTANTS_SURVIVORS`
+from it. Do not hand-edit a survivor line to the position the failure hints at without
+that run: survivor lines are verdicts and must match the prior ledger, which
+`every_committed_survivor_is_in_the_prior_ledger` checks.
+
+**When it runs.** The path filter is *inside* the job, not on the trigger: the job always
+starts, and its first step diffs the PR's merge commit against `main` (`HEAD^1..HEAD`).
+Unless a scoped file (`examine_globs`), `.cargo/mutants.toml`, `mutants.yml`,
+`mutants-pins.yml`, the script or its tests, or anything under `docs/mutation-runs/`
+changed, the remaining steps are skipped and the job is green in seconds. A push to
+`main`, or a diff that cannot be computed, always runs the check.
+
+**Advisory, not required — and why it can be promoted.** It is listed under
+`advisory_pending` in `.github/required-checks.json`. A trigger-level `paths:` filter or a
+job-level `if:` would make the check never report on unrelated PRs, which
+`required_checks_guard.py` rejects for both `required` and `advisory_pending` (a required
+context that never reports blocks every PR forever). Gating at step level keeps the context
+reporting on every PR, so the guard resolves it and it is *safe* to require. It stays
+advisory for now because requiring it changes live branch protection (a maintainer
+action, compared daily by the drift check), and because a red result is never wrong to
+merge past in an emergency: the cost of ignoring it is one red Monday run, not a broken
+`main`. The "promote the advisory checks" step of the runbook above promotes it together
+with the others.
+
 **Status:** pinned at scope 358 from run 37222567772 (main 27f9875, 108.7 min). #373-#376
 added twelve caught or unviable mutants and moved every cited line; the seven survivors are
 the same mutants on new lines, and the run's report is committed unchanged as the prior
 ledger. (History: the 2026-09-28 run 36417581090 failed after #341 shrank the scope from
 351 to 346; #371 re-pinned it the same way.) Edits to the four scoped files after a re-pin
-must be line-neutral until the next one. Check
+must be line-neutral until the next one (`mutants pins` checks this on the PR). Check
 `gh run list --workflow mutants.yml --limit 3` for the current state.
 
 ## Spec bumps

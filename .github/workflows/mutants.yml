@@ -14,6 +14,9 @@
 #
 # NOT ON pull_request, DELIBERATELY. #216 lists blocking PRs on a mutation run as
 # a non-goal, and this is far too slow for it. It is a scheduled ratchet.
+# The pins below that describe the mutant LISTING rather than verdicts (scope,
+# survivor and timeout line:col) ARE checked per PR, in seconds, by
+# mutants-pins.yml (#384) -- so a PR that moves them goes red itself.
 name: mutants
 
 on:

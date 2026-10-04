@@ -315,6 +315,12 @@ examine_globs = [
 # then update the block above AND `MUTANTS_EXPECTED_SCOPE`. The workflow's
 # scope-check step prints these same two commands when it fails, because that
 # red log is where a reader actually meets this, not here.
+#
+# Since #384 the PR that makes such an edit meets it first: the `mutants pins`
+# job (.github/workflows/mutants-pins.yml) compares `cargo mutants --list` with
+# the table above, MUTANTS_EXPECTED_SCOPE and the survivor/timeout lines on
+# every PR that touches a scoped file or a pin. The table's row format
+# (`#   <path>   <count>` plus one `#   total   <n>` row) is parsed by it.
 
 # A floor under the auto-set per-mutant timeout. cargo-mutants derives the timeout
 # from the baseline `cargo test`, which is the right default; this only stops a
