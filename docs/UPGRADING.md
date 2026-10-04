@@ -23,11 +23,13 @@ belongs in the per-crate changelogs.
 
 ## 0.2.1
 
-**One breaking startup change: a deployment with `[lifecycle] enabled = false` over a database
-that holds lifecycle state no longer starts (#373) — run the pre-upgrade check below. Otherwise no
-config action is needed on upgrade or rollback. One table goes dormant, ahead of its removal,
-lifecycle requests are charged only once their signature verifies, and the advertised read
-authentication method id changes (below).**
+**Two behaviour changes need a look before upgrading: a deployment with `[lifecycle] enabled = false`
+over a database that holds lifecycle state no longer starts (#373) — run the pre-upgrade check
+below — and under `require_tenant` an `X-Tenant-Id` header is no longer honoured without a declared
+boundary (#374, `auth.tenant_header_trust`). Otherwise no config action is needed. Rolling back
+past this release needs the `tenant_header_trust` key removed first (0.2.0 refuses unknown `[auth]`
+keys). One table goes dormant, ahead of its removal, lifecycle requests are charged only once
+their signature verifies, and the advertised read authentication method id changes (below).**
 
 **Breaking startup change (#373): lifecycle state with `[lifecycle]` off refuses to start.**
 RFC-ACDP-0013 §6 says a registry that does not advertise `acdp-registry-lifecycle` MUST NOT emit
