@@ -16675,3 +16675,109 @@ fn cited_cross_binary_tests_are_present_and_exactly_tabled() {
          rename -- add them to the table with what they hold."
     );
 }
+
+/// The pinned schema's `read_authentication_methods.items`, as this file
+/// expects it. A spec bump that moves any of these turns the guard below red,
+/// so the ids main.rs emits are re-checked deliberately rather than drifting.
+fn expected_read_auth_method_items() -> Value {
+    json!({
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*$",
+        "minLength": 2,
+        "maxLength": 64
+    })
+}
+
+/// Checks `id` against item rules read from the schema. Only the pattern this
+/// function knows how to evaluate is accepted; anything else panics, so a
+/// changed pattern cannot be silently evaluated by the old rules.
+fn read_auth_method_violation(items: &Value, id: &str) -> Option<String> {
+    let pattern = items["pattern"]
+        .as_str()
+        .expect("items.pattern is a string");
+    assert_eq!(
+        pattern, "^[a-z][a-z0-9_]*$",
+        "the matcher below implements only this pattern; update it with the schema"
+    );
+    let min = items["minLength"].as_u64().expect("items.minLength") as usize;
+    let max = items["maxLength"].as_u64().expect("items.maxLength") as usize;
+    let len = id.chars().count();
+    if len < min || len > max {
+        return Some(format!("{id:?}: length {len} outside {min}..={max}"));
+    }
+    let mut chars = id.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_lowercase());
+    if !first_ok || !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+        return Some(format!("{id:?}: does not match {pattern}"));
+    }
+    None
+}
+
+/// `const READ_AUTH_METHOD_<NAME>: &str = "<value>";` values in main.rs's
+/// source text. `build_capabilities` is private to the binary and so
+/// unreachable from here; the consts are what it emits.
+fn read_auth_method_consts(main_rs: &str) -> Vec<(String, String)> {
+    main_rs
+        .lines()
+        .filter_map(|l| {
+            let rest = l.trim().strip_prefix("const READ_AUTH_METHOD_")?;
+            let (name, rest) = rest.split_once(':')?;
+            let value = rest.split('"').nth(1)?;
+            Some((format!("READ_AUTH_METHOD_{name}"), value.to_string()))
+        })
+        .collect()
+}
+
+/// #372: the ids the binary advertises in `read_authentication_methods` satisfy
+/// the PINNED capabilities schema's item rules, and those rules are exactly the
+/// ones this repository was written against. Runs in the `conformance` job
+/// (require mode), which main.rs's unit tests never do.
+#[test]
+fn read_auth_method_ids_satisfy_the_pinned_schema() {
+    let Some(root) = spec_root() else {
+        eprintln!("ACDP_SPEC_DIR not set; skipping");
+        return;
+    };
+    let schema_path = root.join("schemas/json/acdp-capabilities.schema.json");
+    let schema: Value = serde_json::from_str(
+        &std::fs::read_to_string(&schema_path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", schema_path.display())),
+    )
+    .expect("the capabilities schema is JSON");
+    let field = &schema["properties"]["read_authentication_methods"];
+    assert_eq!(field["type"], "array");
+    assert_eq!(
+        field["uniqueItems"], true,
+        "the pinned schema no longer requires unique method ids"
+    );
+    let items = &field["items"];
+    assert_eq!(
+        items,
+        &expected_read_auth_method_items(),
+        "the pinned schema's read_authentication_methods.items moved; re-check \
+         READ_AUTH_METHOD_* in main.rs against it"
+    );
+
+    // Synthetic negative: the hyphenated id that shipped until 0.2.1 must fail,
+    // or the matcher accepts everything and the loop below proves nothing.
+    assert!(read_auth_method_violation(items, "bearer-jwt").is_some());
+    assert!(read_auth_method_violation(items, "x").is_some());
+    assert!(read_auth_method_violation(items, &"a".repeat(65)).is_some());
+
+    let main_rs_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    let main_rs = std::fs::read_to_string(&main_rs_path).expect("reading src/main.rs");
+    let consts = read_auth_method_consts(&main_rs);
+    assert!(
+        consts
+            .iter()
+            .any(|(n, v)| n == "READ_AUTH_METHOD_BEARER_JWT" && v == "bearer_jwt"),
+        "READ_AUTH_METHOD_BEARER_JWT not found in main.rs; found {consts:?}"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for (name, value) in &consts {
+        if let Some(v) = read_auth_method_violation(items, value) {
+            panic!("{name} violates the pinned capabilities schema: {v}");
+        }
+        assert!(seen.insert(value), "{name} repeats the id {value:?}");
+    }
+}

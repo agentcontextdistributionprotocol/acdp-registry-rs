@@ -204,7 +204,7 @@ this section records only what **this registry** emits in each one
 | `limits` | `max_payload_bytes`, `max_embedded_bytes` and `idempotency_key_ttl_seconds` from `[limits]`; `max_publish_per_minute` is never emitted. |
 | `supports_idempotency_key` | Always `true`. |
 | `anonymous_public_reads` | `auth.anonymous_public_reads`; always present (default `false`). |
-| `read_authentication_methods` | `["bearer-jwt"]` when `auth.enabled = true`, omitted otherwise — see the known issue below. |
+| `read_authentication_methods` | `["bearer_jwt"]` when `auth.enabled = true`, omitted otherwise. |
 
 `acdp_version` is unconditionally `"0.5.0"` (RFC-ACDP-0016 §10 — anchors
 handling has no admin-config gate, so its version claim always wins), but
@@ -213,14 +213,11 @@ set of active capabilities are two different axes — do not infer what a
 registry actually enforces from `acdp_version` alone; check `profiles` and the
 response bodies instead.
 
-**Known issue: `read_authentication_methods` with auth enabled.** When
-`auth.enabled = true` the document also carries
-`"read_authentication_methods": ["bearer-jwt"]` (`build_capabilities`). The
-pinned spec requires each entry to match `^[a-z][a-z0-9_]*$`
-([`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/registries/auth-methods.md) and the
-capabilities schema), and the hyphen does not, so with auth enabled the
-document fails schema validation. Do not treat `bearer-jwt` as a valid method
-identifier; it is a code bug, and the fix will change this value.
+`bearer_jwt` (the `/auth/*` DID challenge answered with a registry-minted JWT) is not
+registered in the spec's open
+[`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/registries/auth-methods.md)
+vocabulary; before 0.2.1 the value was `bearer-jwt`, which the capabilities schema's
+`^[a-z][a-z0-9_]*$` rejects.
 
 ### `GET /.well-known/jwks.json`
 
