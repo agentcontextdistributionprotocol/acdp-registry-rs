@@ -643,29 +643,61 @@ jobs:
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-llvm-cov
+      # ONE number over every server configuration CI tests, not just the
+      # default one. `cargo test --workspace` alone never compiles the
+      # `playground` admin handlers, the `storage-memory` backend
+      # (memory_ext.rs) or the server's `storage-pg` arms, so those lines were
+      # absent from the denominator rather than counted as uncovered.
+      #
+      # Each leg runs with --no-report, which accumulates profiles instead of
+      # reporting; the final `report` merges them all and applies the floor.
+      # Legs run SEQUENTIALLY on purpose: the workspace and pg_integration
+      # legs share the one Postgres service and its truncate-and-test DB.
+      # The pg leg stays fail-closed (#228): ACDP_REQUIRE_PG=1 turns a missing
+      # database into a failure instead of a silent skip. The env is set for
+      # the whole step; the other legs either use it the same way (workspace:
+      # acdp-registry-pg's own tests) or compile no pg code at all.
+      #
+      # `clean --workspace` first: rust-cache can restore a target dir that
+      # still holds profiles from an earlier run, which would otherwise be
+      # merged into this run's number.
+      - name: cargo llvm-cov (workspace + playground + postgres + memory)
+        env:
+          ACDP_REGISTRY_TEST_PG_URL: postgres://acdp:acdp@localhost:5432/acdp_registry
+          ACDP_REQUIRE_PG: "1"
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked --no-report --workspace
+          cargo llvm-cov --locked --no-report -p acdp-registry-server \
+            --features storage-sqlite,playground
+          cargo llvm-cov --locked --no-report -p acdp-registry-server \
+            --no-default-features --features storage-pg \
+            --test pg_integration
+          cargo llvm-cov --locked --no-report -p acdp-registry-server \
+            --no-default-features --features storage-memory
       # --fail-under-lines is the whole point: without a floor this job could
       # only ever ratchet DOWN invisibly, since it renders a summary and
       # uploads lcov but asserted nothing about either.
       #
-      # 75 is deliberately conservative rather than "just under current".
-      # Measured locally at 79.91% line coverage (79.42% region, 71.67%
-      # function) — but that run had no Postgres, so the pg tests skipped and
-      # CI's number will be HIGHER than the one this floor was derived from.
-      # Setting the floor at the local figure would therefore have been
-      # tightening against the wrong baseline. Re-tighten once a real CI
-      # number has been observed on a few runs.
+      # THE FLOOR IS PROVISIONAL. 75 was derived for the OLD denominator
+      # (`--workspace` only; main measured 89.0% on CI with it). Adding the
+      # playground, pg and memory legs changes the denominator, which can
+      # move the percentage either way, so neither 75 nor 89 says anything
+      # about the new number. The rule for the real floor: observe the merged
+      # number on at least 3 CI runs of this job, set the floor to
+      # floor(min) - 1, never above an observed value, and record the three
+      # runs in the commit that changes it. Until then 75 is kept only
+      # because it is the existing floor; it is not a measurement of this
+      # configuration.
       #
       # Honest scope: this makes the coverage JOB fail below the floor. It
       # does not block a merge, because `coverage` is not a required status
       # check (it is in `advisory_pending` in .github/required-checks.json;
       # requiring it is a repo setting, raised separately). A floor on an
       # advisory job is a signal, not a gate.
-      - name: cargo llvm-cov
-        env:
-          ACDP_REGISTRY_TEST_PG_URL: postgres://acdp:acdp@localhost:5432/acdp_registry
-          ACDP_REQUIRE_PG: "1"
+      - name: coverage report (lcov + floor)
         run: |
-          cargo llvm-cov --locked --workspace --lcov --output-path lcov.info \
+          cargo llvm-cov report --lcov --output-path lcov.info \
             --fail-under-lines 75
       - name: coverage summary
         run: |
