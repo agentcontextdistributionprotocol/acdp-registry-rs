@@ -2958,6 +2958,13 @@ async fn revoke_returns_501_when_revocations_not_configured() {
         StatusCode::NOT_IMPLEMENTED,
         "revoke endpoint must signal 501 when the feature isn't wired, not 500"
     );
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/acdp+json"),
+        "the 501 envelope is a canonical error document"
+    );
     let v = body_to_json(resp).await;
     assert_eq!(v["error"]["code"], "not_implemented", "body = {v}");
 }
