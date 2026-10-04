@@ -2461,14 +2461,24 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-/// Every `<file>.rs:<digits>` citation in `text`, as `"<lineno>: <line>"`.
+/// Every line-number citation in `text`, as `"<lineno>: <line>"`: a
+/// `<file>.rs:<digits>` pin, or a bare continuation pin `` `:<digits>` `` (the
+/// "(`:122`, `:128`)" form that cites lines of a file named earlier in the
+/// sentence). A continuation pin is all digits up to the closing backtick, so a
+/// version-shaped image tag (`` `:0.2` ``, `` `:0.2.0` ``) or `` `:latest` `` is
+/// not one. A port must be written with its host (`localhost:8080`), not bare.
 fn rs_line_pins(text: &str) -> Vec<String> {
+    let continuation_pin = |tail: &str| {
+        let digits = tail.chars().take_while(char::is_ascii_digit).count();
+        digits > 0 && tail[digits..].starts_with('`')
+    };
     text.lines()
         .enumerate()
         .filter(|(_, l)| {
             l.split(".rs:")
                 .skip(1)
                 .any(|tail| tail.starts_with(|c: char| c.is_ascii_digit()))
+                || l.split("`:").skip(1).any(continuation_pin)
         })
         .map(|(i, l)| format!("{}: {}", i + 1, l.trim()))
         .collect()
@@ -2584,6 +2594,19 @@ fn operator_docs_never_cite_source_by_line_number() {
     assert_eq!(
         rs_line_pins("see `main.rs:1187` here\nno pin in `main.rs`\n").len(),
         1
+    );
+    // Continuation pins are caught; version tags, `:latest` and `::error::` are not.
+    assert_eq!(
+        rs_line_pins(
+            "trimmed before comparison (`:122`, `:128`).\n\
+             pin `:0.2.0`, or `:0.2`, never `:latest`\n\
+             echo \"`::error::` text\"\n\
+             at `:7`\n"
+        ),
+        vec![
+            "1: trimmed before comparison (`:122`, `:128`).".to_string(),
+            "4: at `:7`".to_string(),
+        ]
     );
 }
 

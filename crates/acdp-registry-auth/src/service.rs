@@ -699,7 +699,7 @@ mod tests {
                 "agent_id of {len} bytes"
             );
         }
-        // Bytes, not characters: MAX - 1 characters, MAX + 1 bytes.
+        // Bytes, not characters: MAX characters, MAX + 1 bytes.
         let multibyte = format!("{}é", did_of_len(CHALLENGE_AGENT_ID_MAX_BYTES - 1));
         assert_eq!(multibyte.chars().count(), CHALLENGE_AGENT_ID_MAX_BYTES);
         assert_eq!(multibyte.len(), CHALLENGE_AGENT_ID_MAX_BYTES + 1);

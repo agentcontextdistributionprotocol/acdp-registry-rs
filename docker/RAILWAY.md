@@ -16,9 +16,10 @@ ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every pus
 > (`:0.2.0`, or `:0.2` to follow patches) for anything you care about keeping
 > stable: `:latest` moves on every merge to `main`, a version tag does not.
 > Both version tags above are **real and pullable** — the release pipeline
-> published its first one on 2026-09-10, and the version shown is the current
-> release (the workspace version; a conformance-gate test keeps this page in
-> step with it). The GitHub Release for an image tag `:X.Y.Z` is
+> published its first one on 2026-09-10, and the version shown is from the
+> current minor line (a conformance-gate test keeps the major.minor of every
+> version tag on this page in step with the workspace version; a patch release
+> does not update the page). The GitHub Release for an image tag `:X.Y.Z` is
 > `acdp-registry-server/vX.Y.Z` (slash namespace) — for the one above,
 > [`acdp-registry-server/v0.2.0`](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/releases/tag/acdp-registry-server%2Fv0.2.0).
 > The older hyphen-named `acdp-registry-server-v0.1.0` Release is a June 2026
