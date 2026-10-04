@@ -33,6 +33,7 @@ go deeper.
 | [RECEIPTS.md](RECEIPTS.md) | ACDP 0.2.0 registry receipts: enabling, serving `/.well-known/did.json`, the key-retention rule, rotation, did:key, the lineage audit. |
 | [OPERATIONS.md](OPERATIONS.md) | Deploying, observability, backup/restore, key rotation, federation ops. |
 | [UPGRADING.md](UPGRADING.md) | **Read before upgrading a deployment.** Operator-visible changes per version — ordering requirements, moved defaults, config whose meaning changed. |
+| [MAINTAINING.md](MAINTAINING.md) | For maintainers: required vs advisory checks, the protection drift job, the enforce_admins / tag-ruleset runbook, the release flow, the mutation oracle. |
 | [ENGINEERING-LOG.md](ENGINEERING-LOG.md) | The narrative record of what changed and why — reasoning, rejected alternatives, evidence. Was the root `CHANGELOG.md` until #220; per-release notes live in `crates/*/CHANGELOG.md`. |
 | [advertisable-profiles.json](advertisable-profiles.json) | The profile names this registry can advertise, as data for non-Rust consumers; kept identical to the code by `advertisable_profiles_json_matches_const` (see [CONFIGURATION.md](CONFIGURATION.md)). |
 | [MUTATION-SCOPE-CANDIDATES.md](MUTATION-SCOPE-CANDIDATES.md) | Which files the mutation oracle should cover next, and the measured survivor bill for each — the companion to `.cargo/mutants.toml` for #216 item 1. |

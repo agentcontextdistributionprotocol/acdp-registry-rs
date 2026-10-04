@@ -41,11 +41,14 @@ The authoritative list is the comment above those steps in
 `.github/workflows/ci.yml` — it carries the arithmetic that generates the count,
 so you can check the list rather than trust it.
 
-CI additionally gates PRs on checks you can reproduce locally:
+CI additionally runs checks you can reproduce locally (which of them block a
+merge is recorded in `.github/required-checks.json`, not here):
 
 ```bash
-# Postgres-backed tests (skipped silently when the env var is unset).
-# Point ACDP_REGISTRY_TEST_PG_URL at a disposable database.
+# Postgres-backed tests. Point ACDP_REGISTRY_TEST_PG_URL at a disposable
+# database. With it unset they skip (printing a line); with ACDP_REQUIRE_PG
+# set to any value a missing URL is a hard failure instead. CI sets
+# ACDP_REQUIRE_PG, so it never skips Postgres silently.
 ACDP_REGISTRY_TEST_PG_URL=postgres://acdp:acdp@localhost:5432/acdp_registry \
     cargo test -p acdp-registry-pg
 ACDP_REGISTRY_TEST_PG_URL=postgres://acdp:acdp@localhost:5432/acdp_registry \
@@ -84,9 +87,28 @@ bump can be driven by running the `bump spec` workflow from the Actions tab
 (optionally with an explicit SHA), which opens a PR for review rather than
 committing directly.
 
-CI also measures coverage with `cargo llvm-cov` (summary on the run page, lcov
-artifact attached) and smoke-tests the Docker image on every PR — it builds the
-`storage-pg` image, boots it against Postgres, and curls `/healthz`.
+CI also measures coverage with `cargo llvm-cov`: one number merged across the
+workspace, playground, Postgres-integration and memory-backend legs, with a floor
+of 88% lines (summary on the run page, lcov artifact attached). The `coverage`
+check is advisory, so the floor is a signal rather than a merge gate. The Docker
+check builds the `storage-pg` image, boots it against Postgres, and then boots
+the documented compose quickstart through `docker/assert-quickstart-boots.sh`.
+
+A few gates fire on things that do not look like your change:
+
+- `cargo-deny` runs with `yanked = "deny"`, so a crate yanked upstream blocks
+  merges until `cargo update -p` on that crate moves the lockfile off it.
+- `no_tracked_file_contains_a_conflict_marker` fails on any merge-conflict
+  marker in any tracked file.
+- Most documentation guards live in
+  `crates/acdp-registry-server/tests/conformance_gate.rs`; a docs edit can fail
+  `tests` there (for example, a relative link to a missing file, or a source
+  file cited by line number in an operator doc).
+- The mutation oracle (`.github/workflows/mutants.yml`) runs on a Monday cron
+  and on manual dispatch, never on PRs. It gates on the exact mutant count and
+  the exact survivor set, so an edit to a scoped file can turn the next Monday
+  run red; re-measure with `cargo mutants --list`. See
+  [docs/MAINTAINING.md](docs/MAINTAINING.md#mutation-oracle).
 
 ### Declaring coverage for a new fixture family
 
@@ -155,7 +177,10 @@ rather than restating them.
 - Postgres migrations must stay additive (new tables/columns, no drops that an
   older binary's queries depend on) — `PgStore::migrate` runs with
   `ignore_missing(true)` so a binary one release behind the database keeps
-  serving during a rolling upgrade. A migration that breaks the binary one
+  serving during a rolling upgrade or rollback. That tolerance exists from 0.2.0
+  on; older binaries refuse a database that is ahead of them. Removing a table
+  or column takes two releases: stop using it in one, drop it in a later one. A
+  migration that breaks the binary one
   version behind it must say so in that version's section of
   [`docs/UPGRADING.md`](docs/UPGRADING.md) (release notes are generated from
   commit subjects and cannot carry it).
@@ -226,6 +251,12 @@ each block and runs `shellcheck` over it. Two consequences worth knowing:
 - The step fails if it extracts zero blocks from a non-zero number of action files. That is
   deliberate: an extractor that matches nothing reports success identically to one that
   finds nothing wrong.
+
+## Maintainers
+
+Required vs advisory checks, branch and tag protection (and how to apply it),
+the release flow, and the scheduled jobs are documented for maintainers in
+[docs/MAINTAINING.md](docs/MAINTAINING.md).
 
 ## Security disclosures
 
