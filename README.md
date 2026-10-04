@@ -25,7 +25,10 @@ see [docs/HTTP-API.md](docs/HTTP-API.md).
 - **RFC-ACDP-0003-conformant publish pipeline** — full DID-resolution +
   signature verification + lineage coherence + atomic commit.
 - **Pluggable storage** — Postgres (production), SQLite (dev / CI), and an
-  in-memory backend, behind a unified `ExtendedRegistryStore` trait.
+  in-memory backend, behind a unified `ExtendedRegistryStore` trait. The memory
+  backend is for demos only (ephemeral: everything is lost on restart), and its
+  `q=` search is a case-insensitive substring match of the whole query, not the
+  stemmed all-words match of SQLite/Postgres.
 - **DID-bound authentication** — challenge / response over Ed25519, short-lived
   JWTs (HS256 or EdDSA with a published JWKS), token revocation, anonymous
   public reads opt-in.

@@ -4739,7 +4739,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** remove the per-publish upsert on both backends; keep the table, its FKs and the applied `001_initial.sql` untouched; drop `lineages` from the `pg_integration.rs` TRUNCATE; add a both-backend contract test that a publish and a supersession write no `lineages` row while the table still exists. 5b (`015_drop_lineages.sql`) stays blocked until a release containing this is tagged. See DECISIONS.md "B8: stop writing `lineages`, drop it one release later".
 - **Alternatives:** keep-and-close with "hard-delete feature" as re-open trigger; single-release drop (breaks N-1 publishes on Postgres).
 - **Blast radius if wrong:** none on the wire — nothing reads the table. If keep-and-close is preferred, revert this commit; rows written while it was in force are simply missing from an unread table. If the next version is not 0.2.1, rename the `UPGRADING.md` heading and the "0.2.1 or later" wording in its body (the upgrade-notes gate would not catch a wrong *future* heading, only a missing current one).
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (5a) — decided by Opus at `/reconcile` (reversible tier); 5b stays GATED.
+- **Reconciled 2026-10-04:** 5a (stop writing, keep the table, `## 0.2.1` note) CONFIRMED as shipped. Q2 (retire vs keep-and-close) is not settled by this pass — it remains the maintainer's to reopen, and reverting 5a is still the whole cost of doing so. 5b (`015_drop_lineages.sql`) stays GATED until ALL of: a release containing 5a is tagged AND deployments have been running it; 5b's `UPGRADING.md` note covers Postgres N-1 and states that SQLite rollback past any migration already fails; the two `publishing_and_superseding_leave_the_dormant_lineages_table_untouched` tests are dropped/flipped and the pg `store_contract.rs` (~:1790) comment updated in the same change; the maintainer explicitly confirms Q2. See DECISIONS.md "Reconcile 2026-10-04 — B8 Phase 5a".
 
 ## hardening-remaining Phases 1-2 — required-checks guard and protection drift
 - **Plan:** plans/hardening-remaining.md (Phases 1, 2)
@@ -4747,7 +4748,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** compare what is visible, fail closed on read errors, warn (not fail) while `pending_settings` is true. Branch-filter matching in the required-checks guard uses `fnmatch` with last-match-wins for `!` entries; GitHub's `?`/`+` pattern semantics differ, so `['*','!mai+n']` falsely passes (known, low risk — optional fix: reject entries containing `?`, `+`, `[`, `\`).
 - **Alternatives:** failing on unverifiable bypass (daily red risk); rejecting all negated patterns.
 - **Blast radius if wrong:** the daily drift job goes red or silently under-checks; no effect on merges or releases. Confirm from the first post-merge `workflow_dispatch` run's log.
-- **Status:** UNCONFIRMED
+- **Status:** UNCONFIRMED (partial) — (a)-list, (c), (d) CONFIRMED; (a)-by-id and (b) DEFERRED to Phase 6; fnmatch gap CHANGED (fixed).
+- **Reconciled 2026-10-04:** decided by Opus at `/reconcile` (reversible tier). (a)-list and (c) CONFIRMED by workflow run 37167253908 on `main`: the narrowed App token read `/branches/main/protection` and listed rulesets. (d) CONFIRMED: the org is on the Free plan, so no org-level rulesets exist to miss — re-open trigger: the org moves to Team or above. (a)-by-id (`/rulesets/{id}`) and (b) (bypass visibility) DEFERRED to the first `branch-protection-drift` dispatch after the Phase 6 settings window, read against its outcome table: "tag rulesets read" = ok, "bypass unverifiable" notice = (b) holds as assumed. fnmatch gap CHANGED: the required-checks guard now fails closed with an "unsupported pattern" problem on any `on.pull_request.branches` entry containing `?`, `+`, `[` or `\`, with self-test cases `['*','!mai+n']` and `['ma?n']`. Overall stays UNCONFIRMED (partial) until Phase 6. See DECISIONS.md "Reconcile 2026-10-04 — hardening-remaining Phases 1-2".
 
 ## Hardening C7 — memory backend keeps substring `q=` search; parity exclusions; provisional coverage floor
 - **Plan:** plans/hardening-remaining.md
@@ -4755,7 +4757,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** pin the divergence in a test and leave the fix upstream. A wrapper-side fix in `MemoryStore::search` (re-filtering the inner matches) was rejected: the inner store has already paginated and counted, so post-filtering would make `total_estimate` wrong and leave short or empty pages behind valid cursors.
 - **Alternatives:** reimplement search in the wrapper (needs the inner map, which the SDK does not expose); fix `InMemoryStore` upstream in `acdp-server`; move `MemoryStore` into `acdp-registry-store` (Q1) so it can run the parity suite from `tests/` and own its search.
 - **Blast radius if wrong:** a demo/playground user sees different `q=` hits than a SQLite/Postgres deployment would return; no durable deployment is affected. A floor set too high or too low makes the non-required `coverage` job flap or under-guard, fixable by editing one number. Revisit Q1 (move MemoryStore into acdp-registry-store) if the memory backend is ever promoted beyond demo use.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED — decided by Opus at `/reconcile` (reversible tier); coverage floor CHANGED to 88.
+- **Reconciled 2026-10-04:** coverage floor CHANGED 75 -> 88 in `ci.yml` = floor(min) - 1 over 5 CI runs of the merged job, from their lcov artifacts (37167246216 89.93%, 37166957267 89.93%, 37166931686 89.90%, 37166569202 89.90%, 37166325403 89.90%); a signal, not a gate, while `coverage` is not required. Substring `q=` divergence and both parity exclusions CONFIRMED (unchanged reasoning). The demo-only docs gap is fixed: README.md (storage bullet) and docs/CONFIGURATION.md `[storage]` now state the memory backend is demo/ephemeral and its `q=` is a case-insensitive substring match. See DECISIONS.md "Reconcile 2026-10-04 — Hardening C7".
 
 ## hardening-remaining Phases 7-8 — example config and doc-truth guards
 - **Plan:** plans/hardening-remaining.md (Phases 7, 8)
@@ -4763,4 +4766,5 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** symbol/section names instead of `file:line` in operator docs; four guards in `conformance_gate.rs`. Remaining line pins in `.github` comments (e.g. `ci.yml:167`, `:195`) are out of the guard's scope and were left.
 - **Alternatives:** full-version RAILWAY guard (adds friction on every patch release); an allow-list file for the line-pin guard (nothing needs allow-listing today).
 - **Blast radius if wrong:** a docs guard fails a release PR until a doc edit lands; no runtime effect.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED — decided by Opus at `/reconcile` (reversible tier).
+- **Reconciled 2026-10-04:** (a), (b), (c) CONFIRMED. Line-pin matcher gaps — a backticked range, `` `f.rs`:9 ``, non-`.rs` extensions, and a `:8080`-style port false positive — DEFERRED as optional hardening; trigger: any such pin appears in a scanned file. Verify `conformance_gate` (the RAILWAY major.minor guard) on the first release-plz PR. See DECISIONS.md "Reconcile 2026-10-04 — hardening-remaining Phases 7-8".

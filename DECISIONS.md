@@ -4312,3 +4312,94 @@ feature" as the re-open trigger; until 5b ships nothing is one-way.
 two `publishing_and_superseding_leave_the_dormant_lineages_table_untouched` tests in
 `acdp-registry-sqlite/tests/store_contract.rs` and `acdp-registry-pg/tests/store_contract.rs`, which
 assert the table exists, and update the `store_contract.rs:1790` comment.
+
+## Reconcile 2026-10-04 — B8 Phase 5a: retire `lineages` (2026-10-04, decided by Opus under `/reconcile`, reversible tier)
+
+**Original assumption** (`ASSUMPTIONS.md` "B8 / hardening-remaining Phase 5a"): the maintainer wants
+`lineages` retired (5a then 5b) rather than kept-and-closed — the plan's default (Q2) — and the next
+release is 0.2.1, so the `docs/UPGRADING.md` note sits under `## 0.2.1`.
+
+**Analysis.** 5a is code-only and reverts cleanly: nothing reads the table, the table, its FKs and
+the applied `001_initial.sql` are untouched, and the both-backend contract test pins that a publish
+and a supersession write no row while the table still exists. What is one-way is 5b (the drop),
+and only 5b. Q2 itself is a product preference this pass cannot settle on the maintainer's behalf.
+
+**Verdict.** CONFIRMED (5a). Q2 remains the maintainer's to reopen (cost: revert 5a, record "a
+hard-delete feature" as the re-open trigger). **5b stays GATED** until ALL of these hold:
+1. a release containing 5a is tagged AND deployments have been running it;
+2. 5b's `UPGRADING.md` note covers Postgres N-1 (rolling back from N+1 straight to a pre-5a binary
+   breaks publishes) and states that SQLite rollback past any migration already fails;
+3. the same change drops or flips the two
+   `publishing_and_superseding_leave_the_dormant_lineages_table_untouched` tests and updates the
+   comment in `acdp-registry-pg/tests/store_contract.rs` (~:1790);
+4. the maintainer explicitly confirms Q2.
+
+**Resulting status:** CONFIRMED (5a); 5b GATED.
+
+## Reconcile 2026-10-04 — hardening-remaining Phases 1-2: required-checks guard and protection drift (2026-10-04, decided by Opus under `/reconcile`, reversible tier)
+
+**Original assumption** (`ASSUMPTIONS.md` "hardening-remaining Phases 1-2"): (a) rulesets list/by-id
+need only `metadata: read` for the App token; (b) a read-only token may see an empty
+`bypass_actors`, so that is a notice, not a failure; (c) `create-github-app-token@v3` accepts the
+narrowed permissions and still reads branch protection; (d) only repo-level rulesets are
+inspected. Plus a known gap: the guard's `fnmatch` branch matching mis-reads GitHub's `?`/`+`
+quantifiers, so `['*','!mai+n']` falsely passes.
+
+**Analysis.** Workflow run 37167253908 on `main` read branch protection and listed rulesets with
+the narrowed App token — (a)-list and (c) are observed, not assumed. (d): the org is on the Free
+plan, which has no org-level rulesets, so `includes_parents=false` misses nothing today. (a)-by-id
+and (b) need a repo that HAS a tag ruleset, which arrives with the Phase 6 settings window; until
+then there is nothing to observe. The fnmatch gap was cheap to close outright: emulating GitHub's
+matcher would be new code to get wrong, while failing closed on `?`, `+`, `[`, `\` costs nothing
+(no workflow here uses them) and turns a silent false pass into a loud problem.
+
+**Verdict.** (a)-list, (c), (d) CONFIRMED (re-open (d) if the org moves to Team or above).
+(a)-by-id and (b) DEFERRED to the first `branch-protection-drift` dispatch after the Phase 6
+settings window, read against its outcome table ("tag rulesets read" = ok; a "bypass
+unverifiable" notice = (b) as assumed). fnmatch gap CHANGED: `_branches_include` now raises on
+those characters and the guard reports an "unsupported pattern" problem; self-tests
+`['*','!mai+n']` and `['ma?n']` added (rejected), `['main']`, `['**']`, `['*','!main']` unchanged.
+
+**Resulting status:** UNCONFIRMED (partial) until Phase 6.
+
+## Reconcile 2026-10-04 — Hardening C7: memory `q=` search, parity exclusions, coverage floor (2026-10-04, decided by Opus under `/reconcile`, reversible tier)
+
+**Original assumption** (`ASSUMPTIONS.md` "Hardening C7"): the demo-only memory backend may keep the
+SDK `InMemoryStore`'s case-insensitive substring `q=`; excluding the tenant-scoped and batched
+visibility parity checks is correct because memory models no tenancy; the coverage floor of 75 is
+provisional until at least 3 CI runs of the merged job are observed.
+
+**Analysis.** The divergence and the exclusions are unchanged and still pinned by
+`memory_ext::tests::fulltext_search_diverges_from_the_cross_backend_contract` and the startup
+refusal of tenancy on memory. Two gaps: "demo-only" was asserted in tests and ASSUMPTIONS but not in
+operator docs, and the floor was not yet measured. Five CI runs of the merged job, from their lcov
+artifacts: 37167246216 89.93%, 37166957267 89.93%, 37166931686 89.90%, 37166569202 89.90%,
+37166325403 89.90% — min 89.90, floor 89, minus 1 = 88.
+
+**Verdict.** Floor CHANGED 75 -> 88 in `ci.yml`, with the derivation and the re-derive rule (when
+the code tree or the set of legs changes materially) in the adjacent comment; it remains a signal,
+not a gate, while `coverage` is not a required check. Substring divergence and parity exclusions
+CONFIRMED. Docs gap fixed: README.md and docs/CONFIGURATION.md `[storage]` now say the memory
+backend is demo/ephemeral only and its `q=` is a case-insensitive substring match, not the stemmed
+all-words match of SQLite/Postgres.
+
+**Resulting status:** CONFIRMED.
+
+## Reconcile 2026-10-04 — hardening-remaining Phases 7-8: example config and doc-truth guards (2026-10-04, decided by Opus under `/reconcile`, reversible tier)
+
+**Original assumption** (`ASSUMPTIONS.md` "hardening-remaining Phases 7-8"): (a) RAILWAY.md image
+tags are guarded at major.minor against the server crate version, so a minor release-plz bump
+fails `conformance_gate` until RAILWAY.md is updated in the same PR; (b) no
+`config/registry.dev.toml` is needed; (c) ENGINEERING-LOG.md and MUTATION-SCOPE-CANDIDATES.md are
+excluded from the line-pin guard as dated records.
+
+**Analysis.** All three hold; `conformance_gate` passes on this tree. The line-pin matcher has known
+blind spots — a backticked range, `` `f.rs`:9 ``, non-`.rs` extensions — and one false-positive
+shape (a `:8080` port). None occurs in any scanned file today, so fixing them now would be
+speculative hardening of a docs guard whose failure mode is a red docs check, not a runtime fault.
+
+**Verdict.** CONFIRMED. Matcher gaps DEFERRED as optional hardening; trigger: any such pin appears in
+a scanned file. Follow-up: verify `conformance_gate` (RAILWAY major.minor guard) on the first
+release-plz PR.
+
+**Resulting status:** CONFIRMED.
