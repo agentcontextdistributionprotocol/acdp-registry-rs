@@ -10844,6 +10844,9 @@ async fn the_two_media_type_gates_agree() {
     let types = [
         "application/acdp+json",
         "application/acdp+json; charset=utf-8",
+        // Case: `AcdpBytes` lowercases explicitly; axum's `Json` parses through
+        // `mime`, which lowercases type and subtype -- so both accept this.
+        "APPLICATION/ACDP+JSON",
         "application/json",
         "application/json; charset=utf-8",
         "application/vnd.acdp+json",

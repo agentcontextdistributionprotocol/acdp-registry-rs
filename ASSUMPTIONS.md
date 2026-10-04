@@ -4775,7 +4775,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** a pure extractor over `git ls-files` markdown, with an exact-count wire-code check and negative controls on synthetic text.
 - **Alternatives:** a Python lint step outside `cargo test`; dropping same-file fragments.
 - **Blast radius if wrong:** a docs-only test goes red on a valid link or misses a bad one; no runtime effect. Known low gaps: multi-line code spans, next-line reference destinations, `A`,`A`,`A-1` slug sequence, hand-built `service_unavailable` envelope not scanned.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (partial) — see deferred items; decided by Opus at `/reconcile` (reversible tier); (c) CHANGED (leading `/` now rejected); (d) reason CHANGED.
+- **Reconciled 2026-10-04:** (a), (b), (e) CONFIRMED: the slug approximation matches github-slugger 2.0.0 on every in-scope heading. Known divergences — the duplicate-slug sequence `A`,`A`,`A-1`, and setext, indented and `_emphasis_` headings — occur in no scanned file: DEFERRED, trigger: such a heading appears. (c) CONFIRMED for GitHub, but the website serves a leading-`/` link from the site root (a 404), so `relative_link_violations` now rejects every leading-`/` link (controls `[x](/README.md)`, `[r]: /docs/b.md#intro`). (d) reason CHANGED, exclusion kept: the two ledgers are append-only and their entries quote link-shaped text; `LINK_GUARD_EXCLUDED` says so. The wire-code scanner gap (hand-built `service_unavailable` envelope) is #376. See DECISIONS.md "Reconcile 2026-10-04 — Docs refresh Phase 0".
 
 ## Docs refresh Phases 1-2 — false-claim fixes and log runbook
 - **Plan:** plans/docs-refresh-2026-10.md (Phases 1, 2)
@@ -4783,7 +4784,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** state the code's behaviour, label spec deviations with a pinned RFC section, keep behaviour changes out (F2 follow-ups).
 - **Alternatives:** documenting the deviations as accepted; changing behaviour in this PR.
 - **Blast radius if wrong:** docs only; the runbook is the one operator-safety item (verified against RFC-0012 §7.4 and the log code, not against a live deployment or a witness).
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (partial) — see deferred items; decided by Opus at `/reconcile` (reversible tier); (d) doc CHANGED (fixed).
+- **Reconciled 2026-10-04:** (a), (b) CONFIRMED as inferences: RFC-0012 §7.4 is silent on whether a new instance may start non-empty; docs/OPERATIONS.md now says the time-unanchored reading is the runbook's, by analogy with §7.3. (c) DEFERRED: acdp-rs c2a1dca walks the reqwest error chain into the message; whether that text reaches the wire is unmeasured — trigger: the first user-visible message change. (d) mapping CONFIRMED, doc CHANGED: the env source runs with `try_parsing(true)`, so numeric-looking values are normalised before they become a string (measured through `RegistryConfig::load`: `01`→`1`, `1e3`→`1000`, `+1`→`1`, `nan`→`NaN`, which fails the pattern) — an env-only instance change could silently keep the same `log_id`. docs/OPERATIONS.md now says to prefer TOML or use a value containing a letter (e.g. `r2`) and to confirm the served `log_id` changed via `GET /log/checkpoint`. (e) CONFIRMED: the Link-convention block exists in docs/README.md. Follow-ups #372 (bearer-jwt), #373 (lifecycle served while disabled), #374 (lax `X-Tenant-Id`), #375 (lifecycle limiter charge). See DECISIONS.md "Reconcile 2026-10-04 — Docs refresh Phases 1-2".
 
 ## Docs refresh Phase 3 — document the shared limiter, Content-Type rules, `q=`, poller, rollback, publish split
 - **Plan:** plans/docs-refresh-2026-10.md (Phase 3)
@@ -4791,7 +4793,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** registry-specific deltas only, cited by symbol; the HTTP-API 429 table row was reduced to a pointer at the new "Rate limits" section rather than rewritten (Phase 5 owns the status-table prose).
 - **Alternatives:** documenting the 429 sources only in the status table; leaving the lifecycle charge timing unstated.
 - **Blast radius if wrong:** docs only. (a) wrong ⇒ a Railway operator's env var is ignored and limits stay per replica; (b) wrong ⇒ an over-cautious note.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED — decided by Opus at `/reconcile` (reversible tier); (c) premise CHANGED.
+- **Reconciled 2026-10-04:** (a), (b), (d), (e) CONFIRMED: (b) sqlx 0.8.6 returns `VersionMissing` for an applied migration the binary does not know unless `ignore_missing` is set, and the SQLite `migrate` does not set it; (d) the charge timing stays documented as current behaviour, its fix is #375. (c) premise CHANGED: axum 0.8.9's `json_content_type` parses through `mime`, which lowercases type and subtype, so `/auth/*` is case-insensitive too — `APPLICATION/ACDP+JSON` added to `the_two_media_type_gates_agree` (both routes accept it). The docs never claimed otherwise, so no doc edit. See DECISIONS.md "Reconcile 2026-10-04 — Docs refresh Phase 3".
 
 ## Docs refresh Phase 4 — maintainer page
 - **Plan:** plans/docs-refresh-2026-10.md (Phase 4)
@@ -4799,7 +4802,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** one maintainer page that points at `.github/required-checks.json` and the workflows instead of transcribing check names; the mutants failure described by function name, not line.
 - **Alternatives:** putting the runbook in OPERATIONS.md (operator audience, rejected in plan Q2); copying the archived Appendix A verbatim (it pasted the four advisory names).
 - **Blast radius if wrong:** a maintainer following a stale snapshot or a mis-described API call; mitigated by the pre-flight GETs, the snapshot step and the rollback block. Docs only.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (partial) — see deferred items; decided by Opus at `/reconcile` (reversible tier).
+- **Reconciled 2026-10-04:** (a), (c), (d), (e), (f) CONFIRMED. (b) CONFIRMED as a dry read against the GitHub REST reference; proof DEFERRED to the first real apply — trigger: the Phase 6 settings window of the hardening plan. The failing weekly mutants run is #371. See DECISIONS.md "Reconcile 2026-10-04 — Docs refresh Phase 4".
 
 ## Docs refresh Phase 5 — pinned pointers instead of RFC/SDK restatements
 - **Plan:** plans/docs-refresh-2026-10.md (Phase 5)
@@ -4807,7 +4811,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** one inline pinned link per pointer plus only registry-specific behaviour; reference-style sibling links converted to inline; a Link-convention block in `docs/README.md`.
 - **Alternatives:** dropping the HTTP column of the status table (rejected: operators need this registry's status per code); pinning acdp-rs guides to `acdp-v0.14.3` (rejected by the plan: that tag predates the guides refresh).
 - **Blast radius if wrong:** a link lands on the right file at the top instead of the section; docs only.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED — decided by Opus at `/reconcile` (reversible tier).
+- **Reconciled 2026-10-04:** (a)-(f) CONFIRMED: all 32 sibling anchors resolve under github-slugger at their pinned revisions. `8a888ed` is in no acdp-rs tag yet — trigger: acdp-rs cuts a tag containing it, then re-point the guide links to that tag. The `docs/registry.md` claims are acdp-rs#328 (no edit here). See DECISIONS.md "Reconcile 2026-10-04 — Docs refresh Phase 5".
 
 ## Docs refresh Phase 6 — guard: sibling links stay pinned
 - **Plan:** plans/docs-refresh-2026-10.md (Phase 6, guard (b))
@@ -4815,4 +4820,5 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** one pure classifier + one pure problem function over synthetic text (21 rejected cases, 14 accepted URLs, code/fence cases ignored), a named-member vacuity guard (scope members, plus an inline spec link at the pin, a pinned acdp-rs link and a versioned docs.rs link that the scanner must see in docs/README.md), and the violation list asserted before the vacuity checks so a bump PR's failure names each stale link.
 - **Alternatives:** matching scheme-less host mentions (rejected: flags link text); only rejecting reference-style definitions and allowing bare URLs (rejected: a bare sibling URL is no more rewritten or pinned-by-construction than a reference link).
 - **Blast radius if wrong:** a required-job test failing on a legitimate link form (fix: widen the matcher with a negative control), or a link form it does not see staying unpinned. Test code and docs only.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (partial) — see deferred items; decided by Opus at `/reconcile` (reversible tier); (a), (c), (d) CHANGED (fixed); (b) rationale CHANGED.
+- **Reconciled 2026-10-04:** (a), (c), (d) CHANGED to fixes: the classifier strips a `www.` host prefix and the scanner also reads scheme-less `www.github.com/…` (GitHub autolinks it); `HEAD` is a moving ref like `main`/`master`; the `blob|tree|raw` segment matches case-insensitively; `_` in a docs.rs crate name is read as `-`; the `docs.rs/crate/<name>/<ver>` form is inspected — each with a negative control, plus an `http://…/blob/main` bad case. (b) rationale CHANGED: the website copies absolute URLs verbatim (rewrite-links.mjs rule 1) and rewrites only relative links (to `blob/main`), so inline-only is a consistency rule, not a rewriter workaround — the guard messages, `LinkForm` docs and docs/README.md "Link convention" now say so. (e), (f) CONFIRMED. (g) CONFIRMED within its stated limits; DEFERRED to the first real spec bump (the recipe does not rewrite `raw.githubusercontent.com` spec URLs; none exist, and the guard still catches one). See DECISIONS.md "Reconcile 2026-10-04 — Docs refresh Phase 6".

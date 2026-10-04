@@ -381,8 +381,14 @@ This registry's `log_id` is `did:web:<authority>/log/<instance>`, where
 `<instance>` is `[log] instance` (default `"1"`; env
 `ACDP_REGISTRY_LOG__INSTANCE`; must match `[a-z0-9-]{1,32}`, checked at
 startup). Changing it is a config change and a restart — no migration, no
-manual SQL. What it does to existing data, which you should state in your
-notice:
+manual SQL. Prefer setting it in the TOML file. If you must use the env var,
+use a value that starts with a letter and is not `nan`, `inf` or `infinity`
+(for example `r2`): the env source parses values that look like numbers before
+they become a string, so `01` becomes `1`, `1e3` becomes `1000`, `+1` becomes
+`1`, `nan` becomes `NaN` (which fails the pattern) and `infinity` becomes `inf` — an env-only "new" instance can silently be the old one.
+Either way, confirm the change took: the `log_id` in `GET /log/checkpoint`
+must differ from the one served before. What the change does to existing
+data, which you should state in your notice:
 
 - **The surviving leaves become the new log's history.** `log_leaves` has no
   instance or `log_id` column, so nothing is deleted or renumbered: the rows
@@ -390,7 +396,9 @@ notice:
   commits to all of them (`tree_size` is the row count), and new publishes
   append after them. Under the new `log_id` those positions say nothing about
   when the entries were first published; the new log anchors them only from
-  its own first checkpoint.
+  its own first checkpoint. (RFC-ACDP-0012 §7.4 is silent on whether a new
+  instantiation may start non-empty; treating the relabelled leaves as
+  time-unanchored is this runbook's reading, by analogy with §7.3.)
 - **Witness cosignatures stop matching.** `log_witness_cosignatures` rows are
   keyed by `log_id`; the old rows stay in the table but are never attached to
   a new-log checkpoint, and the registry polls each `[[witnesses]]` entry for
