@@ -463,30 +463,32 @@ jobs:
                  "or delete it and update COVERED/PARTIAL_DIRECT."
             exit 1
           fi
-      # NAME IS DELIBERATELY NARROW. This step does NOT test the memory
-      # storage backend, and the old name ("cargo test (memory)") implied it
-      # did. Measured: under these flags all four integration files are
-      # cfg-gated away and report 0 tests each (conformance, http_integration,
-      # metrics_integration, pg_integration). What runs is 71 tests — config
-      # validation from main.rs's inline module, plus two workspace scans —
-      # none of which touch MemoryStore.
+      # What this step covers (measured 2026-10-03, 110 tests):
+      #   * 89 in the binary's unit tests: 74 config-validation tests from
+      #     main.rs's inline module, plus 15 under `memory_ext::tests` that
+      #     exercise MemoryStore itself — the shared parity suite
+      #     (`acdp_registry_store::parity`: data-period filters, retraction
+      #     coherence), trait round-trips (put/get, supersession,
+      #     first_version, idempotency replay/evict, the commit_publish
+      #     supersession race) and pinned gaps (no list_contexts, no log or
+      #     witness storage, untenanted, and a MEASURED full-text divergence
+      #     from the SQL backends: substring match, no stemming/stopwords).
+      #   * 21 in integration files: conformance_gate 17,
+      #     anchors_uri_never_dereferenced 2, tls_startup 2.
+      #   * 6 integration files are cfg-gated away and report 0 tests each:
+      #     caps_visibility, conformance, http_integration,
+      #     metrics_integration, pg_integration, tmpdir_hygiene. So the HTTP
+      #     surface is NOT exercised against this backend.
       #
-      # This is STRUCTURAL, not an oversight anyone can close here.
-      # `acdp-registry-server` is bin-only ([[bin]], no [lib]) and
-      # `MemoryStore` lives in src/memory_ext.rs, a module of that binary.
-      # Integration tests compile as separate crates and link only against a
-      # lib target, so no tests/*.rs file can reach it — verified, not
-      # assumed: a probe importing it fails with
+      # Why the MemoryStore tests live in src/memory_ext.rs and not tests/:
+      # `acdp-registry-server` is bin-only ([[bin]], no [lib]). Integration
+      # tests compile as separate crates and link only against a lib target,
+      # so no tests/*.rs file can reach MemoryStore — verified: a probe
+      # importing it fails with
       #   error[E0433]: unresolved module or unlinked crate `acdp_registry_server`
-      # Adding a tests/memory_smoke.rs therefore CANNOT work without
-      # restructuring the crate. The only route to covering MemoryStore is a
-      # #[cfg(test)] mod tests inside memory_ext.rs itself, which has none.
-      #
-      # Renamed rather than fixed, on purpose: leaving an accurate name is
-      # better than leaving an inaccurate one while the real fix is out of
-      # scope. A `MemoryStore::get` that always returned Ok(None) would still
-      # pass this step.
-      - name: cargo test (memory build; storage backend NOT covered)
+      # A `MemoryStore::get` that always returned Ok(None) now fails 9 of the
+      # 15 memory_ext tests (falsified locally before merging).
+      - name: cargo test (memory backend unit tests; HTTP suites cfg-gated off)
         run: |
           cargo test --locked -p acdp-registry-server \
             --no-default-features --features storage-memory
