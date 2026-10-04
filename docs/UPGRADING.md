@@ -49,7 +49,9 @@ identically: the default `backend = "memory"` is the existing per-process limite
 `backend = "postgres"` counts the `/auth/*` per-IP and global ceilings across replicas in the
 registry's own database; see [CONFIGURATION.md · `[rate_limit]`](CONFIGURATION.md#rate_limit-feat-06)
 and [OPERATIONS.md · Rate limiting](OPERATIONS.md#rate-limiting). It is only useful with more than one
-replica, and is refused at startup unless `storage.backend = "postgres"`.
+replica, and is refused at startup unless all of these hold: `storage.backend = "postgres"` (which in
+turn needs a `storage-pg` build), `rate_limit.enabled = true`, `global_per_minute` above 0, and both
+`backend_timeout_ms` and `backend_prune_seconds` above 0. Each refusal names its fix.
 
 On Postgres, upgrading applies migration `014` (a new, additive `rate_limit_windows` table; nothing an
 older binary reads). 0.2.0 and later tolerate a database that a newer release has already migrated
@@ -60,6 +62,13 @@ and a later upgrade re-applies the migration idempotently).
 
 **Rollback ordering.** `[rate_limit]` rejects unknown keys, so a config carrying any of the four new
 keys will **not parse** on an older binary. Roll the config back *before* the binary.
+
+**`acdp` SDK 0.14.1 → 0.14.3.** No wire change for this registry: no status code or `error.code`
+moved. 0.14.2's server fix restores two RFC-ACDP-0014 checks for the *interim* `acdp:key-revocation`
+form on registries advertising `acdp_version` below 0.5.0; this registry always advertises 0.5.0, where
+that form is already refused (see 0.1.5 below). 0.14.2 also keeps the underlying cause in the SDK
+client's transport errors, so some upstream-failure messages may be more specific. 0.14.3 is a
+release-pipeline fix only.
 
 ---
 
@@ -105,9 +114,10 @@ key-revocation record with a body that is not itself a revocation — branch on
 other `superseded_target` rejections.
 
 **Billing-visible change: a `did:web` publish that fails late (a store error, a duplicate-publish
-race) is now charged.** This was the last of four publish branches (did:web, did:key, pinned,
-playground-unpinned) where a late failure was silently uncharged; the other three already charged
-on late failure. No client action needed — this only affects an already-failing request, and only
+race) is now charged.** did:key and playground-pinned publishes already charged a late failure, so
+three of the four publish branches now do. The fourth, playground-unpinned, never charges one, by
+design and permanently: nothing is verified on that branch, so there is no proven identity to charge.
+No client action needed — this only affects an already-failing request, and only
 whether it counts against the publish budget.
 
 **Billing-visible change, `did:key` and pinned publish only: a validly-signed but schema-invalid
@@ -159,7 +169,7 @@ above, and the two `/admin/*` lifecycle endpoints.
 
 **Wire change: `/auth/*` answers 400, not 422, on a wrong-shaped body.**
 
-A request to `/auth/challenge`, `/auth/token` or `/auth/revoke` whose body is valid JSON but does not
+A request to `/auth/challenge`, `/auth/token` or `/auth/token/revoke` whose body is valid JSON but does not
 match the endpoint's schema previously returned **422 Unprocessable Entity** with
 `error.code = "schema_violation"`. It now returns **400 Bad Request** with the same code.
 
@@ -215,8 +225,13 @@ A client that already sends `application/acdp+json`, or none at all, sees no dif
 **Unchanged:** what is hashed and what is verified. The handler still receives the raw bytes and the
 content hash is still recomputed from the re-serialized request, exactly as before.
 
-**Not changed in this release:** `/admin/*` handlers are still ungated (tracked separately), and
-`/auth/*` continues to reject a missing `Content-Type` with 415, which it always has.
+**Not changed in this release:** `/auth/*` continues to reject a missing `Content-Type` with 415,
+which it always has.
+
+*Correction (2026-10):* this note originally also said "`/admin/*` handlers are still ungated
+(tracked separately)". That was already false when 0.1.4 was tagged: as the entry above says, the two
+`/admin/*` lifecycle endpoints gate `Content-Type` exactly as `POST /contexts` does. The other
+`/admin/*` routes read no request body, so there is nothing to gate.
 
 **Upgrade the image and `docker/docker-compose.yml` together.** If you deploy the compose recipe,
 pulling one without the other does not boot.

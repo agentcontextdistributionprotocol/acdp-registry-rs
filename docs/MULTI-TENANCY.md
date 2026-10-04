@@ -102,25 +102,34 @@ The store carries the tenant binding alongside each context:
   an anonymous caller with `anonymous_public_reads = false` sees zero rows
   regardless of tenant, and a non-`None` requester's results are unaffected
   by this flag.
-- Search, lineage and `/lineages/{lineage_id}/current` all **post-filter the
-  tenant binding** in the handler rather than in SQL, but only `search` paginates,
-  so only `search` carries the short-page consequence:
-  - `GET /contexts/search` runs a bounded refill loop, capped at
-    `SEARCH_REFILL_MAX_PAGES` inner pages (**6** today,
-    `handlers/context.rs`). Hitting that cap returns **fewer than `limit`**
-    rows while still emitting a non-`None` `next_cursor`, so a short page is
-    NOT an end-of-results signal — keep paging until `next_cursor` is absent.
+- `GET /contexts/search` with a tenant asserted is filtered, paged and counted
+  **in SQL** on SQLite and Postgres: the handler calls
+  `search_in_tenant`, which puts the tenant predicate in the same statement as
+  the keyset cursor and the `total_estimate` count. Pages therefore fill to
+  `limit` with the caller's own rows, the cursor is anchored on one of them, and
+  `total_estimate` counts only that tenant. The handler still re-checks each
+  row's binding (`tenants_of_ctxs`) as defence in depth; against those backends
+  it drops nothing. (The memory backend is not tenancy-aware; see
+  [Backend support](#backend-support).)
+- The optional `?visibility=` narrowing is different: it is applied **after**
+  the query, in the handler, so it can short a page. Search then runs a bounded
+  refill loop, capped at `SEARCH_REFILL_MAX_PAGES` inner pages (**6** today,
+  `handlers/context.rs`). Hitting that cap returns **fewer than `limit`** rows
+  while still emitting a non-`None` `next_cursor`, so a short page is NOT an
+  end-of-results signal — keep paging until `next_cursor` is absent.
+- Lineage reads post-filter the tenant binding in the handler, but neither
+  paginates, so neither has a short page to misread:
   - `GET /lineages/{lineage_id}` returns the complete lineage in one unpaginated
-    array and filters it in the handler. There is no refill loop and no cursor,
-    so there is no short page to misread; a fully-foreign lineage comes back as
-    an empty array, not a 404.
+    array and filters it in the handler. There is no refill loop and no cursor;
+    a fully-foreign lineage comes back as an empty array, not a 404.
   - `GET /lineages/{lineage_id}/current` filters the single resolved version and
     returns **404 `no current version`** when it belongs to another tenant —
     deliberately indistinguishable from "no such lineage", so the endpoint does
     not confirm existence across a tenant boundary.
 
-  Visibility (`public`/`private`) is a separate axis, enforced in SQL, and never
-  causes short pages.
+  The RFC-ACDP-0008 §4.5 visibility rule (who may see a `public`/`restricted`/
+  `private` row) is a separate axis, enforced in the search SQL, and never
+  causes short pages. Only the caller's own `?visibility=` narrowing does.
 
 ## Configuration
 

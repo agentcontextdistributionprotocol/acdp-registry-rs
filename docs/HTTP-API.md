@@ -50,7 +50,7 @@ All requests pass through, outermost first: a media-type backstop that stamps
 `application/acdp+json` on any response that set none; request-id assignment
 (`x-request-id`, a UUIDv4 minted if absent, propagated downstream, and present
 on **every** response including the ones the middleware generates itself); an
-envelope backstop that gives a `413` the RFC-ACDP-0007 §5 error body; the CORS
+envelope backstop that gives a `413` the RFC-ACDP-0007 §4 error body; the CORS
 layer (off unless `registry.cors.allowed_origins` is populated); a
 `RequestBodyLimitLayer` capped at `limits.max_payload_bytes` (so even
 unauthenticated `/auth/*` calls can't push oversized JSON); a 30 s
@@ -511,9 +511,10 @@ new event). A retry with an already-appended `event_id` and byte-identical
 content is idempotent (200, nothing appended); the same `event_id` with
 different content is a `400 schema_violation`.
 
-Only the producer may use these endpoints (delegation and a
-registry-attested admin path are out of scope for now; registry-initiated
-events would be recorded directly by the operator against the store).
+Only the producer may use these endpoints (delegation is not supported).
+Registry-initiated events go through the admin-gated
+[`POST /admin/contexts/{ctx_id}/retract` and `/republish`](#post-admincontextsctx_idretract-post-admincontextsctx_idrepublish-acdp-030),
+which attribute the event to the registry's own DID.
 
 ### `GET /log/checkpoint`, `GET /log/proof`, `GET /log/entries` *(ACDP 0.3.0)*
 
@@ -928,7 +929,7 @@ half-apply: the swap is not reached at all.
 
 ## Error envelope
 
-Errors follow RFC-ACDP-0007 §5 and are emitted as `application/acdp+json`:
+Errors follow the RFC-ACDP-0007 §4 envelope and are emitted as `application/acdp+json`:
 
 ```json
 {
@@ -957,16 +958,18 @@ documents only the registry's HTTP-status projection of them.
 | 400 | `schema_violation` | Malformed body, missing field, schema mismatch. |
 | 400 | `hash_mismatch` | Recomputed `content_hash` ≠ declared. |
 | 400 | `data_ref_hash_mismatch` | An embedded/remote `data_ref` hash ≠ declared. |
-| 400 | `key_resolution_failed` | DID document fetched but the key isn't usable. |
+| 400 | `key_resolution_failed` | DID document fetched but the key isn't usable, or the producer's `did:web` host was refused by the SSRF policy (a permanent, producer-caused failure). |
 | 400 | `immutable_field` | A lifecycle request tried to supply/alter body content (RFC-ACDP-0013 §6 step 2). |
 | 400 | `invalid_signature` | The producer signature did not verify against the resolved key. |
 | 400 | `unsupported_algorithm` | Signature algorithm outside `supported_signature_algorithms`. |
 | 400 | `invalid_cursor` | A `cursor=` value that does not decode or does not match its query. |
 | 400 | `cursor_expired` | A structurally valid cursor whose window has passed. |
-| 403 | `not_authorized` | Bad/expired/revoked bearer, challenge failure, visibility denial, tenant-scope denial in strict mode. |
+| 400 | `superseded_target` | A static supersession violation: any `details.reason` other than the two 409 ones below (e.g. `not_found`, `lineage_mismatch`, `cross_registry_supersession_unsupported`, `lineage_walk_failed`, `revocation_type_mismatch`). |
+| 403 | `not_authorized` | Bad/expired/revoked bearer, challenge failure, an anonymous **search** when `anonymous_public_reads` is off, tenant-scope denial in strict mode. Retrieval never answers 403 for visibility: see 404. |
 | 403 | `key_not_authorized` | The key resolved fine but is not authorized to sign for that agent. |
-| 404 | `not_found` | Context/lineage absent or not visible to the caller. |
-| 409 | `duplicate_publish` / `superseded_target` | Idempotency/lineage conflict (race). |
+| 404 | `not_found` | Context/lineage absent or not visible to the caller — including a `restricted`/`private` context outside its audience on `GET /contexts/{ctx_id}` and `/body`, and any context for an anonymous caller when `anonymous_public_reads` is off. |
+| 409 | `duplicate_publish` | Idempotency conflict: same `Idempotency-Key`, different content. |
+| 409 | `superseded_target` | Only for the two race reasons: `details.reason` `version_mismatch` or `already_superseded`. Every other reason is 400 (row above). |
 | 409 | `invalid_lifecycle_transition` | Double retract, or republish of a never-retracted context (RFC-ACDP-0013 §6 step 4). |
 | 413 | `payload_too_large` | Body over `max_payload_bytes`. |
 | 413 | `embedded_too_large` | Embedded data over `max_embedded_bytes`. |
@@ -974,7 +977,7 @@ documents only the registry's HTTP-status projection of them.
 | 429 | `rate_limited` | Publish/challenge bucket drained; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
 | 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*` and lifecycle endpoints when their profiles are not enabled). |
-| 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (also covers SSRF-policy rejection). |
+| 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable. A foreign registry refused by the SSRF policy is also `cross_registry_resolution_failed`; a refused DID host is not (it is 400 `key_resolution_failed`). |
 | 502 | `invalid_witness_cosignature` | A witness cosignature failed verification (RFC-ACDP-0015 §6.1). Like `invalid_log_proof`, a 502 because it is normally another party's artifact that failed. |
 | 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Normally raised when validating an *upstream's* proofs (federation), which is why it is a 502. **It is also reachable from this registry's own `/log/proof`**: for a retrieval-authorized requester the handler echoes the leaf via `record.leaf()` (`log_proof` in `crates/acdp-registry-core/src/handlers/log.rs`), and a stored leaf that no longer parses under the closed schema surfaces as `invalid_log_proof` from here, not from a peer (`LogEntryRecord::leaf` in `crates/acdp-registry-store/src/log.rs`, with the reject cases pinned by that module's own tests). If you see it and you are not federating, suspect your own `log_leaves` table. The other `/log/*` failures are `schema_violation`, `not_found`, or `not_implemented`; there is no `log_unavailable`. |
 

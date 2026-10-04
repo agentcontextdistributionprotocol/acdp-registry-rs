@@ -34,6 +34,7 @@ go deeper.
 | [OPERATIONS.md](OPERATIONS.md) | Deploying, observability, backup/restore, key rotation, federation ops. |
 | [UPGRADING.md](UPGRADING.md) | **Read before upgrading a deployment.** Operator-visible changes per version — ordering requirements, moved defaults, config whose meaning changed. |
 | [ENGINEERING-LOG.md](ENGINEERING-LOG.md) | The narrative record of what changed and why — reasoning, rejected alternatives, evidence. Was the root `CHANGELOG.md` until #220; per-release notes live in `crates/*/CHANGELOG.md`. |
+| [advertisable-profiles.json](advertisable-profiles.json) | The profile names this registry can advertise, as data for non-Rust consumers; kept identical to the code by `advertisable_profiles_json_matches_const` (see [CONFIGURATION.md](CONFIGURATION.md)). |
 | [MUTATION-SCOPE-CANDIDATES.md](MUTATION-SCOPE-CANDIDATES.md) | Which files the mutation oracle should cover next, and the measured survivor bill for each — the companion to `.cargo/mutants.toml` for #216 item 1. |
 
 ## Where the protocol ends and this registry begins
@@ -70,7 +71,7 @@ verification, SSRF defenses, or the canonical error-code registry lives in the
   `did:web` identifier for the registry.
 - **`ctx_id`** — a fully-qualified context identifier scoped to an authority.
 - **Wire envelope** — every ACDP data/auth endpoint returns
-  `application/acdp+json`; errors follow the RFC-ACDP-0007 §5 envelope
+  `application/acdp+json`; errors follow the RFC-ACDP-0007 §4 envelope
   (see [HTTP-API.md](HTTP-API.md#error-envelope)).
 - **RFC-ACDP-XXXX** references point at the [protocol spec][spec].
 

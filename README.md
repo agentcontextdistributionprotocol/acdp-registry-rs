@@ -268,8 +268,9 @@ authoritative index is the comment above the feature steps in the `clippy` job o
 the list can be checked rather than trusted.
 
 Note this is the *server binary's* feature space, not the workspace's:
-`acdp-registry-types` builds without its default `axum` feature and is not yet
-covered by CI (#221).
+`acdp-registry-types` also builds without its default `axum` feature, and CI
+covers that separately: the `clippy` job lints it with `--no-default-features`
+(#221).
 
 ## License
 

@@ -209,7 +209,7 @@ The binary validates config before serving and refuses to boot on a misconfig
   A non-Rust consumer (a fixture, a console, a validator) can read the same
   set as data from [`docs/advertisable-profiles.json`](advertisable-profiles.json)
   — vendor it at an `acdp-registry-types/vX.Y.Z` release tag
-  (e.g. `https://raw.githubusercontent.com/agentcontextdistributionprotocol/acdp-registry-rs/acdp-registry-types/v0.1.5/docs/advertisable-profiles.json`)
+  (e.g. `https://raw.githubusercontent.com/agentcontextdistributionprotocol/acdp-registry-rs/acdp-registry-types/v0.2.0/docs/advertisable-profiles.json`)
   and diff it on a version bump. A unit test
   (`advertisable_profiles_json_matches_const`) keeps it identical to the const,
   so a profile removed or renamed here turns this repo's CI red until the file

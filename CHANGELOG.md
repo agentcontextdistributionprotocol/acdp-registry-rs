@@ -25,7 +25,7 @@ boot" (#276). `docker/assert-upgrade-notes.sh` fails the build when the current
 workspace version has no section there, so this is enforced rather than
 remembered. It runs in CI's `rustfmt` job, which is a required status check, so
 a pull request that bumps the version without adding a section cannot be merged
-(#516); it also runs in `docker.yml`, which additionally covers the release tag
+(U-516 in `DECISIONS.md`, #282); it also runs in `docker.yml`, which additionally covers the release tag
 push but cannot itself block a merge. "No operator-visible upgrade steps." is a valid section and is the
 point: an absent section is indistinguishable from one nobody wrote.
 

@@ -46,7 +46,9 @@ acdp-registry-auth:v1:{nonce}:{agent_id}:{registry_authority}:{expires_at}
 The `acdp-registry-auth:v1:` prefix and the `registry_authority` binding are
 load-bearing: they stop a signature minted for one purpose or one registry from
 being replayed as a challenge response elsewhere. **Do not** remove the version
-prefix or the authority component (see CLAUDE.md → Conventions).
+prefix or the authority component. The string is built in exactly one place,
+`AuthChallenge::signing_input` (`crates/acdp-registry-types/src/auth.rs`), and
+returned to the client as the challenge's `signing_input` field.
 
 ### Token issuance checks (`/auth/token`)
 
