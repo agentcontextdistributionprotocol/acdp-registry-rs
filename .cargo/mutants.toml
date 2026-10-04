@@ -89,21 +89,26 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 346 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 358 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
-# MEASURED by mutants.yml run 36417581090 (sha 5a6dfd8; re-pinned by #371),
-# whose outcomes.json is committed as
-# docs/mutation-runs/run36417581090-scope-346-outcomes.json.
+# MEASURED by mutants.yml run 37222567772 (sha 27f9875; the final re-pin of
+# plans/issues-371-376), whose outcomes.json is committed as
+# docs/mutation-runs/run37222567772-scope-358-outcomes.json.
 # The command that reproduces the split:
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
-#     crates/acdp-registry-core/src/handlers/context.rs   134
+#     crates/acdp-registry-core/src/handlers/context.rs   144
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs              9
-#     crates/acdp-registry-sqlite/src/store.rs            138
+#     crates/acdp-registry-sqlite/src/store.rs            140
 #     ----------------------------------------------------------
-#     total                                               346
+#     total                                               358
+#
+# 346 -> 358 (#373-#376): context.rs 134 -> 144 (#375's lifecycle pre-flight,
+# #374's tenant-trust resolver) and store.rs 138 -> 140 (#373's
+# `has_lifecycle_state`) added 12 mutants, none of which survive; the seven
+# survivors are the same mutants on new lines.
 #
 # 351 -> 346 (#341): context.rs 139 -> 134, PURELY SUBTRACTIVE. #341 removed code
 # from `publish_identity_proven_offline`, which deleted five CAUGHT mutants and
@@ -126,8 +131,9 @@ copy_vcs = true
 #
 # At the ~6.2s/mutant marginal cost measured in DECISIONS.md #17 that is ~2.5h,
 # and #216 lists "blocking PRs on a full mutation run" as a non-goal. This is a
-# scheduled job over a bounded set, by design. 346 of 1427 is 24.2% (the 1427 is
-# a66e1f2's figure and was not re-measured after #341). (Was 351 of 1427 = 24.6%
+# scheduled job over a bounded set, by design. 358 of 1427 is 25.1% (the 1427 is
+# a66e1f2's figure and was NOT re-measured after #341 or #373-#376). (Was 346 of
+# 1427 = 24.2%. 351 of 1427 = 24.6%
 # before #341, and 213 of 1427 = 14.9% before U-552 added sqlite/src/store.rs.)
 #
 # ---------------------------------------------------------------------------

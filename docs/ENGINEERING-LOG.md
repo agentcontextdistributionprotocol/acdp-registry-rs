@@ -7156,3 +7156,20 @@ on, publishes and retracts over HTTP, restarts it with the flag off (exits non-z
 nothing listening), then with the flag on again (GET, `status=retracted` search, lineage, and the
 `/current` 404 are all unchanged). With the gate disabled, the flag-off child keeps running and the
 test fails at that step.
+
+## 2026-10-04 — mutants ratchet re-pinned at scope 358 (final re-pin of issues #371-#376)
+
+Run 37222567772 on main 27f9875 measured the post-#373/#374/#375/#376 tree: 358 mutants, 225
+caught / 7 missed / 125 unviable / 1 timeout, 108.7 min (71 min under the 180 cap). The scope
+had grown 346 -> 358 (context.rs 134 -> 144, store.rs 138 -> 140; log.rs 65 and receipt.rs 9
+unchanged), all of the twelve caught or unviable, and the seven survivors are the same mutants
+on new lines (context.rs :83/:84/:609/:1222, log.rs :132, store.rs :1007/:1330; the timeout is
+context.rs :1258). The run's `outcomes.json` is committed byte for byte as
+`docs/mutation-runs/run37222567772-scope-358-outcomes.json`, `MUTANTS_SURVIVORS` is its
+`missed.txt` verbatim, and `MUTANTS_EXPECTED_SCOPE` is 358.
+
+Approach: re-pin from the finished run rather than dispatch a fresh one (about 1 h 50 m),
+which is valid only because every later edit to the four scoped files was a line-neutral
+comment change (context.rs stayed 2324 lines). Checked on the merge base: `cargo mutants
+--list` produced exactly the run's 358 names, and `git diff` of the four files since 27f9875
+held only `//` lines. The whole-workspace denominator (1427 at a66e1f2) was not re-measured.
