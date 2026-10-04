@@ -120,6 +120,34 @@ revocation store now answers `501 not_implemented` instead of a hand-built `503
 service_unavailable` (a code outside RFC-ACDP-0007 §5). The shipped binary always wires one, so
 deployments of it see no change.
 
+**Behaviour change (security fix, #374), with a config action for some strict-mode deployments and a
+rollback note: `X-Tenant-Id` is honoured only from a declared boundary.** The new key
+`[auth] tenant_header_trust = "none" | "trusted_proxies" | "any_peer"` says who may select a tenant
+with the header when no signed `tenant` claim (or, for a publish, `[[auth.tenant_agents]]` binding)
+applies. `trusted_proxies` trusts the header only when the immediate TCP peer is listed in
+`rate_limit.trusted_proxies` (now allowed with the limiter off in this mode); the gateway there must
+strip or overwrite any client-supplied value. See [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id).
+
+- **Strict mode (`require_tenant = true`) no longer honours `X-Tenant-Id`** unless
+  `tenant_header_trust` declares the boundary (`trusted_proxies` or `any_peer`); with the key unset
+  it defaults to `none`. Affected requests — no bearer, or a token without a `tenant` claim, plus the
+  header — now get `403 not_authorized` with the message `X-Tenant-Id is not trusted from this peer
+  (auth.tenant_header_trust = "none"); use a tenant-bound token or send the request through the
+  declared gateway`. Bound-agent publishes and tenant-bound tokens whose header matches are unchanged.
+- **Who needs to act:** strict deployments where callers name their tenant with the header. If a
+  gateway stamps it, set `tenant_header_trust = "trusted_proxies"` and list the gateway in
+  `rate_limit.trusted_proxies`. **Startup now refuses** `require_tenant = true` with no
+  `[[auth.tenant_agents]]` and the header distrusted (no request could ever resolve a tenant), and
+  refuses `trusted_proxies` with an empty `rate_limit.trusted_proxies`.
+- **Lax and auth-off registries keep today's behaviour** under the temporary default `any_peer`, and
+  log a startup warning while the key is unset. **The default becomes `none` in 0.3.0** for every
+  mode: set the key now (`any_peer` to keep partitioning by header on a dev or test registry). A
+  separate warning fires whenever `any_peer` is in effect on a non-loopback bind.
+- With `none` (or an untrusted peer under `trusted_proxies`), a header that is present but
+  uncorroborated is refused with 403, not ignored, in every mode including auth-off.
+- **Rollback:** 0.2.0 refuses unknown `[auth]` keys. Remove `tenant_header_trust` from the config
+  file and `ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST` from the environment before rolling back.
+
 ---
 
 ## 0.2.0

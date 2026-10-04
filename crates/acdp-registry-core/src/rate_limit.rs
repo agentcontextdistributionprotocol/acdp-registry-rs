@@ -416,7 +416,10 @@ impl TrustedProxies {
         self.cidrs.is_empty()
     }
 
-    fn contains(&self, ip: IpAddr) -> bool {
+    /// Is `ip` inside one of the configured blocks? Callers canonicalise
+    /// IPv4-mapped IPv6 first ([`canonical_ip`]). Also the trust test for
+    /// `auth.tenant_header_trust = "trusted_proxies"` (#374).
+    pub fn contains(&self, ip: IpAddr) -> bool {
         self.cidrs.iter().any(|c| c.contains(ip))
     }
 }

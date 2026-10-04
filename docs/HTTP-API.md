@@ -393,7 +393,7 @@ Request headers:
 |--------|----------|-------|
 | `Idempotency-Key` | optional | 1–256 ASCII chars; replays return the prior result within `limits.idempotency_key_ttl_seconds`. |
 | `X-Run-Id`        | optional | ≤256 chars; correlation id echoed into the `context.published` webhook. |
-| `X-Tenant-Id`     | optional | Tenant fallback; see [MULTI-TENANCY.md](MULTI-TENANCY.md). For writes the producer's `[[auth.tenant_agents]]` binding is authoritative. |
+| `X-Tenant-Id`     | optional | Selects the tenant only when no signed `tenant` claim (or, for writes, `[[auth.tenant_agents]]` binding) applies **and** `auth.tenant_header_trust` trusts the sender: `none` never, `trusted_proxies` only from a listed gateway peer, `any_peer` always. A header that is present but untrusted, and does not simply repeat the claim/binding, is `403 not_authorized`; `default` is `400 schema_violation`. See [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id). |
 
 Body: an RFC-ACDP-0003 `PublishRequest` (JSON). Response: `200` with a
 `PublishResponse` (assigned `ctx_id`, `lineage_id`, `version`, `status`, and —
@@ -884,8 +884,8 @@ configured `auth.anonymous_public_reads`, which instead governs whether an
 anonymous (no-bearer) caller of `GET /contexts/search` sees public rows. That
 flag is carried on the `CapabilitiesDocument`, and `RegistryServer::search`
 reads it
-off `self.caps`. The tenant filter applies only when a tenant is asserted (an
-`X-Tenant-Id` header or a JWT `tenant` claim); with none, the listing spans
+off `self.caps`. The tenant filter applies only when a tenant is asserted (a
+trusted `X-Tenant-Id` header or a JWT `tenant` claim); with none, the listing spans
 every tenant rather than defaulting to one.
 
 ### `POST /admin/pinned-keys/reload` *(playground feature)*
@@ -948,7 +948,7 @@ This page documents only what **this registry** answers and when.
 | 400 | `invalid_cursor` | A `cursor=` value that does not decode or does not match its query. |
 | 400 | `cursor_expired` | A structurally valid cursor whose window has passed. |
 | 400 | `superseded_target` | A static supersession violation: any `details.reason` other than the two 409 ones below (e.g. `not_found`, `lineage_mismatch`, `cross_registry_supersession_unsupported`, `lineage_walk_failed`, `revocation_type_mismatch`). |
-| 403 | `not_authorized` | Bad/expired/revoked bearer, challenge failure, an anonymous **search** when `anonymous_public_reads` is off, tenant-scope denial in strict mode. Retrieval never answers 403 for visibility: see 404. |
+| 403 | `not_authorized` | Bad/expired/revoked bearer, challenge failure, an anonymous **search** when `anonymous_public_reads` is off, tenant-scope denial in strict mode, an `X-Tenant-Id` the registry does not trust from the sending peer (`auth.tenant_header_trust`). Retrieval never answers 403 for visibility: see 404. |
 | 403 | `key_not_authorized` | The key resolved fine but is not authorized to sign for that agent. |
 | 404 | `not_found` | Context/lineage absent or not visible to the caller — including a `restricted`/`private` context outside its audience on `GET /contexts/{ctx_id}` and `/body`, and any context for an anonymous caller when `anonymous_public_reads` is off. |
 | 409 | `duplicate_publish` | Idempotency conflict: same `Idempotency-Key`, different content. |

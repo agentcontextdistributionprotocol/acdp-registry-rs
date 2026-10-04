@@ -7,7 +7,7 @@ use acdp::registry::RegistryServer;
 use acdp_registry_auth::AuthService;
 use acdp_registry_store::{ExtendedRegistryStore, SharedRateLimitBackend};
 use acdp_registry_types::config::UnavailablePostureConfig;
-use acdp_registry_types::{PlaygroundConfig, RegistryConfig};
+use acdp_registry_types::{PlaygroundConfig, RegistryConfig, TenantHeaderTrust};
 use acdp_registry_webhook::WebhookEmitter;
 
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -60,6 +60,16 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// default) means `X-Forwarded-For` is never trusted and the TCP socket
     /// peer is always used as the client IP.
     pub trusted_proxies: TrustedProxies,
+    /// #374: the `auth.tenant_header_trust` mode in effect (the config value,
+    /// or the 0.2.x default when the key is absent).
+    pub tenant_header_trust: TenantHeaderTrust,
+    /// #374: the same `[rate_limit] trusted_proxies` list, parsed STRICTLY for
+    /// the tenant-header trust test. The limiter's copy above is lossy (a bad
+    /// entry is dropped and the rest kept); a trust boundary must not be
+    /// silently narrowed or reshaped, so one bad entry here empties the list
+    /// and trusts no peer. Startup validation refuses a bad entry before this
+    /// is ever built; this is the fail-closed backstop for embedders.
+    pub tenant_trusted_proxies: TrustedProxies,
     /// FEAT-10: process-global Prometheus recorder handle. `Some` only when
     /// `[metrics] enabled` — the `/metrics` route is mounted iff this is set.
     pub metrics: Option<PrometheusHandle>,
@@ -178,6 +188,16 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             .clone()
             .map(|l| l as Arc<dyn SharedRateLimitBackend>);
         let trusted_proxies = TrustedProxies::parse_lossy(&rl.trusted_proxies);
+        let tenant_header_trust = config.auth.effective_tenant_header_trust();
+        let tenant_trusted_proxies =
+            TrustedProxies::parse(&rl.trusted_proxies).unwrap_or_else(|e| {
+                tracing::error!(
+                    error = %e,
+                    "rate_limit.trusted_proxies is invalid; no peer is trusted to \
+                     assert X-Tenant-Id"
+                );
+                TrustedProxies::default()
+            });
         // FEAT-10: install the process-global recorder when metrics are
         // enabled. Idempotent — many in-process test harnesses share one.
         let metrics = if config.metrics.enabled {
@@ -199,6 +219,8 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             auth_ip_limiter,
             auth_limit_backend,
             trusted_proxies,
+            tenant_header_trust,
+            tenant_trusted_proxies,
             metrics,
             registry_did_document,
             log,

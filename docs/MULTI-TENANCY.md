@@ -11,30 +11,97 @@ branch on tenant ad hoc — they call these functions.
 
 ## Resolution precedence
 
-For reads (`tenant_for_request`):
+Both functions use the same order:
 
 ```
-JWT `tenant` claim  >  X-Tenant-Id header  >  None
+signed JWT `tenant` claim  >  [[auth.tenant_agents]] binding (writes)  >  TRUSTED X-Tenant-Id  >  None
 ```
 
 - The JWT `tenant` claim is **authoritative** — it's issuer-signed. It is set
   only for agents bound via `[[auth.tenant_agents]]` (see
   [AUTHENTICATION.md](AUTHENTICATION.md#jwt-claims)).
-- `X-Tenant-Id` is a **fallback**, honored only when no authoritative claim
-  applies. It is spoofable, so it is never trusted once a bound token is present.
-- If a bound token's claim and the header **disagree**, the request is rejected
-  (`403 not_authorized`, "tenant assertion mismatch").
-- `None` means "no tenant asserted" → the tenant filter is disabled (V0).
+- On writes, the producer's `[[auth.tenant_agents]]` binding comes next. Publish
+  is producer-authenticated by the signature over `content_hash`, not by a
+  bearer, so the binding is what proves which tenant a producer writes into.
+- `X-Tenant-Id` selects a tenant only when it is **trusted** — when it crossed
+  the boundary the operator declared with
+  [`auth.tenant_header_trust`](#who-may-send-x-tenant-id) — and only when no claim
+  or binding applies. A trusted header never overrides a claim or a binding.
+- A header that agrees with the claim or binding is accepted in every mode
+  (it corroborates; it decides nothing). A header that **disagrees** with them is
+  rejected (`403 not_authorized`, "tenant assertion mismatch").
+- `None` means "no tenant asserted" → the tenant filter is disabled (V0), or,
+  in strict mode, the request is default-denied.
 
-For writes (`tenant_for_publish`): publish is producer-authenticated by the
-signature over `content_hash`, not a bearer. So in strict mode a raw
-`X-Tenant-Id` does **not** decide the write tenant — the authoritative source is
-the producer's `[[auth.tenant_agents]]` binding (or a tenant-bound token claim).
-Otherwise any producer could inject a context into an arbitrary tenant's
-namespace. A bound producer's `[[auth.tenant_agents]]` binding stays authoritative
-in lax mode too (a different header → 403); the header decides writes only when
-auth is disabled or the producer is unbound; see
-[`X-Tenant-Id` is not authenticated](#x-tenant-id-is-not-authenticated).
+## Who may send `X-Tenant-Id`
+
+Nothing in the header authenticates it: any client can send any value. RFC-ACDP-0008
+§6.4 (pinned spec) says an unauthenticated tenant indicator MUST NOT be trusted
+unless deployment policy at a trust boundary, an authenticated gateway, or a
+signed claim stands behind it. The registry cannot see that boundary, so the
+operator declares it:
+
+```toml
+[auth]
+tenant_header_trust = "trusted_proxies"   # "none" | "trusted_proxies" | "any_peer"
+
+[rate_limit]
+trusted_proxies = ["10.0.0.0/8"]          # the gateway(s) that stamp X-Tenant-Id
+```
+
+| `tenant_header_trust` | The header is trusted when… |
+|---|---|
+| `none` | never |
+| `trusted_proxies` | the **immediate TCP peer** is inside `rate_limit.trusted_proxies`. `X-Forwarded-For` plays no part, and a request with no recorded peer is untrusted. The gateway must strip or overwrite any `X-Tenant-Id` a client sends; the registry cannot check that. |
+| `any_peer` | always — you assert a boundary the registry cannot observe (a network policy whose ingress addresses you cannot enumerate, or loopback-only development) |
+
+When the key is absent, 0.2.x applies `none` under `require_tenant = true` and
+`any_peer` otherwise (the pre-#374 behaviour), and warns at startup in the
+`any_peer` case. **The default becomes `none` for every mode in 0.3.0** — set the
+key explicitly. See [UPGRADING.md](UPGRADING.md).
+
+A header that is present but **untrusted** is rejected, not ignored — unless it
+equals the claim or binding the request already carries:
+
+```
+403 not_authorized
+X-Tenant-Id is not trusted from this peer (auth.tenant_header_trust = "<mode>"); use a tenant-bound token or send the request through the declared gateway
+```
+
+Ignoring it instead would silently run the request, or place the write, in the
+untenanted bucket the caller did not ask for. Each rejection is logged at WARN
+with the peer address and the mode. The reserved `default` value is still
+refused first (400 `schema_violation`), and a claim/binding mismatch is still
+its own 403.
+
+### Every case
+
+T = trusted header, U = untrusted header present, – = no header.
+
+| Case | Reads (`tenant_for_request`) | Writes (`tenant_for_publish`) |
+|------|------------------------------|-------------------------------|
+| `auth.enabled = false` | T → header; – → unscoped; U → 403 | T → header; – → untenanted; U → 403 |
+| Lax mode, no valid bearer or an unbound token | T → header; – → unscoped; U → 403 | bound agent: the binding (a different header → 403); unbound agent: T → header, – → untenanted, U → 403 |
+| Strict mode, no valid bearer | T → header; – or U → 403 | bound agent: the binding; unbound agent: T → header, – or U → 403 |
+| Strict mode, unbound token | T → header; – or U → 403 | as the row above |
+| Tenant-bound token | the claim; a different header → 403, in every mode | the claim; a different header → 403 |
+
+On reads the visibility rules still apply on top: an anonymous caller only ever
+sees `public` rows, and only when `anonymous_public_reads` is on. A trusted
+header picks *which tenant's* rows those are.
+
+The one case that is looser than before #374 is strict mode with a **trusted**
+header and no claim or binding. That is deliberate: under `trusted_proxies` the
+gateway is the authenticator (§6.4's second bullet), and strict mode with no
+`[[auth.tenant_agents]]` has no other way to name a tenant.
+
+**`any_peer` is the operator's declaration, not the registry's.** With
+`any_peer` (the 0.2.x default in lax and auth-off mode) the registry trusts
+every client's header, so it meets §6.4 only if something in front of it
+strips or overwrites `X-Tenant-Id` from clients (or sets it from an
+authenticated identity). Startup warns when `any_peer` is in effect on a
+non-loopback bind. Prefer `trusted_proxies`, or tenant-bound tokens with
+`none`.
 
 ## Strict mode (`auth.require_tenant = true`)
 
@@ -43,46 +110,18 @@ On an enforced multi-tenant deployment:
 - A request that resolves to **no tenant** is default-denied (`403
   not_authorized`) — serving it would run with the filter off and could surface
   cross-tenant rows.
-- An authenticated caller's tenant comes **only** from the JWT `tenant` claim.
-  An unbound token (no claim) may **not** assert a tenant via `X-Tenant-Id`.
+- A caller's tenant comes from the JWT `tenant` claim, the producer's binding
+  (writes), or a header trusted under `auth.tenant_header_trust`. With the key
+  absent, strict mode distrusts the header (`none`).
 - Configuring any `[[auth.tenant_agents]]` requires `require_tenant = true`;
   startup validation enforces this so tenancy can't be half-enabled.
+- `require_tenant = true` with no `[[auth.tenant_agents]]` and
+  `tenant_header_trust = "none"` is refused at startup: no request could ever
+  resolve a tenant.
 - Strict mode itself requires a tenancy-aware storage backend (`sqlite` or
   `postgres`): startup validation refuses `storage.backend = "memory"` when
   **either** `require_tenant = true` or a non-empty `[[auth.tenant_agents]]`
   is configured. See [Backend support](#backend-support).
-
-In lax mode (`require_tenant = false`) an unbound caller's `X-Tenant-Id` is
-still honored, preserving V0 behavior.
-
-## `X-Tenant-Id` is not authenticated
-
-Nothing authenticates the header: the registry accepts any value a client
-sends (except the reserved `default`). The code still lets it decide the tenant
-in these cases:
-
-| Case | Reads (`tenant_for_request`) | Writes (`tenant_for_publish`) |
-|------|------------------------------|-------------------------------|
-| `auth.enabled = false` (neither function runs its strict-mode checks then) | header decides | header decides |
-| Lax mode, request with no valid bearer, or an unbound token | header decides | a bound agent: the binding decides (a different header → 403); an unbound agent: header decides |
-| Strict mode, request with no valid bearer | header decides (and satisfies the default-deny) | the agent's binding decides (a different header → 403); an unbound agent is denied |
-| Strict mode, unbound token | ignored (default-deny) | as the row above |
-| Tenant-bound token | the claim decides; a different header → 403 | the claim decides; a different header → 403 |
-
-On reads the visibility rules still apply on top: an anonymous caller only ever
-sees `public` rows, and only when `anonymous_public_reads` is on. But the
-header picks *which tenant's* rows those are, and in strict mode it is all a
-bearer-less caller needs to get past the default-deny.
-
-**Deviation from [RFC-ACDP-0008 §6.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0008-security.md#64-multi-tenancy-implementation-note)
-(pinned spec):** where a deployment partitions by tenant, the attribution MUST
-rest on an authenticated signal, and an unauthenticated tenant header MUST NOT be
-trusted unless deployment policy at a trust boundary, or an authenticated
-gateway, protects it. This registry does not do that itself in the cases above.
-If you rely on tenancy, put it behind a boundary that strips or overwrites
-`X-Tenant-Id` from clients (or sets it from an authenticated identity). With
-strict mode and tenant-bound tokens the claim is authoritative, but the boundary
-still has to strip the header from requests that carry no bearer.
 
 ## The reserved `default` sentinel
 
@@ -112,10 +151,8 @@ the read path: the registry would start cleanly and then serve nothing.
 Both signals are covered because either one alone is enough to break reads.
 `require_tenant = true` with an *empty* `tenant_agents` is a real configuration:
 with no agent bindings no registry-issued token ever carries a `tenant` claim, so
-on the read path a caller asserts its tenant with the `X-Tenant-Id` header, which
-is what this registry's own default-deny message instructs. (Publishes differ:
-strict mode deliberately ignores that spoofable header when the producer has no
-binding, so a publish is denied outright.) On this backend those reads then fail
+a caller's tenant comes from an `X-Tenant-Id` header stamped by the gateway
+declared with `auth.tenant_header_trust`. On this backend those requests then fail
 the same way as the `tenant_agents` arm — no asserted tenant can match the
 `default` each row reports. (The original refusal keyed on `[[auth.tenant_agents]]` alone and
 left that arm starting cleanly and serving nothing; closed in #156.)

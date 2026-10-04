@@ -28,6 +28,8 @@ use crate::state::AppState;
 #[cfg(feature = "playground")]
 use crate::handlers::context::tenant_for_request;
 #[cfg(feature = "playground")]
+use crate::tenant_trust::PeerIp;
+#[cfg(feature = "playground")]
 use axum::extract::Query;
 
 #[cfg(feature = "playground")]
@@ -75,11 +77,12 @@ pub struct AdminListResponse {
 pub async fn admin_list<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     Query(q): Query<AdminListQuery>,
 ) -> Result<Json<AdminListResponse>, AdminLifecycleError> {
     require_admin_bearer(&state.config, &headers)?;
 
-    let requested_tenant = tenant_for_request(&state, &headers)?;
+    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
     // An admin bearer authenticates the CALLER but names no agent, so the
     // §4.5 predicate sees an authenticated-but-unnamed requester: public
     // rows only. Restricted/private stay producer/audience-gated — their
