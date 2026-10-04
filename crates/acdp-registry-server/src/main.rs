@@ -1511,6 +1511,55 @@ mod tests {
         assert!(validate_config(&cfg).is_ok());
     }
 
+    /// D1: the shipped `config/registry.example.toml`, loaded through the REAL
+    /// loader (defaults < file < env) and run through `validate_config`, does
+    /// exactly what its header says: refuses without a secret, naming the env
+    /// var, and validates once one is supplied. Also catches a key the example
+    /// carries that `deny_unknown_fields` no longer accepts.
+    #[test]
+    fn shipped_example_config_refuses_without_a_secret_and_validates_with_one() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/registry.example.toml"
+        );
+        let header: String = std::fs::read_to_string(path)
+            .expect("example config is readable")
+            .lines()
+            .take_while(|l| l.starts_with('#') || l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            header.contains("ACDP_REGISTRY_AUTH__JWT_SECRET=\"$(openssl rand -base64 32)\""),
+            "the example's header must carry the working command, secret included:\n{header}"
+        );
+
+        let cfg = RegistryConfig::load(Some(path))
+            .expect("the shipped example must parse (deny_unknown_fields drift?)");
+        assert!(
+            cfg.auth.enabled && !cfg.auth.allow_ephemeral_secret,
+            "the example is the production-shaped template: auth on, no ephemeral key"
+        );
+        assert!(
+            cfg.auth.jwt_secret.is_empty(),
+            "the example ships no secret; if this fails, ACDP_REGISTRY_AUTH__JWT_SECRET \
+             is set in the test environment — unset it"
+        );
+
+        // Arm 1: as shipped, no secret -> refused, naming the variable the
+        // header tells the operator to set.
+        let err = validate_config(&cfg).expect_err("the example must refuse to boot unsecreted");
+        assert!(
+            err.to_string().contains("ACDP_REGISTRY_AUTH__JWT_SECRET"),
+            "the refusal must name the env var the header documents: {err}"
+        );
+
+        // Arm 2: the value `openssl rand -base64 32` would supply -> accepted.
+        let mut with_secret = cfg.clone();
+        with_secret.auth.jwt_secret =
+            base64::engine::general_purpose::STANDARD.encode([0x5au8; 32]);
+        validate_config(&with_secret).expect("the example with a real secret must validate");
+    }
+
     #[test]
     fn auth_disabled_empty_secret_passes() {
         let mut cfg = RegistryConfig::defaults();
