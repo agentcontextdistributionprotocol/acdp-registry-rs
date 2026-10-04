@@ -1,5 +1,16 @@
 
 
+## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-pg/v0.2.0...acdp-registry-pg/v0.3.0) - 2026-10-04
+
+### Fixed
+
+- *(lifecycle)* refuse to start when lifecycle state exists but [lifecycle] is off ([#373](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/373)) ([#382](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/382))
+
+### Other
+
+- *(store)* stop writing the unread lineages table ([#359](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/359))
+
+
 ## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-pg/v0.1.5...acdp-registry-pg/v0.2.0) - 2026-10-03
 
 ### Added
