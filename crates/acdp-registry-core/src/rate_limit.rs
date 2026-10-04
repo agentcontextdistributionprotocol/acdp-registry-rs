@@ -162,6 +162,13 @@ impl AgentRateLimiter {
         bucket.count = bucket.count.saturating_add(1);
     }
 
+    /// Number of keys in the bucket map. Test-only: lets a handler-level test
+    /// prove an unauthenticated path left no attacker-keyed entry (#375).
+    #[cfg(test)]
+    pub(crate) fn tracked_keys(&self) -> usize {
+        self.buckets.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
     /// Record one publish attempt by `agent_id`. Returns `Err(retry_after_secs)`
     /// when the agent is over budget for the current window, otherwise `Ok`.
     pub fn check(&self, agent_id: &str) -> Result<(), u64> {

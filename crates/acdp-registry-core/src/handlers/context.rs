@@ -1441,7 +1441,9 @@ pub async fn republish<S: ExtendedRegistryStore + 'static>(
 /// 3. Path binding: `event.ctx_id` must equal the path `{ctx_id}`.
 /// 4. Per-agent rate limiting (RFC-ACDP-0008 §4.3 — lifecycle endpoints
 ///    are writes), keyed by the event actor like publish is keyed by the
-///    signing agent.
+///    signing agent. #375: this is a read-only `peek` (it never charges and
+///    never inserts a bucket); the charge is a [`PublishCharge`] armed only
+///    once the event's signature verifies for `event.actor` (step 6a).
 /// 5. Tenant gate (mirrors `retrieve`): a cross-tenant ctx_id 404s.
 /// 6. The SDK server pipeline: visibility-first resolution, event
 ///    validation + endpoint binding, actor authentication
@@ -1451,6 +1453,11 @@ pub async fn republish<S: ExtendedRegistryStore + 'static>(
 ///    and the atomic append — returning the post-transition
 ///    full-retrieval envelope (or the current state on a byte-identical
 ///    `event_id` retry).
+///
+/// Between 5 and 6 sits the #375 charge pre-flight (step "6a" in the body):
+/// the SDK's public lifecycle-event verifier checks the signature against
+/// `event.actor` itself, and only a verified actor is charged. Its result
+/// never changes the response.
 ///
 /// The producer's authentication is the event signature itself (like a
 /// publish); a bearer token is only consulted for read visibility.
@@ -1490,9 +1497,16 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
         ))));
     }
 
-    // 4. Per-agent write rate limit, keyed by the event actor.
+    // 4. Per-agent write rate limit, keyed by the event actor -- the same
+    //    shared bucket publish uses. #375: `event.actor` is UNVERIFIED here,
+    //    so this is the read-only `peek` (never charges, never inserts). It
+    //    used to be `check`, which charged and inserted before the signature
+    //    was looked at: anyone could drain agent A's publish budget by
+    //    POSTing unsigned events naming A, and grow the bucket map with fresh
+    //    actor strings. A 429 here still only answers "is this actor already
+    //    over budget?", the same pre-verification oracle publish accepts.
     if let Some(limiter) = &state.rate_limiter {
-        if let Err(retry_after_seconds) = limiter.check(event.actor.as_str()) {
+        if let Err(retry_after_seconds) = limiter.peek(event.actor.as_str()) {
             crate::metrics::record_rate_limit_rejection(
                 crate::metrics::RateLimitScope::LifecyclePerAgent,
             );
@@ -1501,6 +1515,11 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
             });
         }
     }
+
+    // #375: the charge for this event, disarmed. Mirrors publish (#242): once
+    // armed it fires on EVERY exit -- success, 409, store error, `?`, panic,
+    // cancellation -- and it is armed only where `event.actor` is proven.
+    let mut charge = PublishCharge::new(state.rate_limiter.clone(), event.actor.as_str());
 
     // 5. Tenant gate — same shape as `retrieve`: a ctx_id outside the
     //    caller's tenant is indistinguishable from a missing one.
@@ -1522,7 +1541,23 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
     //    the bearer-authenticated requester (anonymous otherwise) BEFORE
     //    actor/signature checks — error ordering never lets an
     //    unauthorized caller learn a context exists (§14).
+    //    `requester` is computed once, here, after the tenant gate, so the
+    //    error precedence stays tenant 404 → bearer 403 → SDK pipeline.
     let requester = caller_from_headers(&state, &headers)?;
+
+    // 6a. #375 charge pre-flight. Arm only when the signature verifies for
+    //     `event.actor`. Deliberately independent of the context: an
+    //     actor ≠ producer event that is validly signed is charged to its
+    //     actor (who proved key possession), and the charge cannot act as an
+    //     existence oracle because it never looks at the store. The bundled
+    //     SDK call below re-verifies and remains the sole authority for the
+    //     response; this pre-flight only decides the charge.
+    //     With no limiter configured there is nothing to charge, so the
+    //     pre-flight (and its possible DID resolution) is skipped entirely.
+    if state.rate_limiter.is_some() && lifecycle_actor_signature_verifies(&state, &event).await {
+        charge.arm();
+    }
+
     let server = state.server.clone();
     let ctx = if event.actor.as_str().starts_with("did:key:") {
         // did:key verification is pure/offline — run on the blocking pool
@@ -1554,6 +1589,10 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
             }
         }
     };
+    // Success means the SDK verified the event, so it is charged regardless
+    // of the pre-flight (mirrors publish's success-path arm; arming is
+    // monotonic, so this never double-charges).
+    charge.arm();
 
     if let Some(emitter) = &state.webhook {
         let webhook_tenant = stored_tenant.filter(|t| t != "default");
@@ -1588,6 +1627,47 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
     }
 
     Ok(Json(ctx))
+}
+
+/// #375 charge pre-flight: does `event`'s signature verify for
+/// `event.actor`?
+///
+/// Uses the SDK's public RFC-ACDP-0013 §5 verifier with `producer_did`
+/// set to the actor itself, so the answer is "the actor holds the signing
+/// key", not "the actor may transition this context" (the bundled SDK call
+/// still decides that). The event is serialised exactly as the SDK
+/// serialises it before verifying (`serde_json::to_value(event)`), so the
+/// two verifications see the same bytes. `did:key` is pure/offline;
+/// anything else goes through the SAME `state.auth.resolver` instance the
+/// SDK call uses, so its DID-document cache and SSRF guard are shared and
+/// the SDK's re-verification is a cache hit.
+///
+/// Any failure (unsigned, mis-bound key_id, bad signature, resolution
+/// error) is `false`: the request is not charged, and the SDK call
+/// produces the response. This partially reintroduces a pre-flight
+/// duplicate of the kind U-501/#336 removed from publish; it goes away once
+/// the SDK exposes a lifecycle prove/commit split (ASSUMPTIONS.md).
+async fn lifecycle_actor_signature_verifies<S: ExtendedRegistryStore + 'static>(
+    state: &AppState<S>,
+    event: &acdp::types::lifecycle::LifecycleEvent,
+) -> bool {
+    let Ok(raw) = serde_json::to_value(event) else {
+        return false;
+    };
+    if event.actor.as_str().starts_with("did:key:") {
+        acdp::verify::verify_lifecycle_event_offline(&raw, &event.ctx_id, &event.actor, None)
+            .is_ok()
+    } else {
+        acdp::verify::verify_lifecycle_event(
+            &raw,
+            &event.ctx_id,
+            &event.actor,
+            None,
+            &state.auth.resolver,
+        )
+        .await
+        .is_ok()
+    }
 }
 
 /// Pull an authenticated caller DID out of the `Authorization` header.
@@ -1701,5 +1781,152 @@ mod tenant_helper_tests {
             None,
             "a whitespace-only header is treated as absent"
         );
+    }
+}
+
+/// #375: the lifecycle handler must not grow the limiter's bucket map on an
+/// unverified request. Integration tests observe the budget through publish;
+/// only an in-crate test can see the map itself.
+#[cfg(test)]
+mod lifecycle_charge_tests {
+    use std::sync::Arc;
+
+    use acdp::crypto::SigningKey;
+    use acdp::did::WebResolver;
+    use acdp::registry::RegistryServer;
+    use acdp::types::capabilities::CapabilitiesDocument;
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    use acdp::types::primitives::{AgentDid, CtxId};
+    use acdp_registry_auth::{
+        AuthService, ChallengeStore, InMemoryChallengeStore, JwtSecret, JwtSigner,
+    };
+    use acdp_registry_sqlite::SqliteStore;
+    use acdp_registry_store::ExtendedRegistryStore;
+    use acdp_registry_types::{AuthConfig, RegistryConfig};
+    use axum::body::Bytes;
+    use axum::http::HeaderMap;
+
+    use super::lifecycle_transition;
+    use crate::state::{AppState, AppStateInner};
+
+    const AUTHORITY: &str = "registry.example.com";
+
+    async fn state() -> Arc<AppState<SqliteStore>> {
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        store.migrate().await.unwrap();
+        let caps: CapabilitiesDocument = serde_json::from_value(serde_json::json!({
+            "acdp_version": "0.3.0",
+            "registry_did": format!("did:web:{AUTHORITY}"),
+            "supported_signature_algorithms": ["ed25519", "ecdsa-p256"],
+            "supported_did_methods": ["did:web", "did:key"],
+            "profiles": ["acdp-registry-core"],
+            "limits": {
+                "max_payload_bytes": 1_048_576,
+                "max_embedded_bytes": 65_536,
+                "idempotency_key_ttl_seconds": 86_400
+            },
+            "read_authentication_methods": [],
+            "anonymous_public_reads": true,
+            "supports_idempotency_key": true
+        }))
+        .unwrap();
+        let server = RegistryServer::try_new(store, caps, AUTHORITY)
+            .unwrap()
+            .with_lifecycle()
+            .unwrap();
+        let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+        let signer = JwtSigner::new(
+            JwtSecret::from_bytes(&[42u8; 32]),
+            format!("did:web:{AUTHORITY}"),
+            AUTHORITY.into(),
+            30,
+        );
+        let auth = Arc::new(AuthService::new(
+            AuthConfig::default(),
+            challenges,
+            signer,
+            Arc::new(WebResolver::new()),
+            AUTHORITY.into(),
+        ));
+        let mut cfg = RegistryConfig::defaults();
+        cfg.registry.authority = AUTHORITY.into();
+        cfg.lifecycle.enabled = true;
+        cfg.limits.publish_rate_per_minute = 60;
+        Arc::new(AppStateInner::new(Arc::new(server), auth, None, cfg, None))
+    }
+
+    /// A retract event for `ctx_id`, signed by the did:key for `seed`.
+    fn signed(seed: u8, ctx_id: &str) -> serde_json::Value {
+        let key = SigningKey::from_bytes(&[seed; 32]);
+        let did = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+        let key_id = acdp::did::key::did_key_url(&did).unwrap();
+        let event = LifecycleEvent::new(
+            uuid::Uuid::new_v4().to_string(),
+            CtxId(ctx_id.to_string()),
+            LifecycleEventType::Retracted,
+            chrono::Utc::now(),
+            AgentDid::new(did),
+            None,
+        )
+        .unwrap()
+        .sign_with(key, key_id)
+        .unwrap();
+        serde_json::to_value(&event).unwrap()
+    }
+
+    async fn post(
+        state: &Arc<AppState<SqliteStore>>,
+        ctx_id: &str,
+        event: serde_json::Value,
+    ) -> bool {
+        let body = Bytes::from(serde_json::to_vec(&serde_json::json!({ "event": event })).unwrap());
+        lifecycle_transition(
+            state.clone(),
+            HeaderMap::new(),
+            ctx_id.to_string(),
+            body,
+            LifecycleEventType::Retracted,
+        )
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unverified_events_with_distinct_actors_insert_no_buckets() {
+        let state = state().await;
+        let limiter = state.rate_limiter.clone().expect("limiter configured");
+        let ctx_id = format!("acdp://{AUTHORITY}/00000000-0000-4000-8000-000000000375");
+
+        for seed in 1..=40u8 {
+            // Unsigned, distinct did:key actor.
+            let mut unsigned = signed(seed, &ctx_id);
+            unsigned.as_object_mut().unwrap().remove("signature");
+            assert!(!post(&state, &ctx_id, unsigned).await);
+
+            // Distinct did:web actor string, unsigned: refused before any
+            // resolution (no key_id to bind), so no network either.
+            let mut web = signed(seed, &ctx_id);
+            web.as_object_mut().unwrap().remove("signature");
+            web["actor"] = serde_json::json!(format!("did:web:attacker-{seed}.example"));
+            assert!(!post(&state, &ctx_id, web).await);
+
+            // Correctly bound but tampered after signing.
+            let mut bad = signed(seed, &ctx_id);
+            bad["reason"] = serde_json::json!("tampered");
+            assert!(!post(&state, &ctx_id, bad).await);
+        }
+        assert_eq!(
+            limiter.tracked_keys(),
+            0,
+            "120 unverified lifecycle requests naming 80 distinct actors must leave \
+             the bucket map empty"
+        );
+
+        // Control: the accessor does see an insert. A validly signed event
+        // (here for a context that does not exist, so the SDK 404s) proves
+        // its actor's key and is charged -- without this, a broken accessor
+        // would make the assertion above vacuous.
+        assert!(!post(&state, &ctx_id, signed(200, &ctx_id)).await);
+        assert_eq!(limiter.tracked_keys(), 1);
     }
 }

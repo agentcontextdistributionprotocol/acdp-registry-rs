@@ -11193,9 +11193,21 @@ async fn the_two_accept_predicates_agree_on_every_present_media_type() {
 /// sets: a test that needs different wiring assembles it from the same public
 /// pieces (`RegistryServer`, `AuthService`, `AppStateInner`, `build_router`).
 async fn didweb_lifecycle_harness(resolver: Arc<WebResolver>) -> Harness {
+    didweb_lifecycle_harness_with_rate(resolver, None).await
+}
+
+/// [`didweb_lifecycle_harness`] with an explicit `publish_rate_per_minute`
+/// (#375: the lifecycle endpoints share the per-agent publish bucket).
+async fn didweb_lifecycle_harness_with_rate(
+    resolver: Arc<WebResolver>,
+    publish_rate_per_minute: Option<u32>,
+) -> Harness {
     let mut cfg = config(false);
     cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
     cfg.lifecycle.enabled = true;
+    if let Some(rate) = publish_rate_per_minute {
+        cfg.limits.publish_rate_per_minute = rate;
+    }
 
     let db = tempfile::Builder::new()
         .prefix("acdp-didweb-")
@@ -11351,5 +11363,352 @@ async fn a_did_web_retract_retracts_rather_than_republishing() {
          `retracted`. Note this is NOT what catches the deleted match arm -- that \
          mutation 400s at the assertion above; this one guards a retract that is \
          accepted but does not persist: {v}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #375: the lifecycle endpoints share the per-agent publish bucket, keyed by
+// `event.actor`. They used to CHARGE that bucket (`limiter.check`) before the
+// signature was looked at, so anyone could drain agent A's publish budget by
+// POSTing unsigned events naming A. Now the pre-pipeline step is a read-only
+// `peek` and the charge is armed only once the signature verifies for
+// `event.actor`. Every test here measures the budget through PUBLISH, the
+// thing an attacker would actually be denying, rather than through the
+// lifecycle endpoint itself.
+// ---------------------------------------------------------------------------
+
+/// A did:key lifecycle harness with an explicit per-agent budget.
+async fn lifecycle_harness_with_rate(publish_rate_per_minute: u32) -> Harness {
+    let mut cfg = config(false);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.lifecycle.enabled = true;
+    cfg.limits.publish_rate_per_minute = publish_rate_per_minute;
+    build_harness_with_caps(cfg, caps_030(), None).await
+}
+
+/// Publish one public context as `p`; returns the status and, on 200, the
+/// ctx_id.
+async fn publish_as(h: &Harness, p: &Producer, title: &str) -> (StatusCode, Option<String>) {
+    let req = p
+        .publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    (status, v["ctx_id"].as_str().map(str::to_string))
+}
+
+/// `envelope` with the event's signature removed.
+fn unsigned(mut envelope: Value) -> Value {
+    let removed = envelope["event"]
+        .as_object_mut()
+        .unwrap()
+        .remove("signature");
+    assert!(
+        removed.is_some(),
+        "fixture must have had a signature to strip"
+    );
+    envelope
+}
+
+/// `envelope` with its (signed-over) reason changed after signing: a
+/// well-formed, correctly bound signature that does not verify.
+fn bad_signature(mut envelope: Value) -> Value {
+    envelope["event"]["reason"] = json!("tampered after signing");
+    envelope
+}
+
+/// A did:key event validly signed by `signer_seed`, then relabelled with
+/// `actor_seed`'s DID: the key_id no longer binds to the actor.
+fn mis_bound(signer_seed: u8, actor_seed: u8, ctx_id: &str) -> Value {
+    let mut env = signed_event_envelope(signer_seed, ctx_id, "retracted", Some("x"));
+    env["event"]["actor"] = signed_event(actor_seed, ctx_id, "retracted", None)["actor"].clone();
+    env
+}
+
+/// The core #375 property: unverified events naming A never spend A's
+/// budget. Fails against the old `check`: the FIRST unsigned retract would
+/// spend A's second unit, every later one would 429, and A's own second
+/// publish would 429.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unverified_lifecycle_events_do_not_spend_the_named_actors_budget() {
+    let h = lifecycle_harness_with_rate(2).await;
+    let a = did_key_producer(80);
+    let (status, ctx) = publish_as(&h, &a, "lc375 a1").await;
+    assert_eq!(status, StatusCode::OK);
+    let ctx_id = ctx.unwrap();
+    let a_did = signed_event(80, &ctx_id, "retracted", None)["actor"].clone();
+
+    for i in 0..5 {
+        for (what, env) in [
+            (
+                "unsigned",
+                unsigned(signed_event_envelope(80, &ctx_id, "retracted", Some("r"))),
+            ),
+            (
+                "bad signature",
+                bad_signature(signed_event_envelope(80, &ctx_id, "retracted", Some("r"))),
+            ),
+            ("mis-bound key_id", mis_bound(81, 80, &ctx_id)),
+        ] {
+            assert_eq!(env["event"]["actor"], a_did, "every event must NAME A");
+            let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &env).await;
+            assert!(
+                status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS,
+                "#{i} {what} retract naming A must be refused by the pipeline, \
+                 not rate limited (that would mean A was charged): {status} {v}"
+            );
+        }
+    }
+
+    // A still has exactly one unit left: the second publish lands, the third
+    // is over budget (proving the limit is live, not absent).
+    assert_eq!(publish_as(&h, &a, "lc375 a2").await.0, StatusCode::OK);
+    assert_eq!(
+        publish_as(&h, &a, "lc375 a3").await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+/// A verified retract IS charged to its actor (kills "never arm").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_retract_charges_the_actor() {
+    let h = lifecycle_harness_with_rate(2).await;
+    let a = did_key_producer(82);
+    let (_, ctx) = publish_as(&h, &a, "lc375 charge").await;
+    let ctx_id = ctx.unwrap();
+    let env = signed_event_envelope(82, &ctx_id, "retracted", None);
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &env).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        publish_as(&h, &a, "lc375 charge 2").await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "publish + verified retract = 2 units: the budget must now be spent"
+    );
+}
+
+/// A verified event that fails LATE (409 double retract) is still charged
+/// (kills "charge on success only", the #242 hole in reverse).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_double_retract_409_is_charged() {
+    let h = lifecycle_harness_with_rate(3).await;
+    let a = did_key_producer(83);
+    let (_, ctx) = publish_as(&h, &a, "lc375 409").await;
+    let ctx_id = ctx.unwrap();
+    let first = signed_event_envelope(83, &ctx_id, "retracted", None);
+    assert_eq!(
+        post_lifecycle(&h.router, &ctx_id, "retract", &first)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let double = signed_event_envelope(83, &ctx_id, "retracted", None);
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &double).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], "invalid_lifecycle_transition");
+    assert_eq!(
+        publish_as(&h, &a, "lc375 409 b").await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "publish + retract + 409 retract = 3 units: the 409 must have been charged"
+    );
+}
+
+/// BINDING REVISION 5 (plan issues-371-376): a validly signed event whose
+/// actor is NOT the context's producer is refused, and charged to the ACTOR
+/// who proved key possession -- never to the producer it targeted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_event_by_a_non_producer_is_charged_to_the_actor() {
+    let h = lifecycle_harness_with_rate(2).await;
+    let a = did_key_producer(84);
+    let b = did_key_producer(85);
+    let (_, ctx) = publish_as(&h, &a, "lc375 owner").await;
+    let ctx_id = ctx.unwrap();
+    assert_eq!(publish_as(&h, &b, "lc375 other").await.0, StatusCode::OK);
+
+    let env = signed_event_envelope(85, &ctx_id, "retracted", None);
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &env).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"]["code"], "not_authorized");
+
+    assert_eq!(
+        publish_as(&h, &b, "lc375 other 2").await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "B's verified (if unauthorized) event must be charged to B"
+    );
+    assert_eq!(
+        publish_as(&h, &a, "lc375 owner 2").await.0,
+        StatusCode::OK,
+        "the targeted producer A must not pay for B's event"
+    );
+}
+
+/// An actor already over budget is refused with 429 + Retry-After before
+/// the pipeline runs, and the transition does not happen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_over_budget_actor_gets_429_on_a_valid_retract() {
+    let h = lifecycle_harness_with_rate(1).await;
+    let a = did_key_producer(86);
+    let (_, ctx) = publish_as(&h, &a, "lc375 over").await;
+    let ctx_id = ctx.unwrap();
+    let env = signed_event_envelope(86, &ctx_id, "retracted", None);
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/contexts/{}/retract",
+                    pct_encode_path_segment(&ctx_id)
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&env).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(resp
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .is_some());
+    let (_, full) = get_json(
+        &h.router,
+        &format!("/contexts/{}", pct_encode_path_segment(&ctx_id)),
+    )
+    .await;
+    assert_eq!(
+        full["registry_state"]["status"], "active",
+        "a 429'd retract must not be applied"
+    );
+}
+
+/// The did:web arm: the pre-flight verifies through the shared resolver, so
+/// an unsigned did:web retract is not charged and a valid one is.
+#[tokio::test(flavor = "multi_thread")]
+async fn did_web_lifecycle_charges_only_verified_events() {
+    let addr = didweb::spawn_didweb_server().await;
+    let resolver = Arc::new(
+        WebResolver::with_test_endpoint(
+            didweb::ca_pem().as_bytes(),
+            didweb::DIDWEB_AUTHORITY,
+            addr,
+        )
+        .expect("test-endpoint resolver"),
+    );
+    let h = didweb_lifecycle_harness_with_rate(resolver, Some(2)).await;
+    let p = producer(87);
+    let (status, ctx) = publish_as(&h, &p, "lc375 didweb").await;
+    assert_eq!(status, StatusCode::OK);
+    let ctx_id = ctx.unwrap();
+
+    for _ in 0..3 {
+        let env = unsigned(signed_event_envelope_did_web(
+            87,
+            &ctx_id,
+            "retracted",
+            None,
+        ));
+        let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &env).await;
+        assert!(
+            status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS,
+            "{status} {v}"
+        );
+    }
+
+    // Budget intact: one unit left, spent by the valid retract.
+    let env = signed_event_envelope_did_web(87, &ctx_id, "retracted", None);
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &env).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        publish_as(&h, &p, "lc375 didweb 2").await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "publish + verified did:web retract = 2 units"
+    );
+}
+
+/// The pre-flight sits BELOW the tenant gate: a validly signed retract that
+/// the tenant gate refuses (404) is not charged. Fails if the verify/arm is
+/// moved above step 5.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_event_refused_by_the_tenant_gate_is_not_charged() {
+    let h = lifecycle_harness_with_rate(2).await;
+    let a = did_key_producer(88);
+    let req = a
+        .publish_request()
+        .title("lc375 tenant")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(&h.router, &req, Some("tenant-375-a")).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+
+    for _ in 0..3 {
+        let env = signed_event_envelope(88, &ctx_id, "retracted", None);
+        let (status, v) =
+            post_lifecycle_with_tenant(&h.router, &ctx_id, "retract", &env, Some("tenant-375-b"))
+                .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    }
+    assert_eq!(
+        publish_as(&h, &a, "lc375 tenant 2").await.0,
+        StatusCode::OK,
+        "three tenant-gated retracts must not have spent A's second unit"
+    );
+    assert_eq!(
+        publish_as(&h, &a, "lc375 tenant 3").await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+/// The pre-flight sits BELOW the bearer check: a validly signed retract sent
+/// with an invalid bearer (403) is not charged. Fails if the verify/arm is
+/// moved above `caller_from_headers`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_event_refused_for_a_bad_bearer_is_not_charged() {
+    let mut cfg = config(false);
+    cfg.auth.enabled = true;
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.lifecycle.enabled = true;
+    cfg.limits.publish_rate_per_minute = 2;
+    let h = build_harness_with_caps(cfg, caps_030(), None).await;
+    let a = did_key_producer(89);
+    let (status, ctx) = publish_as(&h, &a, "lc375 bearer").await;
+    assert_eq!(status, StatusCode::OK);
+    let ctx_id = ctx.unwrap();
+
+    for _ in 0..3 {
+        let env = signed_event_envelope(89, &ctx_id, "retracted", None);
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/contexts/{}/retract",
+                        pct_encode_path_segment(&ctx_id)
+                    ))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer not-a-valid-jwt")
+                    .body(Body::from(serde_json::to_vec(&env).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(
+        publish_as(&h, &a, "lc375 bearer 2").await.0,
+        StatusCode::OK,
+        "three bearer-refused retracts must not have spent A's second unit"
+    );
+    assert_eq!(
+        publish_as(&h, &a, "lc375 bearer 3").await.0,
+        StatusCode::TOO_MANY_REQUESTS
     );
 }
