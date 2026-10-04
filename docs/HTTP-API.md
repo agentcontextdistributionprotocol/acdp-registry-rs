@@ -192,7 +192,7 @@ this section records only what **this registry** emits in each one
 | Field | What this registry emits |
 |-------|--------------------------|
 | `acdp_version` | Always `"0.5.0"` — see below. |
-| `registry_did` | `did:web:` + `registry.authority`. |
+| `registry_did` | `did:web:` + `registry.authority` (a port's `:` becomes `%3A`). |
 | `supported_signature_algorithms` | `["ed25519", "ecdsa-p256"]`, fixed by the build; not configurable. |
 | `supported_did_methods` | `auth.did_methods`; may include `"did:key"`. |
 | `profiles` | `registry.profiles` (default: `acdp-registry-core`, `acdp-registry-discovery`) plus the receipts, head-receipts, lifecycle and transparency-log profiles when their config sections enable them. |
@@ -418,7 +418,7 @@ is rejected with `key_resolution_failed` (400, permanent).
 content-addressed references to external artifacts. Its shape, the
 content-hash binding, and the version rules are normative in
 [RFC-ACDP-0016 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0016-external-anchors.md#4-the-anchors-field-normative) and
-[§10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0016-external-anchors.md#10-capabilities-profile-and-errors). What this registry adds:
+[§10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0016-external-anchors.md#10-capabilities-profile-and-errors); the request-side version rule (a declared `acdp_version` of 0.5.0 or above) is RFC-ACDP-0016 §14. What this registry adds:
 since it always advertises `acdp_version` `"0.5.0"`, only the request half of
 the gate can fail — a publish carrying `anchors` whose declared
 `acdp_version` is absent or below `0.5.0` is rejected with
@@ -917,8 +917,8 @@ Errors use the envelope of
 emitted as `application/acdp+json`; its fields and when `details` is present
 are specified there. What this registry adds: `internal_error` responses never
 leak detail — the message is always `"internal error"`, with the real cause in
-the server log only. Two routes do **not** use the envelope; see the note
-under the table.
+the server log only. The `/admin/*` routes and `/metrics` do **not** use the
+envelope; see the note under the table.
 
 Each code's meaning and canonical HTTP status are in the spec's
 [error-code registry](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/registries/error-codes.md), and how an `acdp` client

@@ -12,8 +12,8 @@ implementation of the reserved `acdp-registry-events` profile sketched in
 [RFC-ACDP-0009 §2.10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0009-extensions.md#210-registry-webhook-event-profile)
 (which is not advertisable and has no interoperable shape yet). The two differ
 on the wire: the envelope here carries `schema_version` and `type`, not the
-sketch's `event_version` and `event_type`, and the HMAC covers the raw posted bytes rather than JCS
-canonical bytes. Do not build against the sketch expecting this payload.
+sketch's `event_version` and `event_type`, and the HMAC covers the raw posted bytes (the timestamped
+signature covers the timestamp, a dot, then those bytes) rather than JCS canonical bytes. Do not build against the sketch expecting this payload.
 
 ## Events
 
