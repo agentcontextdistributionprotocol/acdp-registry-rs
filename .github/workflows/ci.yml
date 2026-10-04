@@ -28,12 +28,14 @@ jobs:
       #
       # This assertion also runs in `docker.yml`, next to the artifact it
       # describes. That copy REPORTS and cannot block: `docker.yml` publishes the
-      # check named `build`, which is not among main's required status checks, so
-      # a release PR missing its UPGRADING.md section gets a red `build` and a
-      # green merge button. (The list is not transcribed here -- read it with
-      # `gh api repos/{owner}/{repo}/branches/main/protection
-      # --jq .required_status_checks.contexts`. A copy here would go stale the
-      # next time the setting changes, which is exactly what happened to the
+      # check named `docker (build + smoke)`, which is not among main's required
+      # status checks, so a release PR missing its UPGRADING.md section gets a
+      # red `docker (build + smoke)` and a green merge button. (The list is not
+      # transcribed here. Its one committed copy is `.github/required-checks.json`,
+      # which branch-protection-drift.yml compares against the live setting
+      # daily; the live source is `gh api repos/{owner}/{repo}/branches/main/protection
+      # --jq .required_status_checks.checks`. A copy in a comment would go stale
+      # the next time the setting changes, which is exactly what happened to the
       # list this comment used to carry.)
       #
       # So the assertion is run again here, in a job whose check name is ALREADY
@@ -306,8 +308,14 @@ jobs:
 
   # The workspace declares rust-version = 1.88; make that claim enforceable
   # instead of aspirational. Checks both shipped storage backends.
+  #
+  # The check name is `msrv`, deliberately WITHOUT the version: it is listed in
+  # .github/required-checks.json, and a name that embeds the toolchain would
+  # change on every MSRV bump -- orphaning the context once it is required, so
+  # every PR waits forever on a check that never reports. The version lives in
+  # `toolchain:` below and in Cargo.toml's `rust-version`.
   msrv:
-    name: msrv (1.88)
+    name: msrv
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -647,7 +655,8 @@ jobs:
       #
       # Honest scope: this makes the coverage JOB fail below the floor. It
       # does not block a merge, because `coverage` is not a required status
-      # check (that is a repo setting, raised separately). A floor on an
+      # check (it is in `advisory_pending` in .github/required-checks.json;
+      # requiring it is a repo setting, raised separately). A floor on an
       # advisory job is a signal, not a gate.
       - name: cargo llvm-cov
         env:

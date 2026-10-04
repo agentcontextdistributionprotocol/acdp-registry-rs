@@ -8,9 +8,30 @@
 #
 # U-559 fixed today's staleness but installed no automation to keep it fixed -- its own
 # report said so explicitly. This job is that automation: it reads the live setting on a
-# schedule and fails the moment it stops matching EXPECTED below, so the assumption those
-# four files' logic depends on (that these specific contexts gate `main`) gets caught the
-# same day it changes, not discovered by a stale comment weeks later.
+# schedule and fails the moment it stops matching the committed baseline in
+# .github/required-checks.json, so the assumption those four files' logic depends on (that
+# these specific contexts gate `main`) gets caught the same day it changes, not discovered by
+# a stale comment weeks later.
+#
+# THE BASELINE FILE. It used to be an inline `expected=` list in this file -- the only copy,
+# and unvalidated: nothing noticed if a name in it no longer matched any job. It is now
+# .github/required-checks.json, which lint.yml's required-checks guard validates on every
+# PR (each name resolves to a PR-triggered, unskippable job; each entry pins app_id), so a
+# job rename goes red in the PR that does it, and this job compares the live setting to the
+# same file. Comparison is on `.checks` -- context AND app_id -- plus `strict`, not the
+# bare `.contexts` list: an unpinned context is satisfied by ANY app with statuses:write,
+# and `strict=false` would quietly let stale-base PRs merge; neither shows in `.contexts`.
+#
+# ALSO enforce_admins AND THE TAG RULESET. The same file records the expected
+# `enforce_admins` flag and the `protect-release-tags` tag ruleset; a silent admin override
+# or a disabled/loosened ruleset is the same class of quiet settings regression. Both are
+# applied by the maintainer by hand, so while the baseline says `pending_settings: true`
+# their mismatch is a ::warning:: and only context/strict drift fails; flipping it to false
+# makes them hard failures. The comparison lives in .github/scripts/protection-drift.sh, not
+# here, so lint can run its --self-test over fixture JSON on every PR. To prove the hard-fail
+# path RED against the live settings without merging a red main, dispatch this workflow on a
+# branch whose baseline sets `pending_settings: false`:
+#   gh workflow run branch-protection-drift.yml --ref <branch>
 #
 # NOT ON pull_request. Branch protection changes through the GitHub UI, not through a PR
 # to this repo, so a PR-triggered run has nothing to catch here -- a scheduled ratchet is
@@ -24,6 +45,13 @@
 # ACDP_BOT_APP_ID / ACDP_BOT_PRIVATE_KEY org secrets; its installation was granted
 # `administration: read` for this unit (2026-09-21) rather than minting a new PAT, so
 # there is one fewer credential to rotate.
+#
+# The minted token is narrowed with explicit `permission-*` inputs to exactly what this job
+# reads (administration:read for /protection, metadata:read for the repo and its rulesets
+# -- GET /rulesets is a metadata read). The ruleset's `bypass_actors` may not be returned to
+# a read-only token; the script then reports the bypass list as unverifiable. Without
+# them it inherits EVERY permission the installation holds -- including the bot's
+# `contents: write` -- for a job that only ever reads.
 name: branch-protection-drift
 
 on:
@@ -40,6 +68,12 @@ jobs:
   check-drift:
     runs-on: ubuntu-latest
     steps:
+      # The baseline lives in the repo (.github/required-checks.json), so this job needs the
+      # tree. No credentials persisted: nothing here pushes.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
       - name: Mint token for branch-protection read
         id: app
         uses: actions/create-github-app-token@v3
@@ -48,34 +82,12 @@ jobs:
           private-key: ${{ secrets.ACDP_BOT_PRIVATE_KEY }}
           owner: agentcontextdistributionprotocol
           repositories: acdp-registry-rs
+          permission-administration: read
+          permission-metadata: read
 
-      - name: Compare live required contexts against the pinned baseline
+      # All logic, fix commands and the pending_settings rule are in the script; a failed GET
+      # is reported as "could not read", never as "nothing configured".
+      - name: Compare live protection against .github/required-checks.json
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-        run: |
-          set -euo pipefail
-
-          # THE BASELINE. What ci.yml, lint.yml, assert-upgrade-notes.sh and
-          # conformance.rs's own doc-comments assume main's required status checks are,
-          # as of U-562 (2026-09-21). It lives here and nowhere else: raising it is a
-          # one-line diff that shows up in review -- same ratchet shape as mutants.yml's
-          # survivor budget. Order does not matter; both sides are sorted before
-          # comparing.
-          expected='["cargo-deny","clippy","conformance (spec fixtures)","lint","rustfmt","tests"]'
-
-          actual="$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" \
-            --jq '.required_status_checks.contexts | sort')"
-          expected_sorted="$(printf '%s' "$expected" | jq -c 'sort')"
-
-          if [ "$actual" != "$expected_sorted" ]; then
-            echo "::error::main's required_status_checks.contexts drifted from the baseline this repo assumes."
-            echo "  expected: $expected_sorted"
-            echo "  actual:   $actual"
-            echo
-            echo "Update the baseline above, then re-check every comment that names these"
-            echo "contexts: ci.yml, lint.yml, assert-upgrade-notes.sh, and"
-            echo "crates/acdp-registry-server/tests/conformance.rs."
-            exit 1
-          fi
-
-          echo "required_status_checks.contexts unchanged: $actual"
+        run: bash .github/scripts/protection-drift.sh --fetch

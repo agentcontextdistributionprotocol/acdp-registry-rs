@@ -22,15 +22,17 @@
 # TWO workflows call this script, and only one of them can stop a merge.
 #
 #   ci.yml, job `fmt` (check name `rustfmt`) -- BLOCKS.
-#   docker.yml, job `build` (check name `build`) -- REPORTS ONLY.
+#   docker.yml, job `build` (check name `docker (build + smoke)`) -- REPORTS ONLY.
 #
-# `build` is NOT among main's required status checks, and no branch rule or
-# ruleset carries additional ones, so a red `build` leaves the merge button
-# green. The list is deliberately not transcribed here -- read it with
+# `docker (build + smoke)` is NOT among main's required status checks, and no
+# branch rule or ruleset carries additional ones, so a red one leaves the merge
+# button green. The list is deliberately not transcribed here. Its one committed
+# copy is .github/required-checks.json (drift-checked daily against the live
+# setting by branch-protection-drift.yml); the live source is
 #   gh api repos/{owner}/{repo}/branches/main/protection \
-#     --jq .required_status_checks.contexts
-# A copy here goes stale the moment the setting changes, as the one that used
-# to sit on this line did.
+#     --jq .required_status_checks.checks
+# A copy in a comment goes stale the moment the setting changes, as the one
+# that used to sit on this line did.
 # U-514 sited this script only in docker.yml and described it as gating the
 # release PR; that was wrong -- it reported. U-516 added the ci.yml copy, inside
 # a job whose check name is already required, which needed no repo-settings
@@ -40,8 +42,9 @@
 # also triggers on the `acdp-registry-server/v*` tag push, which ci.yml never
 # runs on. So ci.yml covers the pull request and docker.yml covers the tag.
 #
-# If `build` ever becomes a required context, that does not make the ci.yml copy
-# redundant -- it is still the one that reddens in seconds instead of minutes.
+# If `docker (build + smoke)` ever becomes a required context, that does not
+# make the ci.yml copy redundant -- it is still the one that reddens in seconds
+# instead of minutes.
 #
 # ── Modes ──
 #
