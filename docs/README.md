@@ -94,6 +94,9 @@ both GitHub and the website.
 **Re-pointing on a spec bump.** A PR that changes `ref:` in `.spec-pin` must
 replace the old SHA in every pinned spec link in the same PR, and re-check
 each `#anchor` against the new revision's headings (sections get renumbered).
+`sibling_repo_links_are_pinned` in `conformance_gate.rs` enforces these rules,
+so such a PR fails CI until the links are re-pointed;
+[MAINTAINING.md](MAINTAINING.md#spec-bumps) has the one-command rewrite.
 An `acdp` bump re-points docs.rs versions the same way; guide links move only
 when a newer tag or SHA carries the page being cited.
 

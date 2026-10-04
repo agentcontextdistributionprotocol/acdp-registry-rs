@@ -328,8 +328,9 @@ Gates a release PR must pass:
   any merge-conflict marker (including the diff3 base marker) in any tracked file.
 - **Documentation guards.** Most doc-truth guards live in
   `crates/acdp-registry-server/tests/conformance_gate.rs` (documented wire codes and
-  routes, the docs index, relative links resolving, no line-number citations in operator
-  docs, Railway tags, and more); `metrics_integration.rs` checks the documented
+  routes, the docs index, relative links resolving, sibling-repository links pinned
+  (`sibling_repo_links_are_pinned`), no line-number citations in operator docs, Railway
+  tags, and more); `metrics_integration.rs` checks the documented
   rate-limit scopes. Read the test names there rather than a list here.
 
 ## Mutation oracle
@@ -374,6 +375,24 @@ count are updated by hand — the steps are in
 [CONTRIBUTING.md](../CONTRIBUTING.md#adopting-a-new-acdp-spec-revision).
 
 Docs that link into the spec repository at the pinned revision must be re-pointed to the
-new `ref:` in the same bump PR, or they keep citing the old revision. If a guard that
-checks spec links against `.spec-pin` is in place by the time you bump, it will make
-this a CI failure; until then it is a review step.
+new `ref:` in the same bump PR. `sibling_repo_links_are_pinned` (in `conformance_gate.rs`)
+requires every spec link's ref to equal the `ref:` in `.spec-pin`, so a bump PR also
+fails the `tests` and `conformance (spec fixtures)` jobs — listing each stale link —
+until they are re-pointed. From the
+bump branch, with `origin/main` still at the old pin:
+
+```sh
+old=$(git show origin/main:.spec-pin | sed -n 's/^ref: //p')
+new=$(sed -n 's/^ref: //p' .spec-pin)
+git grep -lE "agentcontextdistributionprotocol/agentcontextdistributionprotocol/(blob|tree|raw)/$old" \
+  -- '*.md' 'config/*.toml' 'docker/*' ':!plans' ':!crates/*/CHANGELOG.md' \
+     ':!DECISIONS.md' ':!ASSUMPTIONS.md' ':!docs/ENGINEERING-LOG.md' \
+  | xargs perl -pi -e "s#(agentcontextdistributionprotocol/agentcontextdistributionprotocol/(?:blob|tree|raw)/)$old#\${1}$new#g"
+cargo test --locked -p acdp-registry-server --test conformance_gate sibling_repo_links_are_pinned
+```
+
+The rewrite touches link URLs only: dated records keep the SHA they were written
+against, and the "today" value in the Link-convention block of
+[docs/README.md](README.md#link-convention) is prose, so update it by hand. Then
+re-check each `#anchor` against the new revision's headings — the guard reads no
+network and cannot see a renumbered section.

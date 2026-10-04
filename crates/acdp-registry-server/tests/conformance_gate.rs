@@ -3468,3 +3468,623 @@ fn the_relative_link_guard_rejects_what_it_must_and_ignores_what_it_should() {
     assert!(link_guard_excludes("plans/cross-repo/x.md", "plans/"));
     assert!(!link_guard_excludes("plansx.md", "plans/"));
 }
+
+// ---- docs-refresh Phase 6: sibling-repository links stay pinned -------------
+//
+// A link to a sibling repository's `main` silently changes meaning whenever that
+// repository moves: before this guard every spec and SDK link here pointed at
+// `main`, and the SDK guides on `main` had already drifted from the version this
+// registry builds against. `docs/README.md`'s "Link convention" block is the
+// human-readable form of these rules; this is the enforced form.
+//
+// Like every test in this file it also runs in cargo-mutants' baseline
+// (`.cargo/mutants.toml` sets `copy_vcs = true`, so `git ls-files` works in the
+// copy): a failure here fails that baseline too, not only the PR jobs.
+
+/// The GitHub organisation every sibling repository lives in.
+const ACDP_ORG: &str = "agentcontextdistributionprotocol";
+/// This repository: its links may use `main` (the website rewrites them).
+const THIS_REPO: &str = "acdp-registry-rs";
+/// The spec repository. Its links must use the `.spec-pin` `ref:` value.
+const SPEC_REPO: &str = "agentcontextdistributionprotocol";
+/// The SDK repository. Its links must use an `acdp-v<semver>` tag or a full SHA.
+const SDK_REPO: &str = "acdp-rs";
+/// The ONE spec ref allowed besides the pin, and only on the spec's
+/// non-normative `docs/` pages: `fb76f6d`, the spec docs refresh that followed
+/// the pinned revision (see the Link-convention block in `docs/README.md`).
+/// Normative paths (`rfcs/`, `registries/`, `schemas/`, ...) must use the pin.
+const SPEC_DOCS_REF: &str = "fb76f6d54ba25f583ce526b2bdee30503a5d8e59";
+
+/// Where one sibling URL points.
+#[derive(Debug, Clone, PartialEq)]
+enum SiblingTarget {
+    /// A file or directory at a ref: `github.com/<org>/<repo>/(blob|tree|raw)/<ref>/<path>`
+    /// or `raw.githubusercontent.com/<org>/<repo>/<ref>/<path>`. A
+    /// `refs/heads/<name>` ref is kept whole.
+    AtRef {
+        repo: String,
+        git_ref: String,
+        path: String,
+    },
+    /// Any other URL into an org repository (the repo root, issues, releases):
+    /// nothing to pin.
+    Unpinned { repo: String },
+    /// `docs.rs/<acdp or acdp-*>/<version?>/...`.
+    DocsRs {
+        krate: String,
+        version: Option<String>,
+    },
+}
+
+/// How a URL is written in markdown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LinkForm {
+    /// `[text](url)` -- the only form the website rewriter handles.
+    Inline,
+    /// `[label]: url` -- skipped by the website rewriter.
+    ReferenceDefinition,
+    /// Anything else: a bare URL, an autolink, an HTML attribute.
+    Bare,
+}
+
+#[derive(Debug, Clone)]
+struct SiblingLink {
+    line: usize,
+    url: String,
+    target: SiblingTarget,
+    form: LinkForm,
+}
+
+/// `X.Y.Z` with all three parts non-empty decimal digits.
+fn is_core_semver(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()))
+}
+
+/// A concrete crate version as docs.rs serves it: `X.Y.Z` with an optional
+/// `-prerelease`. `latest`, `*`, `^0.14`, `~0.14` and a missing segment are not.
+fn is_crate_version(v: &str) -> bool {
+    let (core, pre) = match v.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (v, None),
+    };
+    is_core_semver(core)
+        && pre.is_none_or(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        })
+}
+
+/// A ref the SDK repository may be linked at: a release tag `acdp-v<X.Y.Z>`
+/// or a full 40-hex commit SHA. Not `main`, not a short SHA.
+fn is_sdk_pin(r: &str) -> bool {
+    is_sha40(r) || r.strip_prefix("acdp-v").is_some_and(is_core_semver)
+}
+
+/// Splits `segs` (the path after `<org>/<repo>/[kind/]`) into (ref, path). A
+/// `refs/<heads|tags>/<name>` ref spans three segments.
+fn split_ref(segs: &[&str]) -> (String, String) {
+    let n = if segs.first() == Some(&"refs") { 3 } else { 1 };
+    let n = n.min(segs.len());
+    (segs[..n].join("/"), segs[n..].join("/"))
+}
+
+/// Classifies one URL, or `None` when it is neither a URL into an org
+/// repository nor an `acdp*` docs.rs URL.
+fn classify_sibling_url(url: &str) -> Option<SiblingTarget> {
+    let bare = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    // The fragment and query are not part of the ref or path.
+    let bare = bare.split(['#', '?']).next().unwrap_or("");
+    let segs: Vec<&str> = bare.split('/').collect();
+    let host = segs.first()?.to_ascii_lowercase();
+    match host.as_str() {
+        "github.com" | "raw.githubusercontent.com" => {
+            if !segs.get(1)?.eq_ignore_ascii_case(ACDP_ORG) {
+                return None;
+            }
+            let repo = segs.get(2).filter(|r| !r.is_empty())?.to_ascii_lowercase();
+            let rest = &segs[3.min(segs.len())..];
+            if host == "raw.githubusercontent.com" {
+                let (git_ref, path) = split_ref(rest);
+                return Some(SiblingTarget::AtRef {
+                    repo,
+                    git_ref,
+                    path,
+                });
+            }
+            match rest.first() {
+                Some(&("blob" | "tree" | "raw")) => {
+                    let (git_ref, path) = split_ref(&rest[1..]);
+                    Some(SiblingTarget::AtRef {
+                        repo,
+                        git_ref,
+                        path,
+                    })
+                }
+                _ => Some(SiblingTarget::Unpinned { repo }),
+            }
+        }
+        "docs.rs" => {
+            let krate = segs.get(1)?.to_ascii_lowercase();
+            if !(krate == "acdp" || krate.starts_with("acdp-")) {
+                return None;
+            }
+            let version = segs.get(2).filter(|v| !v.is_empty()).map(|v| v.to_string());
+            Some(SiblingTarget::DocsRs { krate, version })
+        }
+        _ => None,
+    }
+}
+
+/// Every sibling-repository or `acdp*` docs.rs URL in `text`, with its line and
+/// form. In markdown, fenced blocks and inline code are skipped (a link-shaped
+/// example there is not a link -- the Link-convention block itself spells
+/// `blob/<ref>/` templates in code spans). Other files (`config/*.toml`,
+/// `docker/*`) are scanned line by line as they are: a URL in a comment is
+/// still read by someone.
+fn sibling_links(text: &str, markdown: bool) -> Vec<SiblingLink> {
+    let lines: Vec<(usize, String)> = if markdown {
+        unfenced_lines(text)
+            .into_iter()
+            .map(|(n, l)| (n, strip_code_spans(l)))
+            .collect()
+    } else {
+        text.lines()
+            .enumerate()
+            .map(|(i, l)| (i + 1, l.to_string()))
+            .collect()
+    };
+    let hosts = ["github.com/", "raw.githubusercontent.com/", "docs.rs/"];
+    let mut out = Vec::new();
+    for (n, line) in lines {
+        // ASCII lowercasing keeps byte offsets, so positions found in `lower`
+        // index `line` too.
+        let lower = line.to_ascii_lowercase();
+        // (scheme start, host start) of every URL whose host is one of `hosts`.
+        // A URL needs its `http(s)://` scheme: link TEXT such as
+        // `[docs.rs/acdp 0.14.3](...)` names a host without being a link, and
+        // the scheme also anchors the host, so `gist.github.com/` is not
+        // mistaken for `github.com/`.
+        let mut starts: Vec<(usize, usize)> = Vec::new();
+        for scheme in ["https://", "http://"] {
+            let mut from = 0;
+            while let Some(i) = lower[from..].find(scheme) {
+                let start = from + i;
+                let at = start + scheme.len();
+                if hosts.iter().any(|h| lower[at..].starts_with(h)) {
+                    starts.push((start, at));
+                }
+                from = at;
+            }
+        }
+        starts.sort_unstable();
+        for (start, at) in starts {
+            let end = line[at..]
+                .find(|c: char| {
+                    c.is_whitespace()
+                        || matches!(
+                            c,
+                            ')' | '(' | '<' | '>' | '"' | '\'' | '`' | ']' | '[' | '|'
+                        )
+                })
+                .map_or(line.len(), |e| at + e);
+            let url = line[at..end].trim_end_matches(['.', ',', ';', ':']);
+            let Some(target) = classify_sibling_url(url) else {
+                continue;
+            };
+            let end = at + url.len();
+            let before = &line[..start];
+            let def_prefix = before.trim_end().trim_end_matches('<').trim_end();
+            let def_line = def_prefix.trim_start();
+            let form = if before.ends_with("](") || before.ends_with("](<") {
+                LinkForm::Inline
+            } else if def_prefix.ends_with("]:")
+                && def_line.starts_with('[')
+                && !def_line.starts_with("[^")
+            {
+                LinkForm::ReferenceDefinition
+            } else {
+                LinkForm::Bare
+            };
+            out.push(SiblingLink {
+                line: n,
+                url: line[start..end].to_string(),
+                target,
+                form,
+            });
+        }
+    }
+    out
+}
+
+/// Why one sibling link breaks the pinning rules, or `None` when it is fine.
+/// `spec_ref` is the `ref:` value of `.spec-pin`.
+fn sibling_link_problem(link: &SiblingLink, markdown: bool, spec_ref: &str) -> Option<String> {
+    let is_branch = |r: &str| {
+        let last = r.rsplit('/').next().unwrap_or(r).to_ascii_lowercase();
+        last == "main" || last == "master"
+    };
+    let repo = match &link.target {
+        SiblingTarget::AtRef { repo, .. } | SiblingTarget::Unpinned { repo } => Some(repo),
+        SiblingTarget::DocsRs { .. } => None,
+    };
+    if repo.is_some_and(|r| r == THIS_REPO) {
+        return None;
+    }
+    if markdown && repo.is_some() && link.form != LinkForm::Inline {
+        return Some(if link.form == LinkForm::ReferenceDefinition {
+            "is a reference-style definition; sibling links must be inline `[text](url)` \
+             (the website rewriter skips reference-style links)"
+                .to_string()
+        } else {
+            "is not an inline `[text](url)` link (bare URL, autolink or HTML); the \
+             website rewriter only rewrites inline links"
+                .to_string()
+        });
+    }
+    match &link.target {
+        SiblingTarget::Unpinned { .. } => None,
+        SiblingTarget::DocsRs { krate, version } => match version {
+            Some(v) if is_crate_version(v) => None,
+            Some(v) => Some(format!(
+                "docs.rs/{krate} at `{v}` is not a concrete version; write the version \
+                 `Cargo.lock` resolves (e.g. docs.rs/{krate}/0.14.3/...)"
+            )),
+            None => Some(format!(
+                "docs.rs/{krate} has no version segment, so it follows whatever is \
+                 latest; write the version `Cargo.lock` resolves"
+            )),
+        },
+        SiblingTarget::AtRef {
+            repo,
+            git_ref,
+            path,
+        } => {
+            if repo == SPEC_REPO {
+                if git_ref == spec_ref || (git_ref == SPEC_DOCS_REF && path.starts_with("docs/")) {
+                    None
+                } else if git_ref == SPEC_DOCS_REF {
+                    Some(format!(
+                        "uses SPEC_DOCS_REF on `{path}`, which is not under the spec's \
+                         `docs/`; normative spec paths must use the `.spec-pin` ref \
+                         `{spec_ref}`"
+                    ))
+                } else {
+                    Some(format!(
+                        "links the spec at `{git_ref}`; spec links must use exactly the \
+                         `.spec-pin` ref `{spec_ref}` (no branch, tag or short SHA) -- or \
+                         SPEC_DOCS_REF on a `docs/` page"
+                    ))
+                }
+            } else if repo == SDK_REPO {
+                (!is_sdk_pin(git_ref)).then(|| {
+                    format!(
+                        "links acdp-rs at `{git_ref}`; use a release tag `acdp-v<X.Y.Z>` or \
+                         a full 40-hex SHA"
+                    )
+                })
+            } else if git_ref.is_empty() || is_branch(git_ref) {
+                Some(format!(
+                    "links sibling `{repo}` at `{git_ref}`; pin a tag or commit SHA, never \
+                     `main`/`master`"
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Every pinning violation in `source` (repo-relative) whose text is `text`.
+/// Pure over its inputs, so the negative controls drive it with synthetic text.
+fn sibling_link_violations(source: &str, text: &str, spec_ref: &str) -> Vec<String> {
+    let markdown = source.ends_with(".md");
+    sibling_links(text, markdown)
+        .into_iter()
+        .filter_map(|l| {
+            sibling_link_problem(&l, markdown, spec_ref)
+                .map(|why| format!("{source} line {}: `{}` {why}", l.line, l.url))
+        })
+        .collect()
+}
+
+/// The `.spec-pin` `ref:` and `repository:` values, parsed the way
+/// `spec_pin_violations` reads the file (column-0 declarations, exactly one each).
+fn spec_pin_ref_and_repo(spec_pin: &str) -> (String, String) {
+    let value = |key: &str, pred: fn(&str) -> bool| {
+        let lines = pin_declarations(spec_pin, key, pred);
+        assert_eq!(
+            lines.len(),
+            1,
+            ".spec-pin must declare `{key}:` exactly once (see spec_pin_violations)"
+        );
+        spec_pin
+            .lines()
+            .nth(lines[0] - 1)
+            .and_then(|l| l.strip_prefix(key))
+            .and_then(|r| r.strip_prefix(": "))
+            .expect("pin_declarations matched this line")
+            .to_string()
+    };
+    (value("ref", is_sha40), value("repository", is_owner_repo))
+}
+
+/// No tracked document links a sibling repository at a moving ref.
+///
+/// Scope: every git-tracked `*.md` minus `LINK_GUARD_EXCLUDED` (its `plans/`
+/// entry also covers the tracked `plans/cross-repo/` notes, its
+/// `crates/*/CHANGELOG.md` entry the generated changelogs), plus tracked
+/// `config/*.toml` and `docker/*` text files. Rules (`docs/README.md`, "Link
+/// convention"): links to THIS repository are free; the spec must be at the
+/// `.spec-pin` ref (or SPEC_DOCS_REF on `docs/` pages); acdp-rs at an
+/// `acdp-v<X.Y.Z>` tag or a full SHA; any other sibling at anything but
+/// `main`/`master`; docs.rs `acdp*` links carry a concrete version; and every
+/// sibling URL in markdown is an inline link.
+///
+/// A `.spec-pin` bump therefore fails this test until the pinned spec links are
+/// re-pointed -- intended; `docs/MAINTAINING.md` ("Spec bumps") gives the
+/// one-line rewrite. No network: an anchor missing at the pinned revision is not
+/// detected here.
+#[test]
+fn sibling_repo_links_are_pinned() {
+    let root = repo_root();
+    let tracked = git_tracked_paths(&root);
+    let spec_pin = std::fs::read_to_string(root.join(".spec-pin")).expect("read .spec-pin");
+    let (spec_ref, spec_repo) = spec_pin_ref_and_repo(&spec_pin);
+    assert_eq!(
+        spec_repo,
+        format!("{ACDP_ORG}/{SPEC_REPO}"),
+        ".spec-pin names a different spec repository than this guard checks"
+    );
+    assert!(is_sha40(SPEC_DOCS_REF), "SPEC_DOCS_REF must be a full SHA");
+
+    let excluded = |p: &str| {
+        LINK_GUARD_EXCLUDED
+            .iter()
+            .any(|(pattern, _)| link_guard_excludes(p, pattern))
+    };
+    let top_level_in = |p: &str, dir: &str| {
+        p.strip_prefix(dir)
+            .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+    };
+    let scope: Vec<&String> = tracked
+        .iter()
+        .filter(|p| {
+            (p.ends_with(".md") && !excluded(p))
+                || (top_level_in(p, "config/") && p.ends_with(".toml"))
+                || top_level_in(p, "docker/")
+        })
+        .collect();
+
+    // Vacuity guard, part 1: named members of the scope, and named non-members.
+    for must in [
+        "README.md",
+        "docs/README.md",
+        "docs/HTTP-API.md",
+        "docker/RAILWAY.md",
+        "config/registry.example.toml",
+        "docker/Dockerfile",
+    ] {
+        assert!(
+            scope.iter().any(|p| p.as_str() == must),
+            "sibling-link scope lost {must}: {scope:?}"
+        );
+    }
+    for p in &scope {
+        assert!(
+            !p.starts_with("plans/") && !link_guard_excludes(p, "crates/*/CHANGELOG.md"),
+            "{p} must stay out of the sibling-link scope"
+        );
+    }
+
+    let mut violations = Vec::new();
+    let mut readme_links = Vec::new();
+    for source in &scope {
+        // `docker/*` is all text today; a binary added there is not a document.
+        let Ok(text) = std::fs::read_to_string(root.join(source.as_str())) else {
+            continue;
+        };
+        if source.as_str() == "docs/README.md" {
+            readme_links = sibling_links(&text, true);
+        }
+        violations.extend(sibling_link_violations(source, &text, &spec_ref));
+    }
+
+    // Violations first: after a spec bump this is the actionable list, and the
+    // vacuity checks below would otherwise fire first with a less useful message.
+    assert!(
+        violations.is_empty(),
+        "sibling-repository links that are not pinned:\n  {}\n\
+         Spec links use the `ref:` in .spec-pin ({spec_ref}); after a spec bump, \
+         re-point them as docs/MAINTAINING.md (\"Spec bumps\") shows. acdp-rs links use \
+         a tag `acdp-v<X.Y.Z>` or a full SHA. See docs/README.md, \"Link convention\".",
+        violations.join("\n  ")
+    );
+
+    // Vacuity guard, part 2: the docs index carries one inline link of each
+    // pinned kind and the scanner SAW each -- an extractor that finds nothing
+    // would otherwise pass every tree.
+    let seen = |pred: &dyn Fn(&SiblingTarget) -> bool| {
+        readme_links
+            .iter()
+            .any(|l| l.form == LinkForm::Inline && pred(&l.target))
+    };
+    assert!(
+        seen(&|t| matches!(t, SiblingTarget::AtRef { repo, git_ref, .. }
+            if repo == SPEC_REPO && *git_ref == spec_ref)),
+        "the scanner found no inline spec link at the .spec-pin ref in docs/README.md: \
+         {readme_links:?}"
+    );
+    assert!(
+        seen(&|t| matches!(t, SiblingTarget::AtRef { repo, git_ref, .. }
+            if repo == SDK_REPO && is_sdk_pin(git_ref))),
+        "the scanner found no inline pinned acdp-rs link in docs/README.md: {readme_links:?}"
+    );
+    assert!(
+        seen(
+            &|t| matches!(t, SiblingTarget::DocsRs { version: Some(v), .. }
+            if is_crate_version(v))
+        ),
+        "the scanner found no versioned docs.rs link in docs/README.md: {readme_links:?}"
+    );
+}
+
+/// The pin guard's matcher on synthetic text: each rule fails alone, and what
+/// is not a link is ignored.
+#[test]
+fn the_sibling_link_guard_rejects_what_it_must_and_ignores_what_it_should() {
+    let pin = "9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd";
+    let gh = "https://github.com/agentcontextdistributionprotocol";
+    let spec = format!("{gh}/agentcontextdistributionprotocol");
+    let sdk = format!("{gh}/acdp-rs");
+    let raw = "https://raw.githubusercontent.com/agentcontextdistributionprotocol";
+    let check = |source: &str, text: &str| sibling_link_violations(source, text, pin);
+
+    let good = [
+        format!("[rfc]({spec}/blob/{pin}/rfcs/RFC-ACDP-0007-errors.md#4-envelope)"),
+        format!("[dir]({spec}/tree/{pin}/registries) and [root]({spec}/tree/{pin})"),
+        format!("[docs]({spec}/blob/{SPEC_DOCS_REF}/docs/overview.md)"),
+        format!("[tag]({sdk}/blob/acdp-v0.14.3/docs/registry.md)"),
+        format!("[sha](<{sdk}/tree/8a888edaa15c4475bbaeccff45567921e3153730/docs>)"),
+        format!("[own]({gh}/acdp-registry-rs/blob/main/README.md)"),
+        format!(
+            "[own raw]({raw}/acdp-registry-rs/main/x.json) see {gh}/acdp-registry-rs/tree/main"
+        ),
+        format!("[issue]({sdk}/issues/1) and [repo]({spec})"),
+        format!("[ci]({gh}/acdp-ci/blob/v1/README.md)"),
+        "[docs.rs/acdp 0.14.3](https://docs.rs/acdp/0.14.3/acdp/) \
+         [sub](https://docs.rs/acdp-client/0.14.3-rc.1/acdp_client/)"
+            .to_string(),
+        "[other](https://docs.rs/serde/latest/serde/) \
+         [gist](https://gist.github.com/agentcontextdistributionprotocol/x/blob/main/y)"
+            .to_string(),
+        format!("in code: `{sdk}/blob/main/docs/x.md` and ``[x]({spec}/blob/main/rfcs)``"),
+        format!("```\n[fenced]({sdk}/blob/main/docs/x.md)\n```"),
+        format!("~~~text\n{spec}/blob/main/rfcs\n~~~"),
+    ];
+    for g in &good {
+        assert_eq!(
+            check("docs/a.md", g),
+            Vec::<String>::new(),
+            "must pass: {g}"
+        );
+    }
+    assert_eq!(
+        sibling_links(&good.join("\n"), true).len(),
+        14,
+        "the scanner must see the 14 sibling/acdp docs.rs URLs above (not serde, not \
+         the gist host, nothing in code): {:?}",
+        sibling_links(&good.join("\n"), true)
+    );
+
+    let bad = [
+        ("blob main", format!("[x]({sdk}/blob/main/docs/x.md)")),
+        ("tree main", format!("[x]({sdk}/tree/main/docs)")),
+        ("raw main", format!("[x]({raw}/acdp-rs/main/docs/x.md)")),
+        ("github raw master", format!("[x]({sdk}/raw/master/x.json)")),
+        (
+            "refs/heads/main",
+            format!("[x]({raw}/acdp-ci/refs/heads/main/x.sh)"),
+        ),
+        (
+            "other sibling main",
+            format!("[x]({gh}/acdp-ci/blob/main/README.md)"),
+        ),
+        (
+            "spec main",
+            format!("[x]({spec}/blob/main/rfcs/RFC-ACDP-0001.md)"),
+        ),
+        (
+            "wrong spec sha",
+            format!("[x]({spec}/blob/0000000000000000000000000000000000000000/rfcs/a.md)"),
+        ),
+        (
+            "short spec sha",
+            format!("[x]({spec}/blob/9deb7e7/rfcs/a.md)"),
+        ),
+        ("spec tag", format!("[x]({spec}/blob/v0.5.0/rfcs/a.md)")),
+        (
+            "SPEC_DOCS_REF outside docs/",
+            format!("[x]({spec}/blob/{SPEC_DOCS_REF}/rfcs/a.md)"),
+        ),
+        (
+            "SPEC_DOCS_REF on the repo root",
+            format!("[x]({spec}/tree/{SPEC_DOCS_REF})"),
+        ),
+        ("sdk main", format!("[x]({sdk}/blob/main/docs/registry.md)")),
+        (
+            "sdk short sha",
+            format!("[x]({sdk}/blob/8a888ed/docs/x.md)"),
+        ),
+        (
+            "sdk bare v-tag",
+            format!("[x]({sdk}/blob/v0.14.3/docs/x.md)"),
+        ),
+        (
+            "reference-style definition",
+            format!("[r]: {sdk}/blob/acdp-v0.14.3/docs/x.md"),
+        ),
+        (
+            "bare url",
+            format!("see {sdk}/blob/acdp-v0.14.3/docs/x.md for more"),
+        ),
+        ("autolink", format!("<{sdk}/blob/acdp-v0.14.3/docs/x.md>")),
+        (
+            "unversioned docs.rs",
+            "[x](https://docs.rs/acdp/)".to_string(),
+        ),
+        (
+            "docs.rs latest",
+            "[x](https://docs.rs/acdp-client/latest/acdp_client/)".to_string(),
+        ),
+        (
+            "docs.rs crate root",
+            "[x](https://docs.rs/acdp)".to_string(),
+        ),
+    ];
+    for (label, b) in &bad {
+        let found = check("docs/a.md", b);
+        assert_eq!(
+            found.len(),
+            1,
+            "{label}: `{b}` must produce exactly one violation, got {found:?}"
+        );
+    }
+
+    // Non-markdown files: refs are checked, the inline-only rule is not, and
+    // there are no code spans -- a backticked URL in a comment still counts.
+    assert_eq!(
+        check(
+            "docker/Dockerfile",
+            &format!("# see {sdk}/blob/acdp-v0.14.3/x")
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        check("config/a.toml", &format!("# see {sdk}/blob/main/x")).len(),
+        1
+    );
+    assert_eq!(
+        check("docker/x.sh", &format!("# `{spec}/blob/main/rfcs`")).len(),
+        1
+    );
+
+    // .spec-pin parsing on the real file's shape: the 64-hex digest is not the ref.
+    let (r, repo) = spec_pin_ref_and_repo(&format!(
+        "# comment\nrepository: {ACDP_ORG}/{SPEC_REPO}\nref: {pin}\n\
+         conformance-digest: rfc6962-sha256:{}\n",
+        "a".repeat(64)
+    ));
+    assert_eq!(r, pin);
+    assert_eq!(repo, format!("{ACDP_ORG}/{SPEC_REPO}"));
+    assert!(is_sdk_pin("acdp-v0.14.3") && !is_sdk_pin("acdp-v0.14") && !is_sdk_pin("main"));
+    assert!(
+        is_crate_version("0.14.3") && !is_crate_version("latest") && !is_crate_version("^0.14")
+    );
+}
