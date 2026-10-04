@@ -133,7 +133,8 @@ Capabilities document. `Cache-Control: public, max-age=300`.
 `supported_did_methods` mirrors `auth.did_methods`; `profiles` mirrors
 `registry.profiles`; `limits` mirrors the `[limits]` config section.
 `supported_signature_algorithms` mirrors nothing — it is fixed by the build
-(`crates/acdp-registry-server/src/main.rs:1187`) and is not configurable.
+(`build_capabilities` in `crates/acdp-registry-server/src/main.rs`) and is
+not configurable.
 
 `acdp_version` is unconditionally `"0.5.0"` (RFC-ACDP-0016 §10 — anchors
 handling has no admin-config gate, so its version claim always wins), but
@@ -658,7 +659,8 @@ Mounted only when `auth.enabled = true`. Full flow and JWT details in
 Body `{ "agent_id": "did:web:..." }` — `did:key:` is accepted here too.
 
 The `agent_id` is checked cheaply **before** any storage work: it must start
-with `did:web:` or `did:key:` and be 9–2048 characters. Anything else is
+with `did:web:` or `did:key:` and be 9–2048 bytes long (UTF-8 bytes, both
+bounds inclusive). Anything else is
 rejected **403 `not_authorized`** (`auth challenge: unsupported DID method:
 …`) without a challenge record being written, so a client mistyping the
 method cannot fill the challenge table.
@@ -690,7 +692,8 @@ Returns an `AuthChallenge`:
 }
 ```
 
-`agent_id` must be a `did:web:` DID (8–2048 bytes). Bounded by
+`agent_id` must be a `did:web:` or `did:key:` DID of 9–2048 bytes (the
+screen above). Bounded by
 `limits.challenge_rate_per_minute` (default 60) per `agent_id` plus a
 process-global ceiling; `429` + `Retry-After` when drained.
 
@@ -882,8 +885,9 @@ top of [Admin](#admin)). The admin bearer authenticates the caller but names
 no agent DID, so under the RFC-ACDP-0008 §4.5 predicate it reaches the
 **public arm only**: `visibility = 'public'` rows are always included, and
 restricted/private rows are never disclosed to this listing — because
-`admin_list` passes `anonymous_public_reads = true` unconditionally
-(`crates/acdp-registry-core/src/handlers/admin.rs:87`), independent of the
+`admin_list` (`crates/acdp-registry-core/src/handlers/admin.rs`) passes
+`public_arm_open = true` to `list_contexts` unconditionally (its local
+`admin_sees_public_arm`), independent of the
 configured `auth.anonymous_public_reads`, which instead governs whether an
 anonymous (no-bearer) caller of `GET /contexts/search` sees public rows. That
 flag is carried on the `CapabilitiesDocument`, and `RegistryServer::search`
@@ -971,7 +975,7 @@ documents only the registry's HTTP-status projection of them.
 | 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*` and lifecycle endpoints when their profiles are not enabled). |
 | 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (also covers SSRF-policy rejection). |
 | 502 | `invalid_witness_cosignature` | A witness cosignature failed verification (RFC-ACDP-0015 §6.1). Like `invalid_log_proof`, a 502 because it is normally another party's artifact that failed. |
-| 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Normally raised when validating an *upstream's* proofs (federation), which is why it is a 502. **It is also reachable from this registry's own `/log/proof`**: for a retrieval-authorized requester the handler echoes the leaf via `record.leaf()` (`crates/acdp-registry-core/src/handlers/log.rs:359`), and a stored leaf that no longer parses under the closed schema surfaces as `invalid_log_proof` from here, not from a peer (`crates/acdp-registry-store/src/log.rs:64`, with the reject cases pinned by that module's own tests). If you see it and you are not federating, suspect your own `log_leaves` table. The other `/log/*` failures are `schema_violation`, `not_found`, or `not_implemented`; there is no `log_unavailable`. |
+| 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Normally raised when validating an *upstream's* proofs (federation), which is why it is a 502. **It is also reachable from this registry's own `/log/proof`**: for a retrieval-authorized requester the handler echoes the leaf via `record.leaf()` (`log_proof` in `crates/acdp-registry-core/src/handlers/log.rs`), and a stored leaf that no longer parses under the closed schema surfaces as `invalid_log_proof` from here, not from a peer (`LogEntryRecord::leaf` in `crates/acdp-registry-store/src/log.rs`, with the reject cases pinned by that module's own tests). If you see it and you are not federating, suspect your own `log_leaves` table. The other `/log/*` failures are `schema_violation`, `not_found`, or `not_implemented`; there is no `log_unavailable`. |
 
 Note: auth failures on the ACDP routes surface as `403 not_authorized`, not
 `401`, and carry no `WWW-Authenticate` challenge. `/admin/*` likewise answers

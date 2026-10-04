@@ -1,10 +1,10 @@
 # CI-only overlay stacked on top of `docker-compose.yml` + `compose.ci.yml`.
 #
-# Enables auth so CI reaches `validate_config`'s auth-gated branch
-# (`crates/acdp-registry-server/src/main.rs:129-142`). The shipped recipe runs
-# `auth.enabled = false` (`config.docker.toml`), so without this overlay that
-# branch, and the HS256 empty-secret refusal inside it, are never executed by any
-# check in this repo's CI.
+# Enables auth so CI reaches `validate_config`'s `auth.enabled`-gated checks
+# (`crates/acdp-registry-server/src/main.rs`): the signing-algorithm match and
+# the HS256 empty-secret refusal. The shipped recipe runs `auth.enabled = false`
+# (`config.docker.toml`), so without this overlay those checks are never
+# executed by any check in this repo's CI.
 #
 # ── Why this overlay still exists after #271 ──
 #

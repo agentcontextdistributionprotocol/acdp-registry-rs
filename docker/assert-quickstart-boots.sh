@@ -13,8 +13,8 @@
 #
 # That gap is not hypothetical. W3-U5 existed because the quickstart did not
 # boot: `docker-compose.yml` shipped `ACDP_REGISTRY_AUTH__JWT_SECRET=changeme`,
-# and `validate_config` rejects that placeholder by name
-# (`crates/acdp-registry-server/src/main.rs:166`), so the stack exited rc=1
+# and `validate_config` rejects that placeholder by name (its `changeme`
+# literal guard, `crates/acdp-registry-server/src/main.rs`), so the stack exited rc=1
 # before serving a request. The defect lived in the one file CI never opened,
 # which is why users hit it first. Fixed in `abfebf7`; nothing guarded it.
 #
@@ -26,10 +26,10 @@
 #
 #   --check            boot the recipe exactly as shipped; must come up healthy.
 #   --check-auth-on    boot it with auth enabled and a real generated secret;
-#                      must come up healthy. `validate_config` gates a separate
-#                      branch on `auth.enabled` (main.rs:108), so the shipped
-#                      auth-off default exercises neither that branch nor the
-#                      HS256 empty-secret refusal beside it.
+#                      must come up healthy. `validate_config` gates checks
+#                      on `auth.enabled` (the signing-algorithm match and the
+#                      HS256 empty-secret refusal), so the shipped auth-off
+#                      default exercises neither.
 #   --self-test        NEGATIVE CONTROLS. Each one asserts the stack REFUSES.
 #                      Without these, `--check` passing means nothing: a boot
 #                      check that cannot fail is decorative. Mirrors the
@@ -118,7 +118,7 @@ This is the W3-U5 class of defect: the recipe the README tells operators to run 
     secret="${ACDP_REGISTRY_JWT_SECRET:-$(openssl rand -base64 32)}"
     COMPOSE=("${AUTH_ON[@]}")
     boot "ACDP_REGISTRY_JWT_SECRET=$secret" || fail "the recipe does not boot with auth enabled and a valid secret. \
-validate_config's auth.enabled branch (main.rs:108) rejected a configuration that should be accepted."
+validate_config's auth.enabled-gated checks rejected a configuration that should be accepted."
     echo "    healthy: $(cat /tmp/acdpqs-health.json)"
     echo "    OK"
     ;;
@@ -135,7 +135,7 @@ validate_config's auth.enabled branch (main.rs:108) rejected a configuration tha
     (
         if boot "ACDP_REGISTRY_JWT_SECRET=changeme"; then
             echo "::error::the stack booted with the 'changeme' placeholder; \
-validate_config's literal guard (main.rs:166) is not reached through the compose recipe"
+validate_config's 'changeme' literal guard is not reached through the compose recipe"
             exit 1
         fi
         registry_logs | grep -qi "changeme" \
@@ -144,7 +144,8 @@ the negative control is passing for the wrong cause"; registry_logs | sed 's/^/ 
         echo "    correctly refused, and the log names the placeholder"
     ) || rc=1
 
-    # (2) Auth on with an EMPTY secret must refuse (main.rs:129-142). Distinct
+    # (2) Auth on with an EMPTY secret must refuse (validate_config's HS256
+    #     empty-secret refusal). Distinct
     #     from (1): that one is the ungated non-empty check, this one is the
     #     auth.enabled-gated empty check. One passing does not imply the other.
     echo "--> (2) auth enabled with an empty secret must refuse to boot"

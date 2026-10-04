@@ -211,8 +211,9 @@ enabled = false
 # NOTE on acdp_version: enabling this does NOT move the advertised
 # `acdp_version`. Since RFC-ACDP-0016 (anchors) the registry folds an
 # UNCONDITIONAL 0.5.0 claim into the max()-over-claims in
-# `acdp_version_claim` (main.rs:1144,1154), so /.well-known/acdp.json
-# advertises 0.5.0 regardless of which features are on. "ACDP 0.2.0" above
+# `acdp_version_claim` (its `ANCHORS_VERSION_CLAIM`, in the server's main.rs),
+# so /.well-known/acdp.json advertises 0.5.0 regardless of which features are
+# on. "ACDP 0.2.0" above
 # is the protocol level this FEATURE belongs to, not what gets served.
 #
 # Exactly one key source. Generate a seed with: openssl rand -base64 32

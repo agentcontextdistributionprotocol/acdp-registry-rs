@@ -55,11 +55,14 @@ binary on top.
 `ExtendedRegistryStore: acdp::registry::RegistryStore + Send + Sync` adds, on
 top of the upstream sync trait:
 
-- `list_contexts(limit, cursor, requester, tenant, anonymous_public_reads) ->
+- `list_contexts(limit, cursor, requester, tenant, public_arm_open) ->
   Page<FullContext>` — visibility-filtered, tenant-scoped admin/debug
-  pagination; `anonymous_public_reads` gates whether an anonymous
-  (`requester = None`) caller sees `public` rows, the same RFC-ACDP-0008
-  §4.5 term `search` already honors.
+  pagination; `public_arm_open` gates whether a `requester = None` caller
+  sees `public` rows, the same RFC-ACDP-0008 §4.5 term `search` already
+  honors. It is the predicate's input, not the config flag: the caller
+  derives it. The only production caller, `admin_list`, passes `true` (an
+  admin bearer is authenticated); `search` instead derives the term from the
+  capabilities' `anonymous_public_reads`.
 - `health()` — ping the backend (drives `/healthz`).
 - `migrate()` — apply pending migrations at startup.
 - Tenant binding — `set_tenant_of_ctx` / `tenant_of_ctx` / `tenants_of_ctxs`,

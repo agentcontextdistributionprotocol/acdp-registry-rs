@@ -18,6 +18,28 @@ use crate::jwt::JwtSigner;
 use crate::revocation_store::{RevocationRecord, RevocationStore};
 use crate::AuthError;
 
+/// DID-method prefixes `issue_challenge`'s cheap pre-storage screen accepts.
+/// Full DID parsing and the `auth.did_methods` gate run later, at token issue.
+pub const CHALLENGE_DID_PREFIXES: [&str; 2] = ["did:web:", "did:key:"];
+
+/// Shortest `agent_id` `issue_challenge` accepts, in BYTES (inclusive): a
+/// method prefix plus at least one byte of method-specific id.
+pub const CHALLENGE_AGENT_ID_MIN_BYTES: usize = 9;
+
+/// Longest `agent_id` `issue_challenge` accepts, in BYTES (inclusive) — a
+/// `str::len`, so a multi-byte character counts once per UTF-8 byte.
+pub const CHALLENGE_AGENT_ID_MAX_BYTES: usize = 2048;
+
+// One minimum covers every prefix only while they share a length; adding a
+// prefix of another length must revisit the bound rather than inherit it.
+const _: () = {
+    let mut i = 0;
+    while i < CHALLENGE_DID_PREFIXES.len() {
+        assert!(CHALLENGE_DID_PREFIXES[i].len() + 1 == CHALLENGE_AGENT_ID_MIN_BYTES);
+        i += 1;
+    }
+};
+
 /// Bundles configuration + challenge store + JWT signer + DID resolver.
 pub struct AuthService {
     pub config: AuthConfig,
@@ -63,13 +85,17 @@ impl AuthService {
     /// runs before any storage work — full DID parsing (and, for did:key,
     /// the `auth.did_methods` capability gate) still happens on
     /// `issue_token`. Without this the challenge table fills with garbage
-    /// from clients that mistype the DID method. `did:web` and `did:key`
-    /// share a prefix length (8 chars), so one length bound covers both.
+    /// from clients that mistype the DID method. Bounds are
+    /// [`CHALLENGE_DID_PREFIXES`], [`CHALLENGE_AGENT_ID_MIN_BYTES`] and
+    /// [`CHALLENGE_AGENT_ID_MAX_BYTES`] (docs/HTTP-API.md states them and a
+    /// conformance-gate test keeps the two in step).
     #[tracing::instrument(skip(self), fields(agent = %agent_id))]
     pub async fn issue_challenge(&self, agent_id: &str) -> Result<AuthChallenge, AuthError> {
-        if !(agent_id.starts_with("did:web:") || agent_id.starts_with("did:key:"))
-            || agent_id.len() < "did:web:".len() + 1
-            || agent_id.len() > 2048
+        if !CHALLENGE_DID_PREFIXES
+            .iter()
+            .any(|p| agent_id.starts_with(p))
+            || agent_id.len() < CHALLENGE_AGENT_ID_MIN_BYTES
+            || agent_id.len() > CHALLENGE_AGENT_ID_MAX_BYTES
         {
             return Err(AuthError::UnsupportedDidMethod(agent_id.to_string()));
         }
@@ -652,6 +678,33 @@ mod tests {
         let huge = format!("did:web:{}", "a".repeat(2050));
         assert!(matches!(
             svc.issue_challenge(&huge).await.unwrap_err(),
+            AuthError::UnsupportedDidMethod(_)
+        ));
+    }
+
+    /// The bounds docs/HTTP-API.md states are inclusive and counted in bytes.
+    #[tokio::test]
+    async fn issue_challenge_bounds_are_inclusive_byte_lengths() {
+        let svc = bare_service();
+        let did_of_len = |n: usize| format!("did:web:{}", "a".repeat(n - "did:web:".len()));
+        for (len, ok) in [
+            (CHALLENGE_AGENT_ID_MIN_BYTES - 1, false),
+            (CHALLENGE_AGENT_ID_MIN_BYTES, true),
+            (CHALLENGE_AGENT_ID_MAX_BYTES, true),
+            (CHALLENGE_AGENT_ID_MAX_BYTES + 1, false),
+        ] {
+            assert_eq!(
+                svc.issue_challenge(&did_of_len(len)).await.is_ok(),
+                ok,
+                "agent_id of {len} bytes"
+            );
+        }
+        // Bytes, not characters: MAX - 1 characters, MAX + 1 bytes.
+        let multibyte = format!("{}é", did_of_len(CHALLENGE_AGENT_ID_MAX_BYTES - 1));
+        assert_eq!(multibyte.chars().count(), CHALLENGE_AGENT_ID_MAX_BYTES);
+        assert_eq!(multibyte.len(), CHALLENGE_AGENT_ID_MAX_BYTES + 1);
+        assert!(matches!(
+            svc.issue_challenge(&multibyte).await.unwrap_err(),
             AuthError::UnsupportedDidMethod(_)
         ));
     }

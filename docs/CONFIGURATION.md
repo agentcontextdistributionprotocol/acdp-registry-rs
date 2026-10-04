@@ -394,11 +394,17 @@ List **only** proxies you operate; a wrong entry is a spoofing hole. CIDRs are
 validated at startup — a malformed entry fails the boot rather than silently
 disabling XFF trust.
 
-> Same per-process, in-memory caveat as `[limits]`. Behind a load balancer with
-> `trusted_proxies` set, each replica limits per real client IP; the
-> `global_per_minute` ceiling is per replica. Requests are admitted or rejected
-> *before* any DID resolution, so the SSRF/DNS path never runs for a throttled
-> request.
+> Which ceilings are per replica depends on `backend`. With the default
+> `backend = "memory"` this is the same per-process, in-memory caveat as
+> `[limits]`: behind a load balancer with `trusted_proxies` set, each replica
+> limits per real client IP, and both `per_ip_per_minute` and
+> `global_per_minute` are per replica. With `backend = "postgres"` both are
+> counted once across every replica sharing the database (see **Shared
+> backend** above) — except while the database cannot answer and
+> `backend_unavailable = "allow"`, when they fall back to per-replica counting.
+> The `[limits]` per-agent budgets stay per-process under either backend.
+> Requests are admitted or rejected *before* any DID resolution, so the
+> SSRF/DNS path never runs for a throttled request.
 
 ### `[metrics]` *(FEAT-10)*
 
@@ -435,12 +441,14 @@ itself is **not** feature-gated: the publish handler's DID-signature bypass
 `playground_snapshot.enabled` branch) is a plain runtime `if`, compiled into
 every build including a stock release binary with default features.
 `did:key` producers are checked before this branch, unconditionally, through
-acdp's offline verifier (the `starts_with("did:key:")` branch,
-`context.rs:421`; rationale in the comment at `:422-428`) — a
+acdp's offline verifier (the `starts_with("did:key:")` branch of
+`publish_inner` in `context.rs`; rationale in the comment that opens that
+branch) — a
 `did:key` identity is self-verifying by construction, so `[playground]` never
 affects how a `did:key` publish is authorized. Pinned agents
 (`[[playground.pinned_keys]]`) are cryptographically verified inside the
-playground branch itself (`context.rs:457-464`); the skip applies only to
+playground branch itself (`crate::playground::enforce_pinned_signature`,
+called at the top of that branch); the skip applies only to
 publishes from non-`did:key` agents that aren't pinned.
 
 | Key | Type | Default | Notes |
@@ -509,8 +517,10 @@ enabled emits neither `lifecycle_events` nor the `retracted` status.
 **Disabling the flag does not retract what a previous enablement recorded.**
 The stores attach `registry_state.lifecycle_events` and derive the `retracted`
 status from stored columns unconditionally — there is no `lifecycle.enabled`
-check anywhere in either store (`crates/acdp-registry-sqlite/src/store.rs:489`
-and `:515`; the `retracted` column is selected on every read path). So a
+check anywhere in either store (`get` and `lineage` in
+`crates/acdp-registry-sqlite/src/store.rs` and their counterparts in
+`crates/acdp-registry-pg/src/store.rs` attach the events whenever any exist;
+the `retracted` column is selected on every read path). So a
 registry that enabled lifecycle, accumulated events, then disabled the profile
 keeps serving both while advertising neither and answering `501` on the
 lifecycle endpoints. If you need the emission to stop, the events have to go —
