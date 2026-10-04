@@ -376,7 +376,9 @@ count are updated by hand — the steps are in
 
 Docs that link into the spec repository at the pinned revision must be re-pointed to the
 new `ref:` in the same bump PR. `sibling_repo_links_are_pinned` (in `conformance_gate.rs`)
-requires every spec link's ref to equal the `ref:` in `.spec-pin`, so a bump PR also
+requires every spec link's ref to equal the `ref:` in `.spec-pin` (the one exception is
+`SPEC_DOCS_REF` in that test, for links under the spec's `docs/` directory, which is
+updated by hand), so a bump PR also
 fails the `tests` and `conformance (spec fixtures)` jobs — listing each stale link —
 until they are re-pointed. From the
 bump branch, with `origin/main` still at the old pin:
@@ -384,6 +386,7 @@ bump branch, with `origin/main` still at the old pin:
 ```sh
 old=$(git show origin/main:.spec-pin | sed -n 's/^ref: //p')
 new=$(sed -n 's/^ref: //p' .spec-pin)
+[ -n "$old" ] && [ -n "$new" ] || { echo "could not read the old or new ref"; exit 1; }
 git grep -lE "agentcontextdistributionprotocol/agentcontextdistributionprotocol/(blob|tree|raw)/$old" \
   -- '*.md' 'config/*.toml' 'docker/*' ':!plans' ':!crates/*/CHANGELOG.md' \
      ':!DECISIONS.md' ':!ASSUMPTIONS.md' ':!docs/ENGINEERING-LOG.md' \
