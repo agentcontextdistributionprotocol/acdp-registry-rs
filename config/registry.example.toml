@@ -1,7 +1,19 @@
-# acdp-registry-rs configuration example.
+# acdp-registry-rs configuration example — a PRODUCTION-SHAPED template.
 #
-# Load with: ACDP_REGISTRY_CONFIG=./config/registry.example.toml acdp-registry
-# or set the same fields via env vars: ACDP_REGISTRY_<SECTION>__<FIELD>.
+# auth.enabled = true with an empty jwt_secret and allow_ephemeral_secret =
+# false, so it REFUSES TO BOOT until a secret is supplied. Load it with
+# (from the repo root; or swap `acdp-registry` for
+# `cargo run -p acdp-registry-server`):
+#
+#   ACDP_REGISTRY_CONFIG=./config/registry.example.toml \
+#   ACDP_REGISTRY_AUTH__JWT_SECRET="$(openssl rand -base64 32)" \
+#       acdp-registry
+#
+# Without the secret it exits 1 naming ACDP_REGISTRY_AUTH__JWT_SECRET. The
+# secret deliberately is not a `${VAR}` placeholder here: the config loader
+# does not substitute variables, so one would be read as a literal (invalid)
+# base64 string. Any field can be overridden the same way:
+# ACDP_REGISTRY_<SECTION>__<FIELD>.
 
 [registry]
 # Bare DNS hostname. Used to mint `ctx_id` and as the `did:web` registry id.
@@ -67,9 +79,10 @@ token_ttl_seconds    = 3600
 challenge_ttl_seconds = 300
 # Clock-skew leeway applied to JWT exp validation.
 token_leeway_seconds = 30
-# CLAUDE.md: anonymous reads are off by default. Opt in explicitly when
-# the registry hosts world-readable public contexts (developer registries,
-# discovery hubs).
+# Anonymous reads are off by default (built-in default false; see
+# docs/CONFIGURATION.md, [auth]). This template opts in explicitly, as you
+# should when the registry hosts world-readable public contexts (developer
+# registries, discovery hubs).
 anonymous_public_reads = true
 # Enforce tenant scoping on every authenticated request. Default false keeps
 # V0 behavior (a request that asserts no tenant runs with the tenant filter
@@ -198,8 +211,9 @@ enabled = false
 # NOTE on acdp_version: enabling this does NOT move the advertised
 # `acdp_version`. Since RFC-ACDP-0016 (anchors) the registry folds an
 # UNCONDITIONAL 0.5.0 claim into the max()-over-claims in
-# `acdp_version_claim` (main.rs:1144,1154), so /.well-known/acdp.json
-# advertises 0.5.0 regardless of which features are on. "ACDP 0.2.0" above
+# `acdp_version_claim` (its `ANCHORS_VERSION_CLAIM`, in the server's main.rs),
+# so /.well-known/acdp.json advertises 0.5.0 regardless of which features are
+# on. "ACDP 0.2.0" above
 # is the protocol level this FEATURE belongs to, not what gets served.
 #
 # Exactly one key source. Generate a seed with: openssl rand -base64 32

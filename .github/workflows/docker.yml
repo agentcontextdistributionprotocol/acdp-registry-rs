@@ -274,8 +274,8 @@ jobs:
       #
       # That distinction is the whole reason these steps exist. W3-U5 happened
       # because the compose file shipped `ACDP_REGISTRY_AUTH__JWT_SECRET=changeme`;
-      # `validate_config` rejects that placeholder by name
-      # (`crates/acdp-registry-server/src/main.rs:166`), so the quickstart exited
+      # `validate_config` rejects that placeholder by name (its `changeme`
+      # literal guard, `crates/acdp-registry-server/src/main.rs`), so the quickstart exited
       # rc=1 before serving a request. The defect lived in the one file CI never
       # read, which is why a user hit it before CI did. Fixed in `abfebf7` with
       # nothing guarding it since.
@@ -289,8 +289,8 @@ jobs:
         run: bash docker/assert-quickstart-boots.sh --check
 
       # The shipped recipe runs `auth.enabled = false`, so the step above
-      # exercises neither `validate_config`'s auth-gated branch (main.rs:108)
-      # nor the HS256 empty-secret refusal beside it. Boot it again the way the
+      # exercises neither of `validate_config`'s `auth.enabled`-gated checks
+      # (the signing-algorithm match, the HS256 empty-secret refusal). Boot it again the way the
       # compose file's own header documents overriding the secret.
       #
       # The secret is generated HERE rather than inside the script so that the

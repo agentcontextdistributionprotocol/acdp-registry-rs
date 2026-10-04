@@ -126,7 +126,8 @@ no-store`: `/auth/*`, the `/admin/*` routes, and `/healthz` (on the degraded
 arm as well as the healthy one — a cached "ok" masks an outage).
 
 The three `/.well-known/*` documents keep `public, max-age=300`
-(`crates/acdp-registry-core/src/handlers/meta.rs:74`, `:95`, `:143`). None of
+(`capabilities`, `registry_did_document` and `jwks` in
+`crates/acdp-registry-core/src/handlers/meta.rs`). None of
 them is requester-relative, and `every_well_known_document_keeps_public_caching`
 pins all three against a downgrade. (`/.well-known/did.json` exists only when a
 receipt key is configured; its **404 arm answers `no-store`** — a cached 404

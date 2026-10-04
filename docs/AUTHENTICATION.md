@@ -272,7 +272,9 @@ constant-time comparison against a configured shared secret, via the same
 
 The gate is applied only when `metrics.bearer_token` is non-blank
 (`crates/acdp-registry-core/src/metrics.rs`); the configured value and
-the presented one are both trimmed before comparison (`:122`, `:128`). Three
+the presented one are both trimmed before comparison (the configured token's
+`.trim()` and the `.map(str::trim)` on the presented bearer, both in the
+`metrics_endpoint` handler). Three
 consequences follow, and they are the ones that surprise people:
 
 - **An empty `metrics.bearer_token` leaves `/metrics` open**, to anyone who can

@@ -7,24 +7,27 @@ every `acdp-registry-server/v*` release tag:
 ```
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:latest        # tip of main
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:main          # tip of main
-ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1.0         # a release tag, leading `v` stripped
-ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1           # rolling major.minor
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.2.0         # a release tag, leading `v` stripped
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.2           # rolling major.minor
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every push to main
 ```
 
 > **`:latest` tracks the tip of `main`, not the last release.** Pin a version tag
-> (`:0.1.0`, or `:0.1` to follow patches) for anything you care about keeping
+> (`:0.2.0`, or `:0.2` to follow patches) for anything you care about keeping
 > stable: `:latest` moves on every merge to `main`, a version tag does not.
 > Both version tags above are **real and pullable** — the release pipeline
-> published its first one on 2026-09-10. They are no longer illustrative.
-> The GitHub Release corresponding to `:0.1.0` is
-> [`acdp-registry-server/v0.1.0`](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/releases/tag/acdp-registry-server%2Fv0.1.0)
-> (slash namespace). The older hyphen-named `acdp-registry-server-v0.1.0`
-> Release is a June 2026 baseline, built 124 commits earlier, and does **not**
-> describe this image.
+> published its first one on 2026-09-10, and the version shown is from the
+> current minor line (a conformance-gate test keeps the major.minor of every
+> version tag on this page in step with the workspace version; a patch release
+> does not update the page). The GitHub Release for an image tag `:X.Y.Z` is
+> `acdp-registry-server/vX.Y.Z` (slash namespace) — for the one above,
+> [`acdp-registry-server/v0.2.0`](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/releases/tag/acdp-registry-server%2Fv0.2.0).
+> The older hyphen-named `acdp-registry-server-v0.1.0` Release is a June 2026
+> baseline, built 124 commits before the slash-namespaced v0.1.0, and does
+> **not** describe any of the images above.
 
 > **Which tag to deploy, and what it guarantees.** Deploy a **version tag** —
-> `:0.1` to follow patches within a minor, or an exact `:0.1.3` to pin one
+> `:0.2` to follow patches within a minor, or an exact `:0.2.0` to pin one
 > release. That image is the artifact built from the release tag, and it is the
 > only one whose `org.opencontainers.image.version` label names the release it
 > is. Deploy `:latest` or `:main` only when you deliberately want the tip of
@@ -65,7 +68,7 @@ ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every pus
 > tag both build the same commit, and the two images differ *deterministically*:
 > the build metadata stamps `org.opencontainers.image.version` as `main` in one
 > and as the version in the other, and each build carries its own provenance
-> attestation. So `:0.1.3` and `:latest` can report different digests for one
+> attestation. So `:0.2.0` and `:latest` can report different digests for one
 > commit with nothing wrong — the release image is the one that knows it is a
 > release, which is why it is built rather than retagged. To confirm two tags
 > came from the same source, compare `org.opencontainers.image.revision`, which
@@ -94,9 +97,9 @@ Railway needs to pull from GHCR. Either:
 ## Creating the Railway service (later)
 
 1. New Project → **Deploy from a Docker image**.
-2. Image: `ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.1` — a
+2. Image: `ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.2` — a
    version tag is the right default for anything you care about keeping stable,
-   and the image tag carries no leading `v`. Pin an exact patch (`:0.1.3`) to
+   and the image tag carries no leading `v`. Pin an exact patch (`:0.2.0`) to
    stop even patch releases from moving under you; use `:latest` only if you
    deliberately want the tip of `main`, per the tag guidance above.
 3. Add a **PostgreSQL** plugin (the image is built with `STORAGE_FEATURE=storage-pg`).

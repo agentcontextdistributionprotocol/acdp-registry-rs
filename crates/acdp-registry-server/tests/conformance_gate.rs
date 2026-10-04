@@ -2450,3 +2450,395 @@ fn each_classifier_wiring_invariant_is_individually_falsified() {
         );
     }
 }
+
+// ---- D3 (hardening-remaining Phase 8): doc-truth guards --------------------
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf()
+}
+
+/// Every line-number citation in `text`, as `"<lineno>: <line>"`: a
+/// `<file>.rs:<digits>` pin, or a bare continuation pin `` `:<digits>` `` (the
+/// "(`:122`, `:128`)" form that cites lines of a file named earlier in the
+/// sentence). A continuation pin is all digits up to the closing backtick, so a
+/// version-shaped image tag (`` `:0.2` ``, `` `:0.2.0` ``) or `` `:latest` `` is
+/// not one. A port must be written with its host (`localhost:8080`), not bare.
+fn rs_line_pins(text: &str) -> Vec<String> {
+    let continuation_pin = |tail: &str| {
+        let digits = tail.chars().take_while(char::is_ascii_digit).count();
+        digits > 0 && tail[digits..].starts_with('`')
+    };
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            l.split(".rs:")
+                .skip(1)
+                .any(|tail| tail.starts_with(|c: char| c.is_ascii_digit()))
+                || l.split("`:").skip(1).any(continuation_pin)
+        })
+        .map(|(i, l)| format!("{}: {}", i + 1, l.trim()))
+        .collect()
+}
+
+/// Operator-facing files that may cite source, but never by line number.
+/// Excluded on purpose: `docs/ENGINEERING-LOG.md` (a dated narrative whose
+/// citations describe the tree AS IT WAS when each entry was written) and
+/// `docs/MUTATION-SCOPE-CANDIDATES.md` (a point-in-time mutation-testing
+/// survey that pins the lines its survivors were found on).
+fn line_pin_scope(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    const EXCLUDED: [&str; 2] = ["ENGINEERING-LOG.md", "MUTATION-SCOPE-CANDIDATES.md"];
+    let list = |dir: &str| -> Vec<std::path::PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(root.join(dir))
+            .unwrap_or_else(|e| panic!("read_dir {dir}: {e}"))
+            .map(|e| e.expect("dir entry").path())
+            .filter(|p| p.is_file())
+            .collect();
+        v.sort();
+        v
+    };
+    let mut files = vec![root.join("README.md")];
+    files.extend(list("docs").into_iter().filter(|p| {
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        name.ends_with(".md") && !EXCLUDED.contains(&name.as_str())
+    }));
+    files.extend(
+        list("config")
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "toml")),
+    );
+    files.extend(list("docker"));
+    files
+}
+
+/// D3 guard (a). `file.rs:N` citations in operator-facing text rotted
+/// repeatedly: Phase 8 of the hardening plan found 17 of them, several pointing
+/// at unrelated code after ordinary edits (`main.rs:1187` for
+/// `supported_signature_algorithms`, which had moved ~140 lines). Cite the
+/// symbol instead — a renamed symbol fails a grep, a moved line fails nothing.
+/// Same rule `authentication_doc_cites_symbols_that_exist_and_never_line_numbers`
+/// enforces for AUTHENTICATION.md, widened to every operator-facing file.
+///
+/// Also scans `::error::` lines in tracked `.github/` files (their text is what
+/// a CI reader acts on). LIMIT, stated: an `::error::` message continued onto a
+/// second line is checked only on its first; `docker/` scripts are scanned
+/// whole, so the gap is `.github/` only. Plain `.github/` comments are out of
+/// scope.
+#[test]
+fn operator_docs_never_cite_source_by_line_number() {
+    let root = repo_root();
+    let files = line_pin_scope(&root);
+    // Vacuity guard: the scope must include the files the drift was found in,
+    // or a broken directory listing would pass everything.
+    for must in [
+        "README.md",
+        "docs/HTTP-API.md",
+        "docs/CONFIGURATION.md",
+        "docs/OPERATIONS.md",
+        "config/registry.example.toml",
+        "docker/RAILWAY.md",
+        "docker/assert-quickstart-boots.sh",
+        "docker/compose.ci-auth-on.yml",
+    ] {
+        assert!(
+            files.contains(&root.join(must)),
+            "line-pin scope lost {must}: {files:?}"
+        );
+    }
+    assert!(
+        !files.iter().any(|p| p.ends_with("docs/ENGINEERING-LOG.md")),
+        "the historical log must stay out of scope"
+    );
+
+    let mut found = Vec::new();
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        for pin in rs_line_pins(&text) {
+            found.push(format!(
+                "{}:{pin}",
+                f.strip_prefix(&root).unwrap().display()
+            ));
+        }
+    }
+    let gh: Vec<String> = git_tracked_paths(&root)
+        .into_iter()
+        .filter(|p| p.starts_with(".github/"))
+        .collect();
+    assert!(
+        gh.iter().any(|p| p == ".github/workflows/docker.yml"),
+        "git ls-files returned no .github workflows: {gh:?}"
+    );
+    for p in gh {
+        let Ok(text) = std::fs::read_to_string(root.join(&p)) else {
+            continue;
+        };
+        for line in text.lines().filter(|l| l.contains("::error::")) {
+            if !rs_line_pins(line).is_empty() {
+                found.push(format!("{p}: {}", line.trim()));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "operator-facing text cites source by line number:\n  {}\n\
+         Line pins rot silently on unrelated edits. Cite the function, constant or \
+         test by name instead (e.g. `build_capabilities` in \
+         `crates/acdp-registry-server/src/main.rs`).",
+        found.join("\n  ")
+    );
+
+    // Negative control for the matcher itself.
+    assert_eq!(
+        rs_line_pins("see `main.rs:1187` here\nno pin in `main.rs`\n").len(),
+        1
+    );
+    // Continuation pins are caught; version tags, `:latest` and `::error::` are not.
+    assert_eq!(
+        rs_line_pins(
+            "trimmed before comparison (`:122`, `:128`).\n\
+             pin `:0.2.0`, or `:0.2`, never `:latest`\n\
+             echo \"`::error::` text\"\n\
+             at `:7`\n"
+        ),
+        vec![
+            "1: trimmed before comparison (`:122`, `:128`).".to_string(),
+            "4: at `:7`".to_string(),
+        ]
+    );
+}
+
+/// D3 guard (b). `docker/RAILWAY.md` told operators to deploy `:0.1` after
+/// 0.2.0 shipped. Every image version tag on the page must share the
+/// major.minor of the server crate (= the workspace version, which release-plz
+/// tags as `acdp-registry-server/v<version>` and docker.yml turns into the
+/// image tags). Compared at major.minor so a patch release does not redden the
+/// release PR; a minor bump (a breaking 0.x release) must update the page.
+#[test]
+fn railway_image_tags_track_the_workspace_version() {
+    let root = repo_root();
+    let version = env!("CARGO_PKG_VERSION");
+    let mm: String = version.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+    let doc = std::fs::read_to_string(root.join("docker/RAILWAY.md")).expect("read RAILWAY.md");
+
+    let tags = railway_version_tags(&doc);
+    assert!(
+        tags.len() >= 4,
+        "found only {} version tags in docker/RAILWAY.md ({tags:?}); the scanner \
+         or the page changed shape",
+        tags.len()
+    );
+    let stale: Vec<&String> = tags
+        .iter()
+        .filter(|t| t.as_str() != mm && !t.starts_with(&format!("{mm}.")))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "docker/RAILWAY.md names image tags {stale:?}, but the server is {version}: \
+         operators following the page would deploy an old minor. Update every \
+         version tag on the page to {mm} / {mm}.<patch>."
+    );
+    assert!(
+        doc.contains(&format!("acdp-registry:{mm}` — a")),
+        "the recommended Railway image (`…/acdp-registry:{mm}`) is missing from the \
+         'Creating the Railway service' steps"
+    );
+
+    // Negative control: the pre-fix page shape is caught.
+    assert_eq!(
+        railway_version_tags("img `acdp-registry:0.1` or (`:0.1.3`) and `:latest`"),
+        vec!["0.1".to_string(), "0.1.3".to_string()]
+    );
+}
+
+/// Version-shaped image tags: `acdp-registry:<v>` and inline `` `:<v>` ``.
+fn railway_version_tags(doc: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for marker in ["acdp-registry:", "`:"] {
+        for (i, _) in doc.match_indices(marker) {
+            let v: String = doc[i + marker.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            let v = v.trim_end_matches('.').to_string();
+            if v.contains('.') && v.starts_with(|c: char| c.is_ascii_digit()) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// Read `pub const <name>: usize = <n>;` from a source string.
+fn usize_const(src: &str, name: &str, origin: &str) -> usize {
+    let decl = format!("pub const {name}: usize = ");
+    let at = src.find(&decl).unwrap_or_else(|| {
+        panic!("`{decl}` not found in {origin}; the guard can no longer read the bound")
+    });
+    src[at + decl.len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|e| panic!("{name} in {origin} is not a usize literal: {e}"))
+}
+
+/// `<a>–<b> <unit>` (en dash or hyphen) occurrences.
+fn numeric_ranges(text: &str) -> Vec<(usize, usize, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let digits_end = |mut k: usize| {
+        while k < chars.len() && chars[k].is_ascii_digit() {
+            k += 1;
+        }
+        k
+    };
+    let num =
+        |a: usize, b: usize| -> usize { chars[a..b].iter().collect::<String>().parse().unwrap() };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let starts_number =
+            chars[i].is_ascii_digit() && (i == 0 || !chars[i - 1].is_ascii_alphanumeric());
+        if !starts_number {
+            i += 1;
+            continue;
+        }
+        let e1 = digits_end(i);
+        let is_range = e1 + 1 < chars.len()
+            && (chars[e1] == '–' || chars[e1] == '-')
+            && chars[e1 + 1].is_ascii_digit();
+        if !is_range {
+            i = e1;
+            continue;
+        }
+        let e2 = digits_end(e1 + 1);
+        let unit: String = chars[e2..]
+            .iter()
+            .skip_while(|c| **c == ' ')
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
+        out.push((num(i, e1), num(e1 + 1, e2), unit));
+        i = e2;
+    }
+    out
+}
+
+/// The body of the `### <heading>` section of `doc` (up to the next `### `).
+fn h3_section<'a>(doc: &'a str, heading: &str, origin: &str) -> &'a str {
+    let start = doc
+        .find(heading)
+        .unwrap_or_else(|| panic!("{origin} lost its {heading} section"));
+    let body = &doc[start + heading.len()..];
+    &body[..body.find("\n### ").unwrap_or(body.len())]
+}
+
+/// D3 guard (c). HTTP-API.md said the challenge `agent_id` "must be a
+/// `did:web:` DID (8–2048 bytes)" while the code accepted did:web OR did:key of
+/// 9–2048 bytes. The bounds now live in named constants in
+/// `acdp-registry-auth`'s `service.rs`; every range stated in the
+/// `POST /auth/challenge` section must equal them, in bytes, and the section
+/// must name every accepted prefix.
+#[test]
+fn challenge_did_bounds_in_http_api_match_the_constants() {
+    let root = repo_root();
+    let origin = "crates/acdp-registry-auth/src/service.rs";
+    let src = std::fs::read_to_string(root.join(origin)).expect("read service.rs");
+    let min = usize_const(&src, "CHALLENGE_AGENT_ID_MIN_BYTES", origin);
+    let max = usize_const(&src, "CHALLENGE_AGENT_ID_MAX_BYTES", origin);
+    let pdecl = "pub const CHALLENGE_DID_PREFIXES: [&str; ";
+    let p_at = src
+        .find(pdecl)
+        .unwrap_or_else(|| panic!("CHALLENGE_DID_PREFIXES not declared in {origin}"));
+    let p_line = src[p_at..].lines().next().unwrap();
+    let prefixes: Vec<&str> = p_line.split('"').skip(1).step_by(2).collect();
+    assert!(
+        prefixes.len() >= 2,
+        "parsed prefixes {prefixes:?} from {p_line:?}"
+    );
+
+    let doc = std::fs::read_to_string(root.join("docs/HTTP-API.md")).expect("read HTTP-API.md");
+    let section = h3_section(&doc, "### `POST /auth/challenge`", "docs/HTTP-API.md");
+
+    let ranges = numeric_ranges(section);
+    assert!(
+        ranges.len() >= 2,
+        "the challenge section states the length bound {} time(s); expected both the \
+         screen paragraph and the summary line to state it: {ranges:?}",
+        ranges.len()
+    );
+    for (lo, hi, unit) in &ranges {
+        assert!(
+            (*lo, *hi) == (min, max) && unit == "bytes",
+            "docs/HTTP-API.md's challenge section says {lo}–{hi} {unit}; the code \
+             accepts {min}–{max} bytes (CHALLENGE_AGENT_ID_MIN_BYTES/MAX_BYTES)"
+        );
+    }
+    for p in &prefixes {
+        assert!(
+            section.contains(&format!("`{p}`")),
+            "the challenge section never names the accepted prefix `{p}`"
+        );
+    }
+    assert!(
+        !section.contains("must be a `did:web:` DID ("),
+        "the challenge section restricts agent_id to did:web again, but \
+         {prefixes:?} are all accepted"
+    );
+
+    // Negative control: the pre-fix sentences are caught.
+    assert_eq!(
+        numeric_ranges("a `did:web:` DID (8–2048 bytes). and 9–2048 characters"),
+        vec![(8, 2048, "bytes".into()), (9, 2048, "characters".into())]
+    );
+}
+
+/// Blockquote paragraphs (consecutive `>` lines, markers stripped, joined).
+fn blockquotes(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur: Option<String> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix('>') {
+            let c = cur.get_or_insert_with(String::new);
+            c.push(' ');
+            c.push_str(rest.trim());
+        } else if let Some(c) = cur.take() {
+            out.push(c);
+        }
+    }
+    out.extend(cur);
+    out
+}
+
+/// D3 guard (d). CONFIGURATION.md's `[rate_limit]` caveat said the
+/// `global_per_minute` ceiling "is per replica" unconditionally — false since
+/// `backend = "postgres"` counts it once across replicas. Any caveat
+/// blockquote in that section that talks about per-replica counting must name
+/// both backends, so the claim is scoped to the one it is true for.
+#[test]
+fn configuration_rate_limit_caveat_names_the_backend() {
+    let root = repo_root();
+    let doc =
+        std::fs::read_to_string(root.join("docs/CONFIGURATION.md")).expect("read CONFIGURATION.md");
+    let section = h3_section(&doc, "### `[rate_limit]`", "docs/CONFIGURATION.md");
+
+    let quotes = blockquotes(section);
+    let per_replica: Vec<&String> = quotes
+        .iter()
+        .filter(|q| q.contains("per replica"))
+        .collect();
+    assert!(
+        !per_replica.is_empty(),
+        "the [rate_limit] section no longer carries its multi-replica caveat \
+         blockquote; restore it (scoped by backend) or retire this guard"
+    );
+    for q in per_replica {
+        assert!(
+            q.contains("backend = \"memory\"") && q.contains("backend = \"postgres\""),
+            "the [rate_limit] caveat states per-replica limits without naming the \
+             `backend` it applies to — under `backend = \"postgres\"` both ceilings \
+             are shared across replicas:\n{q}"
+        );
+    }
+}

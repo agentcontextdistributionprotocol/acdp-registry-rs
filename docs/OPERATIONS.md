@@ -152,14 +152,15 @@ out of band and distribute them to operators / monitoring.
   the `playground` Cargo feature. Both are admin-bearer gated. `GET
   /admin/contexts` authenticates the caller but names no agent DID, and
   `admin_list` unconditionally passes `true` for the store's
-  `anonymous_public_reads` parameter — the local is spelled
-  `admin_sees_public_arm` where it is declared
-  (`crates/acdp-registry-core/src/handlers/admin.rs:87`) and is passed as the
-  fifth positional argument (`admin.rs:101`), binding to
-  `list_contexts`'s `anonymous_public_reads` parameter
-  (`crates/acdp-registry-store/src/lib.rs:75`), so it
+  `public_arm_open` parameter — the local is spelled `admin_sees_public_arm`
+  where it is declared in `admin_list`
+  (`crates/acdp-registry-core/src/handlers/admin.rs`) and is passed as the
+  fifth positional argument, binding to `ExtendedRegistryStore::list_contexts`'s
+  `public_arm_open` parameter (`crates/acdp-registry-store/src/lib.rs`), so it
   reaches the RFC-ACDP-0008 §4.5 public arm only — restricted and private
-  contexts are never disclosed to it.
+  contexts are never disclosed to it. (The configured
+  `auth.anonymous_public_reads` is not consulted on this path: it scopes only
+  unauthenticated requests, and an admin bearer is authenticated.)
 
 ```bash
 curl -H "Authorization: Bearer $ADMIN_TOKEN" https://registry.example.com/admin/status

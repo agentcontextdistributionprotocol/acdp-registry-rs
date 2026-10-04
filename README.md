@@ -81,7 +81,7 @@ cargo run -p acdp-registry-server
 # Or with a config file. NOTE: the example is a production-shaped template —
 # it sets auth.enabled = true with an empty jwt_secret and
 # allow_ephemeral_secret = false, so it will REFUSE to boot without a secret.
-# Supply one (the config's own guidance, registry.example.toml:49-51):
+# Supply one (the config's own guidance, in its header and above `jwt_secret`):
 ACDP_REGISTRY_CONFIG=config/registry.example.toml \
 ACDP_REGISTRY_AUTH__JWT_SECRET="$(openssl rand -base64 32)" \
     cargo run -p acdp-registry-server
@@ -116,10 +116,12 @@ docker compose up --build
 
 ## Configuration
 
-Configuration is loaded from a TOML file (`ACDP_REGISTRY_CONFIG` env var, or
-`config/registry.example.toml`) and overridden by `ACDP_REGISTRY_<SECTION>__<FIELD>`
-environment variables (double underscore separates levels). See
-[`config/registry.example.toml`](config/registry.example.toml).
+Configuration starts from built-in defaults, is layered with the TOML file
+named by `ACDP_REGISTRY_CONFIG` (if set — there is no fallback file; with the
+variable unset only the built-in defaults apply), and is overridden by
+`ACDP_REGISTRY_<SECTION>__<FIELD>` environment variables (double underscore
+separates levels). See [`config/registry.example.toml`](config/registry.example.toml)
+for an annotated, production-shaped template.
 
 **An EMPTY `ACDP_REGISTRY_*` variable is treated as absent, not as an override**
 (#271). `ACDP_REGISTRY_REGISTRY__AUTHORITY=""` leaves your TOML value alone
