@@ -183,6 +183,15 @@ The four-way charge split is pinned by
 `late_failures_are_charged_on_exactly_three_of_the_four_publish_branches`
 (`crates/acdp-registry-server/tests/http_integration.rs`).
 
+The producer lifecycle routes (`/retract`, `/republish`) share that per-agent
+bucket, keyed by the event `actor`, and follow the same rule: a read-only peek
+before verification, a `PublishCharge` armed once the signer is proven. The SDK
+has no prove/commit split for lifecycle events (`retract_verified` and
+`republish_verified` bundle verify and commit), so `lifecycle_transition` proves
+the actor itself first with the SDK's public `verify_lifecycle_event*`, using the
+same resolver instance, then makes the bundled call unchanged; the bundled call
+alone decides the response.
+
 DID verification reuses `acdp`'s `WebResolver` (LRU-cached, SSRF-policy-gated —
 see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md#ssrfpolicy)) for **both** publish and
 auth-challenge verification; there is intentionally only one resolver per server

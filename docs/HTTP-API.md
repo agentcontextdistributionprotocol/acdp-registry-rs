@@ -123,17 +123,22 @@ never `0`). Each limiter is a fixed 60-second window, and the sources are:
 
 The admin lifecycle routes and the read routes have no registry-side rate
 limit. The challenge, publish and lifecycle budgets are always per process,
-whichever `rate_limit.backend` is configured. Publish and lifecycle differ in
-**when** they charge: a publish only *peeks* at the bucket before signature
-verification and charges once the signer is proven (see
-[`POST /contexts`](#post-contexts)), while a lifecycle request is charged at
-the check itself, before its event signature is verified. Consequence: the
-lifecycle routes need no bearer, and the bucket is the same per-agent bucket
-publish uses, keyed by the `actor` the request names; so while
-`[lifecycle] enabled` is on, anyone can send unsigned retract or republish
-requests naming an agent and drain that agent's publish budget (its real
-publishes then answer `429`). This is current behaviour, tracked as a code
-follow-up, not a documented guarantee. Every `429` is
+whichever `rate_limit.backend` is configured. Publish and lifecycle charge
+the same way: before signature verification they only *peek* at the bucket
+(an agent already over budget gets `429`; nothing is charged and no bucket is
+created), and the request is charged once its signer is proven (see
+[`POST /contexts`](#post-contexts) and
+[the lifecycle endpoints](#post-contextsctx_idretract-post-contextsctx_idrepublish-acdp-030)).
+A lifecycle request is charged to its event `actor` once the event signature
+verifies for that actor, and from then on on every exit, including a `409`
+and a store error. An unsigned or mis-signed event naming an agent therefore
+spends nothing from that agent's budget, and does not create a bucket.
+Because the pre-verification peek answers for whatever agent a request names,
+the `429`s it returns are counted before verification: an unauthenticated
+caller naming an agent that is already over budget increments the
+rejection counter (scope `publish_per_agent` or `lifecycle_per_agent`)
+without being verified, so those two scopes can be inflated by anyone.
+Every `429` is
 counted on the rejection counter documented under
 [`GET /metrics`](#get-metrics-feat-10), labelled with the check that refused
 it; a refusal because the shared backend was unavailable counts under that
@@ -569,10 +574,13 @@ What is specific to this registry:
 - **Signature verification** goes through the same DID pipeline as a publish
   — `did:web` via resolution, `did:key` offline.
 - **Rate limit.** Per-agent limiting draws on the same bucket as publish
-  (`limits.publish_rate_per_minute`), keyed by the event `actor`, but unlike
-  publish it is charged when checked — after the shape and path checks,
-  before the tenant gate and the signature verification (see
-  [Rate limits](#rate-limits-429)).
+  (`limits.publish_rate_per_minute`), keyed by the event `actor`. After the
+  shape and path checks the handler only *peeks* at the bucket (an actor
+  already over budget gets `429`). After the tenant gate it verifies the
+  event signature against the `actor` itself, and only when that succeeds is
+  the request charged — on every exit from then on, including a `409` and a
+  `403` for an actor that is not the producer. An unsigned or mis-signed
+  event is never charged. See [Rate limits](#rate-limits-429).
 - **Response.** `200` with the post-transition full-retrieval envelope
   (`body` + `registry_state`, `status` re-derived, `lifecycle_events`
   including the new event).

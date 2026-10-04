@@ -23,7 +23,8 @@ belongs in the per-crate changelogs.
 
 ## 0.2.1
 
-**No action needed on upgrade or rollback. One table goes dormant, ahead of its removal.**
+**No action needed on upgrade or rollback. One table goes dormant, ahead of its removal, and
+lifecycle requests are charged only once their signature verifies.**
 
 Publishing no longer writes the `lineages` table (both backends). Nothing in the registry ever read
 it — lineage reads (`GET /lineages/{id}`, `/current`, the admin audit) are served from `contexts` —
@@ -36,6 +37,19 @@ database action (0.2.0 simply resumes writing it, and nothing reads what it writ
 drops the table with a new migration. That release is the one with a rollback constraint: it is
 safe to roll back from it to 0.2.1 or later, but not directly to 0.2.0 or earlier on Postgres,
 whose publishes would fail against the dropped table. Its own section here will repeat this.
+
+**Behaviour change (security fix, #375): a lifecycle request is charged only once its signature
+verifies.** `POST /contexts/{ctx_id}/retract` and `/republish` draw on the per-agent publish bucket,
+keyed by the event `actor`. Before this release they charged that bucket before looking at the
+signature, so while `[lifecycle] enabled` was on anyone could drain an agent's publish budget with
+unsigned events naming it, and add a bucket per invented actor. Now an unsigned or mis-signed event
+costs the named agent nothing and creates no bucket. A validly signed event is charged to its actor
+on every outcome: success, `409 invalid_lifecycle_transition`, a store error, and a `403` because the
+actor is not the context's producer. An actor already over budget still gets `429` before
+verification, as at publish. **Who needs to act:** nobody. No response code, header, config key or
+metric label changed. If you alert on `acdp_registry_rate_limit_rejections_total{scope="lifecycle_per_agent"}`,
+note that it can still be raised by unauthenticated requests naming an agent that is already over
+budget.
 
 ---
 
