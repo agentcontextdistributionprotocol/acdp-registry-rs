@@ -89,6 +89,33 @@ In order (`service.rs`):
     store. If that write fails, the whole request fails — a token that can't be
     tracked is never handed out.
 
+### Rate limits and request bodies on `/auth/*`
+
+All three `/auth/*` routes sit behind one limiter, `auth_rate_limit`
+(`crates/acdp-registry-core/src/lib.rs`), which charges every request to a
+process-global ceiling and then a per-client-IP budget before the handler or
+its body extractor runs — so before any DID resolution, and whether or not the
+request later succeeds. With `[rate_limit] backend = "postgres"` those two
+ceilings are counted once across every replica sharing the database
+(`LayeredRateLimiter` in `crates/acdp-registry-core/src/rate_limit_shared.rs`
+puts the in-memory limiter in front of `PgRateLimitBackend` in
+`crates/acdp-registry-pg/src/rate_limit.rs`); when the database cannot answer,
+`backend_unavailable` decides between falling back to the per-process count
+and refusing with `Retry-After: 5`. `POST /auth/challenge` additionally has its
+own per-`agent_id` budget and global ceiling (`[limits]`), always per process.
+Every source of a `429`, with its key and setting, is listed in
+[HTTP-API.md · Rate limits](HTTP-API.md#rate-limits-429), and the keys in
+[CONFIGURATION.md · `[rate_limit]`](CONFIGURATION.md#rate_limit-feat-06).
+
+Request bodies go through `AcdpJson` (`crates/acdp-registry-core/src/extract.rs`).
+`Content-Type` must be present and be `application/json` or an
+`application/*+json` type such as `application/acdp+json` (parameters
+ignored): an absent or other type is `415 unsupported_media_type`. This is
+stricter than `POST /contexts`, which accepts an absent header. A body that
+is not JSON, or is JSON of the wrong shape, is `400 schema_violation` (not
+`422`), and an oversized one is `413`; see
+[HTTP-API.md · Request bodies](HTTP-API.md#request-bodies-and-content-type).
+
 ## JWT claims
 
 ```json
@@ -388,6 +415,17 @@ store. **Durable cursors** (`get_revocation_cursor` / `set_revocation_cursor`,
 unix ms) survive restarts, and the cursor advances only when an entire page
 applies cleanly — a partial failure replays that page on the next tick rather
 than skipping revocations.
+
+The poller fetches through `poller_client`, which builds the client with the
+`acdp` SDK's `safe_client` (`crates/acdp-registry-auth/src/revocation_poller.rs`):
+redirects are **never followed** (a feed answering `3xx` is a failed poll
+for that tick, and the cursor stays put), every connection re-runs the SSRF
+DNS check, and a feed host that resolves into a private, loopback or
+link-local range is refused. A peer whose feed is reachable only on an
+internal hostname therefore cannot be polled. Not following redirects is
+what stops a hostile or compromised peer from bouncing the poller, with its
+`admin_token` bearer attached, at an internal address. Pinned by
+`poller_client_does_not_follow_redirects`.
 
 ## Where it's wired
 

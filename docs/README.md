@@ -36,6 +36,7 @@ go deeper.
 | [ENGINEERING-LOG.md](ENGINEERING-LOG.md) | The narrative record of what changed and why — reasoning, rejected alternatives, evidence. Was the root `CHANGELOG.md` until #220; per-release notes live in `crates/*/CHANGELOG.md`. |
 | [advertisable-profiles.json](advertisable-profiles.json) | The profile names this registry can advertise, as data for non-Rust consumers; kept identical to the code by `advertisable_profiles_json_matches_const` (see [CONFIGURATION.md](CONFIGURATION.md)). |
 | [MUTATION-SCOPE-CANDIDATES.md](MUTATION-SCOPE-CANDIDATES.md) | Which files the mutation oracle should cover next, and the measured survivor bill for each — the companion to `.cargo/mutants.toml` for #216 item 1. |
+| [mutation-runs/README.md](mutation-runs/README.md) | Index of the committed cargo-mutants run ledgers (`outcomes.json` per run): which one each was measured against and which are superseded. A dated record. |
 
 ## Where the protocol ends and this registry begins
 

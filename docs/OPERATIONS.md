@@ -120,11 +120,17 @@ path. Never edit an applied migration.
 **Rolling back a release (Postgres).** The Postgres migrator tolerates a
 database that is *ahead* of the running binary — it can roll back one release
 without crash-looping, because migrations are required to stay additive (see
-CONTRIBUTING.md). Applied migrations remain checksum-verified, so a corrupted
-or edited migration still fails startup. The orphaned table/columns from the
-newer migration are left in place and simply unused by the older binary; to
-fully retire a migration, delete its row from `_sqlx_migrations` and drop its
-objects by hand.
+CONTRIBUTING.md). **That tolerance shipped in 0.2.0, so it only helps when the
+binary you roll back *to* is 0.2.0 or later.** 0.1.5 and earlier refuse to
+start against a database carrying a migration they do not know; rolling back
+to one of them needs the manual step in
+[UPGRADING.md · 0.2.0](UPGRADING.md#020) first. Applied migrations remain
+checksum-verified, so a corrupted or edited migration still fails startup. The
+orphaned table/columns from the newer migration are left in place and simply
+unused by the older binary; to fully retire a migration, delete its row from
+`_sqlx_migrations` and drop its objects by hand. The SQLite migrator has no
+such tolerance: a SQLite database migrated by a newer release does not start
+under an older one.
 
 ## Admin endpoints
 
@@ -198,9 +204,11 @@ the key to `false` to return `404` for foreign ids instead.
 ## Rate limiting
 
 Per-agent, per-process, in-memory fixed-window counters:
-`limits.publish_rate_per_minute` on `POST /contexts` and
+`limits.publish_rate_per_minute` on `POST /contexts` (and, from the same
+per-agent bucket, the producer lifecycle routes) and
 `limits.challenge_rate_per_minute` on `POST /auth/challenge` (both default 60,
-`0` disables; `429` + `Retry-After` when drained).
+`0` disables; `429` + `Retry-After` when drained). The full list of `429`
+sources is in [HTTP-API.md · Rate limits](HTTP-API.md#rate-limits-429).
 
 On top of these, the FEAT-06 `[rate_limit]` section adds **per-IP** and
 **process-global** buckets over the whole `/auth/*` subrouter (token issuance /
