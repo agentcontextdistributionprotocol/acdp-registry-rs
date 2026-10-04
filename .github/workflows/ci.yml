@@ -726,3 +726,41 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           arguments: --workspace
+
+  # cargo-vet (#387): every third-party crate in Cargo.lock must be covered by
+  # an audit in supply-chain/audits.toml, an imported audit (acdp-rs plus the
+  # mozilla/google/bytecode-alliance sets, frozen in supply-chain/imports.lock),
+  # or an exemption in supply-chain/config.toml. cargo-deny (the job above)
+  # answers a different question: known advisories, licenses, bans, sources.
+  #
+  # ADVISORY: `cargo-vet` is in `advisory_pending`, not `required`, in
+  # .github/required-checks.json. A dependency bump that is not yet vetted
+  # reddens this job without blocking the merge; see docs/MAINTAINING.md
+  # "Supply-chain audits (cargo vet)" for the certify/exempt workflow and
+  # what promoting it to required would take.
+  #
+  # INSTALL: compiled from crates.io with `--locked` at an exact version. The
+  # SHA-pinned install-action used elsewhere has no manifest for 0.10.2 (only
+  # 0.10.0, checked at v2.87.21's manifests/cargo-vet.json), and its fallback
+  # is a third-party rebuild; acdp-rs documents the same gap. rust-cache keeps
+  # ~/.cargo/bin, so `cargo install` is a no-op once the binary is cached.
+  # Keep the version in step with supply-chain/config.toml's [cargo-vet]
+  # format and with acdp-rs's pin, so imports.lock parses identically.
+  vet:
+    name: cargo-vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: install cargo-vet
+        run: |
+          cargo install --locked cargo-vet --version 0.10.2
+          cargo vet --version
+      # --locked: use the committed imports.lock, never re-fetch the imported
+      # audit sets, so the verdict is reproducible from the tree alone.
+      - name: cargo vet
+        run: cargo vet --locked
