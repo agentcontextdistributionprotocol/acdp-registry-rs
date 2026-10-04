@@ -365,9 +365,11 @@ history under the same `log_id`**; it MUST start a new instantiation with a new
 `<instance>` component, and SHOULD publish an operational notice. "Serve" here
 includes reads: `GET /log/checkpoint` is public and signs the current tree on
 demand, so a registry that merely boots on a rolled-back database is already
-signing the reconstructed history under the old `log_id`. Restoring an older
-backup and carrying on under the same `log_id` is therefore never a valid
-recovery, even if no new entry is published.
+signing the reconstructed history under the old `log_id`. (That reading of
+"serve" is this runbook's, not the RFC's wording.) Restoring an older backup
+and carrying on under the same `log_id` is therefore not a valid recovery
+unless step 4 shows the restored tree is consistent with everything already
+served.
 
 This registry's `log_id` is `did:web:<authority>/log/<instance>`, where
 `<instance>` is `[log] instance` (default `"1"`; env
@@ -412,11 +414,12 @@ notice:
    serve is at least as large as the largest served checkpoint **and** a
    consistency proof from that checkpoint to the new head verifies (fetch
    `GET /log/proof?first=<served>&second=<current>` with the registry reachable
-   only by you). Otherwise — the restored tree is smaller, the root differs, or
+   only by you, and check the proof with any RFC 6962 consistency-proof verifier;
+   the shapes are in RFC-ACDP-0012 §6). Otherwise — the restored tree is smaller, the root differs, or
    you cannot show either way — **set a new `[log] instance`** (for example
    `"1"` → `"2"`) before the registry is reachable again. On a public registry
    you can rarely rule out an unseen checkpoint, so expect to change it after
-   any rollback.
+   any rollback. (This is operator guidance, stricter than §7.4's wording.)
 5. **If it was a rollback from a restore:** contexts published after the backup
    are gone from this registry, along with their leaves. Their producers have
    to re-publish them, which mints new `ctx_id`s and new leaves in the new log.

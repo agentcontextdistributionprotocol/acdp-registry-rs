@@ -4776,3 +4776,11 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** a Python lint step outside `cargo test`; dropping same-file fragments.
 - **Blast radius if wrong:** a docs-only test goes red on a valid link or misses a bad one; no runtime effect. Known low gaps: multi-line code spans, next-line reference destinations, `A`,`A`,`A-1` slug sequence, hand-built `service_unavailable` envelope not scanned.
 - **Status:** UNCONFIRMED
+
+## Docs refresh Phases 1-2 — false-claim fixes and log runbook
+- **Plan:** plans/docs-refresh-2026-10.md (Phases 1, 2)
+- **Assumed:** (a) after an `[log] instance` change the surviving `log_leaves` become the new log's history from index 0, anchored only from its first checkpoint (inferred by analogy with RFC-0012 §7.3; the spec does not say whether a new instantiation may start non-empty); (b) the runbook's "expect a new instance after any rollback on a public registry" is operator guidance stricter than §7.4 (`/log/checkpoint` signs on demand, so unseen checkpoints cannot be ruled out); (c) acdp 0.14.2's client error-chain change is described as possibly more specific upstream-failure messages with no status or code change — message text reaching the wire through `KeyResolution`/`CrossRegistry*` strings was not measured; (d) `ACDP_REGISTRY_LOG__INSTANCE` follows the documented env naming rule (not covered by a test); (e) the Link-convention block was deferred to Phase 5.
+- **Chose:** state the code's behaviour, label spec deviations with a pinned RFC section, keep behaviour changes out (F2 follow-ups).
+- **Alternatives:** documenting the deviations as accepted; changing behaviour in this PR.
+- **Blast radius if wrong:** docs only; the runbook is the one operator-safety item (verified against RFC-0012 §7.4 and the log code, not against a live deployment or a witness).
+- **Status:** UNCONFIRMED

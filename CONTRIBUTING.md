@@ -123,7 +123,7 @@ and version bumps from these prefixes:
 
 ## Adding a new endpoint
 
-Four steps, each enforced by a test that fails the build if it is skipped:
+Four steps; steps 2–4 are enforced by a test that fails the build if skipped:
 
 1. Write the handler in `crates/acdp-registry-core/src/handlers/`, returning
    `RegistryError` so failures get the wire envelope.

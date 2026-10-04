@@ -31,7 +31,9 @@ signature over `content_hash`, not a bearer. So in strict mode a raw
 `X-Tenant-Id` does **not** decide the write tenant — the authoritative source is
 the producer's `[[auth.tenant_agents]]` binding (or a tenant-bound token claim).
 Otherwise any producer could inject a context into an arbitrary tenant's
-namespace. Outside strict mode it does decide it; see
+namespace. A bound producer's `[[auth.tenant_agents]]` binding stays authoritative
+in lax mode too (a different header → 403); the header decides writes only when
+auth is disabled or the producer is unbound; see
 [`X-Tenant-Id` is not authenticated](#x-tenant-id-is-not-authenticated).
 
 ## Strict mode (`auth.require_tenant = true`)
@@ -62,7 +64,7 @@ in these cases:
 | Case | Reads (`tenant_for_request`) | Writes (`tenant_for_publish`) |
 |------|------------------------------|-------------------------------|
 | `auth.enabled = false` (neither function runs its strict-mode checks then) | header decides | header decides |
-| Lax mode, request with no valid bearer, or an unbound token | header decides | header decides |
+| Lax mode, request with no valid bearer, or an unbound token | header decides | a bound agent: the binding decides (a different header → 403); an unbound agent: header decides |
 | Strict mode, request with no valid bearer | header decides (and satisfies the default-deny) | the agent's binding decides (a different header → 403); an unbound agent is denied |
 | Strict mode, unbound token | ignored (default-deny) | as the row above |
 | Tenant-bound token | the claim decides; a different header → 403 | the claim decides; a different header → 403 |

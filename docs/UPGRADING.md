@@ -65,7 +65,7 @@ keys will **not parse** on an older binary. Roll the config back *before* the bi
 
 **`acdp` SDK 0.14.1 → 0.14.3.** No wire change for this registry: no status code or `error.code`
 moved. 0.14.2's server fix restores two RFC-ACDP-0014 checks for the *interim* `acdp:key-revocation`
-form on registries advertising `acdp_version` below 0.5.0; this registry always advertises 0.5.0, where
+form on registries advertising `acdp_version` in `[0.3.0, 0.5.0)`; this registry always advertises 0.5.0, where
 that form is already refused (see 0.1.5 below). 0.14.2 also keeps the underlying cause in the SDK
 client's transport errors, so some upstream-failure messages may be more specific. 0.14.3 is a
 release-pipeline fix only.
