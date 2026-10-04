@@ -392,7 +392,7 @@ The job pins cargo-mutants to the version that measured the prior ledger
 real tree and tool. Run it locally with:
 
 ```sh
-cargo mutants --list > /tmp/listing.txt
+cargo mutants --list --colors never > /tmp/listing.txt
 python3 .github/scripts/check_mutants_pins.py check --listing /tmp/listing.txt
 ```
 

@@ -149,6 +149,11 @@ def read_config(text: str):
 
 
 def read_listing(text: str) -> list:
+    if "\x1b" in text:
+        raise Unsound("the listing contains ANSI escape codes -- it was produced with"
+                      " colours on (CARGO_TERM_COLOR=always). Re-run with"
+                      " `cargo mutants --list --colors never`; coloured descriptions"
+                      " never match the committed names verbatim")
     lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         raise Unsound("the listing is empty -- `cargo mutants --list` produced nothing,"

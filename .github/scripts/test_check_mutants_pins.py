@@ -217,6 +217,15 @@ class Unsound(Base):
         self.assertEqual(rc, EXIT_UNSOUND, out)
         self.assertIn("not `file:line:col: description`", out)
 
+    def test_a_coloured_listing_is_refused_not_compared(self):
+        """Measured on this job's first CI run: CARGO_TERM_COLOR=always makes
+        `--list` wrap descriptions in ANSI escapes, so every survivor 'vanished'
+        while scope and split still matched. That is an input fault, not drift."""
+        coloured = [ln.replace(": ", ": \x1b[35m", 1) + "\x1b[0m" for ln in LISTING]
+        rc, out = self.run_check(listing=coloured)
+        self.assertEqual(rc, EXIT_UNSOUND, out)
+        self.assertIn("--colors never", out)
+
     def test_no_table(self):
         rc, out = self.run_check(cfg='examine_globs = ["%s"]\n' % A)
         self.assertEqual(rc, EXIT_UNSOUND, out)

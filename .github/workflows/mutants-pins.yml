@@ -89,16 +89,20 @@ jobs:
         with:
           tool: cargo-mutants@${{ env.CARGO_MUTANTS_VERSION }}
 
-      # Same command the cron runs: no flags, the scope comes from
-      # .cargo/mutants.toml. The listing is written to a file first so a crashed
-      # `cargo mutants` fails this step instead of reaching the checker as an
-      # empty pipe (the checker also rejects an empty listing).
+      # The cron's command, no scope flags: the scope comes from
+      # .cargo/mutants.toml. `--colors never` IS LOAD-BEARING: cargo-mutants
+      # honours CARGO_TERM_COLOR (set to `always` above), and coloured output
+      # wraps each description in ANSI escapes, so no committed survivor line
+      # would ever match verbatim (measured on this job's first run; the checker
+      # now rejects escapes as unsound). The listing is written to a file first
+      # so a crashed `cargo mutants` fails this step instead of reaching the
+      # checker as an empty pipe (the checker also rejects an empty listing).
       - name: check the pins against `cargo mutants --list`
         if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
           cargo mutants --version
-          cargo mutants --list > "$RUNNER_TEMP/listing.txt"
+          cargo mutants --list --colors never > "$RUNNER_TEMP/listing.txt"
           rc=0
           python3 .github/scripts/check_mutants_pins.py check --listing "$RUNNER_TEMP/listing.txt" || rc=$?
           case "$rc" in
@@ -124,7 +128,7 @@ jobs:
           f=crates/acdp-registry-core/src/handlers/context.rs
           cp "$f" "$RUNNER_TEMP/context.rs.orig"
           { echo; cat "$RUNNER_TEMP/context.rs.orig"; } > "$f"
-          cargo mutants --list > "$RUNNER_TEMP/shifted.txt"
+          cargo mutants --list --colors never > "$RUNNER_TEMP/shifted.txt"
           rc=0
           python3 .github/scripts/check_mutants_pins.py check --listing "$RUNNER_TEMP/shifted.txt" > "$RUNNER_TEMP/shifted.out" || rc=$?
           cp "$RUNNER_TEMP/context.rs.orig" "$f"
