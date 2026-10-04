@@ -183,39 +183,30 @@ carry no directive.
 
 ### `GET /.well-known/acdp.json`
 
-Capabilities document. `Cache-Control: public, max-age=300`.
+Capabilities document. `Cache-Control: public, max-age=300`. The fields, their
+meaning, an example, and the consumer validation rules are normative in
+[RFC-ACDP-0007 §3](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0007-capabilities.md#3-capabilities-document);
+this section records only what **this registry** emits in each one
+(`build_capabilities` in `crates/acdp-registry-server/src/main.rs`):
 
-```json
-{
-  "acdp_version": "0.5.0",
-  "registry_did": "did:web:registry.example.com",
-  "supported_signature_algorithms": ["ed25519", "ecdsa-p256"],
-  "supported_did_methods": ["did:web"],
-  "profiles": ["acdp-registry-core", "acdp-registry-discovery"],
-  "limits": {
-    "max_payload_bytes": 1048576,
-    "max_embedded_bytes": 65536,
-    "idempotency_key_ttl_seconds": 86400
-  }
-}
-```
-
-`supported_did_methods` mirrors `auth.did_methods`; `profiles` mirrors
-`registry.profiles`; `limits` mirrors the `[limits]` config section.
-`supported_signature_algorithms` mirrors nothing — it is fixed by the build
-(`build_capabilities` in `crates/acdp-registry-server/src/main.rs`) and is
-not configurable.
+| Field | What this registry emits |
+|-------|--------------------------|
+| `acdp_version` | Always `"0.5.0"` — see below. |
+| `registry_did` | `did:web:` + `registry.authority`. |
+| `supported_signature_algorithms` | `["ed25519", "ecdsa-p256"]`, fixed by the build; not configurable. |
+| `supported_did_methods` | `auth.did_methods`; may include `"did:key"`. |
+| `profiles` | `registry.profiles` (default: `acdp-registry-core`, `acdp-registry-discovery`) plus the receipts, head-receipts, lifecycle and transparency-log profiles when their config sections enable them. |
+| `limits` | `max_payload_bytes`, `max_embedded_bytes` and `idempotency_key_ttl_seconds` from `[limits]`; `max_publish_per_minute` is never emitted. |
+| `supports_idempotency_key` | Always `true`. |
+| `anonymous_public_reads` | `auth.anonymous_public_reads`; always present (default `false`). |
+| `read_authentication_methods` | `["bearer-jwt"]` when `auth.enabled = true`, omitted otherwise — see the known issue below. |
 
 `acdp_version` is unconditionally `"0.5.0"` (RFC-ACDP-0016 §10 — anchors
 handling has no admin-config gate, so its version claim always wins), but
-`profiles` still lights up per-config exactly as before: with a `[receipt]`
-signing key configured (ACDP 0.2.0), `profiles` additionally carries
-`"acdp-registry-receipts"`, and so on for lifecycle/log/witnesses. The
-advertised version string and the set of active capabilities are two
-different axes — do not infer what a registry actually enforces from
-`acdp_version` alone; check `profiles` and the response bodies instead.
-`supported_did_methods` may include `"did:key"` when enabled via
-`auth.did_methods`.
+`profiles` still lights up per config. The advertised version string and the
+set of active capabilities are two different axes — do not infer what a
+registry actually enforces from `acdp_version` alone; check `profiles` and the
+response bodies instead.
 
 **Known issue: `read_authentication_methods` with auth enabled.** When
 `auth.enabled = true` the document also carries
@@ -424,20 +415,19 @@ fetch — when `"did:key"` is in `supported_did_methods`; otherwise the publish
 is rejected with `key_resolution_failed` (400, permanent).
 
 `anchors` (RFC-ACDP-0016, still **Draft**) is an optional array of typed,
-content-addressed references from the body to external, non-ACDP artifacts.
-It follows the same absent-when-empty convention as every other optional
-array field — omit it entirely rather than sending `[]`. A publish carrying
-`anchors` is rejected with `schema_violation` (400) unless **both**: the
-registry's own advertised `acdp_version` (the value served at
-`GET /.well-known/acdp.json`) is `>= 0.5.0` (RFC-ACDP-0016 §10), **and** the
-request's own declared `acdp_version` is `>= 0.5.0` (RFC-ACDP-0016 §14; an
-absent `acdp_version` is treated as `0.1.0` and therefore also rejected).
-The check runs before signature verification and applies uniformly to every
-publish path (`did:key`, playground pinned-key, and the default `did:web`
-pipeline). Each anchor's `uri` is an advisory locator hint only — it is
-never dereferenced by any verification code path; the binding is each
-anchor's own `content_hash`, not `uri`. `uri` is stored and re-served
-verbatim and is never dereferenced by this registry.
+content-addressed references to external artifacts. Its shape, the
+content-hash binding, and the version rules are normative in
+[RFC-ACDP-0016 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0016-external-anchors.md#4-the-anchors-field-normative) and
+[§10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0016-external-anchors.md#10-capabilities-profile-and-errors). What this registry adds:
+since it always advertises `acdp_version` `"0.5.0"`, only the request half of
+the gate can fail — a publish carrying `anchors` whose declared
+`acdp_version` is absent or below `0.5.0` is rejected with
+`schema_violation` (400). The check runs right after the body parses, before
+the rate-limit peek and before signature verification, so it applies to every
+publish path (`did:key`, playground pinned-key, playground unpinned, and the
+default `did:web` pipeline) and a rejected publish is never charged. Each
+anchor's `uri` is stored and re-served verbatim and is never dereferenced by
+this registry.
 
 ### `GET /contexts/{ctx_id}`
 
@@ -562,46 +552,30 @@ persisted, and never attached to body-only responses. See
 
 ### `POST /contexts/{ctx_id}/retract`, `POST /contexts/{ctx_id}/republish` *(ACDP 0.3.0)*
 
-Lifecycle events & retraction (RFC-ACDP-0013 §6). Mounted always; a
-registry without `lifecycle.enabled = true` answers
-`501 not_implemented`. The request body is a closed envelope with exactly
-one member:
+Lifecycle events & retraction. The request envelope, the event object, its
+signing, the ordered processing steps (visibility-first resolution, closed
+shape with `immutable_field` for body content, actor authentication,
+the `invalid_lifecycle_transition` alternation check, atomic append), retry
+idempotency and the response shape are normative in
+[RFC-ACDP-0013 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0013-lifecycle-events.md#4-lifecycle-event-object),
+[§5](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0013-lifecycle-events.md#5-event-signing-construction) and
+[§6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints); the handler follows
+§6 in order. (Its one known deviation — lifecycle data still served after the
+flag is turned off — is in [CONFIGURATION.md](CONFIGURATION.md#lifecycle-acdp-030).)
+What is specific to this registry:
 
-```json
-{
-  "event": {
-    "event_id": "018f6d0a-7b2e-4c4d-9e1f-3a5b7c9d1e2f",
-    "ctx_id": "acdp://registry.example.com/1234...",
-    "event_type": "retracted",
-    "occurred_at": "2026-07-04T09:15:42.000Z",
-    "actor": "did:web:agents.example.com:producer",
-    "reason": "underlying data source found to be fabricated",
-    "signature": { "algorithm": "ed25519", "key_id": "…#key-2", "value": "…" }
-  }
-}
-```
-
-Processing follows §6 in order: visibility-first resolution (an invisible
-context 404s — no existence oracle), closed-shape validation (any `body`
-member or body-field-named member → `400 immutable_field`; other unknown
-members → `schema_violation`; `event.ctx_id` must equal the path
-`{ctx_id}`; `event_type` must match the endpoint), actor authentication
-(`actor` must equal the context's `body.agent_id`; the event **must** be
-signed and the signature verifies through the same DID pipeline as a
-publish — `did:web` via resolution, `did:key` offline), then the strict
-alternation check (`retracted` only when not retracted, `republished` only
-when retracted; violation → `409 invalid_lifecycle_transition`) and the
-atomic append. Per-agent rate limiting draws on the same bucket as publish
-(`limits.publish_rate_per_minute`), keyed by the event `actor`, but unlike
-publish it is charged when checked — after the shape and path checks,
-before the tenant gate and the signature verification (see
-[Rate limits](#rate-limits-429)).
-
-Response: `200` with the post-transition full-retrieval envelope (`body` +
-`registry_state`, `status` re-derived, `lifecycle_events` including the
-new event). A retry with an already-appended `event_id` and byte-identical
-content is idempotent (200, nothing appended); the same `event_id` with
-different content is a `400 schema_violation`.
+- **Gate.** Mounted always; a registry without `lifecycle.enabled = true`
+  answers `501 not_implemented`.
+- **Signature verification** goes through the same DID pipeline as a publish
+  — `did:web` via resolution, `did:key` offline.
+- **Rate limit.** Per-agent limiting draws on the same bucket as publish
+  (`limits.publish_rate_per_minute`), keyed by the event `actor`, but unlike
+  publish it is charged when checked — after the shape and path checks,
+  before the tenant gate and the signature verification (see
+  [Rate limits](#rate-limits-429)).
+- **Response.** `200` with the post-transition full-retrieval envelope
+  (`body` + `registry_state`, `status` re-derived, `lifecycle_events`
+  including the new event).
 
 Only the producer may use these endpoints (delegation is not supported).
 Registry-initiated events go through the admin-gated
@@ -610,135 +584,52 @@ which attribute the event to the registry's own DID.
 
 ### `GET /log/checkpoint`, `GET /log/proof`, `GET /log/entries` *(ACDP 0.3.0)*
 
-Registry transparency log (RFC-ACDP-0012). Mounted always; a registry
-without `log.enabled = true` answers `501 not_implemented` from every
-`/log/*` path. There is **no `log_unavailable`** anywhere (§7.1): with the
-profile advertised, every accepted publish appends its leaf in the same
-storage transaction as the context row and its receipt, so the proof for a
-context exists the moment its publish response does.
+Registry transparency log. The checkpoint object, the two `/log/proof` modes
+and their parameters, the `/log/entries` shape, and the verification
+procedures are normative in
+[RFC-ACDP-0012 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0012-transparency-log.md#6-checkpoints-signed-tree-heads-normative),
+[§8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0012-transparency-log.md#8-endpoints-normative) and
+[§9](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0012-transparency-log.md#9-verification-procedures-normative); the `witness_signatures`
+aggregation envelope is
+[RFC-ACDP-0015 §6.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0015-witness-cosigning.md#61-registry-aggregation). This section records what
+this registry does with them:
 
-**`GET /log/checkpoint`** — the current signed tree head, bare:
-
-```json
-{
-  "checkpoint_version": "acdp-log/1",
-  "log_id": "did:web:registry.example.com/log/1",
-  "tree_size": 5,
-  "root_hash": "sha256:…",
-  "timestamp": "2026-07-04T12:00:00.000Z",
-  "signature": { "algorithm": "ed25519", "key_id": "…#receipt-key-1", "value": "…" }
-}
-```
-
-Signed with the RFC-ACDP-0010 **receipt key** (§6 — no new key role);
-`timestamp` is fresh per evaluation. Publicly readable wherever
-capabilities are.
-
-**Witness cosignatures (`witness_signatures`)** *(ACDP 0.4.0, RFC-ACDP-0015 §6.1).*
-When the registry is configured with `[[witnesses]]` and has collected one
-or more **verified** witness cosignatures over the exact
-`(log_id, tree_size, root_hash)` it is serving, `GET /log/checkpoint`
-returns an **envelope** that wraps the bare checkpoint under `log_checkpoint`
-and adds a top-level `witness_signatures` array as a **sibling**:
-
-```json
-{
-  "log_checkpoint": {
-    "checkpoint_version": "acdp-log/1",
-    "log_id": "did:web:registry.example.com/log/1",
-    "tree_size": 5,
-    "root_hash": "sha256:…",
-    "timestamp": "2026-07-04T12:00:00.000Z",
-    "signature": { "algorithm": "ed25519", "key_id": "…#receipt-key-1", "value": "…" }
-  },
-  "witness_signatures": [
-    {
-      "cosignature_version": "acdp-cosig/1",
-      "witness_id": "did:web:witness.example.org",
-      "witnessed_checkpoint": { "log_id": "…/log/1", "tree_size": 5, "root_hash": "sha256:…", "timestamp": "…" },
-      "witnessed_at": "2026-07-04T12:00:03.000Z",
-      "signature": { "algorithm": "ed25519", "key_id": "did:web:witness.example.org#witness-key-1", "value": "…" }
-    }
-  ]
-}
-```
-
-`witness_signatures` is **OUTSIDE** the signed checkpoint object — it is
-never inside it, never part of any `content_hash`, receipt, checkpoint, or
-leaf preimage (§6.1). The embedded `log_checkpoint` is the same closed,
-signed object as the bare form. When the registry has collected **no**
-cosignatures for the served tuple, the response is the **bare** checkpoint
-above (no envelope, no `witness_signatures`) — the array is never
-fabricated or served empty, and pre-0.4.0 consumers see exactly what they
-always did. A registry only serves `witness_signatures` at all once
-`[[witnesses]]` is configured — that gating is unchanged. What changed
-(REG-3, RFC-ACDP-0016 §10) is that `acdp_version` served at
-[`GET /.well-known/acdp.json`](#get-well-knownacdpjson) no longer moves in
-step with this: `acdp_version` is unconditionally `"0.5.0"` regardless of
-whether `[[witnesses]]` is configured, since the anchors capability claim
-always wins the version max(). A deployment with no witnesses configured
-still advertises `"0.5.0"` and simply never serves `witness_signatures`;
-whether witness aggregation is active is visible in the response body
-(whether `witness_signatures` accompanies a checkpoint) and in
-`profiles` (`"acdp-registry-transparency-log"` — witnesses are never a
-distinct registry profile, RFC-ACDP-0015 §6.1), not in `acdp_version`. The
-same top-level `witness_signatures` sibling is attached to
-the embedded checkpoint carried by `GET /log/proof` (inclusion and
-consistency modes) when cosignatures exist for that embedded checkpoint's
-tuple. A consumer verifies each cosignature under the witness DID's
-`assertionMethod` key and counts distinct trusted witnesses (the §8
-*N-witnessed* verdict); the registry never holds a witness key, so it can
-neither forge a cosignature nor make aggregation a trust dependency — a
-consumer MAY always fetch direct from a witness (§6.2). See
-[CONFIGURATION.md](CONFIGURATION.md#witnesses-acdp-040) for `[[witnesses]]`.
-
-**`GET /log/proof`** — one path, two mutually exclusive parameter sets:
-
-- *Inclusion mode:* exactly one of `?ctx_id=<ctx_id>` (the consumer
-  surface — **retrieval visibility applies exactly as for
-  `GET /contexts/{ctx_id}`**: an unauthorized or unlogged ctx_id is
-  `404 not_found`, indistinguishable from absence) or `?leaf_index=<n>`
-  (the auditor surface — positions are public, no visibility gate).
-  Optional `&tree_size=<n>` requests the proof against a historical size
-  (`leaf_index < tree_size ≤` current); the registry signs a checkpoint at
-  that size on demand (§8.2). The response is the `log_inclusion` object
-  (`log_id`, `leaf_index`, `tree_size`, `inclusion_path[]`,
-  `log_checkpoint`), plus a convenience `leaf` echo **only** when the
-  requester is authorized to retrieve the context — verifiers reconstruct
-  the leaf from verified body + receipt material instead (§9.1 step 1).
-- *Consistency mode:* `?first=<m>&second=<n>` with
-  `0 < m ≤ n ≤` current size. Response: `log_id`, `first_tree_size`,
-  `second_tree_size`, `consistency_path[]` (empty when `m == n`), and a
-  `log_checkpoint` at the second size. The caller verifies against its own
-  **retained** earlier root — that retained root is the whole point
-  (§9.2). Hash-only; no visibility gate.
-
-Mixing the parameter sets, omitting both, malformed integers, or
-out-of-range positions/sizes → `400 schema_violation`.
-
-**`GET /log/entries?start=<i>&end=<j>`** — leaves `[start, end)`
-(`start < end ≤` current size). Every entry carries `leaf_index` and
-`leaf_hash` unconditionally — the ordered leaf hashes alone recompute
-every root, which is what makes third-party auditing possible (§8.3). The
-`leaf` body is present **only** for entries whose context the requester is
-authorized to retrieve (public contexts: always); otherwise it is absent,
-never `null`. The page is capped at 256 entries; continue from
-`start + len(entries)`.
-
-```json
-{
-  "log_id": "did:web:registry.example.com/log/1",
-  "start": 0,
-  "entries": [
-    { "leaf_index": 0, "leaf_hash": "sha256:…", "leaf": { "leaf_version": "acdp-log-leaf/1", … } },
-    { "leaf_index": 1, "leaf_hash": "sha256:…" }
-  ]
-}
-```
-
-Visibility note (§15): leaf *hashes*, positions, and tree size are public
-by design — a registry with confidentiality requirements over publication
-volume/timing metadata must weigh that before enabling `[log]`.
+- **Gate.** Mounted always; a registry without `log.enabled = true` answers
+  `501 not_implemented` from every `/log/*` path. With it there is **no
+  `log_unavailable`** anywhere: every accepted publish appends its leaf in the
+  same storage transaction as the context row and its receipt, so the proof
+  for a context exists the moment its publish response does.
+- **Checkpoints** are signed with the `[receipt]` key (no new key role);
+  `timestamp` is fresh per evaluation, and a `/log/proof` request for a
+  historical `tree_size` gets a checkpoint signed at that size on demand.
+  Publicly readable wherever capabilities are.
+- **Witness cosignatures** *(ACDP 0.4.0).* When `[[witnesses]]` is configured
+  and at least one **verified** cosignature exists for the exact
+  `(log_id, tree_size, root_hash)` being served, `GET /log/checkpoint` returns
+  the envelope (`log_checkpoint` plus a sibling `witness_signatures` array),
+  and the checkpoint embedded in a `GET /log/proof` response carries the same
+  sibling. With none collected the response is the **bare** checkpoint — the
+  array is never fabricated or served empty. Aggregation adds no profile
+  (still `acdp-registry-transparency-log`) and does not move `acdp_version`,
+  which is `"0.5.0"` regardless (see
+  [`GET /.well-known/acdp.json`](#get-well-knownacdpjson)). See
+  [CONFIGURATION.md](CONFIGURATION.md#witnesses-acdp-040) for `[[witnesses]]`.
+- **Visibility.** An inclusion proof by `?ctx_id=` applies retrieval
+  visibility exactly as for `GET /contexts/{ctx_id}`: an unauthorized or
+  unlogged `ctx_id` is `404 not_found`, indistinguishable from absence. Proofs
+  by `?leaf_index=` and consistency proofs have no visibility gate. The
+  convenience `leaf` echo on `/log/proof`, and the `leaf` of each
+  `/log/entries` entry, are present **only** when the requester is authorized
+  to retrieve that context (public contexts: always); otherwise absent, never
+  `null`. Leaf hashes, positions and tree size are public by design — a
+  registry with confidentiality requirements over publication volume/timing
+  metadata must weigh that before enabling `[log]`.
+- **Limits and errors.** `GET /log/entries` returns at most **256** entries
+  per page; continue from `start + len(entries)`. Mixing the `/log/proof`
+  parameter sets, omitting both, malformed integers, or out-of-range
+  positions/sizes → `400 schema_violation`. A stored leaf that no longer
+  parses surfaces as `invalid_log_proof` from this registry's own
+  `/log/proof` — see the [status table](#status--code-table).
 
 ---
 
@@ -1021,27 +912,19 @@ half-apply: the swap is not reached at all.
 
 ## Error envelope
 
-Errors follow the RFC-ACDP-0007 §4 envelope and are emitted as `application/acdp+json`:
-
-```json
-{
-  "error": {
-    "code": "schema_violation",
-    "message": "human-readable detail",
-    "details": { }
-  }
-}
-```
-
-`details` is present only for codes that carry structured context (e.g.
-`superseded_target` carries `details.reason`). `internal_error` responses never
+Errors use the envelope of
+[RFC-ACDP-0007 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0007-capabilities.md#4-error-envelope),
+emitted as `application/acdp+json`; its fields and when `details` is present
+are specified there. What this registry adds: `internal_error` responses never
 leak detail — the message is always `"internal error"`, with the real cause in
-the server log only.
+the server log only. Two routes do **not** use the envelope; see the note
+under the table.
 
-The `code` strings are the canonical RFC-ACDP-0007 §5 registry. Their definitive
-list, and how an `acdp` client maps each one back to a typed `AcdpError` (with
-retry guidance), is in [acdp-rs · Errors & Retries][acdp-errors] — this page
-documents only the registry's HTTP-status projection of them.
+Each code's meaning and canonical HTTP status are in the spec's
+[error-code registry](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/registries/error-codes.md), and how an `acdp` client
+maps each one back to a typed `AcdpError` (with retry guidance) is in
+[acdp-rs · Errors & Retries](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/errors.md#wire-errors-round-trip-into-typed-variants).
+This page documents only what **this registry** answers and when.
 
 ### Status / code table
 
@@ -1065,7 +948,7 @@ documents only the registry's HTTP-status projection of them.
 | 409 | `invalid_lifecycle_transition` | Double retract, or republish of a never-retracted context (RFC-ACDP-0013 §6 step 4). |
 | 413 | `payload_too_large` | Body over `max_payload_bytes`. |
 | 413 | `embedded_too_large` | Embedded data over `max_embedded_bytes`. |
-| 415 | `unsupported_media_type` | A body-bearing request (`POST /contexts`, the lifecycle and admin lifecycle routes, `/auth/*`) whose `Content-Type` is present but neither `application/json` nor `application/*+json` (parameters such as `charset` are ignored). An absent `Content-Type` is accepted on those routes except `/auth/*`, where it is also a 415. Minted by this registry: outside the canonical RFC-ACDP-0007 §5 code list, so an `acdp` client sees it as an untyped registry error. |
+| 415 | `unsupported_media_type` | A body-bearing request (`POST /contexts`, the lifecycle and admin lifecycle routes, `/auth/*`) whose `Content-Type` is present but neither `application/json` nor `application/*+json` (parameters such as `charset` are ignored). An absent `Content-Type` is accepted on those routes except `/auth/*`, where it is also a 415. How to treat an absent header is registry choice under RFC-ACDP-0007 §4.1; this is ours. |
 | 429 | `rate_limited` | A rate-limit bucket drained (`/auth/*`, challenge, publish or lifecycle; see [Rate limits](#rate-limits-429)), or the shared `/auth/*` backend unavailable under `backend_unavailable = "deny"`; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
 | 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*` and lifecycle endpoints when their profiles are not enabled). |
@@ -1080,5 +963,3 @@ Note: auth failures on the ACDP routes surface as `403 not_authorized`, not
 `401` with `WWW-Authenticate: Bearer realm="metrics"`, because it sits outside
 the ACDP auth pipeline entirely — see
 [AUTHENTICATION.md](AUTHENTICATION.md#metrics-is-gated-separately).
-
-[acdp-errors]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/errors.md

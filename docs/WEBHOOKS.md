@@ -7,6 +7,14 @@ request that triggered an event never waits on (or fails because of) webhook
 delivery. Implementation: `crates/acdp-registry-webhook/src/lib.rs`; event types:
 `crates/acdp-registry-types/src/event.rs`.
 
+This is a **private operational feature** of this registry, not an
+implementation of the reserved `acdp-registry-events` profile sketched in
+[RFC-ACDP-0009 §2.10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0009-extensions.md#210-registry-webhook-event-profile)
+(which is not advertisable and has no interoperable shape yet). The two differ
+on the wire: the envelope here carries `schema_version` and `type`, not the
+sketch's `event_version` and `event_type`, and the HMAC covers the raw posted bytes rather than JCS
+canonical bytes. Do not build against the sketch expecting this payload.
+
 ## Events
 
 Five event types. Each is delivered as a flattened envelope: the variant fields
@@ -260,7 +268,7 @@ Queue depth is exposed operationally at `GET /admin/status`
 `webhook.url` is validated at startup against the same `SsrfPolicy` as DID and
 cross-registry resolution: HTTPS only, no private/internal authorities, no
 redirects to such (the policy is documented in
-[acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/security.md)).
+[acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md#ssrfpolicy)).
 A webhook config that fails validation aborts startup rather than silently
 disabling delivery.
 

@@ -10,10 +10,8 @@ its domain lapse.
 
 This doc is the operator runbook. The receipt wire format, signing
 construction, and consumer-side verification procedure are normative in
-[RFC-ACDP-0010]; the verifying client lives in `acdp-rs`
+[RFC-ACDP-0010](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0010-registry-receipts.md); the verifying client lives in `acdp-rs`
 (`VerificationPolicy`, `ReceiptPolicy::Require`).
-
-[RFC-ACDP-0010]: https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/main/rfcs/RFC-ACDP-0010-registry-receipts.md
 
 ## Enabling receipts
 
@@ -86,18 +84,17 @@ With `head_receipts = true` the registry:
   signing key); `acdp_version` itself is unconditionally `"0.5.0"` as of
   REG-3 (see above) and no longer moves with `head_receipts`;
 - mints a **fresh** receipt on every `GET /lineages/{id}/current` response,
-  attached as the top-level `lineage_head_receipt` envelope member. `as_of`
-  is the registry clock at response time, millisecond-truncated; the head
-  fields are copied verbatim from the served, visibility-filtered head, so
-  the RFC-ACDP-0011 §7 step-5 byte-match holds by construction;
-- **never persists** head receipts (they are ephemeral evidence about one
-  response instant), never attaches them to `GET /contexts/{ctx_id}/body`,
-  and never mints one naming a superseded or retracted head — minting runs
-  *after* head selection, and when `/current` 404s (all versions
+  as the top-level `lineage_head_receipt` member, and never attaches one to
+  `GET /contexts/{ctx_id}/body`; when `/current` 404s (all versions
   superseded-or-retracted) there is no head claim to attest;
-- signs with the **same receipt key** — head receipts introduce no new key
-  role, no new DID-document entry, and no new rotation procedure (the
-  `receipt_version: "acdp-lhr/1"` member domain-separates the preimage).
+- **never persists** head receipts — each is minted for one response;
+- signs with the **same receipt key**, so there is no new key, DID-document
+  entry, or rotation procedure to operate.
+
+What a head receipt attests — `as_of` semantics, the byte-match against the
+served head, freshness, and key lifecycle — is normative in
+[RFC-ACDP-0011 §6–§8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0011-lineage-head-receipts.md#6-issuance)
+and is not restated here.
 
 Because head receipts are requester-relative (the head is selected under
 the requester's visibility), `/current` responses must not be cached across
@@ -169,17 +166,15 @@ The active signing key appears in both `verificationMethod` and
 
 ## The key-retention rule (read before rotating)
 
-RFC-ACDP-0010 §9 (**MUST**): every key that ever signed a receipt stays in
-`verificationMethod` **indefinitely**. Rotation removes a key from
-`assertionMethod` **only**. A verifier accepts a receipt key found in
-`verificationMethod` even when absent from `assertionMethod` — that is what
-keeps old receipts verifiable after rotation.
-
-**Removing a retired key from `verificationMethod` bricks every receipt that
-key ever signed.** The one sanctioned exception is confirmed key compromise,
-where invalidation is the point; in that case re-mint affected receipts under
-the successor key (they attest the original stored `created_at`, not re-mint
-time).
+The rule is
+[RFC-ACDP-0010 §9](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0010-registry-receipts.md#9-registry-receipt-key-lifecycle-normative)
+(**MUST**), and it is what keeps old receipts verifiable after rotation. For an
+operator it comes down to one thing: **removing a retired key from
+`verificationMethod` bricks every receipt that key ever signed.** In this
+registry a key stays there for exactly as long as it is configured — as the
+active key or as a `[[receipt.retired_keys]]` entry — so the procedure below
+never deletes one. The only sanctioned removal is on confirmed key compromise;
+read §9 before doing it.
 
 ### Rotation procedure
 
@@ -269,20 +264,14 @@ change.
 
 ## Verifying end-to-end
 
-From any machine that can reach the registry over TLS:
-
-```rust
-use acdp::client::registry::RegistryClient; // see docs.rs/acdp
-use acdp::client::verified::{ReceiptPolicy, VerificationPolicy, VerifiedContext};
-
-let policy = VerificationPolicy {
-    receipts: ReceiptPolicy::Require,
-    ..VerificationPolicy::default()
-};
-// fetch + verify body signature, then receipt signature against the
-// registry's /.well-known/did.json, plus all RFC-ACDP-0010 §8 cross-checks.
-```
-
-A receipt failure does not invalidate the body — the producer signature
-stands on its own; what is lost is the registry's binding of identifiers and
-time. `acdp` reports the two verdicts separately.
+Consumer-side verification is the SDK's job, not this registry's: set
+`ReceiptPolicy::Require` on the `VerificationPolicy` of the `acdp-client`
+[`verified` module](https://docs.rs/acdp-client/0.14.3/acdp_client/verified/index.html)
+(re-exported by `acdp`), as described in
+[acdp-rs · Consuming & Verifying](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/consuming.md#verifiedcontext--the-verification-pipeline).
+It checks the receipt against this registry's `/.well-known/did.json` — so run
+it from a machine that reaches the registry over TLS at its bare authority —
+and applies the
+[RFC-ACDP-0010 §8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0010-registry-receipts.md#8-verification-procedure-normative)
+procedure. A receipt failure does not invalidate the body; the SDK reports the
+two verdicts separately.
