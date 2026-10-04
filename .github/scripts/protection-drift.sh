@@ -28,9 +28,15 @@
 # ── bypass_actors ──
 #
 # The rulesets API may return `bypass_actors` only to callers that can write the
-# ruleset; this job's token has administration:READ. If the field is absent the
-# bypass list is reported as unverifiable (::notice::) and stays a
-# maintainer-checked item; if present it is compared like everything else.
+# ruleset; this job's token has administration:READ. It may also return the
+# field as an EMPTY list rather than omitting it -- and if that were compared
+# literally against the baseline's bot bypass, the job would go red every day.
+# So the comparison is conservative: when the baseline expects a NON-EMPTY bypass
+# list, a live list that is absent, null or empty is reported as unverifiable
+# (::notice::) and stays a maintainer-checked item. A non-empty live list is
+# compared like everything else (an extra actor or a changed bypass_mode is
+# drift). The cost: a ruleset whose bypass list really was emptied is not caught
+# here -- this token cannot tell that apart from a list it is not shown.
 #
 # ── Modes ──
 #
@@ -74,6 +80,9 @@ $b[0] as $b | $p[0] as $p | $r[0] as $rs |
 ($want | map(.context)) as $want_names |
 ($b.tag_ruleset.name) as $rs_name |
 (($rs // []) | map(select(.target == "tag"))) as $tags |
+# The app the baseline pins its required checks to (the guard holds every
+# `required` entry to GitHub Actions), so no app id is hard-coded here.
+($want | map(.app_id) | unique) as $pins |
 ($tags | map(select(.name == $rs_name))) as $mine |
 
 # ---- required status checks: always hard ----
@@ -84,6 +93,11 @@ $b[0] as $b | $p[0] as $p | $r[0] as $rs |
   (if $p.required_status_checks != null and $p.required_status_checks.strict != $b.strict then
      {level: "error", msg: "required_status_checks.strict is \($p.required_status_checks.strict | tojson), baseline says \($b.strict | tojson). Fix: \($fix_checks)"}
    else empty end),
+  # A context listed twice live (e.g. once pinned, once unpinned) is satisfied by
+  # EITHER entry, so the per-context checks below, which look at one entry, would
+  # pass on the pinned one. Always a hard failure, whatever the order.
+  ($live | group_by(.context) | map(select(length > 1))[] |
+     {level: "error", msg: "required check `\(.[0].context)` appears \(length) times live with app_ids \(map(.app_id) | tojson): any one of them satisfies it, so an unpinned or wrongly pinned duplicate defeats the pin. Fix: \($fix_checks)"}),
   ($want[] | . as $w | ($live | map(select(.context == $w.context))) as $hit |
      if ($hit | length) == 0 then
        {level: "error", msg: "required check `\($w.context)` is in the baseline but NOT required live. Fix: \($fix_checks)"}
@@ -91,7 +105,8 @@ $b[0] as $b | $p[0] as $p | $r[0] as $rs |
        {level: "error", msg: "required check `\($w.context)` is pinned to app_id \($hit[0].app_id | tojson) live, baseline pins \($w.app_id) -- an unpinned or wrongly pinned context can be satisfied by another app. Fix: \($fix_checks)"}
      else empty end),
   ($live[] | select(.context as $c | $want_names | index($c) | not) |
-     if $pending and (.context as $c | ($b.advisory_pending // []) | index($c)) then
+     if $pending and (.context as $c | ($b.advisory_pending // []) | index($c))
+        and (.app_id as $a | $pins | index($a)) then
        {level: "warning", msg: "`\(.context)` is already required live but still advisory_pending in the baseline: merge the PR that moves it to `required` (and sets pending_settings false)."}
      else
        {level: "error", msg: "`\(.context)` (app_id \(.app_id | tojson)) is required live but not in the baseline. If intended, add it to `required` in .github/required-checks.json; otherwise Fix: \($fix_checks)"}
@@ -128,12 +143,14 @@ $b[0] as $b | $p[0] as $p | $r[0] as $rs |
            {level: $lvl, msg: "tag ruleset `\($rs_name)` is missing rule type(s) \(tojson). \($fix)"} else empty end),
         (($have - $need) | if length > 0 then
            {level: $lvl, msg: "tag ruleset `\($rs_name)` has rule type(s) \(tojson) the baseline does not list. \($fix)"} else empty end)),
-     (if ($m | has("bypass_actors")) and $m.bypass_actors != null then
+     (($b.tag_ruleset.bypass_actors // []) | length > 0) as $want_bypass |
+     (if (($m.bypass_actors // []) | length > 0)
+         or ($want_bypass | not) and ($m | has("bypass_actors")) and $m.bypass_actors != null then
         (if ($m.bypass_actors | norm_actors) != ($b.tag_ruleset.bypass_actors | norm_actors) then
            {level: $lvl, msg: "tag ruleset `\($rs_name)` bypass_actors is \($m.bypass_actors | norm_actors | tojson), baseline \($b.tag_ruleset.bypass_actors | norm_actors | tojson). \($fix)"}
          else empty end)
       else
-        {level: "notice", msg: "tag ruleset `\($rs_name)`: bypass_actors not returned to this token, so the bypass list is unverifiable here; it stays a maintainer check (expected \($b.tag_ruleset.bypass_actors | norm_actors | tojson))."}
+        {level: "notice", msg: "tag ruleset `\($rs_name)`: bypass_actors \(if ($m | has("bypass_actors")) and $m.bypass_actors != null then "returned EMPTY" else "not returned" end) to this token, so the bypass list is unverifiable here (an admin-read token cannot tell an emptied list from one it is not shown); it stays a maintainer check (expected \($b.tag_ruleset.bypass_actors | norm_actors | tojson))."}
       end)
    end),
   ($tags[] | select(.name != $rs_name) |
@@ -179,7 +196,7 @@ fetch() {
   local api="repos/${GITHUB_REPOSITORY}"
 
   if ! gh api "$api/branches/main/protection" > "$tmp/protection.json"; then
-    echo "::error::could not READ main's branch protection (GET $api/branches/main/protection failed). This is not drift: the check could not run. Does the token still have administration:read?"
+    echo "::error::could not READ main's branch protection (GET $api/branches/main/protection failed): could not read it (or protection was removed). A 404 here can be real drift -- branch protection deleted -- so it fails like drift does. Does the token still have administration:read, and does main still have protection?"
     return 1
   fi
   if ! gh api "$api/rulesets?includes_parents=false&per_page=100" > "$tmp/list.json"; then
@@ -281,6 +298,14 @@ JSON
   case_ "matching settings pass, no findings at all" 0 "!::(error|warning|notice)::"
   case_ "matching settings without bypass_actors: notice, still green" 0 "^::notice::.*unverifiable${NL}!::(error|warning)::" \
     . . 'map(del(.bypass_actors))'
+  case_ "bypass_actors returned as [] while the baseline expects the bot: notice, still green" 0 \
+    "^::notice::.*bypass_actors returned EMPTY.*unverifiable${NL}!::(error|warning)::" . . '.[0].bypass_actors = []'
+  case_ "bypass_actors null: notice, still green" 0 "^::notice::.*bypass_actors not returned${NL}!::(error|warning)::" \
+    . . '.[0].bypass_actors = null'
+  case_ "baseline expects no bypass, live empty: compared, no findings" 0 "!::(error|warning|notice)::" \
+    '.tag_ruleset.bypass_actors = []' . '.[0].bypass_actors = []'
+  case_ "baseline expects no bypass, live has one: RED" 1 "^::error::.*bypass_actors is" \
+    '.tag_ruleset.bypass_actors = []'
   case_ "pending_settings true + everything matching: nudge to flip the flag" 0 "^::notice::.*set it to false" \
     '.pending_settings = true'
 
@@ -307,6 +332,16 @@ JSON
     '.pending_settings = true' '.required_status_checks.checks += [{"context": "surprise", "app_id": 15368}]'
   case_ "advisory check already required, pending: warning only" 0 "^::warning::.msrv. is already required live" \
     '.pending_settings = true' '.required_status_checks.checks += [{"context": "msrv", "app_id": 15368}]'
+  case_ "advisory check required live UNPINNED while pending: RED, not a warning" 1 "^::error::.msrv. .app_id null. is required live but not in the baseline${NL}!::warning::.msrv." \
+    '.pending_settings = true' '.required_status_checks.checks += [{"context": "msrv", "app_id": null}]'
+  case_ "advisory check required live with a wrong app_id while pending: RED" 1 "^::error::.msrv. .app_id 8329. is required live" \
+    '.pending_settings = true' '.required_status_checks.checks += [{"context": "msrv", "app_id": 8329}]'
+  case_ "duplicate live context, pinned entry first: RED" 1 "^::error::required check .lint. appears 2 times live with app_ids \\[15368,null\\]" \
+    . '.required_status_checks.checks += [{"context": "lint", "app_id": null}]'
+  case_ "duplicate live context, unpinned entry first: RED" 1 "^::error::required check .lint. appears 2 times live with app_ids \\[null,15368\\]" \
+    . '.required_status_checks.checks = [{"context": "lint", "app_id": null}] + .required_status_checks.checks'
+  case_ "duplicate live context is RED even while pending and both pinned" 1 "^::error::required check .lint. appears 2 times live" \
+    '.pending_settings = true' '.required_status_checks.checks += [{"context": "lint", "app_id": 15368}]'
   case_ "advisory check already required, not pending: RED" 1 "^::error::.msrv. .app_id 15368. is required live but not in the baseline" \
     . '.required_status_checks.checks += [{"context": "msrv", "app_id": 15368}]'
   case_ "no required_status_checks at all is RED" 1 "^::error::branch protection has NO required_status_checks" \
