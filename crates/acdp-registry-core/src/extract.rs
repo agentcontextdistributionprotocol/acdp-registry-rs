@@ -132,10 +132,9 @@ fn media_type_accepted(headers: &axum::http::HeaderMap) -> bool {
 /// publish — the larger blast radius of the two. Gating without giving up the
 /// raw bytes keeps this change to exactly the one behaviour `err-002` names.
 ///
-/// (`/auth/*` answers 422 here and is therefore non-conformant with that same
-/// table. That is a pre-existing, separate defect on routes no fixture points
-/// at; it is reported rather than fixed in passing, because widening this
-/// change to `/auth/*` is its own wire change and its own review.)
+/// (`/auth/*` goes through [`AcdpJson`], whose `JsonDataError` rejection
+/// would carry the same 422; `status_for_code` maps its `schema_violation`
+/// back to the table's **400** (U-523), so neither extractor leaks a 422.)
 pub struct AcdpBytes(pub axum::body::Bytes);
 
 impl<S> FromRequest<S> for AcdpBytes

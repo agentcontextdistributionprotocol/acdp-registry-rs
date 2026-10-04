@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use acdp::error::AcdpError;
 use acdp_registry_auth::extract_bearer;
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::{AuthChallenge, RegistryError, TokenRequest, TokenResponse};
@@ -10,7 +11,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::json;
 
 use crate::extract::AcdpJson;
 use crate::metrics::RateLimitScope;
@@ -85,28 +85,30 @@ pub struct RevokeRequest {
 /// Returns 204 on success. 403 when the bearer is missing/invalid or
 /// belongs to a different DID than the target token: all three paths
 /// yield `RegistryError::AuthToken`, which `http_status` maps to 403
-/// (`not_authorized`) — this registry has no 401-bearing code. 503 when the
-/// registry was started without a revocation store (which means the
-/// signer does not consult one either).
+/// (`not_authorized`) — this registry has no 401-bearing code. 501
+/// `not_implemented` when the registry was built without a revocation
+/// store (which means the signer does not consult one either) — the same
+/// posture as the `/log/*` endpoints on a registry that does not advertise
+/// the transparency log. The shipped binary always wires one, so this arm
+/// is reachable only from a library embedder's `AppState`.
 pub async fn revoke_token<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     AcdpJson(req): AcdpJson<RevokeRequest>,
 ) -> Result<Response, RegistryError> {
-    // 503 when the revocation store isn't wired — match the doc contract
-    // above. In current binaries `state.auth.revocations` is always
-    // `Some`, so this branch is defensive against future configurations
-    // that disable revocation. Falling through would surface as a 500
-    // via `AuthError::Internal`, which is the wrong signal: the registry
-    // is healthy; the feature simply isn't available.
+    // 501 when the revocation store isn't wired — match the doc contract
+    // above. In the shipped binary `state.auth.revocations` is always
+    // `Some`, so this arm is defensive against an embedder that builds
+    // `AppState` without one. Falling through would surface as a 500 via
+    // `AuthError::Internal`, which is the wrong signal: the registry is
+    // healthy; the feature simply isn't available. Routed through
+    // `RegistryError` (not a hand-built body) so the envelope, status and
+    // code come from the one `http_status`/`error_code` table the
+    // conformance gate scans.
     if state.auth.revocations.is_none() {
-        let body = Json(json!({
-            "error": {
-                "code": "service_unavailable",
-                "message": "token revocation is not configured on this registry"
-            }
-        }));
-        return Ok((StatusCode::SERVICE_UNAVAILABLE, body).into_response());
+        return Err(RegistryError::Acdp(AcdpError::NotImplemented(
+            "token revocation is not configured on this registry".into(),
+        )));
     }
     let bearer = headers
         .get("authorization")

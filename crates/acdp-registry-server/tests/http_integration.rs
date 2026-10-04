@@ -109,7 +109,8 @@ fn caps() -> CapabilitiesDocument {
 fn config(playground: bool) -> RegistryConfig {
     // Tests expect anonymous reads to surface published public contexts.
     // The new shipped default for `public_arm_open` is `false`
-    // (SEC-07 / CLAUDE.md), so opt in explicitly inside the test harness.
+    // (SEC-07, docs/ENGINEERING-LOG.md; RFC-ACDP-0008 §6.3 makes anonymous
+    // reads a MAY), so opt in explicitly inside the test harness.
     let auth = AuthConfig {
         anonymous_public_reads: true,
         ..AuthConfig::default()
@@ -2905,9 +2906,11 @@ async fn health_503_still_reports_the_build_version() {
 }
 
 #[tokio::test]
-async fn revoke_returns_503_when_revocations_not_configured() {
-    // Doc contract on `revoke_token`: 503 when the registry started
-    // without a revocation store. Default builds always wire one, so
+async fn revoke_returns_501_when_revocations_not_configured() {
+    // Doc contract on `revoke_token`: 501 `not_implemented` when the
+    // registry was built without a revocation store (#376 — previously a
+    // hand-built 503 `service_unavailable` envelope, a code outside the
+    // RFC-ACDP-0007 §5 table). The shipped binary always wires one, so
     // this path needs a custom harness that mounts /auth/* but skips
     // `AuthService::with_revocations`.
     let db = tempfile::Builder::new()
@@ -2952,11 +2955,18 @@ async fn revoke_returns_503_when_revocations_not_configured() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::SERVICE_UNAVAILABLE,
-        "revoke endpoint must signal 503 when the feature isn't wired, not 500"
+        StatusCode::NOT_IMPLEMENTED,
+        "revoke endpoint must signal 501 when the feature isn't wired, not 500"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/acdp+json"),
+        "the 501 envelope is a canonical error document"
     );
     let v = body_to_json(resp).await;
-    assert_eq!(v["error"]["code"], "service_unavailable");
+    assert_eq!(v["error"]["code"], "not_implemented", "body = {v}");
 }
 
 #[tokio::test]

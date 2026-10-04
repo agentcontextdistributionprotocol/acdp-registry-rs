@@ -405,9 +405,11 @@ pub struct AuthConfig {
     #[serde(default = "default_token_leeway")]
     pub token_leeway_seconds: u64,
     /// Allow anonymous reads of `public`-visibility contexts. Defaults to
-    /// `false` — CLAUDE.md: "Anonymous public reads are off by default for
-    /// new registries unless the config explicitly opts in." Operators who
-    /// want world-readable public contexts MUST set this to true.
+    /// `false` — SEC-07 (`docs/ENGINEERING-LOG.md`): anonymous public reads
+    /// are off by default for new registries unless the config explicitly
+    /// opts in; RFC-ACDP-0008 §6.3 makes anonymous reads a MAY, not a MUST.
+    /// Operators who want world-readable public contexts MUST set this to
+    /// true.
     #[serde(default)]
     pub anonymous_public_reads: bool,
     /// JWT signing algorithm. `HS256` (default, backward-compatible) uses

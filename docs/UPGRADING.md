@@ -59,6 +59,11 @@ metric label changed. If you alert on `acdp_registry_rate_limit_rejections_total
 note that it can still be raised by unauthenticated requests naming an agent that is already over
 budget.
 
+**Library embedders only (#376):** `POST /auth/token/revoke` on an `AppState` built without a
+revocation store now answers `501 not_implemented` instead of a hand-built `503
+service_unavailable` (a code outside RFC-ACDP-0007 §5). The shipped binary always wires one, so
+deployments of it see no change.
+
 ---
 
 ## 0.2.0
