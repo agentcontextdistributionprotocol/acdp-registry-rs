@@ -4756,3 +4756,11 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** reimplement search in the wrapper (needs the inner map, which the SDK does not expose); fix `InMemoryStore` upstream in `acdp-server`; move `MemoryStore` into `acdp-registry-store` (Q1) so it can run the parity suite from `tests/` and own its search.
 - **Blast radius if wrong:** a demo/playground user sees different `q=` hits than a SQLite/Postgres deployment would return; no durable deployment is affected. A floor set too high or too low makes the non-required `coverage` job flap or under-guard, fixable by editing one number. Revisit Q1 (move MemoryStore into acdp-registry-store) if the memory backend is ever promoted beyond demo use.
 - **Status:** UNCONFIRMED
+
+## hardening-remaining Phases 7-8 — example config and doc-truth guards
+- **Plan:** plans/hardening-remaining.md (Phases 7, 8)
+- **Assumed:** (a) RAILWAY.md image tags are guarded at major.minor only, against the server crate version — a minor release-plz bump fails `conformance_gate` until RAILWAY.md is updated in the same PR (same shape as the upgrade-notes gate, which already forces a human edit on release PRs); (b) `config/registry.dev.toml` is unnecessary because the built-in defaults already are the no-env dev config; (c) `ENGINEERING-LOG.md` and `MUTATION-SCOPE-CANDIDATES.md` are excluded from the line-pin guard because they are dated records of the code as it was.
+- **Chose:** symbol/section names instead of `file:line` in operator docs; four guards in `conformance_gate.rs`. Remaining line pins in `.github` comments (e.g. `ci.yml:167`, `:195`) are out of the guard's scope and were left.
+- **Alternatives:** full-version RAILWAY guard (adds friction on every patch release); an allow-list file for the line-pin guard (nothing needs allow-listing today).
+- **Blast radius if wrong:** a docs guard fails a release PR until a doc edit lands; no runtime effect.
+- **Status:** UNCONFIRMED
