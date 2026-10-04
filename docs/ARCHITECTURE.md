@@ -80,7 +80,8 @@ top of the upstream sync trait:
   `/log/entries` uses it to decide which leaves to echo.
 
 The sync `RegistryStore` methods inherited from `acdp` are required so the
-upstream `RegistryServer::publish_verified` algorithm runs unchanged. The
+upstream `RegistryServer` publish algorithm (see
+[Publish pipeline](#publish-pipeline)) runs unchanged. The
 Postgres and SQLite implementations bridge to async sqlx via
 `tokio::task::block_in_place + Handle::current().block_on(...)`; HTTP handlers
 wrap the sync calls in `tokio::task::spawn_blocking`.
@@ -98,8 +99,18 @@ media-type layer → `x-request-id` assignment + propagation → a `413` envelop
 backstop → CORS → `RequestBodyLimitLayer` (capped at `limits.max_payload_bytes`)
 → 30 s `TimeoutLayer` → `TraceLayer` → request metrics (when `metrics.enabled`;
 FEAT-10). The `/auth/*` routes additionally carry the FEAT-06 per-IP/global
-rate-limit `route_layer`, and ACDP data and auth routes carry an
+rate-limit `route_layer` (`auth_rate_limit`), and ACDP data and auth routes carry an
 `application/acdp+json` response-header layer.
+
+`auth_rate_limit` charges each request to whatever `SharedRateLimitBackend`
+`AppState` holds: the in-memory `AgentRateLimiter` by default, or, with
+`[rate_limit] backend = "postgres"`, a `LayeredRateLimiter` that asks the
+in-memory limiter first and only on an admit asks `PgRateLimitBackend` (one
+atomic upsert per check on the `rate_limit_windows` table). The layering is
+applied in `AppStateInner::with_shared_auth_limiter`, never by the binary, so a
+shared backend cannot be installed without its in-memory pre-filter; the
+layered limiter also applies the `backend_unavailable` posture. Details:
+[CONFIGURATION.md · `[rate_limit]`](CONFIGURATION.md#rate_limit-feat-06).
 
 Note the ordering rule that governs this list: `Router::layer` makes the **later**
 call the **outer** one — the inverse of `tower::ServiceBuilder`, where the first
@@ -113,32 +124,65 @@ request-id pair, `SetRequestId` must be applied last so it runs first, because
 ## Publish pipeline
 
 The protocol-critical part of `POST /contexts` is **not** implemented here — it
-is `acdp`'s `RegistryServer::publish_verified`, the ordered RFC-ACDP-0003 §2.1
-algorithm (schema/size validation → `content_hash` recompute → algorithm + DID
-key resolution → signature verification → atomic commit). Its one invariant —
+is `acdp`'s `RegistryServer`, the ordered RFC-ACDP-0003 §2.1 algorithm
+(schema/size validation → `content_hash` recompute → algorithm + DID key
+resolution → signature verification → atomic commit). Its one invariant —
 *never persist a context before its signature is verified* — and the full step
 list are documented in [acdp-rs · Implementing a Registry][acdp-registry]. We
 reuse it unchanged and add storage adapters, **not** a parallel validator.
 
-What this registry wraps around that call:
+The registry calls it in **two halves** rather than as one bundled call
+(`acdp` 0.14's prove/commit split): a `prove_publish_identity*` call runs the
+§2.1 validation and signature steps and persists nothing, and `commit_proven`
+then runs the atomic store commit (idempotency lookup, predecessor checks,
+insert, supersession marking). The split exists so the per-agent publish
+budget can be charged at the exact point the signer becomes proven — between
+the two halves — and not before.
 
-1. Body-size cap (the `RequestBodyLimitLayer`, uniformly across routes).
-2. JSON deserialization into `acdp::types::publish::PublishRequest`.
-3. Per-agent rate-limit check (`limits.publish_rate_per_minute`) — *before* the
-   expensive verify.
+What `publish` (`crates/acdp-registry-core/src/handlers/context.rs`) wraps
+around those calls:
+
+1. Body-size cap (the `RequestBodyLimitLayer`, uniformly across routes) and the
+   `Content-Type` gate (`AcdpBytes`; see
+   [HTTP-API.md](HTTP-API.md#request-bodies-and-content-type)).
+2. JSON deserialization into `acdp::types::publish::PublishRequest`, then the
+   RFC-ACDP-0016 `anchors` version gate.
+3. A read-only **peek** at the per-agent budget
+   (`limits.publish_rate_per_minute`) for the *claimed* `agent_id`: an agent
+   already over budget gets `429`, but nothing is charged and no bucket is
+   created, because the claim is not yet proven.
 4. Tenant resolution for the write (`tenant_for_publish`; see
    [MULTI-TENANCY.md](MULTI-TENANCY.md)).
-5. → `RegistryServer::publish_verified(req, idempotency_key, resolver)`.
-6. Receipt minting and the transparency-log leaf append, when `[receipt]` /
+5. One of four branches, each pairing a proof with `commit_proven` except the
+   last:
+   - `did:key` producer (checked first, whatever `[playground]` says) →
+     `prove_publish_identity_did_key`, offline;
+   - playground, agent with a pinned key → the pinned-signature check, then
+     `prove_publish_identity_pinned`;
+   - production → `prove_publish_identity`, resolving the `did:web` document;
+   - playground, unpinned agent → `publish_unverified_for_tests`, the SDK's
+     test path that skips the §2.1 signature steps (a protocol violation
+     reserved for demos), with idempotency and tenant stamping done around it
+     by the handler.
+6. The charge: a `PublishCharge` guard is **armed** as soon as a
+   `prove_publish_identity*` call succeeds, so every later failure on those
+   three branches (a store error, a duplicate-publish race) is charged too;
+   it is armed again on success, which is the only charge on the unpinned
+   playground branch. Arming is idempotent, so a publish is charged at most
+   once, and a publish that fails before its signer is proven is never
+   charged.
+7. Receipt minting and the transparency-log leaf append, when `[receipt]` /
    `[log]` are enabled (see [RECEIPTS.md](RECEIPTS.md)).
-7. A `context.published` webhook on success (see [WEBHOOKS.md](WEBHOOKS.md)).
+8. A `context.published` webhook on success (see [WEBHOOKS.md](WEBHOOKS.md)).
+
+The four-way charge split is pinned by
+`late_failures_are_charged_on_exactly_three_of_the_four_publish_branches`
+(`crates/acdp-registry-server/tests/http_integration.rs`).
 
 DID verification reuses `acdp`'s `WebResolver` (LRU-cached, SSRF-policy-gated —
 see [acdp-rs · Security Model][acdp-security]) for **both** publish and
 auth-challenge verification; there is intentionally only one resolver per server
-instance. In playground mode the binary calls `publish_unverified_for_tests`
-instead, skipping the §2.1 signature-verification steps — a protocol violation
-reserved for demos.
+instance.
 
 [acdp-registry]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/registry.md
 [acdp-security]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/security.md
@@ -168,10 +212,10 @@ visibility rule in those shared paths, not in the handler.
 | Crate | Role |
 |-------|------|
 | `acdp-registry-types`  | Leaf: config (TOML+env), errors with HTTP projection, webhook events. |
-| `acdp-registry-store`  | `ExtendedRegistryStore` trait — extends `acdp::registry::RegistryStore`. |
-| `acdp-registry-pg`     | Postgres backend (native `TIMESTAMPTZ` / `TEXT[]` / `JSONB` / `tsvector`). |
+| `acdp-registry-store`  | `ExtendedRegistryStore` trait — extends `acdp::registry::RegistryStore`; also the `SharedRateLimitBackend` trait for the `/auth/*` ceilings. |
+| `acdp-registry-pg`     | Postgres backend (native `TIMESTAMPTZ` / `TEXT[]` / `JSONB` / `tsvector`); `PgRateLimitBackend`, the cluster-wide `/auth/*` counter. |
 | `acdp-registry-sqlite` | SQLite backend (FTS5 virtual table; arrays as JSON TEXT). |
 | `acdp-registry-auth`   | DID challenge → JWT (HS256/EdDSA), revocation store + cross-issuer pollers. |
 | `acdp-registry-webhook`| HMAC-SHA256-signed POSTs over a bounded mpsc channel. |
-| `acdp-registry-core`   | axum router + handlers, generic over `S`. |
+| `acdp-registry-core`   | axum router + handlers, generic over `S`; the in-memory rate limiters and `LayeredRateLimiter` (in-memory in front of a shared backend). |
 | `acdp-registry-server` | Binary (`acdp-registry`); features select the storage backend. |

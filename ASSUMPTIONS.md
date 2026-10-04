@@ -4784,3 +4784,11 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** documenting the deviations as accepted; changing behaviour in this PR.
 - **Blast radius if wrong:** docs only; the runbook is the one operator-safety item (verified against RFC-0012 §7.4 and the log code, not against a live deployment or a witness).
 - **Status:** UNCONFIRMED
+
+## Docs refresh Phase 3 — document the shared limiter, Content-Type rules, `q=`, poller, rollback, publish split
+- **Plan:** plans/docs-refresh-2026-10.md (Phase 3)
+- **Assumed:** (a) `ACDP_REGISTRY_RATE_LIMIT__BACKEND=postgres` (docker/RAILWAY.md) maps to `rate_limit.backend` under the documented `__` env rule — read from `RegistryConfig::load`'s `Environment` source, not covered by a test for this key; (b) a SQLite database migrated by a newer release fails to start an older binary (docs/OPERATIONS.md) — inferred from the SQLite `migrate` not calling `set_ignore_missing(true)` and sqlx's default, not measured; (c) the `Content-Type` gate on `/auth/*` is described by the shared accept predicate; case-insensitive matching of the type was NOT claimed because only the `AcdpBytes` path lowercases and no test pins case on `/auth/*`; (d) the lifecycle per-agent check charging before signature verification (`limiter.check(event.actor)` in `lifecycle_transition`) is documented as current behaviour; whether it should move to the publish peek/charge shape is a code question, not settled here; (e) a revocation feed answering `3xx` is a failed tick because `fetch_once` treats any non-success status as an error.
+- **Chose:** registry-specific deltas only, cited by symbol; the HTTP-API 429 table row was reduced to a pointer at the new "Rate limits" section rather than rewritten (Phase 5 owns the status-table prose).
+- **Alternatives:** documenting the 429 sources only in the status table; leaving the lifecycle charge timing unstated.
+- **Blast radius if wrong:** docs only. (a) wrong ⇒ a Railway operator's env var is ignored and limits stay per replica; (b) wrong ⇒ an over-cautious note.
+- **Status:** UNCONFIRMED

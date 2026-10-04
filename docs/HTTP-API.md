@@ -67,7 +67,70 @@ missing from exactly the failures an operator most needs to correlate.
 The `/auth/*` subrouter additionally carries the FEAT-06 per-IP + process-global
 rate limiter (`[rate_limit]`): it admits or rejects a request with `429` +
 `Retry-After` **before** any DID resolution, keyed by the resolved client IP
-(TCP peer, or the trusted-proxy `X-Forwarded-For` policy).
+(TCP peer, or the trusted-proxy `X-Forwarded-For` policy). It runs as a
+`route_layer` on the three `/auth/*` routes only, ahead of their handlers and
+body extractors, so every request it admits is charged whatever the handler
+then answers (a `415` or `400` included). It checks the global ceiling first,
+then the per-IP budget. With the default `rate_limit.backend = "memory"` both
+are counted per process. With `backend = "postgres"` the in-memory limiter
+stays in front as a pre-filter and an admitted check is then counted once
+across every replica sharing the database (see
+[CONFIGURATION.md · `[rate_limit]`](CONFIGURATION.md#rate_limit-feat-06)); a
+shared-counter denial is the same `429` with the database's own `Retry-After`.
+If the database cannot answer, `backend_unavailable = "allow"` (the default)
+admits the request on the per-process check alone, while `"deny"` refuses it
+with `429` and `Retry-After: 5`.
+
+### Request bodies and `Content-Type`
+
+The body-bearing routes gate the request `Content-Type` before reading the
+body. Accepted on all of them: `application/json` or any `application/*+json`
+type (so `application/acdp+json`), with parameters such as `; charset=utf-8`
+ignored. Anything else that is present — `text/plain`, `application/xml`, an
+empty value — is `415 unsupported_media_type`. The routes differ only on an
+**absent** header:
+
+| Route family | No `Content-Type` | Wrong-shaped or non-JSON body |
+|--------------|-------------------|-------------------------------|
+| `POST /contexts` | accepted (treated as JSON) | `400 schema_violation` |
+| `POST /contexts/{ctx_id}/retract`, `POST /contexts/{ctx_id}/republish` | accepted | `400 schema_violation` (`400 immutable_field` for a body-content member) |
+| `POST /admin/contexts/{ctx_id}/retract`, `POST /admin/contexts/{ctx_id}/republish` | accepted (the body is optional) | `400 schema_violation` |
+| `POST /auth/challenge`, `POST /auth/token`, `POST /auth/token/revoke` | `415 unsupported_media_type` | `400 schema_violation` (never `422`) |
+
+Accepting an absent header on the publish and lifecycle routes is a
+deliberate choice (`POST /contexts` never required it, and rejecting it
+would break every publisher that omits it); `/auth/*` has always required
+it. On every route an oversized body is `413 payload_too_large`, and a query
+string that does not parse (for example `GET /contexts/search?limit=abc`) is
+`400 schema_violation`. These rejections carry the error envelope below, not
+plain text. `POST /admin/pinned-keys/reload` takes no body.
+
+### Rate limits (`429`)
+
+Every `429` is `rate_limited` with a `Retry-After` header (whole seconds,
+never `0`). Each limiter is a fixed 60-second window, and the sources are:
+
+| Source | Applies to | Keyed by | Configured by |
+|--------|------------|----------|---------------|
+| `/auth/*` global ceiling | all three `/auth/*` routes | — | `rate_limit.global_per_minute` (default 6000) |
+| `/auth/*` per-IP budget | all three `/auth/*` routes | resolved client IP | `rate_limit.per_ip_per_minute` (default 60) |
+| Shared backend unavailable, `backend_unavailable = "deny"` | all three `/auth/*` routes | — | `Retry-After: 5`, fixed |
+| Challenge global ceiling | `POST /auth/challenge` | — | 64 × `limits.challenge_rate_per_minute` |
+| Challenge per-agent budget | `POST /auth/challenge` | the requested `agent_id` | `limits.challenge_rate_per_minute` (default 60) |
+| Publish per-agent budget | `POST /contexts` | the signing `agent_id` | `limits.publish_rate_per_minute` (default 60) |
+| Lifecycle per-agent budget | `POST /contexts/{ctx_id}/retract`, `/republish` | the event `actor` | the same per-agent bucket as publish |
+
+The admin lifecycle routes and the read routes have no registry-side rate
+limit. The challenge, publish and lifecycle budgets are always per process,
+whichever `rate_limit.backend` is configured. Publish and lifecycle differ in
+**when** they charge: a publish only *peeks* at the bucket before signature
+verification and charges once the signer is proven (see
+[`POST /contexts`](#post-contexts)), while a lifecycle request is charged at
+the check itself, before its event signature is verified. Every `429` is
+counted on the rejection counter documented under
+[`GET /metrics`](#get-metrics-feat-10), labelled with the check that refused
+it; a refusal because the shared backend was unavailable counts under that
+check's own `auth_global` or `auth_per_ip` scope.
 
 ---
 
@@ -336,8 +399,18 @@ Body: an RFC-ACDP-0003 `PublishRequest` (JSON). Response: `200` with a
 `PublishResponse` (assigned `ctx_id`, `lineage_id`, `version`, `status`, and —
 on a receipts-advertising registry — the top-level `registry_receipt`, the
 signed RFC-ACDP-0010 attestation minted atomically with the row). A
-per-agent rate limit (`limits.publish_rate_per_minute`, default 60) is checked
-before the expensive verify — `429` + `Retry-After` when drained.
+per-agent rate limit (`limits.publish_rate_per_minute`, default 60, keyed by
+the body's `agent_id`) answers `429` + `Retry-After` when drained. Before
+signature verification it is only a **read-only peek**: the claimed
+`agent_id` is not yet proven, so an over-budget agent is refused but nothing
+is charged and no bucket is created. The publish is **charged** only once the
+signer's identity is proven (from then on, a later failure such as a store
+error is charged too) or when the publish succeeds. A publish that fails
+before its signer is proven — a bad signature, an unresolvable key, a
+malformed body — costs the named agent nothing. In playground mode without a
+pinned key nothing is verified, so only a successful publish is charged.
+Because peek and charge are separated by the verify, concurrent publishes by
+one agent can overshoot the limit by the number in flight.
 
 did:key producers (ACDP 0.2.0) are verified **offline** — no DID-document
 fetch — when `"did:key"` is in `supported_did_methods`; otherwise the publish
@@ -395,7 +468,7 @@ Query parameters (all optional):
 
 | Param | Meaning |
 |-------|---------|
-| `q` | Full-text query. |
+| `q` | Full-text query over `title`, `summary`, `description`, `domain`, `tags` and `agent_id`. On Postgres it is `plainto_tsquery('english', q)`: English stemming (`running` matches "run"), English stopwords dropped, case-folded, every remaining word required (any order), no operator syntax. SQLite (FTS5 `porter` tokenizer plus the same stopword list) is brought to the same contract, and both backends run the same parity test; the two stemmers are different implementations and can still disagree on individual words. A query made only of stopwords (`q=the`) matches nothing on either. The demo `memory` backend differs: one case-insensitive substring match of the whole query, unstemmed, so a multi-word `q` is a contiguous phrase. |
 | `type` | Context type filter. |
 | `domain`, `tags`, `agent_id`, `schema_uri`, `derived_from` | Exact-match facets. |
 | `status` | Status filter (default `active`). A retracted context matches only `status=retracted` — never the default, nor `superseded`/`expired` even where those facts also hold (RFC-ACDP-0013 §8.2). |
@@ -511,8 +584,11 @@ signed and the signature verifies through the same DID pipeline as a
 publish — `did:web` via resolution, `did:key` offline), then the strict
 alternation check (`retracted` only when not retracted, `republished` only
 when retracted; violation → `409 invalid_lifecycle_transition`) and the
-atomic append. Per-agent rate limiting applies as to publish, keyed by the
-event actor.
+atomic append. Per-agent rate limiting draws on the same bucket as publish
+(`limits.publish_rate_per_minute`), keyed by the event `actor`, but unlike
+publish it is charged when checked — after the shape and path checks,
+before the tenant gate and the signature verification (see
+[Rate limits](#rate-limits-429)).
 
 Response: `200` with the post-transition full-retrieval envelope (`body` +
 `registry_state`, `status` re-derived, `lifecycle_events` including the
@@ -983,7 +1059,7 @@ documents only the registry's HTTP-status projection of them.
 | 413 | `payload_too_large` | Body over `max_payload_bytes`. |
 | 413 | `embedded_too_large` | Embedded data over `max_embedded_bytes`. |
 | 415 | `unsupported_media_type` | A body-bearing request (`POST /contexts`, the lifecycle and admin lifecycle routes, `/auth/*`) whose `Content-Type` is present but neither `application/json` nor `application/*+json` (parameters such as `charset` are ignored). An absent `Content-Type` is accepted on those routes except `/auth/*`, where it is also a 415. Minted by this registry: outside the canonical RFC-ACDP-0007 §5 code list, so an `acdp` client sees it as an untyped registry error. |
-| 429 | `rate_limited` | Publish/challenge bucket drained; carries `Retry-After`. |
+| 429 | `rate_limited` | A rate-limit bucket drained (`/auth/*`, challenge, publish or lifecycle; see [Rate limits](#rate-limits-429)), or the shared `/auth/*` backend unavailable under `backend_unavailable = "deny"`; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
 | 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*` and lifecycle endpoints when their profiles are not enabled). |
 | 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable. A foreign registry refused by the SSRF policy is also `cross_registry_resolution_failed`; a refused DID host is not (it is 400 `key_resolution_failed`). |

@@ -44,7 +44,9 @@ see [docs/HTTP-API.md](docs/HTTP-API.md).
 - **HMAC-signed webhooks** — `context.published`, `context.retrieved`,
   `context.retracted`, `context.republished`, `search.executed`.
 - **Abuse controls & observability** — per-IP and global `/auth/*` rate
-  limiting, and an optional Prometheus `/metrics` endpoint.
+  limiting (per process by default, optionally counted across replicas in
+  Postgres with `[rate_limit] backend = "postgres"`), per-agent publish and
+  challenge budgets, and an optional Prometheus `/metrics` endpoint.
 - **Playground mode** — a runtime config flag (`[playground] enabled = true`,
   compiled into every build) that skips DID verification for hands-on demos;
   never enable in production. Only its admin routes are compile-gated behind

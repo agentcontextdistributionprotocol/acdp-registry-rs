@@ -171,6 +171,17 @@ Railway needs to pull from GHCR. Either:
 > both flags. If you want `public` contexts unreadable, set neither — which is
 > what this recipe does.
 
+> **More than one replica.** This recipe runs one. If you scale the service
+> out with auth enabled, the `/auth/*` per-IP and global limits are by default
+> counted by each replica on its own, so the effective ceiling grows with the
+> replica count. Set `ACDP_REGISTRY_RATE_LIMIT__BACKEND = postgres` to count
+> them once across all replicas in the shared Postgres database (this image is
+> already Postgres-only, which that setting requires; it also needs
+> `rate_limit.enabled` and a non-zero `global_per_minute`, both the defaults).
+> The per-agent publish and challenge budgets stay per replica either way, and
+> none of this replaces an edge limiter for volumetric floods. Details:
+> [OPERATIONS.md · Rate limiting](../docs/OPERATIONS.md#rate-limiting).
+
 > **TLS:** terminate TLS at Railway's edge and run the container with
 > `registry.tls.enabled = false` (as in `config.docker.toml`). The
 > `ALLOW_PUBLIC_BIND` opt-in exists so a non-loopback bind without in-process
