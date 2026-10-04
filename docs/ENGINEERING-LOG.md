@@ -7092,3 +7092,38 @@ section, two already written by release-plz): six stubbed, two skipped, and the 
 asserted byte-identical to before the change. A canary defining `version()` and `crates()` as failing
 shell functions stayed silent, which is what makes "nothing executed" a measurement rather than a
 reading of the diff.
+
+## #371 — re-pinning the mutation ratchet after #341, and a ledger that was stale since #331
+
+The 2026-09-28 scheduled `mutants.yml` run (36417581090, sha 5a6dfd8) failed. The cause was
+not a survivor. #341 removed code from `publish_identity_proven_offline`, and with it five
+CAUGHT mutants: context.rs went 139 -> 134 and the scope went 351 -> 346, while log.rs (65),
+receipt.rs (9) and store.rs (138) did not change. The same edit moved three cited lines up by
+32: `if !matches.is_empty()` from :1238 to :1206, `rec.expires_at > Utc::now()` from :642 to
+:600, and the budgeted timeout `if !should_refill` from :1292 to :1260. The run itself was
+complete: 346 / 214 caught / 7 missed / 124 unviable / 1 timeout, with `end_time` present,
+in 143.7 minutes against the 180-minute cap. Its `missed.txt` holds the same seven mutants
+the list already named. Diffed against the u552 ledger by name with line:col stripped, the
+change is -5 caught and nothing else.
+
+The re-pin uses that run's own report. The `outcomes.json` is committed unchanged as
+`docs/mutation-runs/run36417581090-scope-346-outcomes.json` and is now
+`MUTANTS_PRIOR_LEDGER`. `MUTANTS_SURVIVORS` is that run's `missed.txt` verbatim, with the
+existing reasons kept, and `MUTANTS_EXPECTED_SCOPE` is 346. u552 is marked SUPERSEDED, not
+VOID, because it was a correct measurement of its tree.
+
+**The finding worth keeping: the prior ledger was already stale before #341.** u552 records
+the store.rs survivor at `store.rs:1306:35`. `MUTANTS_SURVIVORS` has said `store.rs:1317:35`
+since #331 (5cceb1a), when U-574's comment rewrite moved the line and the list was updated
+without the ledger. The classifier's freshness gate (`classify_removed_survivors.py`) would
+have refused to pair any drifted line against u552. Replaying it locally gives
+`STALE PRIOR LEDGER: 3 of 7` (the two #341 moves plus the #331 one). Nothing caught it at PR
+time, because that gate only runs inside the scheduled job, and only when a survivor
+disappears.
+
+So this unit moves the same rule to PR time. `every_committed_survivor_is_in_the_prior_ledger`
+(`crates/acdp-registry-server/tests/conformance_gate.rs`) parses `MUTANTS_SURVIVORS` with the
+workflow's own strip rules and asserts that each line is a `scenario.Mutant.name` in the
+declared ledger. Against u552 it fails and names `store.rs:1317:35`. It would have failed
+#331. Scope count and line drift are still detected only by the cron. Catching them at PR time
+needs a path-gated job that installs cargo-mutants and runs `--list`, which is follow-up work.

@@ -360,12 +360,18 @@ cargo mutants --list | sed 's/:[0-9]*:[0-9]*:.*//' | sort | uniq -c   # per-file
 The ledgers of past runs, and which one is current, are indexed in
 [docs/mutation-runs/README.md](mutation-runs/README.md).
 
-**Status when this page was written:** the most recent scheduled run (2026-09-28) failed.
-The measured scope no longer matched `MUTANTS_EXPECTED_SCOPE`, and two of the committed
-survivors, in `run_search_with_refill` and `publish_inner`
-(`crates/acdp-registry-core/src/handlers/context.rs`) had moved lines after an edit to
-that file, so the committed survivor lines no longer matched. The fix is the re-measure
-above; check `gh run list --workflow mutants.yml --limit 3` for the current state.
+Any edit to `MUTANTS_SURVIVORS` must also commit the `outcomes.json` of the run that
+produced it and point `MUTANTS_PRIOR_LEDGER` at that file. The classifier pairs a drifted
+survivor against that ledger, and it refuses a ledger that is missing any committed line.
+`every_committed_survivor_is_in_the_prior_ledger` in
+`crates/acdp-registry-server/tests/conformance_gate.rs` runs the same check on every PR.
+
+**Status:** the 2026-09-28 scheduled run (36417581090) failed. #341 had shrunk the scope
+from 351 to 346 (five caught mutants removed, no survivor change), and three cited lines in
+`crates/acdp-registry-core/src/handlers/context.rs` had moved. #371 re-pinned the ratchet
+from that run's own report: scope 346, the same seven survivors at their current lines, and
+the report committed as the new prior ledger. Check
+`gh run list --workflow mutants.yml --limit 3` for the current state.
 
 ## Spec bumps
 
