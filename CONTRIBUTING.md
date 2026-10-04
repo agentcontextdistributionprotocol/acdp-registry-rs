@@ -47,8 +47,8 @@ merge is recorded in `.github/required-checks.json`, not here):
 ```bash
 # Postgres-backed tests. Point ACDP_REGISTRY_TEST_PG_URL at a disposable
 # database. With it unset they skip (printing a line); with ACDP_REQUIRE_PG
-# set to any value a missing URL is a hard failure instead. CI sets
-# ACDP_REQUIRE_PG, so it never skips Postgres silently.
+# set (use `1`) a missing URL is a hard failure instead. CI sets it, but
+# not every Postgres test runs in every job; see docs/MAINTAINING.md.
 ACDP_REGISTRY_TEST_PG_URL=postgres://acdp:acdp@localhost:5432/acdp_registry \
     cargo test -p acdp-registry-pg
 ACDP_REGISTRY_TEST_PG_URL=postgres://acdp:acdp@localhost:5432/acdp_registry \

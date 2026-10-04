@@ -4791,6 +4791,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** registry-specific deltas only, cited by symbol; the HTTP-API 429 table row was reduced to a pointer at the new "Rate limits" section rather than rewritten (Phase 5 owns the status-table prose).
 - **Alternatives:** documenting the 429 sources only in the status table; leaving the lifecycle charge timing unstated.
 - **Blast radius if wrong:** docs only. (a) wrong ⇒ a Railway operator's env var is ignored and limits stay per replica; (b) wrong ⇒ an over-cautious note.
+- **Status:** UNCONFIRMED
 
 ## Docs refresh Phase 4 — maintainer page
 - **Plan:** plans/docs-refresh-2026-10.md (Phase 4)

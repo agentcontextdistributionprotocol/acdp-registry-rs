@@ -88,7 +88,7 @@ baseline:
   bypass list by eye after any change.
 - A failed GET is reported as "could not read", never as "nothing configured".
 
-Every failure message carries the command that restores the baseline. To prove the
+Most failure messages carry the command that restores the baseline (a few, such as a duplicate tag ruleset or a failed GET, only say what to check). To prove the
 hard-fail path against the live settings without merging a red `main`, push a branch
 whose baseline sets `pending_settings` to `false` and run
 `gh workflow run branch-protection-drift.yml --ref` with that branch name. The script's
@@ -200,11 +200,12 @@ gh api --method POST $R/git/refs \
 gh api --method POST $R/branches/main/protection/enforce_admins --jq .enabled
 
 # 4. Promote the advisory checks: live checks + the baseline's advisory_pending,
-#    every one pinned. Inspect the body before sending it.
+#    every one pinned (unique_by makes a re-run harmless). Inspect the body first.
 gh api $R/branches/main/protection/required_status_checks \
   | jq --slurpfile b .github/required-checks.json \
-      '{strict, checks: ((.checks | map({context, app_id}))
-                         + ($b[0].advisory_pending | map({context: ., app_id: 15368})))}' \
+      '{strict, checks: (((.checks | map({context, app_id}))
+                         + ($b[0].advisory_pending | map({context: ., app_id: 15368})))
+                         | unique_by(.context))}' \
   > "$SNAP/rsc-new.json"
 jq . "$SNAP/rsc-new.json"
 gh api --method PATCH $R/branches/main/protection/required_status_checks \
@@ -218,6 +219,7 @@ gh api --method PATCH $R/branches/main/protection/required_status_checks \
 
    ```sh
    gh workflow run branch-protection-drift.yml --repo agentcontextdistributionprotocol/acdp-registry-rs
+   sleep 5   # let the dispatched run register before listing
    gh run list --repo agentcontextdistributionprotocol/acdp-registry-rs --workflow branch-protection-drift.yml --limit 1
    gh run watch --repo agentcontextdistributionprotocol/acdp-registry-rs RUN_ID   # RUN_ID from the line above
    ```
@@ -234,7 +236,7 @@ gh api --method PATCH $R/branches/main/protection/required_status_checks \
 # Admins no longer bound by protection:
 gh api --method DELETE $R/branches/main/protection/enforce_admins
 # Tag ruleset off (break-glass; keeps it for re-enabling) or gone:
-gh api --method PUT $R/rulesets/$RS --input - <<< '{"enforcement":"disabled"}'
+echo '{"enforcement":"disabled"}' | gh api --method PUT $R/rulesets/$RS --input -
 gh api --method DELETE $R/rulesets/$RS
 # Required checks back to the snapshot (pinned object form again):
 jq '{strict: .required_status_checks.strict,
@@ -308,9 +310,12 @@ Gates a release PR must pass:
   the code or the set of legs changes materially. Because the job is advisory, the floor
   is a signal, not a merge gate.
 - **`ACDP_REQUIRE_PG`.** Postgres-backed tests skip (printing a line) when
-  `ACDP_REGISTRY_TEST_PG_URL` is unset. With `ACDP_REQUIRE_PG` set — to any value,
-  including empty — a missing URL is a hard failure instead. CI sets it in the `tests`
-  and `coverage` jobs, so CI never skips Postgres silently.
+  `ACDP_REGISTRY_TEST_PG_URL` is unset. With `ACDP_REQUIRE_PG` set a missing URL is a hard
+  failure instead (most tests treat any value as set; the auth crate's `pg_revocation`
+  test only fails on exactly `1`, and otherwise skips without printing). CI sets it in
+  the `tests` and `coverage` jobs, but the required `tests` job does not pass the
+  Postgres URL to the workspace run, so the auth Postgres test runs only in the
+  advisory `coverage` job.
 - **Docker smoke.** `docker (build + smoke)` builds the image, boots it against
   Postgres and checks health, then boots the documented compose quickstart through
   `docker/assert-quickstart-boots.sh` (as shipped, and again with auth enabled), and runs
@@ -355,8 +360,8 @@ The ledgers of past runs, and which one is current, are indexed in
 [docs/mutation-runs/README.md](mutation-runs/README.md).
 
 **Status when this page was written:** the most recent scheduled run (2026-09-28) failed.
-The measured scope no longer matched `MUTANTS_EXPECTED_SCOPE`, and the two known
-survivors in `run_search_with_refill` and `publish_inner`
+The measured scope no longer matched `MUTANTS_EXPECTED_SCOPE`, and two of the committed
+survivors, in `run_search_with_refill` and `publish_inner`
 (`crates/acdp-registry-core/src/handlers/context.rs`) had moved lines after an edit to
 that file, so the committed survivor lines no longer matched. The fix is the re-measure
 above; check `gh run list --workflow mutants.yml --limit 3` for the current state.
