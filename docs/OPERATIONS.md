@@ -415,7 +415,7 @@ notice:
    consistency proof from that checkpoint to the new head verifies (fetch
    `GET /log/proof?first=<served>&second=<current>` with the registry reachable
    only by you, and check the proof with any RFC 6962 consistency-proof verifier;
-   the shapes are in RFC-ACDP-0012 §6). Otherwise — the restored tree is smaller, the root differs, or
+   the response shape is RFC-ACDP-0012 §8.2 and the verification algorithm §9.2). The proof needs the root of a checkpoint you actually retained (monitor or witness), not just a row count. Otherwise — the restored tree is smaller, the root differs, or
    you cannot show either way — **set a new `[log] instance`** (for example
    `"1"` → `"2"`) before the registry is reachable again. On a public registry
    you can rarely rule out an unseen checkpoint, so expect to change it after
