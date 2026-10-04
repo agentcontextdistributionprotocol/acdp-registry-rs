@@ -49,22 +49,53 @@ verification, SSRF defenses, or the canonical error-code registry lives in the
 
 | For… | See |
 |------|-----|
-| The publish pipeline algorithm (RFC-ACDP-0003 §2.1), `RegistryServer` / `RegistryStore` | [acdp-rs · Implementing a Registry][acdp-registry] |
-| Building/signing a `PublishRequest`, `content_hash`, supersession | [acdp-rs · Producing][acdp-producing] |
-| The verification pipeline, `VerifiedContext`, retrieval | [acdp-rs · Consuming & Verifying][acdp-consuming] |
-| The `AcdpError` ↔ RFC-ACDP-0007 §5 wire-code registry, retry guidance | [acdp-rs · Errors & Retries][acdp-errors] |
-| SSRF defenses, HTTPS/size/redirect caps, algorithm-downgrade rejection (`WebResolver`) | [acdp-rs · Security Model][acdp-security] |
-| The three-layer model (what is hashed/signed/mutable) | [acdp-rs · Architecture][acdp-arch] |
-| API reference for the `acdp` crate | [docs.rs/acdp](https://docs.rs/acdp) |
-| The IANA-style registries (profiles, error codes, lifecycle event types, signature algorithms) | [spec · registries][spec-registries] |
-| Normative protocol rules | [RFC set][spec] |
+| The publish pipeline algorithm (RFC-ACDP-0003 §2.1), `RegistryServer` / `RegistryStore` | [acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/registry.md) |
+| Building/signing a `PublishRequest`, `content_hash`, supersession | [acdp-rs · Producing](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/producing.md) |
+| The verification pipeline, `VerifiedContext`, retrieval | [acdp-rs · Consuming & Verifying](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/consuming.md) |
+| The `AcdpError` ↔ RFC-ACDP-0007 §5 wire-code registry, retry guidance | [acdp-rs · Errors & Retries](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/errors.md) |
+| SSRF defenses, HTTPS/size/redirect caps, algorithm-downgrade rejection (`WebResolver`) | [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md) |
+| The three-layer model (what is hashed/signed/mutable) | [acdp-rs · Architecture](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/architecture.md) |
+| API reference for the `acdp` crate | [docs.rs/acdp 0.14.3](https://docs.rs/acdp/0.14.3/acdp/) |
+| The IANA-style registries (profiles, error codes, lifecycle event types, signature algorithms) | [spec · registries](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/registries) |
+| Normative protocol rules | [RFC set](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs) |
 
-[acdp-registry]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/registry.md
-[acdp-producing]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/producing.md
-[acdp-consuming]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/consuming.md
-[acdp-errors]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/errors.md
-[acdp-security]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/security.md
-[acdp-arch]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/architecture.md
+`acdp-rs` documents its own registry building blocks, not this registry. Where
+its [Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/registry.md) guide describes a deployment
+choice, this registry's docs state what it actually does: for example, it
+enforces its own per-agent publish budget rather than plugging a limiter into
+`RegistryServer` (see [ARCHITECTURE.md](ARCHITECTURE.md#publish-pipeline)),
+and it can advertise the seven profiles listed in
+[advertisable-profiles.json](advertisable-profiles.json), not only the three
+that guide names.
+
+### Link convention
+
+Every link to a sibling repository is **pinned** and written **inline**
+(`[text](url)`), never reference-style and never as a relative `../` path —
+the website rewriter skips reference-style links, and relative paths break on
+both GitHub and the website.
+
+- **Spec (RFCs, `registries/`, schemas, `VERSIONING.md`):**
+  `https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/<ref>/rfcs/RFC-ACDP-00NN-<slug>.md#<anchor>`, where `<ref>` is
+  the `ref:` value in `.spec-pin` (today `9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd`). Non-normative
+  pages under the spec's `docs/` may instead use
+  `fb76f6d54ba25f583ce526b2bdee30503a5d8e59`, the docs refresh that followed
+  the pin. No other spec ref — no `main`, tag, or short SHA.
+- **SDK guides:** `https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/<ref>/docs/<page>.md#<anchor>`,
+  where `<ref>` is a release tag `acdp-v<semver>` or a full 40-hex SHA — today
+  `8a888edaa15c4475bbaeccff45567921e3153730` (the guides refresh, not yet in a
+  tag). Never `main`.
+- **SDK API:** docs.rs with an explicit version matching `Cargo.lock`, e.g.
+  `https://docs.rs/acdp/0.14.3/acdp/`. For re-exported modules use the
+  sub-crate path (`https://docs.rs/acdp-client/0.14.3/acdp_client/verified/`);
+  the `acdp/client/...` form does not exist on docs.rs.
+- **Links to this repository** may use `main`.
+
+**Re-pointing on a spec bump.** A PR that changes `ref:` in `.spec-pin` must
+replace the old SHA in every pinned spec link in the same PR, and re-check
+each `#anchor` against the new revision's headings (sections get renumbered).
+An `acdp` bump re-points docs.rs versions the same way; guide links move only
+when a newer tag or SHA carries the page being cited.
 
 ## Conventions used throughout
 
@@ -75,20 +106,21 @@ verification, SSRF defenses, or the canonical error-code registry lives in the
 - **Wire envelope** — every ACDP data/auth endpoint returns
   `application/acdp+json`; errors follow the RFC-ACDP-0007 §4 envelope
   (see [HTTP-API.md](HTTP-API.md#error-envelope)).
-- **RFC-ACDP-XXXX** references point at the [protocol spec][spec].
-
-[spec]: https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol
-[spec-registries]: https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/main/registries
-[spec-profiles]: https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/main/registries/profiles.md
+- **RFC-ACDP-XXXX** references point at the
+  [protocol spec](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd) at the revision pinned in `.spec-pin`.
 
 ## Spec profiles implemented
 
 The profile names, their status, and their prerequisites are defined
-canonically in the spec's [profile registry][spec-profiles] — this section only
+canonically in the spec's [profile registry](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/registries/profiles.md) — this section only
 records **which** of them this implementation advertises, not what they mean.
 
-`acdp-registry-core` and `acdp-registry-discovery` always; `acdp-registry-receipts`,
+`acdp-registry-core` and `acdp-registry-discovery` by default (an operator-set
+`registry.profiles` replaces that pair, and is the only way to advertise
+`acdp-registry-federated`); `acdp-registry-receipts`,
 `acdp-registry-head-receipts`, `acdp-registry-lifecycle`, and
 `acdp-registry-transparency-log` are advertised when their config sections are
-enabled. All are served at `GET /.well-known/acdp.json`.
+enabled. The full allowlist is
+[advertisable-profiles.json](advertisable-profiles.json). All are served at
+`GET /.well-known/acdp.json`.
 See [HTTP-API.md](HTTP-API.md#get-well-knownacdpjson).

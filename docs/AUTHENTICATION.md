@@ -5,7 +5,7 @@ flow that mints a short-lived JWT, and authenticates **producers** (publishers)
 implicitly via the signature over `content_hash` carried in the publish request.
 This doc covers the first. Publish signing belongs to the protocol, not this
 registry — how a producer builds and signs a `PublishRequest` is documented in
-[acdp-rs · Producing][acdp-producing], and where the registry verifies it in
+[acdp-rs · Producing](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/producing.md), and where the registry verifies it in
 [ARCHITECTURE.md](ARCHITECTURE.md#publish-pipeline).
 
 All of this lives in `crates/acdp-registry-auth/` and is mounted only when
@@ -78,12 +78,12 @@ In order (`service.rs`):
    HTTPS-only, SSRF-policy-gated, LRU-cached, the *same* resolver used for
    publish. Its defenses (IP-literal rejection, DNS-time SSRF filtering,
    size/redirect caps) are documented in
-   [acdp-rs · Security Model][acdp-security].
+   [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md#defenses-applied-by-default).
 7. (`did:web` only) The verification method named by the fragment must appear
    in the document's `assertionMethod` set.
 8. If the verification method declares an algorithm, it must match the request's
    `algorithm` (algorithm-downgrade defense, RFC-ACDP-0001 §5.10 — enforced by
-   `acdp`; see [acdp-rs · Security Model][acdp-security]).
+   `acdp`; see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md#defenses-applied-by-default)).
 9. The signature is verified against the resolved public key.
 10. A JWT is minted and its `jti` is recorded as *issued* in the revocation
     store. If that write fails, the whole request fails — a token that can't be
@@ -435,6 +435,3 @@ what stops a hostile or compromised peer from bouncing the poller, with its
 - Stores: `challenge_store.rs`, `revocation_store.rs` (in-memory / SQLite / PG).
 - Startup wiring (signer choice, ephemeral secret, poller spawn):
   `crates/acdp-registry-server/src/main.rs`.
-
-[acdp-producing]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/producing.md
-[acdp-security]: https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/main/docs/security.md

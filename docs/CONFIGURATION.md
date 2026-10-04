@@ -550,18 +550,19 @@ event is recorded unsigned but still attributed to the registry DID.
 
 ### `[log]` *(ACDP 0.3.0)*
 
-Registry transparency log (RFC-ACDP-0012): a per-registry, append-only
-RFC 6962-style Merkle tree over publish events. When enabled the registry
-appends one leaf per accepted publish **in the same storage transaction as
-the context row and its receipt** (§7.1 — the body, the receipt, and the
-leaf commit together, or none does; a publish that cannot durably append
-its leaf fails), serves `GET /log/checkpoint`, `GET /log/proof`, and
-`GET /log/entries`, signs checkpoints with the `[receipt]` key (§6: no new
-key role), and advertises `acdp-registry-transparency-log` (`acdp_version`
-itself is unconditionally `"0.5.0"` as of REG-3 and no longer moves with
-this flag). When disabled (the default) the three `/log/*` endpoints
-answer `501 not_implemented`. There is no degraded mode and no
-`log_unavailable` error.
+Registry transparency log
+([RFC-ACDP-0012](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0012-transparency-log.md)): the leaf
+encoding, Merkle tree construction and checkpoint format are normative in
+[§4–§6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0012-transparency-log.md#4-leaf-object-and-leaf-encoding-normative)
+and not restated here. When enabled this registry appends one leaf per
+accepted publish **in the same storage transaction as the context row and its
+receipt** (a publish that cannot durably append its leaf fails), serves
+`GET /log/checkpoint`, `GET /log/proof`, and `GET /log/entries`, signs
+checkpoints with the `[receipt]` key (no new key to operate), and advertises
+`acdp-registry-transparency-log` (`acdp_version` itself is unconditionally
+`"0.5.0"` as of REG-3 and no longer moves with this flag). When disabled (the
+default) the three `/log/*` endpoints answer `501 not_implemented`. There is
+no degraded mode and no `log_unavailable` error.
 
 Prerequisites (enforced at startup): a configured `[receipt]` signing key
 and a durable storage backend (`sqlite` or `postgres`).
@@ -601,14 +602,13 @@ and verifies *N-witnessed* locally.
 For each configured witness a background poller GETs
 `<url>?log_id=<this registry's log_id>` over the SSRF-guarded outbound
 client (HTTPS-only, DNS-rebinding-guarded, no redirects — RFC-ACDP-0008
-§4.8), and for every returned cosignature runs the RFC-ACDP-0015 §8
-verification procedure **against this registry's own checkpoint** at that
-`tree_size`: closed parse, the witness signature under the witness DID's
-`assertionMethod` key (resolved via the `did:web` resolver), and — the
-load-bearing check — that the cosignature's `witnessed_checkpoint` matches
-this registry's **own root** at that size. A witness cosigning a *different*
-root (a fork, or a lie) is logged and **dropped** — it is never stored and
-never served. Only verified cosignatures are persisted (table
+§4.8) and runs the
+[RFC-ACDP-0015 §8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0015-witness-cosigning.md#8-consumer-verification-procedure-normative)
+verification procedure on every returned cosignature **against this
+registry's own checkpoint** at that `tree_size`, resolving the witness key
+through the `did:web` resolver. A witness cosigning a *different* root (a
+fork, or a lie) is logged and **dropped** — it is never stored and never
+served. Only verified cosignatures are persisted (table
 `log_witness_cosignatures`, keyed by
 `(log_id, tree_size, root_hash, witness_did)`; a fresh re-observation
 upserts, newest wins), so serving is a single indexed read with no blocking
