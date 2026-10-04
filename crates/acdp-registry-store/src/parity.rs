@@ -396,6 +396,51 @@ where
     ctx_id
 }
 
+/// **#390 — a durable backend's `has_lifecycle_state` must see a retraction.**
+///
+/// The server's startup refusal (RFC-ACDP-0013 §6: no lifecycle state may be
+/// served while `acdp-registry-lifecycle` is not advertised) asks the store
+/// [`ExtendedRegistryStore::has_lifecycle_state`]. That method is *defaulted*
+/// to `Ok(false)` so non-durable backends keep compiling — which also means a
+/// durable backend that forgets to override it compiles cleanly and silently
+/// disables the refusal. Each backend's own contract suite pins its SQL; this
+/// pins the obligation itself, once, so a new backend that runs the kit cannot
+/// inherit the default unnoticed.
+///
+/// # Only the "sees it" direction
+///
+/// There is deliberately no "a fresh store reports `false`" leg. The Postgres
+/// suite runs against one shared database that accretes retractions from
+/// every test and every run, so a fresh-false leg would fail there for a
+/// reason unrelated to the probe. Each backend's isolated contract suite owns
+/// that direction.
+///
+/// # Pass the raw store
+///
+/// Call this with the backend itself, never a delegating wrapper: a wrapper
+/// that does not forward `has_lifecycle_state` (the kit's own `DefaultOnly`
+/// does not) answers with the default and fails this assertion — which is
+/// exactly the defect it exists to catch.
+pub async fn assert_lifecycle_state_probe_sees_retraction<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let ctx_id = publish_then_retract(store, 250, "lifecycle probe fixture").await;
+    let seen = store
+        .has_lifecycle_state()
+        .await
+        .expect("has_lifecycle_state must not error");
+    assert!(
+        seen,
+        "[{label}] has_lifecycle_state() returned false after {ctx_id} was retracted. \
+         The server's RFC-ACDP-0013 §6 startup refusal relies on this probe; a \
+         durable backend that leaves it at the trait default (Ok(false)) lets a \
+         registry restarted with [lifecycle] off serve retracted state. Override \
+         `ExtendedRegistryStore::has_lifecycle_state` to check both the event \
+         store and the retracted flag."
+    );
+}
+
 /// **B3 — a context and its lifecycle events must never contradict each other.**
 ///
 /// `get()` and `lineage()` read the context row and its lifecycle events as two
@@ -1485,4 +1530,136 @@ where
         "batched visibility diverged from the retrieve contract:\n{}",
         violations.join("\n")
     );
+}
+
+/// Falsification for [`assert_lifecycle_state_probe_sees_retraction`]: the
+/// assertion is only worth running if a backend that inherits the trait's
+/// `Ok(false)` default actually fails it.
+#[cfg(test)]
+mod lifecycle_probe_tests {
+    use super::*;
+    use acdp::error::AcdpError;
+    use acdp::registry::{IdempotencyRecord, InMemoryStore, LifecycleCommitOutcome};
+    use acdp::types::body::{Body, FullContext};
+    use acdp::types::primitives::{ContentHash, LineageId};
+    use acdp::types::publish::PublishResponse;
+    use acdp::types::search::SearchResponse;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The SDK's in-memory store, plus an honest `has_lifecycle_state`: it
+    /// remembers whether a lifecycle event was ever committed. That stands in
+    /// for a durable backend that overrides the probe correctly.
+    #[derive(Default)]
+    struct Recording {
+        inner: InMemoryStore,
+        saw_event: AtomicBool,
+    }
+
+    impl acdp::registry::RegistryStore for Recording {
+        fn put(&self, body: Body) -> Result<(), AcdpError> {
+            self.inner.put(body)
+        }
+        fn get(&self, ctx_id: &CtxId) -> Result<Option<FullContext>, AcdpError> {
+            self.inner.get(ctx_id)
+        }
+        fn lineage(&self, lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError> {
+            self.inner.lineage(lineage_id)
+        }
+        fn current(&self, lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError> {
+            self.inner.current(lineage_id)
+        }
+        fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), AcdpError> {
+            self.inner.mark_superseded(ctx_id)
+        }
+        fn first_version_ctx_id(&self, lineage_id: &LineageId) -> Result<Option<CtxId>, AcdpError> {
+            self.inner.first_version_ctx_id(lineage_id)
+        }
+        fn search(
+            &self,
+            params: &SearchParams,
+            requester: Option<&AgentDid>,
+            public_arm_open: bool,
+        ) -> Result<SearchResponse, AcdpError> {
+            self.inner.search(params, requester, public_arm_open)
+        }
+        fn idempotency_lookup(
+            &self,
+            agent_id: &AgentDid,
+            key: &str,
+        ) -> Result<Option<IdempotencyRecord>, AcdpError> {
+            self.inner.idempotency_lookup(agent_id, key)
+        }
+        fn idempotency_record(
+            &self,
+            agent_id: &AgentDid,
+            key: &str,
+            hash: &ContentHash,
+            response: &PublishResponse,
+            expires_at: DateTime<Utc>,
+        ) -> Result<(), AcdpError> {
+            self.inner
+                .idempotency_record(agent_id, key, hash, response, expires_at)
+        }
+        fn idempotency_evict_expired(&self, now: DateTime<Utc>) -> Result<(), AcdpError> {
+            self.inner.idempotency_evict_expired(now)
+        }
+        fn commit_publish(
+            &self,
+            commit: PublishCommit<'_>,
+        ) -> Result<PublishCommitOutcome, AcdpError> {
+            self.inner.commit_publish(commit)
+        }
+        fn commit_lifecycle_event(
+            &self,
+            event: &LifecycleEvent,
+        ) -> Result<LifecycleCommitOutcome, AcdpError> {
+            let outcome = self.inner.commit_lifecycle_event(event)?;
+            self.saw_event.store(true, Ordering::SeqCst);
+            Ok(outcome)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExtendedRegistryStore for Recording {
+        async fn health(&self) -> Result<(), AcdpError> {
+            Ok(())
+        }
+        async fn migrate(&self) -> Result<(), AcdpError> {
+            Ok(())
+        }
+        async fn list_contexts(
+            &self,
+            _limit: u32,
+            _cursor: Option<&str>,
+            _requester: Option<&AgentDid>,
+            _tenant: Option<&str>,
+            _public_arm_open: bool,
+        ) -> Result<crate::Page<FullContext>, AcdpError> {
+            unimplemented!("not reached by the lifecycle probe kit")
+        }
+        async fn has_lifecycle_state(&self) -> Result<bool, AcdpError> {
+            Ok(self.saw_event.load(Ordering::SeqCst))
+        }
+    }
+
+    /// Positive control: a store that overrides the probe passes. Without
+    /// this, the `should_panic` below could be passing because the fixture
+    /// itself panics (a publish or retract failing), not because the probe
+    /// answered `false`.
+    #[tokio::test]
+    async fn a_store_that_overrides_the_probe_passes() {
+        let store = Arc::new(Recording::default());
+        assert_lifecycle_state_probe_sees_retraction(&store, "recording").await;
+    }
+
+    /// The falsification: the same store behind `DefaultOnly`, which forwards
+    /// every write but does NOT forward `has_lifecycle_state`, so the trait
+    /// default answers. The retraction lands in the inner store, the probe
+    /// still says `false`, and the kit must fail.
+    #[tokio::test]
+    #[should_panic(expected = "has_lifecycle_state() returned false")]
+    async fn a_store_that_inherits_the_default_probe_fails() {
+        let store = Arc::new(DefaultOnly(Arc::new(Recording::default())));
+        assert_lifecycle_state_probe_sees_retraction(&store, "default-only").await;
+    }
 }
