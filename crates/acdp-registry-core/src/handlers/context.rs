@@ -1552,7 +1552,9 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
     //     existence oracle because it never looks at the store. The bundled
     //     SDK call below re-verifies and remains the sole authority for the
     //     response; this pre-flight only decides the charge.
-    if lifecycle_actor_signature_verifies(&state, &event).await {
+    //     With no limiter configured there is nothing to charge, so the
+    //     pre-flight (and its possible DID resolution) is skipped entirely.
+    if state.rate_limiter.is_some() && lifecycle_actor_signature_verifies(&state, &event).await {
         charge.arm();
     }
 

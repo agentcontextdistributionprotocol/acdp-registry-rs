@@ -1137,3 +1137,57 @@ async fn a_rejected_lifecycle_transition_is_counted_under_its_wire_code() {
         );
     }
 }
+
+/// #375: an over-budget actor's valid retract is a 429 counted under
+/// `scope="lifecycle_per_agent"`.
+///
+/// **No publish, deliberately** (same reason as the test above: this binary's
+/// counters are process-global and `publish_total{outcome="inserted"} == 2` is
+/// pinned elsewhere). The budget is spent instead by a validly signed retract
+/// of a context that does not exist. Since #375 that request is charged: its
+/// signature verifies for its actor, and the 404 comes after. So with a budget of
+/// 1, the second valid retract is over budget. That also makes this test
+/// fail if the verified-charge path stops arming. No other test in this binary
+/// emits `lifecycle_per_agent`, so the count is exact.
+#[tokio::test]
+async fn an_over_budget_lifecycle_actor_is_counted_under_lifecycle_per_agent() {
+    let mut cfg = metrics_config();
+    cfg.lifecycle.enabled = true;
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.limits.publish_rate_per_minute = 1;
+    let h = harness_with_caps(cfg, caps_lifecycle(), true).await;
+
+    let ghost = format!("acdp://{AUTHORITY}/{}", uuid::Uuid::new_v4());
+    let (status, v) = post_retract(
+        &h.router,
+        &ghost,
+        &signed_lifecycle_event(78, &ghost, "retracted", "spend the unit"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "first retract: {v}");
+    let (status, v) = post_retract(
+        &h.router,
+        &ghost,
+        &signed_lifecycle_event(78, &ghost, "retracted", "over budget"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the verified first retract spent the only unit, so the second must 429: {v}"
+    );
+
+    let (status, _ct, body) = scrape(&h.router).await;
+    assert_eq!(status, StatusCode::OK, "metrics scrape");
+    assert_eq!(
+        metric_sum(
+            &body,
+            &[
+                "acdp_registry_rate_limit_rejections_total",
+                "scope=\"lifecycle_per_agent\""
+            ]
+        ),
+        1.0,
+        "exactly one lifecycle_per_agent rejection\n{body}"
+    );
+}

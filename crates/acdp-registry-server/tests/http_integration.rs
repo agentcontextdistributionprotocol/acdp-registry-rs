@@ -11628,3 +11628,87 @@ async fn did_web_lifecycle_charges_only_verified_events() {
         "publish + verified did:web retract = 2 units"
     );
 }
+
+/// The pre-flight sits BELOW the tenant gate: a validly signed retract that
+/// the tenant gate refuses (404) is not charged. Fails if the verify/arm is
+/// moved above step 5.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_event_refused_by_the_tenant_gate_is_not_charged() {
+    let h = lifecycle_harness_with_rate(2).await;
+    let a = did_key_producer(88);
+    let req = a
+        .publish_request()
+        .title("lc375 tenant")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(&h.router, &req, Some("tenant-375-a")).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+
+    for _ in 0..3 {
+        let env = signed_event_envelope(88, &ctx_id, "retracted", None);
+        let (status, v) =
+            post_lifecycle_with_tenant(&h.router, &ctx_id, "retract", &env, Some("tenant-375-b"))
+                .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    }
+    assert_eq!(
+        publish_as(&h, &a, "lc375 tenant 2").await.0,
+        StatusCode::OK,
+        "three tenant-gated retracts must not have spent A's second unit"
+    );
+    assert_eq!(
+        publish_as(&h, &a, "lc375 tenant 3").await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+/// The pre-flight sits BELOW the bearer check: a validly signed retract sent
+/// with an invalid bearer (403) is not charged. Fails if the verify/arm is
+/// moved above `caller_from_headers`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_event_refused_for_a_bad_bearer_is_not_charged() {
+    let mut cfg = config(false);
+    cfg.auth.enabled = true;
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.lifecycle.enabled = true;
+    cfg.limits.publish_rate_per_minute = 2;
+    let h = build_harness_with_caps(cfg, caps_030(), None).await;
+    let a = did_key_producer(89);
+    let (status, ctx) = publish_as(&h, &a, "lc375 bearer").await;
+    assert_eq!(status, StatusCode::OK);
+    let ctx_id = ctx.unwrap();
+
+    for _ in 0..3 {
+        let env = signed_event_envelope(89, &ctx_id, "retracted", None);
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/contexts/{}/retract",
+                        pct_encode_path_segment(&ctx_id)
+                    ))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer not-a-valid-jwt")
+                    .body(Body::from(serde_json::to_vec(&env).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(
+        publish_as(&h, &a, "lc375 bearer 2").await.0,
+        StatusCode::OK,
+        "three bearer-refused retracts must not have spent A's second unit"
+    );
+    assert_eq!(
+        publish_as(&h, &a, "lc375 bearer 3").await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
