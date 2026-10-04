@@ -27,10 +27,12 @@ JWT `tenant` claim  >  X-Tenant-Id header  >  None
 - `None` means "no tenant asserted" → the tenant filter is disabled (V0).
 
 For writes (`tenant_for_publish`): publish is producer-authenticated by the
-signature over `content_hash`, not a bearer. So a raw `X-Tenant-Id` must **not**
-decide the write tenant — the authoritative source is the producer's
-`[[auth.tenant_agents]]` binding (or a tenant-bound token claim). Otherwise any
-producer could inject a context into an arbitrary tenant's namespace.
+signature over `content_hash`, not a bearer. So in strict mode a raw
+`X-Tenant-Id` does **not** decide the write tenant — the authoritative source is
+the producer's `[[auth.tenant_agents]]` binding (or a tenant-bound token claim).
+Otherwise any producer could inject a context into an arbitrary tenant's
+namespace. Outside strict mode it does decide it; see
+[`X-Tenant-Id` is not authenticated](#x-tenant-id-is-not-authenticated).
 
 ## Strict mode (`auth.require_tenant = true`)
 
@@ -50,6 +52,35 @@ On an enforced multi-tenant deployment:
 
 In lax mode (`require_tenant = false`) an unbound caller's `X-Tenant-Id` is
 still honored, preserving V0 behavior.
+
+## `X-Tenant-Id` is not authenticated
+
+Nothing authenticates the header: the registry accepts any value a client
+sends (except the reserved `default`). The code still lets it decide the tenant
+in these cases:
+
+| Case | Reads (`tenant_for_request`) | Writes (`tenant_for_publish`) |
+|------|------------------------------|-------------------------------|
+| `auth.enabled = false` (neither function runs its strict-mode checks then) | header decides | header decides |
+| Lax mode, request with no valid bearer, or an unbound token | header decides | header decides |
+| Strict mode, request with no valid bearer | header decides (and satisfies the default-deny) | the agent's binding decides (a different header → 403); an unbound agent is denied |
+| Strict mode, unbound token | ignored (default-deny) | as the row above |
+| Tenant-bound token | the claim decides; a different header → 403 | the claim decides; a different header → 403 |
+
+On reads the visibility rules still apply on top: an anonymous caller only ever
+sees `public` rows, and only when `anonymous_public_reads` is on. But the
+header picks *which tenant's* rows those are, and in strict mode it is all a
+bearer-less caller needs to get past the default-deny.
+
+**Deviation from [RFC-ACDP-0008 §6.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0008-security.md#64-multi-tenancy-implementation-note)
+(pinned spec):** where a deployment partitions by tenant, the attribution MUST
+rest on an authenticated signal, and an unauthenticated tenant header MUST NOT be
+trusted unless deployment policy at a trust boundary, or an authenticated
+gateway, protects it. This registry does not do that itself in the cases above.
+If you rely on tenancy, put it behind a boundary that strips or overwrites
+`X-Tenant-Id` from clients (or sets it from an authenticated identity). With
+strict mode and tenant-bound tokens the claim is authoritative, but the boundary
+still has to strip the header from requests that carry no bearer.
 
 ## The reserved `default` sentinel
 

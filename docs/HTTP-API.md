@@ -147,6 +147,15 @@ different axes — do not infer what a registry actually enforces from
 `supported_did_methods` may include `"did:key"` when enabled via
 `auth.did_methods`.
 
+**Known issue: `read_authentication_methods` with auth enabled.** When
+`auth.enabled = true` the document also carries
+`"read_authentication_methods": ["bearer-jwt"]` (`build_capabilities`). The
+pinned spec requires each entry to match `^[a-z][a-z0-9_]*$`
+([`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/registries/auth-methods.md) and the
+capabilities schema), and the hyphen does not, so with auth enabled the
+document fails schema validation. Do not treat `bearer-jwt` as a valid method
+identifier; it is a code bug, and the fix will change this value.
+
 ### `GET /.well-known/jwks.json`
 
 JSON Web Key Set for verifying this registry's JWTs. `Cache-Control:

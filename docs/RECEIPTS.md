@@ -206,8 +206,14 @@ Contexts published before receipts were enabled stay receipt-less, and their
 `registry_receipt` member is simply absent. We deliberately do **not**
 backfill: a receipt attests publish-time facts — above all the producer key
 the registry *actually resolved at that moment* — and minting one later would
-be a false attestation. (RFC-ACDP-0010 permits backfill that attests the
-stored `created_at`; this implementation takes the conservative position.)
+be a false attestation.
+
+**Deviation from a SHOULD in [RFC-ACDP-0010 §7](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0010-registry-receipts.md#7-issuance)
+(pinned spec):** a registry advertising `acdp-registry-receipts` SHOULD backfill
+receipts for previously published contexts, attesting the stored `created_at`.
+This implementation does not, for the reason above, so those contexts are served
+without a receipt. The same applies to transparency-log leaves (see
+[CONFIGURATION.md · `[log]`](CONFIGURATION.md#log-acdp-030)).
 
 The `GET /admin/lineages/{lineage_id}/audit` report exposes
 `receiptless_contexts` so you can see how much pre-receipts history a lineage
