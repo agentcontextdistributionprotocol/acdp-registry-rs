@@ -21,7 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## 0.2.1
+## 0.3.0
 
 **Two behaviour changes need a look before upgrading: a deployment with `[lifecycle] enabled = false`
 over a database that holds lifecycle state no longer starts (#373) — run the pre-upgrade check
@@ -101,7 +101,7 @@ so no response changes. Rows written by earlier releases stay in place but stop 
 There is no migration in this release; the table still exists, so rolling back to 0.2.0 needs no
 database action (0.2.0 simply resumes writing it, and nothing reads what it writes). A later release
 drops the table with a new migration. That release is the one with a rollback constraint: it is
-safe to roll back from it to 0.2.1 or later, but not directly to 0.2.0 or earlier on Postgres,
+safe to roll back from it to 0.3.0 or later, but not directly to 0.2.0 or earlier on Postgres,
 whose publishes would fail against the dropped table. Its own section here will repeat this.
 
 **Behaviour change (security fix, #375): a lifecycle request is charged only once its signature
@@ -142,7 +142,7 @@ strip or overwrite any client-supplied value. See [MULTI-TENANCY.md](MULTI-TENAN
   `[[auth.tenant_agents]]` and the header distrusted (no request could ever resolve a tenant), and
   refuses `trusted_proxies` with an empty `rate_limit.trusted_proxies`.
 - **Lax and auth-off registries keep today's behaviour** under the temporary default `any_peer`, and
-  log a startup warning while the key is unset. **The default becomes `none` in 0.3.0** for every
+  log a startup warning while the key is unset. **The default becomes `none` in 0.4.0** for every
   mode: set the key now (`any_peer` to keep partitioning by header on a dev or test registry). A
   separate warning fires whenever `any_peer` is in effect on a non-loopback bind.
 - With `none` (or an untrusted peer under `trusted_proxies`), a header that is present but

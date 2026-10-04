@@ -719,7 +719,7 @@ fn tenant_header_trust_checks(cfg: &RegistryConfig) -> anyhow::Result<Vec<String
     if cfg.auth.tenant_header_trust.is_none() && mode == TenantHeaderTrust::AnyPeer {
         warnings.push(
             "auth.tenant_header_trust is not set and defaulted to \"any_peer\": any client may \
-             select a tenant with X-Tenant-Id. The default becomes \"none\" in 0.3.0; set \
+             select a tenant with X-Tenant-Id. The default becomes \"none\" in 0.4.0; set \
              auth.tenant_header_trust explicitly (see docs/MULTI-TENANCY.md)."
                 .to_string(),
         );
@@ -1400,7 +1400,7 @@ fn acdp_version_claim(cfg: &RegistryConfig) -> &'static str {
 /// The pinned capabilities schema requires every item to match
 /// `^[a-z][a-z0-9_]*$` (2-64 chars). The id is not registered in the spec's
 /// `registries/auth-methods.md` (an open vocabulary). It is not `oauth`
-/// because the flow is not an RFC 6749 grant. Until 0.2.1 the value was the
+/// because the flow is not an RFC 6749 grant. Through 0.2.0 the value was the
 /// hyphenated form, which fails that pattern (#372).
 ///
 /// Every `READ_AUTH_METHOD_*` const here is checked against the pinned
@@ -1894,7 +1894,7 @@ mod tests {
     fn read_auth_method_matcher_rejects_what_the_schema_rejects() {
         assert!(is_schema_valid_read_auth_method("bearer_jwt"));
         assert!(is_schema_valid_read_auth_method("ab"));
-        // #372: the hyphenated id that shipped until 0.2.1.
+        // #372: the hyphenated id that shipped through 0.2.0.
         assert!(!is_schema_valid_read_auth_method("bearer-jwt"));
         assert!(!is_schema_valid_read_auth_method("a"));
         assert!(!is_schema_valid_read_auth_method("1abc"));
@@ -2664,7 +2664,7 @@ mod tests {
     fn strict_without_bindings_and_without_header_trust_is_refused() {
         let mut cfg = trust_cfg();
         cfg.auth.require_tenant = true;
-        // Key absent: the 0.2.x default under require_tenant is `none`.
+        // Key absent: the 0.3.x default under require_tenant is `none`.
         let err = validate_config(&cfg).expect_err("no request can resolve a tenant");
         assert!(
             err.to_string()
@@ -2721,14 +2721,14 @@ mod tests {
         let cfg = trust_cfg();
         let w = tenant_header_trust_checks(&cfg).unwrap();
         assert_eq!(w.len(), 1, "{w:?}");
-        assert!(w[0].contains("becomes \"none\" in 0.3.0"), "{w:?}");
+        assert!(w[0].contains("becomes \"none\" in 0.4.0"), "{w:?}");
 
         // Explicit any_peer on loopback: quiet.
         let mut cfg = trust_cfg();
         cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
         assert!(tenant_header_trust_checks(&cfg).unwrap().is_empty());
 
-        // Strict + absent defaults to none, which 0.3.0 does not change: no
+        // Strict + absent defaults to none, which 0.4.0 will not change: no
         // Phase-1 warning (bindings present so the config is valid).
         let mut cfg = trust_cfg();
         cfg.auth.require_tenant = true;

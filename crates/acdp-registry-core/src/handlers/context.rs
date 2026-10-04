@@ -1073,11 +1073,11 @@ const SEARCH_LIMIT_MAX: u32 = 100;
 /// `resp.total_estimate` carries an honest §4.5-scoped pre-page count).
 /// Tenant scoping also runs in SQL: an asserted tenant routes the scan through
 /// `ExtendedRegistryStore::search_in_tenant`, so the keyset cursor and the
-/// count only ever see the caller's own rows (pinned by
-/// `search_reports_a_tenant_scoped_total_estimate` in
-/// `tests/http_integration.rs`). The handler-side `tenants_of_ctxs` filter is
-/// a backstop; the bounded refill compensates only for `?visibility=`
-/// narrowing and that backstop.
+/// count only ever see the caller's own rows (count pinned by
+/// `search_reports_a_tenant_scoped_total_estimate`, cursor anchor by the store
+/// `parity::assert_tenant_scoped_search_parity`). The handler-side
+/// `tenants_of_ctxs` filter is a backstop; the bounded refill compensates only
+/// for `?visibility=` narrowing and that backstop.
 pub async fn search<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
@@ -1236,8 +1236,8 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
         // tenant predicate in the same statement as the keyset and the count —
         // so neither `next_cursor` nor `total_estimate` can be anchored on, or
         // count, a foreign row (`search_reports_a_tenant_scoped_total_estimate`
-        // in `tests/http_integration.rs` pins the count half). The filter
-        // re-checks ownership on what came back, so a
+        // pins the count, the store `parity::assert_tenant_scoped_search_parity`
+        // the cursor anchor). The filter re-checks ownership on what came back, so a
         // store whose `search_in_tenant` regressed to ignoring the tenant
         // drops foreign rows here rather than serving them; it does NOT stop
         // such a regressed store's cursor from anchoring on a foreign row.

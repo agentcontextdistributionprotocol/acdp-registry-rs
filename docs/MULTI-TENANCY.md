@@ -55,9 +55,9 @@ trusted_proxies = ["10.0.0.0/8"]          # the gateway(s) that stamp X-Tenant-I
 | `trusted_proxies` | the **immediate TCP peer** is inside `rate_limit.trusted_proxies`. `X-Forwarded-For` plays no part, and a request with no recorded peer is untrusted. The gateway must strip or overwrite any `X-Tenant-Id` a client sends; the registry cannot check that. |
 | `any_peer` | always — you assert a boundary the registry cannot observe (a network policy whose ingress addresses you cannot enumerate, or loopback-only development) |
 
-When the key is absent, 0.2.x applies `none` under `require_tenant = true` and
+When the key is absent, 0.3.x applies `none` under `require_tenant = true` and
 `any_peer` otherwise (the pre-#374 behaviour), and warns at startup in the
-`any_peer` case. **The default becomes `none` for every mode in 0.3.0** — set the
+`any_peer` case. **The default becomes `none` for every mode in 0.4.0** — set the
 key explicitly. See [UPGRADING.md](UPGRADING.md).
 
 A header that is present but **untrusted** is rejected, not ignored — unless it
@@ -96,7 +96,7 @@ gateway is the authenticator (§6.4's second bullet), and strict mode with no
 `[[auth.tenant_agents]]` has no other way to name a tenant.
 
 **`any_peer` is the operator's declaration, not the registry's.** With
-`any_peer` (the 0.2.x default in lax and auth-off mode) the registry trusts
+`any_peer` (the 0.3.x default in lax and auth-off mode) the registry trusts
 every client's header, so it meets §6.4 only if something in front of it
 strips or overwrites `X-Tenant-Id` from clients (or sets it from an
 authenticated identity). Startup warns when `any_peer` is in effect on a

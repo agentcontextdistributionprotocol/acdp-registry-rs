@@ -128,7 +128,7 @@ The binary validates config before serving and refuses to boot on a misconfig
   default under `require_tenant`) is refused (no request could ever resolve a
   tenant). Two warnings, not refusals: `any_peer` in effect on a non-loopback
   `bind`, and the key left unset where it defaults to `any_peer` (the default
-  becomes `none` in 0.3.0).
+  becomes `none` in 0.4.0).
 - **Bind safety** — a non-loopback `bind` with neither TLS nor auth requires an
   explicit `allow_public_bind = true`.
 - **TLS** — when `tls.enabled`, `cert_path` and `key_path` must exist on disk.
@@ -308,7 +308,7 @@ values for illustration. Env var = `ACDP_REGISTRY_` + the bracketed path.
 | `token_leeway_seconds` | u64 | `30` | Clock-skew tolerance for `exp`. |
 | `anonymous_public_reads` | bool | `false` | Allow unauthenticated reads of `public` contexts. Opt in for discovery hubs. |
 | `require_tenant` | bool | `false` | Strict multi-tenancy: requests resolving to no tenant are denied. See [MULTI-TENANCY.md](MULTI-TENANCY.md). |
-| `tenant_header_trust` | `"none"` \| `"trusted_proxies"` \| `"any_peer"` | unset: `"none"` when `require_tenant = true`, else `"any_peer"` (startup warning; becomes `"none"` in 0.3.0) | Who may select a tenant with `X-Tenant-Id` when no signed claim or agent binding applies. `trusted_proxies`: only when the immediate TCP peer (not `X-Forwarded-For`) is in `rate_limit.trusted_proxies`. An untrusted header that disagrees with the claim/binding, or has none to agree with, is 403 `not_authorized`. See [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id). |
+| `tenant_header_trust` | `"none"` \| `"trusted_proxies"` \| `"any_peer"` | unset: `"none"` when `require_tenant = true`, else `"any_peer"` (startup warning; becomes `"none"` in 0.4.0) | Who may select a tenant with `X-Tenant-Id` when no signed claim or agent binding applies. `trusted_proxies`: only when the immediate TCP peer (not `X-Forwarded-For`) is in `rate_limit.trusted_proxies`. An untrusted header that disagrees with the claim/binding, or has none to agree with, is 403 `not_authorized`. See [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id). |
 | `admin_tokens` | string[] | `[]` | Bearer tokens for `/admin/*`. Entries must be non-empty and not whitespace-only (startup validation). An empty *list* disables every admin-bearer-gated route: `/admin/status`, `/admin/lineages/{id}/audit`, `/admin/contexts/{id}/retract`, `/admin/contexts/{id}/republish`, `GET /admin/contexts`, `/admin/pinned-keys/reload`. See [HTTP-API.md#admin](HTTP-API.md#admin). |
 
 #### `[[auth.tenant_agents]]`

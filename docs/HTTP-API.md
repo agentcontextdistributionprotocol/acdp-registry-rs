@@ -216,7 +216,7 @@ response bodies instead.
 `bearer_jwt` (the `/auth/*` DID challenge answered with a registry-minted JWT) is not
 registered in the spec's open
 [`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/registries/auth-methods.md)
-vocabulary; before 0.2.1 the value was `bearer-jwt`, which the capabilities schema's
+vocabulary; before 0.3.0 the value was `bearer-jwt`, which the capabilities schema's
 `^[a-z][a-z0-9_]*$` rejects.
 
 ### `GET /.well-known/jwks.json`
