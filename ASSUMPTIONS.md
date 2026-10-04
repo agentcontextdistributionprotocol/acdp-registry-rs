@@ -4740,3 +4740,11 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** keep-and-close with "hard-delete feature" as re-open trigger; single-release drop (breaks N-1 publishes on Postgres).
 - **Blast radius if wrong:** none on the wire — nothing reads the table. If keep-and-close is preferred, revert this commit; rows written while it was in force are simply missing from an unread table. If the next version is not 0.2.1, rename the `UPGRADING.md` heading and the "0.2.1 or later" wording in its body (the upgrade-notes gate would not catch a wrong *future* heading, only a missing current one).
 - **Status:** UNCONFIRMED
+
+## hardening-remaining Phases 1-2 — required-checks guard and protection drift
+- **Plan:** plans/hardening-remaining.md (Phases 1, 2)
+- **Assumed:** (a) `GET /rulesets` and `/rulesets/{id}` need only `metadata: read` for an App installation token, so the drift token narrowed to `administration: read` + `metadata: read` can list rulesets (a 403 fails the job loudly with "could not LIST rulesets"); (b) the rulesets API may omit or return an empty `bypass_actors` to a read-only token, so an absent/empty list is a `::notice::` (unverifiable) when the baseline expects a non-empty list — a ruleset whose bypass was really emptied cannot be caught by this token; (c) `actions/create-github-app-token@v3` accepts `permission-administration` / `permission-metadata` and the narrowed token still reads `/branches/main/protection`; (d) only repo-level rulesets are inspected (`includes_parents=false`); an org-level tag ruleset would be invisible to the drift job.
+- **Chose:** compare what is visible, fail closed on read errors, warn (not fail) while `pending_settings` is true. Branch-filter matching in the required-checks guard uses `fnmatch` with last-match-wins for `!` entries; GitHub's `?`/`+` pattern semantics differ, so `['*','!mai+n']` falsely passes (known, low risk — optional fix: reject entries containing `?`, `+`, `[`, `\`).
+- **Alternatives:** failing on unverifiable bypass (daily red risk); rejecting all negated patterns.
+- **Blast radius if wrong:** the daily drift job goes red or silently under-checks; no effect on merges or releases. Confirm from the first post-merge `workflow_dispatch` run's log.
+- **Status:** UNCONFIRMED
