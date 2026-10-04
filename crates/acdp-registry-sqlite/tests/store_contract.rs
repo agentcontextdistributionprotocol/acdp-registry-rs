@@ -2374,3 +2374,83 @@ async fn registry_store_idempotency_evict_expired_actually_deletes_through_the_t
          stubbed to `Ok(())` reports success and leaves it behind"
     );
 }
+
+/// A publish, and a superseding publish in the same lineage, leave the
+/// `lineages` table untouched.
+///
+/// Nothing reads `lineages`: `lineage`, `current` and `first_version_ctx_id`
+/// all derive from `contexts`. The per-publish upsert into it was removed so
+/// the table can be dropped by a later migration (two-release retirement,
+/// DECISIONS.md "B8: stop writing `lineages`"). This pins both halves: the v1
+/// publish (the old INSERT arm) and the v2 supersession (the old
+/// `ON CONFLICT ... DO UPDATE` arm) write no row, while the table itself still
+/// exists — a rolled-back N-1 binary that still writes it keeps working — and
+/// the lineage reads still resolve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publishing_and_superseding_leave_the_dormant_lineages_table_untouched() {
+    let (store, _dir) = store().await;
+    let p = producer(85);
+
+    let (exists,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'lineages'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("sqlite_master query");
+    assert_eq!(
+        exists, 1,
+        "precondition: the table stays until its drop migration, so an N-1 \
+         binary that still writes it keeps working after a rollback"
+    );
+
+    let v1 = commit(Arc::clone(&store), request(&p, "dormant lineages v1"), None)
+        .await
+        .expect("join")
+        .expect("v1 publish");
+    let v1_body = store
+        .get(&response(&v1).ctx_id)
+        .expect("retrieve ok")
+        .expect("v1 present")
+        .body;
+    let v2_req = p
+        .supersede_body(&v1_body)
+        .title("dormant lineages v2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid v2 request");
+    let v2 = commit(Arc::clone(&store), v2_req, None)
+        .await
+        .expect("join")
+        .expect("v2 publish");
+    let lineage_id = response(&v1).lineage_id.clone();
+    assert_eq!(
+        response(&v2).lineage_id,
+        lineage_id,
+        "v2 continues v1's lineage"
+    );
+
+    let (rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM lineages")
+        .fetch_one(store.pool())
+        .await
+        .expect("count lineages");
+    assert_eq!(
+        rows, 0,
+        "a publish must not write `lineages` any more: neither the first \
+         version (INSERT) nor its successor (ON CONFLICT DO UPDATE)"
+    );
+
+    // The reads never depended on the table.
+    let current = store
+        .current(&lineage_id)
+        .expect("current ok")
+        .expect("lineage has a current version");
+    assert_eq!(current.body.ctx_id, response(&v2).ctx_id);
+    assert_eq!(store.lineage(&lineage_id).expect("lineage ok").len(), 2);
+    assert_eq!(
+        store
+            .first_version_ctx_id(&lineage_id)
+            .expect("first_version_ctx_id ok"),
+        Some(response(&v1).ctx_id.clone())
+    );
+}

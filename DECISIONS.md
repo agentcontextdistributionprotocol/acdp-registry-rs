@@ -1725,6 +1725,9 @@ judgement rather than fact is escalated rather than settled.
    TRUNCATEs it, so removal requires an edit outside this unit's path scope. The evidence is
    handed to the coordinator as a standalone decision. Cost of inaction, measured: one extra row
    INSERT per publish, inside a transaction that already writes several.
+   **SUPERSEDED (2026-10-03)** by "B8: stop writing `lineages`, drop it one release later" at the
+   end of this file — both reasons above were limits of this unit's scope, not reasons to keep
+   the table.
 
 ### Escalated to the human — 1 entry
 
@@ -4259,3 +4262,53 @@ feature configurations that build (`sqlite` default, `postgres`, `memory`, `sqli
 `acdp-registry-types --no-default-features`) — `conformance.rs` itself is
 `#![cfg(feature = "storage-sqlite")]`-gated, so only the two `storage-sqlite`-inclusive
 configurations actually compile it; the fix does not touch any other crate.
+
+## B8: stop writing `lineages`, drop it one release later (2026-10-03, plans/hardening-remaining.md Phase 5)
+
+**Supersedes** H-B #9 above ("`lineages` is write-only and was deliberately NOT dropped") and
+`ASSUMPTIONS.md` "`lineages` is write-only and was deliberately NOT dropped". That ruling gave two
+reasons — no mandate for a one-way door in that unit, and `pg_integration.rs` sat outside its path
+scope. Both were limits of that unit, not reasons to keep the table, and neither holds for a plan
+that owns the change.
+
+**Why retire it.** (1) It is still read by nothing: lineage reads, `current`,
+`first_version_ctx_id` and the admin audit all derive from `contexts` (re-verified; the only
+`lineages` references in `crates/` are the two per-publish upserts, the two `001_initial.sql`
+`CREATE TABLE`s, the `pg_integration.rs` TRUNCATE, and a `pg/tests/store_contract.rs` comment that 5b updates). (2) Its `first_version_ctx` and
+`latest_ctx` columns are foreign keys onto `contexts(ctx_id)` **without `ON DELETE`**, so it
+blocks any future hard delete of a context — the PG store-contract test already has to restore a
+row instead of deleting it for exactly this reason. (3) A table named "lineage head index" that
+nothing consults misleads the next reader into thinking it is authoritative. The per-publish
+write cost is the least of the three.
+
+**Why two releases, not one.** `CONTRIBUTING.md` (Migrations) requires Postgres migrations to stay
+additive, and `PgStore::migrate` runs with `ignore_missing(true)` precisely so a binary one release
+behind the database keeps serving (#345). A single release that both stopped writing and dropped
+the table would leave its N-1 still upserting into a table that no longer exists — every publish
+on a rolled-back Postgres binary would fail. So:
+
+- **5a (this change, release N):** remove the upsert from both stores; keep the table, its schema
+  and the applied `001_initial.sql` byte-for-byte (editing an applied migration changes its sqlx
+  checksum); drop `lineages` from the `pg_integration.rs` TRUNCATE list now (the `CASCADE` over
+  the FK still empties it while it exists, and a 5a-built test binary must keep passing against a
+  5b-migrated database). Pinned by
+  `publishing_and_superseding_leave_the_dormant_lineages_table_untouched` in both backends'
+  `store_contract.rs`. Code-only and reversible by revert.
+- **5b (release N+1, BLOCKED until a release containing 5a is tagged):**
+  `015_drop_lineages.sql` on both backends; N-1 is then a 5a binary that never touches the table.
+  Rolling back from N+1 directly to a pre-5a binary on Postgres breaks publishes — 5b's
+  `UPGRADING.md` section must say so (5a's already forewarns).
+
+**Unchanged:** publish serialisation. The upsert was never a lock — a first version's
+`lineage_id` is freshly minted, and concurrent successors already serialise on the predecessor's
+`SELECT … FOR UPDATE` (PG) / `BEGIN IMMEDIATE` (SQLite) before the upsert ran; the transparency-log
+advisory lock is untouched.
+
+**Rejected:** single-release drop (breaks N-1 on PG); keep-and-close (keeps the FK that blocks hard
+delete). If the maintainer prefers keep-and-close (plan Q2), revert 5a and record "a hard-delete
+feature" as the re-open trigger; until 5b ships nothing is one-way.
+
+**5b follow-up note (B8):** when `lineages` is dropped, also delete (or flip to "table is gone") the
+two `publishing_and_superseding_leave_the_dormant_lineages_table_untouched` tests in
+`acdp-registry-sqlite/tests/store_contract.rs` and `acdp-registry-pg/tests/store_contract.rs`, which
+assert the table exists, and update the `store_contract.rs:1790` comment.

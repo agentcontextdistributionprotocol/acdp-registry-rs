@@ -1724,19 +1724,6 @@ async fn insert_body<'c>(
     .await
     .map_err(map_sqlx_err)?;
 
-    // Lineage head bookkeeping.
-    sqlx::query(
-        "INSERT INTO lineages (lineage_id, first_version_ctx, latest_ctx) \
-         VALUES (?, ?, ?) \
-         ON CONFLICT(lineage_id) DO UPDATE SET latest_ctx = excluded.latest_ctx",
-    )
-    .bind(body.lineage_id.as_str())
-    .bind(body.ctx_id.as_str())
-    .bind(body.ctx_id.as_str())
-    .execute(&mut **tx)
-    .await
-    .map_err(map_sqlx_err)?;
-
     Ok(())
 }
 

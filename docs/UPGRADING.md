@@ -21,6 +21,24 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.2.1
+
+**No action needed on upgrade or rollback. One table goes dormant, ahead of its removal.**
+
+Publishing no longer writes the `lineages` table (both backends). Nothing in the registry ever read
+it — lineage reads (`GET /lineages/{id}`, `/current`, the admin audit) are served from `contexts` —
+so no response changes. Rows written by earlier releases stay in place but stop being updated:
+**if you query `lineages` directly** (a report, a dashboard, an ad-hoc SQL check), switch to
+`contexts`, grouping by `lineage_id`; `lineages` is stale from this release on.
+
+There is no migration in this release; the table still exists, so rolling back to 0.2.0 needs no
+database action (0.2.0 simply resumes writing it, and nothing reads what it writes). A later release
+drops the table with a new migration. That release is the one with a rollback constraint: it is
+safe to roll back from it to 0.2.1 or later, but not directly to 0.2.0 or earlier on Postgres,
+whose publishes would fail against the dropped table. Its own section here will repeat this.
+
+---
+
 ## 0.2.0
 
 **No action needed on upgrade. One optional feature, and one rollback ordering note.**

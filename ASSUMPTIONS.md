@@ -1545,6 +1545,10 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** every insert keeps paying for one extra row write. Measured cost:
   one INSERT per publish, inside a transaction that already writes several rows.
 - **Status:** CLOSED (2026-09-12) — finding handed to the coordinator with its evidence; no action taken here. See DECISIONS.md H-B #9.
+  **SUPERSEDED (2026-10-03):** both reasons were scope limits of that unit, not design reasons.
+  The table is now retired in two releases — writes stop first, the drop follows a release later.
+  See DECISIONS.md "B8: stop writing `lineages`, drop it one release later" and the B8 entry at
+  the end of this file.
 
 ## H-A / P2 — 408 is not given an RFC-ACDP-0007 §5 envelope
 
@@ -4727,4 +4731,12 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** `DELETE` the `auth_global` row and skip near a window boundary at the start of each proof, rather than a UUID key (the global scope has exactly one row by design, so no per-test key exists).
 - **Alternatives:** a shared `pg_advisory_lock` across both test binaries; a per-test throwaway database.
 - **Blast radius if wrong:** test flakiness only; no production effect.
+- **Status:** UNCONFIRMED
+
+## B8 / hardening-remaining Phase 5a — retire `lineages` (stop writing now) and file the note under 0.2.1
+- **Plan:** plans/hardening-remaining.md (Phase 5a, Q2)
+- **Assumed:** (Q2) the maintainer wants `lineages` retired (5a then 5b) rather than kept-and-closed — the plan's default; and the next release is 0.2.1, so the `docs/UPGRADING.md` note goes under `## 0.2.1` (a `refactor` commit is a patch bump under release-plz; a `feat` landing first would make it 0.3.0, as #358 had to correct for 0.2.0).
+- **Chose:** remove the per-publish upsert on both backends; keep the table, its FKs and the applied `001_initial.sql` untouched; drop `lineages` from the `pg_integration.rs` TRUNCATE; add a both-backend contract test that a publish and a supersession write no `lineages` row while the table still exists. 5b (`015_drop_lineages.sql`) stays blocked until a release containing this is tagged. See DECISIONS.md "B8: stop writing `lineages`, drop it one release later".
+- **Alternatives:** keep-and-close with "hard-delete feature" as re-open trigger; single-release drop (breaks N-1 publishes on Postgres).
+- **Blast radius if wrong:** none on the wire — nothing reads the table. If keep-and-close is preferred, revert this commit; rows written while it was in force are simply missing from an unread table. If the next version is not 0.2.1, rename the `UPGRADING.md` heading and the "0.2.1 or later" wording in its body (the upgrade-notes gate would not catch a wrong *future* heading, only a missing current one).
 - **Status:** UNCONFIRMED

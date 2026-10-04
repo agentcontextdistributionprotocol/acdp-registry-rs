@@ -1999,3 +1999,96 @@ mod predecessor_admission {
         row.map(|(n,)| n == 0).unwrap_or(true)
     }
 }
+
+/// A publish, and a superseding publish in the same lineage, leave the
+/// `lineages` table untouched — the Postgres twin of the SQLite contract test
+/// of the same name.
+///
+/// Nothing reads `lineages`; the per-publish upsert was removed so a later
+/// migration can drop the table (two-release retirement, DECISIONS.md "B8:
+/// stop writing `lineages`"). The database is shared and may hold rows an
+/// older binary wrote, so the assertion is scoped to this run's lineage (a
+/// UUID-unique title makes its ids fresh) rather than to the whole table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publishing_and_superseding_leave_the_dormant_lineages_table_untouched() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    let p = producer(100);
+    let run = uuid::Uuid::new_v4().simple().to_string();
+
+    let (exists,): (bool,) = sqlx::query_as("SELECT to_regclass('lineages') IS NOT NULL")
+        .fetch_one(store.pool())
+        .await
+        .expect("to_regclass query");
+    assert!(
+        exists,
+        "precondition: the table stays until its drop migration, so an N-1 \
+         binary that still writes it keeps working after a rollback"
+    );
+
+    let v1 = commit(
+        Arc::clone(&store),
+        request(&p, &format!("dormant lineages v1 {run}")),
+        None,
+    )
+    .await
+    .expect("join")
+    .expect("v1 publish");
+    let v1_body = tokio::task::block_in_place(|| store.get(&response(&v1).ctx_id))
+        .expect("retrieve ok")
+        .expect("v1 present")
+        .body;
+    let v2_req = p
+        .supersede_body(&v1_body)
+        .title(format!("dormant lineages v2 {run}"))
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid v2 request");
+    let v2 = commit(Arc::clone(&store), v2_req, None)
+        .await
+        .expect("join")
+        .expect("v2 publish");
+    let lineage_id = response(&v1).lineage_id.clone();
+    assert_eq!(
+        response(&v2).lineage_id,
+        lineage_id,
+        "v2 continues v1's lineage"
+    );
+
+    let (rows,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM lineages \
+         WHERE lineage_id = $1 OR first_version_ctx = ANY($2) OR latest_ctx = ANY($2)",
+    )
+    .bind(lineage_id.as_str())
+    .bind(vec![
+        response(&v1).ctx_id.as_str().to_string(),
+        response(&v2).ctx_id.as_str().to_string(),
+    ])
+    .fetch_one(store.pool())
+    .await
+    .expect("count lineages");
+    assert_eq!(
+        rows, 0,
+        "a publish must not write `lineages` any more: neither the first \
+         version (INSERT) nor its successor (ON CONFLICT DO UPDATE)"
+    );
+
+    // The reads never depended on the table.
+    let (current, versions, first) = tokio::task::block_in_place(|| {
+        (
+            store.current(&lineage_id),
+            store.lineage(&lineage_id),
+            store.first_version_ctx_id(&lineage_id),
+        )
+    });
+    let current = current
+        .expect("current ok")
+        .expect("lineage has a current version");
+    assert_eq!(current.body.ctx_id, response(&v2).ctx_id);
+    assert_eq!(versions.expect("lineage ok").len(), 2);
+    assert_eq!(
+        first.expect("first_version_ctx_id ok"),
+        Some(response(&v1).ctx_id.clone())
+    );
+}
