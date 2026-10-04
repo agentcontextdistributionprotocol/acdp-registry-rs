@@ -382,10 +382,10 @@ This registry's `log_id` is `did:web:<authority>/log/<instance>`, where
 `ACDP_REGISTRY_LOG__INSTANCE`; must match `[a-z0-9-]{1,32}`, checked at
 startup). Changing it is a config change and a restart — no migration, no
 manual SQL. Prefer setting it in the TOML file. If you must use the env var,
-use a value containing a letter (for example `r2`): the env source parses
-values that look like numbers before they become a string, so `01` becomes
-`1`, `1e3` becomes `1000`, `+1` becomes `1` (and `nan` becomes `NaN`, which
-fails the pattern) — an env-only "new" instance can silently be the old one.
+use a value that starts with a letter and is not `nan`, `inf` or `infinity`
+(for example `r2`): the env source parses values that look like numbers before
+they become a string, so `01` becomes `1`, `1e3` becomes `1000`, `+1` becomes
+`1`, `nan` becomes `NaN` (which fails the pattern) and `infinity` becomes `inf` — an env-only "new" instance can silently be the old one.
 Either way, confirm the change took: the `log_id` in `GET /log/checkpoint`
 must differ from the one served before. What the change does to existing
 data, which you should state in your notice:

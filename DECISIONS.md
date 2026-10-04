@@ -4452,7 +4452,7 @@ An operator rolling back with `ACDP_REGISTRY_LOG__INSTANCE=01` would silently ke
 
 **Verdict.** (a), (b) CONFIRMED as inferences (doc now labels them). (c) DEFERRED, trigger: the
 first user-visible message change. (d) mapping CONFIRMED, doc CHANGED: docs/OPERATIONS.md says to
-prefer TOML or use a value containing a letter (e.g. `r2`), and to confirm the `log_id` in
+prefer TOML or use a value that starts with a letter and is not `nan`/`inf`/`infinity` (e.g. `r2`), and to confirm the `log_id` in
 `GET /log/checkpoint` changed. (e) CONFIRMED. Code-vs-spec follow-ups filed: #372
 (`bearer-jwt` identifier), #373 (lifecycle data served while disabled), #374 (lax `X-Tenant-Id`),
 #375 (lifecycle limiter charge before verification).

@@ -74,7 +74,8 @@ Every link to a sibling repository is **pinned** and written **inline**
 (`[text](url)`), never reference-style and never as a relative `../` path.
 Inline-only is a consistency rule — one form to scan and to re-point on a bump
 — not a workaround: the website copies absolute URLs verbatim and rewrites
-only relative links (to this repository's `blob/main`). Relative `../` paths
+only relative links (to site routes for synced docs, otherwise to this
+repository's `blob/main`). Relative `../` paths
 into a sibling break on both GitHub and the website, and a relative link
 starting with `/` is served from the website's root, where it 404s.
 
