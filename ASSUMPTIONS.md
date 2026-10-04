@@ -4859,6 +4859,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** `RegistryError::Acdp(AcdpError::NotImplemented(..))`, the test renamed `revoke_returns_501_when_revocations_not_configured`; the scanner as a pure `hand_built_envelope_sites` with synthetic falsification (one inserted `json!({"error":{"code":"x"}})` → exactly one hit; comment, `code:` binding, `code::` path and `errcode:` → none), plus a git-tracked-count check on the walk. Falsified against the real tree by restoring main's `auth.rs`: the test names `handlers/auth.rs` as a `JsonKey` site. CI comment: dropped the "7 executables / 71 tests" counts (measured 10/103 and drifting; the steps run no tests) rather than updating them.
 - **Alternatives:** keep 503 and add `service_unavailable` to the §5 docs and the scanned set (rejected: invents a code outside the spec table); a syn-based scanner (rejected: new dev-dependency for a two-pattern check); scanning `tests/` too (rejected: tests legitimately assert envelope shapes).
 - **Blast radius if wrong:** an embedder's client that special-cased 503 on revoke sees 501; the scanner may need a narrow allow-list entry if a legitimate `"code":` key (a non-error JSON document) is ever added to `src/`. Mutation pins in context.rs shift with the comment edits — accepted per plan (single final re-pin).
+- **Status:** UNCONFIRMED
 
 ## #373 — refuse to start when lifecycle state exists and `[lifecycle]` is off
 - **Plan:** Plan: issues-371-376 (Phase 5, #373; BINDING REVISIONS 1, 2, 4)
