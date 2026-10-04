@@ -601,6 +601,7 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
     // would make the registry key rate limits on the proxy IP for everyone).
     acdp_registry_core::rate_limit::TrustedProxies::parse(&cfg.rate_limit.trusted_proxies)
         .map_err(|e| anyhow::anyhow!("rate_limit.trusted_proxies: {e}"))?;
+    refuse_match_all_trusted_proxies(&cfg.rate_limit.trusted_proxies)?;
     // FEAT-06: a non-empty trusted_proxies list only makes sense with a
     // consumer. It has two: the limiter (XFF trust) and, since #374, the
     // `X-Tenant-Id` trust boundary under `auth.tenant_header_trust =
@@ -709,21 +710,16 @@ fn tenant_header_trust_checks(cfg: &RegistryConfig) -> anyhow::Result<Vec<String
     {
         anyhow::bail!(
             "auth.require_tenant = true with no [[auth.tenant_agents]] and \
-             auth.tenant_header_trust = \"none\" (the default under require_tenant): no request \
+             auth.tenant_header_trust = \"none\" (the default): no request \
              can ever resolve a tenant. Bind agents to tenants in [[auth.tenant_agents]], or \
              declare the boundary that stamps X-Tenant-Id with auth.tenant_header_trust = \
              \"trusted_proxies\" (plus rate_limit.trusted_proxies)."
         );
     }
+    // #386 (0.4.0): an absent key means `none` in every mode, so the 0.3.x
+    // "defaulted to any_peer" warning is gone; `any_peer` is only ever an
+    // explicit choice, and the non-loopback warning below still covers it.
     let mut warnings = Vec::new();
-    if cfg.auth.tenant_header_trust.is_none() && mode == TenantHeaderTrust::AnyPeer {
-        warnings.push(
-            "auth.tenant_header_trust is not set and defaulted to \"any_peer\": any client may \
-             select a tenant with X-Tenant-Id. The default becomes \"none\" in 0.4.0; set \
-             auth.tenant_header_trust explicitly (see docs/MULTI-TENANCY.md)."
-                .to_string(),
-        );
-    }
     if mode == TenantHeaderTrust::AnyPeer && !is_loopback_bind(&cfg.registry.bind) {
         warnings.push(format!(
             "auth.tenant_header_trust = \"any_peer\" on non-loopback bind '{}': X-Tenant-Id \
@@ -733,6 +729,32 @@ fn tenant_header_trust_checks(cfg: &RegistryConfig) -> anyhow::Result<Vec<String
         ));
     }
     Ok(warnings)
+}
+
+/// #391: refuse a zero-length prefix (`0.0.0.0/0`, `::/0`, or any `x/0`) in
+/// `rate_limit.trusted_proxies`. Such an entry contains every address of its
+/// family, so it silently means "trust `X-Forwarded-For` from anyone" for the
+/// limiter and, under `auth.tenant_header_trust = "trusted_proxies"`, the same
+/// as `any_peer` for tenancy. An operator who means the latter says so.
+/// Runs after `TrustedProxies::parse`, so every entry is already a valid CIDR.
+fn refuse_match_all_trusted_proxies(entries: &[String]) -> anyhow::Result<()> {
+    for e in entries {
+        let zero_prefix = e
+            .trim()
+            .split_once('/')
+            .is_some_and(|(_, p)| p.parse::<u8>() == Ok(0));
+        if zero_prefix {
+            anyhow::bail!(
+                "rate_limit.trusted_proxies entry '{}' has a /0 prefix and matches every \
+                 address: it would trust X-Forwarded-For from any client and, under \
+                 auth.tenant_header_trust = \"trusted_proxies\", let any client select a \
+                 tenant. List the gateway's own address or CIDR instead (or set \
+                 auth.tenant_header_trust = \"any_peer\" if that is really the intent).",
+                e.trim()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Whether `bind` is a loopback address (`127.0.0.0/8`, `::1`) or `localhost`.
@@ -2664,7 +2686,7 @@ mod tests {
     fn strict_without_bindings_and_without_header_trust_is_refused() {
         let mut cfg = trust_cfg();
         cfg.auth.require_tenant = true;
-        // Key absent: the 0.3.x default under require_tenant is `none`.
+        // Key absent: the default is `none` (#386: in every mode).
         let err = validate_config(&cfg).expect_err("no request can resolve a tenant");
         assert!(
             err.to_string()
@@ -2703,6 +2725,35 @@ mod tests {
         assert!(validate_config(&cfg).is_ok());
     }
 
+    /// #391: a /0 entry matches every address of its family, so it is
+    /// refused at startup whichever consumer (limiter or tenant trust) uses
+    /// the list; a narrow entry next to it does not rescue it.
+    #[test]
+    fn a_match_all_trusted_proxy_entry_is_refused() {
+        for (mode, limiter) in [
+            (Some(TenantHeaderTrust::TrustedProxies), false),
+            (None, true),
+        ] {
+            for bad in ["0.0.0.0/0", "::/0", " 10.0.0.0/0 ", "2001:db8::/0"] {
+                let mut cfg = trust_cfg();
+                cfg.auth.tenant_header_trust = mode;
+                cfg.rate_limit.enabled = limiter;
+                cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into(), bad.into()];
+                let err = validate_config(&cfg).expect_err(bad);
+                let msg = err.to_string();
+                assert!(msg.contains("has a /0 prefix"), "{bad}: {msg}");
+                assert!(msg.contains(bad.trim()), "{bad}: {msg}");
+            }
+            // The narrowest real prefixes and a bare host still start.
+            let mut cfg = trust_cfg();
+            cfg.auth.tenant_header_trust = mode;
+            cfg.rate_limit.enabled = limiter;
+            cfg.rate_limit.trusted_proxies =
+                vec!["0.0.0.0/1".into(), "::/1".into(), "127.0.0.1".into()];
+            assert!(validate_config(&cfg).is_ok(), "{mode:?}");
+        }
+    }
+
     #[test]
     fn the_tenant_trust_list_is_parsed_strictly() {
         let mut cfg = trust_cfg();
@@ -2716,20 +2767,25 @@ mod tests {
     }
 
     #[test]
-    fn absent_key_warns_only_when_it_defaults_to_any_peer() {
-        // Lax + absent → any_peer + the Phase-1 warning.
-        let cfg = trust_cfg();
-        let w = tenant_header_trust_checks(&cfg).unwrap();
-        assert_eq!(w.len(), 1, "{w:?}");
-        assert!(w[0].contains("becomes \"none\" in 0.4.0"), "{w:?}");
+    fn absent_key_means_none_and_is_quiet_in_every_mode() {
+        // #386: lax + absent → none, no warning (0.3.x warned and fell back
+        // to any_peer), even on a public bind.
+        let mut cfg = trust_cfg();
+        assert_eq!(
+            cfg.auth.effective_tenant_header_trust(),
+            TenantHeaderTrust::None
+        );
+        assert!(tenant_header_trust_checks(&cfg).unwrap().is_empty());
+        cfg.registry.bind = "0.0.0.0".into();
+        assert!(tenant_header_trust_checks(&cfg).unwrap().is_empty());
 
         // Explicit any_peer on loopback: quiet.
         let mut cfg = trust_cfg();
         cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
         assert!(tenant_header_trust_checks(&cfg).unwrap().is_empty());
 
-        // Strict + absent defaults to none, which 0.4.0 will not change: no
-        // Phase-1 warning (bindings present so the config is valid).
+        // Strict + absent: none, quiet (bindings present so the config is
+        // valid).
         let mut cfg = trust_cfg();
         cfg.auth.require_tenant = true;
         cfg.auth.tenant_agents = vec![acdp_registry_types::TenantAgentBinding {
@@ -2749,9 +2805,9 @@ mod tests {
         assert!(w[0].contains("non-loopback bind '0.0.0.0'"), "{w:?}");
         assert!(w[0].contains("§6.4"), "{w:?}");
 
-        // Absent key on a public bind: both warnings.
+        // Absent key on a public bind: `none`, so no warning at all (#386).
         cfg.auth.tenant_header_trust = None;
-        assert_eq!(tenant_header_trust_checks(&cfg).unwrap().len(), 2);
+        assert!(tenant_header_trust_checks(&cfg).unwrap().is_empty());
 
         // The other modes are quiet on a public bind.
         cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::None);

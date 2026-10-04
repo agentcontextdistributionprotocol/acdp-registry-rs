@@ -113,13 +113,13 @@ fn config(playground: bool) -> RegistryConfig {
     // (SEC-07, docs/ENGINEERING-LOG.md; RFC-ACDP-0008 §6.3 makes anonymous
     // reads a MAY), so opt in explicitly inside the test harness.
     //
-    // #374: `tenant_header_trust` is deliberately left unset, so each test gets
-    // the 0.3.x default for its own mode: `any_peer` for the lax/auth-off tests
-    // (which partition by X-Tenant-Id, and keep doing so), `none` for the
-    // strict ones. Pinning `any_peer` here would have leaked into every strict
-    // test that later flips `require_tenant`, turning the header they spoof
-    // into a trusted gateway assertion and masking the default-distrust they
-    // exist to cover. Tests that need a specific mode set it explicitly.
+    // #374/#386: `tenant_header_trust` is deliberately left unset, so every
+    // test gets the shipped default, `none` (0.4.0: in every mode). A test
+    // that partitions by X-Tenant-Id must opt in with `any_peer` itself (see
+    // `trust_tenant_header`). Pinning `any_peer` here would leak into every
+    // strict test that later flips `require_tenant`, turning the header they
+    // spoof into a trusted gateway assertion and masking the default-distrust
+    // they exist to cover.
     let auth = AuthConfig {
         anonymous_public_reads: true,
         ..AuthConfig::default()
@@ -156,6 +156,15 @@ fn config(playground: bool) -> RegistryConfig {
         log: Default::default(),
         witnesses: Vec::new(),
     }
+}
+
+/// #386: opt a test config into `X-Tenant-Id` selection from any peer. Since
+/// 0.4.0 an unset `tenant_header_trust` means `none` in every mode, so the
+/// lax/auth-off tests that partition by header declare the boundary the way an
+/// operator must.
+fn trust_tenant_header(mut cfg: RegistryConfig) -> RegistryConfig {
+    cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
+    cfg
 }
 
 async fn harness(playground: bool) -> Harness {
@@ -784,7 +793,7 @@ async fn tenancy_stamp_and_filter_roundtrip() {
     // X-Tenant-Id=tenant-a → 200, with X-Tenant-Id=tenant-b → 404
     // (same shape as not-found — no oracle that the row exists in a
     // tenant the caller doesn't belong to).
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     let req = producer(11)
         .publish_request()
         .title("tenant-a-row")
@@ -819,7 +828,7 @@ async fn tenancy_default_when_no_publish_header() {
     // 'default' sentinel is NOT assertable (#4): retrieving with
     // X-Tenant-Id=default → 400; the row is reachable only via the ABSENCE of
     // a tenant assertion; a real tenant does not see it.
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     let req = producer(12)
         .publish_request()
         .title("default-tenant-row")
@@ -1012,7 +1021,7 @@ async fn publish_stamps_tenant_from_bound_token_claim() {
     // With a bound token and no X-Tenant-Id header, the row is stamped from the
     // JWT claim (tenant-a) — not from the absent header. Retrieval is then only
     // visible under tenant-a.
-    let mut cfg = config(true);
+    let mut cfg = trust_tenant_header(config(true));
     cfg.auth.enabled = true;
     let h = harness_from_config(cfg).await;
 
@@ -1238,8 +1247,9 @@ async fn trusted_proxies_mode_trusts_only_the_declared_gateway() {
 
 /// #374: the untrusted-header rejection covers the write half (#2's open
 /// side) and auth-off registries too. An unbound producer's header in lax
-/// mode lands under `any_peer` (today's behaviour, the 0.3.x lax default) and
-/// is refused under `none`; auth-off + `none` refuses the header as well.
+/// mode lands under `any_peer` and is refused under `none`, which is also
+/// what an unset key means since #386 (0.3.x defaulted lax/auth-off to
+/// `any_peer`); auth-off + `none` refuses the header as well.
 #[tokio::test]
 async fn untrusted_header_is_refused_on_lax_and_auth_off_writes() {
     let unbound = || {
@@ -1251,11 +1261,12 @@ async fn untrusted_header_is_refused_on_lax_and_auth_off_writes() {
             .build()
             .unwrap()
     };
-    for auth_enabled in [true, false] {
-        // `none`: refused, envelope code not_authorized.
+    for (auth_enabled, unset) in [(true, false), (false, false), (true, true), (false, true)] {
+        // `none` (explicit, or the key left unset): refused, envelope code
+        // not_authorized.
         let mut cfg = config(true);
         cfg.auth.enabled = auth_enabled;
-        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::None);
+        cfg.auth.tenant_header_trust = (!unset).then_some(TenantHeaderTrust::None);
         let h = harness_from_config(cfg).await;
         let (status, v) = publish_with_tenant(&h.router, &unbound(), Some("tenant-a")).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "auth={auth_enabled}: {v}");
@@ -1602,7 +1613,7 @@ async fn search_filters_by_tenant() {
     // Publish two rows under different tenants. Search with
     // X-Tenant-Id=tenant-a returns only the tenant-a row; no header
     // returns both; tenant-c returns neither.
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     let req_a = producer(13)
         .publish_request()
         .title("alpha-search")
@@ -1654,8 +1665,10 @@ async fn admin_list_filters_by_tenant() {
     // The playground-mode admin endpoint also honors the tenant header.
     // REG-11 Phase 3: `/admin/contexts` is now admin-bearer gated like every
     // other `/admin/*` route, so the harness must configure a token and the
-    // request must present it.
-    let mut cfg = config(true);
+    // request must present it. #386: the publishes select their tenant by
+    // header, so this registry declares `any_peer`; the admin listing's own
+    // header is honoured in every mode (see the strict test below).
+    let mut cfg = trust_tenant_header(config(true));
     cfg.auth.admin_tokens = vec!["secret-admin".into()];
     let h = harness_from_config(cfg).await;
     let req_a = producer(15)
@@ -1672,8 +1685,10 @@ async fn admin_list_filters_by_tenant() {
         .visibility(Visibility::Public)
         .build()
         .unwrap();
-    publish_with_tenant(&h.router, &req_a, Some("tenant-a")).await;
-    publish_with_tenant(&h.router, &req_b, Some("tenant-b")).await;
+    let (s, v) = publish_with_tenant(&h.router, &req_a, Some("tenant-a")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) = publish_with_tenant(&h.router, &req_b, Some("tenant-b")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
 
     let resp = h
         .router
@@ -1693,6 +1708,126 @@ async fn admin_list_filters_by_tenant() {
     let items = v["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["body"]["title"], "admin-alpha");
+}
+
+/// `GET /admin/contexts` with an optional bearer and `X-Tenant-Id`; returns
+/// the status and the listed titles (empty on a non-200).
+#[cfg(feature = "playground")]
+async fn admin_list_titles(
+    app: &axum::Router,
+    bearer: Option<&str>,
+    tenant: Option<&str>,
+) -> (StatusCode, Vec<String>) {
+    let mut b = Request::builder().uri("/admin/contexts");
+    if let Some(t) = bearer {
+        b = b.header("authorization", format!("Bearer {t}"));
+    }
+    if let Some(t) = tenant {
+        b = b.header("X-Tenant-Id", t);
+    }
+    let resp = app
+        .clone()
+        .oneshot(b.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    let titles = v["items"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|i| i["body"]["title"].as_str().unwrap().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    (status, titles)
+}
+
+/// #391: under `require_tenant` with `tenant_header_trust = "none"` (the
+/// default), an ADMIN-authenticated caller may still select a tenant by
+/// header on `GET /admin/contexts`: the admin bearer is cross-tenant, so the
+/// header only narrows. Without a header strict mode still default-denies, a
+/// non-admin caller is still refused by the admin gate, the reserved sentinel
+/// is still 400, and the same header on a non-admin read is still untrusted.
+/// Covers both the unset key and an explicit `none`.
+#[cfg(feature = "playground")]
+#[tokio::test]
+async fn admin_list_selects_a_tenant_by_header_under_strict_none() {
+    for mode in [None, Some(TenantHeaderTrust::None)] {
+        let mut cfg = config(true);
+        cfg.auth.enabled = true;
+        cfg.auth.require_tenant = true;
+        cfg.auth.tenant_header_trust = mode;
+        cfg.auth.admin_tokens = vec!["secret-admin".into()];
+        cfg.auth.tenant_agents = vec![
+            TenantAgentBinding {
+                agent_did: "did:web:agents.test:smoke-17".into(),
+                tenant_id: "tenant-a".into(),
+            },
+            TenantAgentBinding {
+                agent_did: "did:web:agents.test:smoke-18".into(),
+                tenant_id: "tenant-b".into(),
+            },
+        ];
+        let h = harness_from_config(cfg).await;
+        let mut ctx_ids = Vec::new();
+        for (seed, title) in [(17, "strict-admin-alpha"), (18, "strict-admin-bravo")] {
+            let req = producer(seed)
+                .publish_request()
+                .title(title)
+                .context_type(ContextType::DataSnapshot)
+                .visibility(Visibility::Public)
+                .build()
+                .unwrap();
+            // The binding places the write; no header needed.
+            let (s, v) = publish_with_tenant(&h.router, &req, None).await;
+            assert_eq!(s, StatusCode::OK, "{mode:?}: {v}");
+            ctx_ids.push(v["ctx_id"].as_str().unwrap().to_string());
+        }
+
+        let admin = Some("secret-admin");
+        assert_eq!(
+            admin_list_titles(&h.router, admin, Some("tenant-a")).await,
+            (StatusCode::OK, vec!["strict-admin-alpha".to_string()]),
+            "{mode:?}"
+        );
+        assert_eq!(
+            admin_list_titles(&h.router, admin, Some("tenant-b")).await,
+            (StatusCode::OK, vec!["strict-admin-bravo".to_string()]),
+            "{mode:?}"
+        );
+        // No header: strict default-deny still applies to the admin listing.
+        assert_eq!(
+            admin_list_titles(&h.router, admin, None).await.0,
+            StatusCode::FORBIDDEN,
+            "{mode:?}"
+        );
+        // The reserved sentinel is refused before anything else.
+        assert_eq!(
+            admin_list_titles(&h.router, admin, Some("default")).await.0,
+            StatusCode::BAD_REQUEST,
+            "{mode:?}"
+        );
+        // The header grants nothing without the admin bearer.
+        assert_eq!(
+            admin_list_titles(&h.router, None, Some("tenant-a")).await.0,
+            StatusCode::FORBIDDEN,
+            "{mode:?}"
+        );
+        assert_eq!(
+            admin_list_titles(&h.router, Some("not-the-admin"), Some("tenant-a"))
+                .await
+                .0,
+            StatusCode::FORBIDDEN,
+            "{mode:?}"
+        );
+        // The same header on a non-admin read is still untrusted (#374).
+        assert_eq!(
+            retrieve_with_tenant(&h.router, &ctx_ids[0], Some("tenant-a")).await,
+            StatusCode::FORBIDDEN,
+            "{mode:?}"
+        );
+    }
 }
 
 #[cfg(feature = "playground")]
@@ -2421,7 +2556,7 @@ async fn expired_idempotency_key_is_not_matched() {
 /// update both the key and this assertion deliberately.
 #[tokio::test]
 async fn idempotency_key_is_agent_scoped_not_tenant_scoped() {
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     let app = &h.router;
     let req = producer(12)
         .publish_request()
@@ -2672,6 +2807,67 @@ async fn admin_status_requires_token_and_reports_health() {
     assert_eq!(v["webhook"]["enabled"], false, "body = {v}");
     assert_eq!(v["idempotency"]["records"], 0, "body = {v}");
     assert_eq!(v["revocation"]["configured_feeds"], 0, "body = {v}");
+}
+
+/// #391: `GET /admin/status` reports the EFFECTIVE tenant-header trust mode,
+/// whether the key was set, and the gateway-list size — the runtime answer the
+/// startup log used to be the only record of.
+#[tokio::test]
+async fn admin_status_reports_the_effective_tenancy_policy() {
+    async fn tenancy(cfg: RegistryConfig) -> Value {
+        let h = harness_from_config(cfg).await;
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/status")
+                    .header("authorization", "Bearer secret-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_to_json(resp).await["tenancy"].clone()
+    }
+    let base = || {
+        let mut cfg = config(true);
+        cfg.auth.admin_tokens = vec!["secret-admin".into()];
+        cfg
+    };
+
+    // Key unset, lax mode: the default `none` (#386), reported as unset.
+    assert_eq!(
+        tenancy(base()).await,
+        json!({
+            "require_tenant": false,
+            "tenant_header_trust": "none",
+            "tenant_header_trust_configured": false,
+            "trusted_proxies": 0
+        })
+    );
+
+    // Explicit modes are reported as configured, strict mode as such.
+    let mut cfg = base();
+    cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
+    let t = tenancy(cfg).await;
+    assert_eq!(t["tenant_header_trust"], "any_peer", "{t}");
+    assert_eq!(t["tenant_header_trust_configured"], true, "{t}");
+
+    let mut cfg = base();
+    cfg.auth.require_tenant = true;
+    cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::TrustedProxies);
+    cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into(), "192.0.2.7".into()];
+    assert_eq!(
+        tenancy(cfg).await,
+        json!({
+            "require_tenant": true,
+            "tenant_header_trust": "trusted_proxies",
+            "tenant_header_trust_configured": true,
+            "trusted_proxies": 2
+        })
+    );
 }
 
 /// #117: `GET /admin/status` carries a `build` group, still bearer-gated.
@@ -5180,7 +5376,8 @@ fn caps_030() -> CapabilitiesDocument {
 /// optionally, receipts + head receipts — mirroring the binary's
 /// `serve_with_store` chaining.
 async fn lifecycle_harness(head_receipts: bool) -> Harness {
-    let mut cfg = config(false);
+    // #386: the tenant-scoped lifecycle tests select a tenant by header.
+    let mut cfg = trust_tenant_header(config(false));
     cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
     cfg.lifecycle.enabled = true;
     if head_receipts {
@@ -5989,7 +6186,8 @@ fn log_caps() -> CapabilitiesDocument {
 /// store is built `with_transparency_log()` (mirroring the binary), so
 /// every accepted publish appends its leaf atomically (§7.1).
 async fn log_harness() -> Harness {
-    let mut cfg = config(false);
+    // #386: the tenant-scoped /log tests select a tenant by header.
+    let mut cfg = trust_tenant_header(config(false));
     cfg.receipt.signing_key_seed_b64 = B64.encode(RECEIPT_SEED);
     cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
     cfg.log.enabled = true;
@@ -8744,7 +8942,7 @@ async fn the_acdp_media_type_is_accepted_not_rejected() {
 /// produce the expected number by coincidence.
 #[tokio::test]
 async fn search_reports_a_tenant_scoped_total_estimate() {
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     for (seed, tenant, title) in [
         (31u8, "tenant-a", "est-alpha"),
         (34u8, "tenant-a", "est-delta"),
@@ -9103,7 +9301,8 @@ impl ExtendedRegistryStore for CountingStore {
 
 /// Build a log-enabled harness over a [`CountingStore`], returning the counters.
 async fn counting_log_harness() -> (Harness, Arc<StoreCalls>) {
-    let mut cfg = config(false);
+    // #386: `log_entries_leaf_presence_is_tenant_scoped` selects by header.
+    let mut cfg = trust_tenant_header(config(false));
     cfg.receipt.signing_key_seed_b64 = B64.encode(RECEIPT_SEED);
     cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
     cfg.log.enabled = true;
@@ -10046,7 +10245,7 @@ async fn tenant_lineage(h: &Harness, seed: u8, tenant: &str) -> (String, String)
 /// assertion ran first and leave the other never evaluated.
 #[tokio::test]
 async fn context_body_is_served_to_the_owning_tenant() {
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     let (_lineage, ctx_id) = tenant_lineage(&h, 170, "tenant-body-a").await;
 
     let (status, v) = get_json_with_tenant(
@@ -10076,7 +10275,7 @@ async fn context_body_is_served_to_the_owning_tenant() {
 /// is a separate route with its own copy of the gate and had none.
 #[tokio::test]
 async fn context_body_is_withheld_from_a_foreign_tenant() {
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     let (_lineage, ctx_id) = tenant_lineage(&h, 171, "tenant-body-a").await;
 
     let (status, v) = get_json_with_tenant(
@@ -10105,7 +10304,7 @@ async fn context_body_is_withheld_from_a_foreign_tenant() {
 /// direction fails with an EMPTY list where two versions were expected.
 #[tokio::test]
 async fn lineage_lists_the_owning_tenants_versions() {
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     let (lineage_id, _ctx) = tenant_lineage(&h, 172, "tenant-lineage-a").await;
 
     let (status, v) = get_json_with_tenant(
@@ -10149,7 +10348,7 @@ async fn lineage_lists_the_owning_tenants_versions() {
 /// filter and nothing else.
 #[tokio::test]
 async fn lineage_withholds_another_tenants_versions() {
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     let (lineage_id, _ctx) = tenant_lineage(&h, 173, "tenant-lineage-a").await;
     let uri = format!("/lineages/{}", pct_encode_path_segment(&lineage_id));
 
@@ -10178,7 +10377,7 @@ async fn lineage_withholds_another_tenants_versions() {
 /// tenant`), split for the same reason as the `/body` pair.
 #[tokio::test]
 async fn lineage_current_is_served_to_the_owning_tenant() {
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     let (lineage_id, _ctx) = tenant_lineage(&h, 174, "tenant-current-a").await;
 
     let (status, v) = get_json_with_tenant(
@@ -10208,7 +10407,7 @@ async fn lineage_current_is_served_to_the_owning_tenant() {
 /// PRESENT but foreign one is answered identically.
 #[tokio::test]
 async fn lineage_current_is_withheld_from_a_foreign_tenant() {
-    let h = harness(true).await;
+    let h = harness_from_config(trust_tenant_header(config(true))).await;
     let (lineage_id, _ctx) = tenant_lineage(&h, 175, "tenant-current-a").await;
 
     let (status, v) = get_json_with_tenant(
@@ -10470,7 +10669,8 @@ async fn webhook_harness(
     let addr = listener.local_addr().expect("addr");
     let rx = spawn_webhook_capture(listener);
 
-    let mut cfg = config(false);
+    // #386: the tenant-carrying webhook tests select a tenant by header.
+    let mut cfg = trust_tenant_header(config(false));
     cfg.webhook = WebhookConfig {
         enabled: true,
         url: format!("http://{addr}/hook"),
@@ -11602,7 +11802,8 @@ async fn a_did_web_retract_retracts_rather_than_republishing() {
 
 /// A did:key lifecycle harness with an explicit per-agent budget.
 async fn lifecycle_harness_with_rate(publish_rate_per_minute: u32) -> Harness {
-    let mut cfg = config(false);
+    // #386: the tenant-gate test selects a tenant by header.
+    let mut cfg = trust_tenant_header(config(false));
     cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
     cfg.lifecycle.enabled = true;
     cfg.limits.publish_rate_per_minute = publish_rate_per_minute;

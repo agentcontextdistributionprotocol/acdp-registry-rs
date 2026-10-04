@@ -141,7 +141,9 @@ out of band and distribute them to operators / monitoring.
 
 - `GET /admin/status` — always shipped, admin-bearer gated. An operational
   snapshot: build identity, storage health, idempotency record count, webhook
-  queue depth, configured revocation feeds, and migration state. Good for a
+  queue depth, configured revocation feeds, migration state, and the tenancy
+  policy in effect (`tenancy.tenant_header_trust` is the effective
+  `X-Tenant-Id` trust mode, #391). Good for a
   readiness probe richer than `/healthz`. Shape in
   [HTTP-API.md](HTTP-API.md#get-adminstatus).
 
@@ -221,7 +223,9 @@ with `into_make_service_with_connect_info`, so the peer IP is available behind
 `axum_server`.
 
 By default all of these are per-process. Behind a load balancer set
-`trusted_proxies` so per-IP limits track real clients; the `global_per_minute`
+`trusted_proxies` to the balancer's own addresses (IPv4 gateways in IPv4 form;
+entries are matched as written, and a `/0` entry is refused at startup) so
+per-IP limits track real clients; the `global_per_minute`
 ceiling is then per replica. With more than one replica you have three options
 for the `/auth/*` bound:
 

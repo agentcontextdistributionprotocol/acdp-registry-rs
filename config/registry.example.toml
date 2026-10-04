@@ -98,9 +98,9 @@ require_tenant = false
 #                       (matched on the TCP peer, not X-Forwarded-For); the
 #                       gateway must strip or overwrite the client's header
 #   "any_peer"        - from every client (a boundary the registry can't see)
-# Unset: "none" when require_tenant = true, otherwise "any_peer" with a startup
-# warning — the default becomes "none" for every mode in 0.4.0, so set it.
-# See docs/MULTI-TENANCY.md.
+# Unset: "none" in every mode (0.4.0; 0.3.x fell back to "any_peer" when
+# require_tenant = false). A dev registry that partitions by header says
+# "any_peer". See docs/MULTI-TENANCY.md.
 #   tenant_header_trust = "none"
 # Bearer tokens accepted by every /admin/* route (require_admin_bearer).
 # Empty (the default) disables all /admin/* routes, including
@@ -160,7 +160,10 @@ global_per_minute = 6000
 # Empty (default) = never trust XFF, always use the socket peer. List ONLY the
 # addresses of proxies you operate — a wrong entry lets clients spoof their IP.
 # Also the gateway list for auth.tenant_header_trust = "trusted_proxies" (and
-# then allowed even with enabled = false).
+# then allowed even with enabled = false). Entries are matched as written:
+# list IPv4 gateways in IPv4 form ("10.0.0.0/8"), because peers are compared
+# after "::ffff:a.b.c.d" is canonicalised to IPv4, so an "::ffff:..." entry
+# never matches. A /0 entry ("0.0.0.0/0", "::/0") is refused at startup.
 #   trusted_proxies = ["10.0.0.0/8"]
 trusted_proxies = []
 # Where the two ceilings above are counted. "memory" (default): per process.

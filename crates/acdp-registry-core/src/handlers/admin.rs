@@ -26,7 +26,7 @@ use crate::secure_compare::ct_eq;
 use crate::state::AppState;
 
 #[cfg(feature = "playground")]
-use crate::handlers::context::tenant_for_request;
+use crate::handlers::context::{reject_reserved_tenant, tenant_for_request, tenant_from_headers};
 #[cfg(feature = "playground")]
 use crate::tenant_trust::PeerIp;
 #[cfg(feature = "playground")]
@@ -73,6 +73,17 @@ pub struct AdminListResponse {
 /// the `tenant_id` predicate entirely (`if tenant.is_some()` in
 /// `list_contexts`, `acdp-registry-sqlite` and `acdp-registry-pg`), so the
 /// listing spans every tenant rather than defaulting to one.
+///
+/// #391: an `X-Tenant-Id` header on this route is honoured whatever
+/// `auth.tenant_header_trust` says, because the caller has already presented
+/// an admin bearer. That credential is cross-tenant (it can list every tenant
+/// in lax mode and retract any context), so the header can only NARROW what
+/// the caller may see; it is an authenticated selection, not the
+/// unauthenticated indicator RFC-ACDP-0008 §6.4 is about. Without it, a
+/// strict registry on the default `none` could not serve this route at all.
+/// The reserved `default` sentinel is still refused (400). With no header the
+/// normal resolution applies, so strict mode still default-denies an
+/// unscoped admin listing.
 #[cfg(feature = "playground")]
 pub async fn admin_list<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
@@ -82,7 +93,13 @@ pub async fn admin_list<S: ExtendedRegistryStore + 'static>(
 ) -> Result<Json<AdminListResponse>, AdminLifecycleError> {
     require_admin_bearer(&state.config, &headers)?;
 
-    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
+    let header_tenant = tenant_from_headers(&headers);
+    reject_reserved_tenant(header_tenant.as_deref())?;
+    let requested_tenant = match header_tenant {
+        // #391: admin-authenticated selection — trusted from any peer.
+        Some(t) => Some(t),
+        None => tenant_for_request(&state, &headers, peer)?,
+    };
     // An admin bearer authenticates the CALLER but names no agent, so the
     // §4.5 predicate sees an authenticated-but-unnamed requester: public
     // rows only. Restricted/private stay producer/audience-gated — their
@@ -213,6 +230,26 @@ pub struct AdminStatusResponse {
     pub webhook: WebhookStatus,
     pub revocation: RevocationStatus,
     pub migrations: MigrationStatus,
+    pub tenancy: TenancyStatus,
+}
+
+/// The tenant-resolution policy in effect (#391). `tenant_header_trust` is
+/// the EFFECTIVE mode — what the request path applies — so an operator can
+/// confirm at runtime what a startup log line used to be the only record of.
+#[derive(Debug, Serialize)]
+pub struct TenancyStatus {
+    /// `auth.require_tenant`.
+    pub require_tenant: bool,
+    /// The effective `auth.tenant_header_trust`: `"none"`,
+    /// `"trusted_proxies"` or `"any_peer"`.
+    pub tenant_header_trust: &'static str,
+    /// Whether the key was set (config file or environment). `false` means
+    /// the mode above is the default (`none` since 0.4.0, #386).
+    pub tenant_header_trust_configured: bool,
+    /// Number of `rate_limit.trusted_proxies` entries: the gateway list the
+    /// `trusted_proxies` mode matches the TCP peer against. A count, not the
+    /// CIDRs, so the snapshot does not map the deployment's network.
+    pub trusted_proxies: usize,
 }
 
 /// Identity of the running build (#117). The coarse `version` string is
@@ -292,7 +329,7 @@ pub struct MigrationStatus {
 
 /// `GET /admin/status` — auth-gated operational snapshot (storage health,
 /// idempotency table size, webhook queue depth, configured revocation feeds,
-/// storage backend). Ships in every build; gated by `auth.admin_tokens` like
+/// storage backend, tenancy policy). Ships in every build; gated by `auth.admin_tokens` like
 /// the other admin endpoints. Not playground-gated — it's production
 /// observability.
 pub async fn admin_status<S: ExtendedRegistryStore + 'static>(
@@ -339,6 +376,12 @@ pub async fn admin_status<S: ExtendedRegistryStore + 'static>(
         migrations: MigrationStatus {
             backend: format!("{:?}", state.config.storage.backend),
             applied: true,
+        },
+        tenancy: TenancyStatus {
+            require_tenant: state.config.auth.require_tenant,
+            tenant_header_trust: state.tenant_header_trust.as_str(),
+            tenant_header_trust_configured: state.config.auth.tenant_header_trust.is_some(),
+            trusted_proxies: state.config.rate_limit.trusted_proxies.len(),
         },
     }))
 }
