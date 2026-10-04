@@ -644,6 +644,8 @@ mod tests {
             vec![],
             vec![contrib.clone()],
         );
+        let private_owner_only = publish("p-owner", Visibility::Private, vec![], vec![]);
+        let restricted_aud = publish("r-aud", Visibility::Restricted, vec![aud.clone()], vec![]);
         let public_retracted = publish("pub-retracted", Visibility::Public, vec![], vec![]);
         store
             .commit_lifecycle_event(&retract_event(&CtxId(public_retracted.clone()), did(11)))
@@ -651,6 +653,8 @@ mod tests {
         let ids = [
             private_aud.as_str(),
             private_contrib.as_str(),
+            private_owner_only.as_str(),
+            restricted_aud.as_str(),
             public_retracted.as_str(),
             "not-a-ctx-id-at-all",
         ];
@@ -664,9 +668,29 @@ mod tests {
             "audience may retrieve private"
         );
         assert!(
+            as_aud.contains(&restricted_aud),
+            "audience may retrieve restricted"
+        );
+        assert!(
+            !as_aud.contains(&private_owner_only),
+            "another context's audience is not this one's"
+        );
+        assert!(
             as_aud.contains(&public_retracted),
             "retracted stays retrievable"
         );
+        let as_owner = store
+            .visible_ctx_ids(&ids, Some(&did(11)), None, false)
+            .await
+            .unwrap();
+        for id in [
+            &private_aud,
+            &private_contrib,
+            &private_owner_only,
+            &restricted_aud,
+        ] {
+            assert!(as_owner.contains(id), "the producer may retrieve {id}");
+        }
         let as_contrib = store
             .visible_ctx_ids(&ids, Some(&contrib), None, false)
             .await
@@ -680,12 +704,84 @@ mod tests {
             .await
             .unwrap();
         assert!(!as_outsider.contains(&private_aud));
+        assert!(
+            !as_outsider.contains(&private_owner_only),
+            "an outsider is refused a private owner-only context"
+        );
+        assert!(
+            !as_outsider.contains(&restricted_aud),
+            "an outsider is refused a restricted context"
+        );
+        assert!(
+            as_outsider.contains(&public_retracted),
+            "an authenticated outsider may retrieve public"
+        );
         assert!(!as_outsider.contains("not-a-ctx-id-at-all"));
         let anon_off = store
             .visible_ctx_ids(&ids, None, None, false)
             .await
             .unwrap();
         assert!(anon_off.is_empty(), "anonymous with reads off sees nothing");
+    }
+
+    /// RFC-ACDP-0008 §4.5 search disclosure through `MemoryStore::search`:
+    /// a wrapper that dropped `requester` or forced `public_arm_open` on would
+    /// leak a private context or open anonymous reads, and goes red here.
+    #[test]
+    fn search_applies_the_disclosure_rules_to_requester_and_public_arm() {
+        let store = MemoryStore::new();
+        let owner = producer(17);
+        let publish = |title: &str, vis: Visibility| {
+            let req = owner
+                .publish_request()
+                .title(title)
+                .context_type(ContextType::DataSnapshot)
+                .visibility(vis)
+                .build()
+                .expect("valid publish request");
+            commit(&store, &req).ctx_id
+        };
+        let private = publish("search private", Visibility::Private);
+        let public = publish("search public", Visibility::Public);
+        let found = |requester: Option<&AgentDid>, public_arm_open: bool| {
+            let params = SearchParams {
+                agent_id: Some(did(17).as_str().to_string()),
+                ..Default::default()
+            };
+            let mut ids: Vec<CtxId> = store
+                .search(&params, requester, public_arm_open)
+                .expect("search ok")
+                .matches
+                .into_iter()
+                .map(|m| m.ctx_id)
+                .collect();
+            ids.sort_by(|a, b| a.0.cmp(&b.0));
+            ids
+        };
+        let sorted = |mut v: Vec<CtxId>| {
+            v.sort_by(|a, b| a.0.cmp(&b.0));
+            v
+        };
+
+        assert_eq!(
+            found(Some(&did(18)), false),
+            vec![public.clone()],
+            "an outsider sees the public context only, never the private one"
+        );
+        assert!(
+            found(None, false).is_empty(),
+            "anonymous with public reads off sees nothing"
+        );
+        assert_eq!(
+            found(None, true),
+            vec![public.clone()],
+            "anonymous with public reads on sees only the public context"
+        );
+        assert_eq!(
+            found(Some(&did(17)), false),
+            sorted(vec![private, public]),
+            "the producer sees both"
+        );
     }
 
     // ── 3. Pinned gaps and divergences ──────────────────────────────────────
@@ -700,9 +796,13 @@ mod tests {
     ///
     /// Each line below states the contract's answer and pins this backend's
     /// opposite one. The fix belongs upstream (`acdp-server`'s
-    /// `InMemoryStore`), so it is asserted here rather than patched; if
-    /// upstream changes, this test goes red and the parity call should
-    /// replace it.
+    /// `InMemoryStore`). A wrapper-side fix (re-filtering the inner store's
+    /// matches here) was rejected: the inner store has already paginated and
+    /// counted, so post-filtering would make `total_estimate` wrong and leave
+    /// short or empty pages behind valid cursors. It is asserted here instead;
+    /// if upstream changes, this test goes red and the parity call should
+    /// replace it. (Accepted because this backend is demo-only; see
+    /// ASSUMPTIONS.md.)
     #[test]
     fn fulltext_search_diverges_from_the_cross_backend_contract() {
         let store = MemoryStore::new();

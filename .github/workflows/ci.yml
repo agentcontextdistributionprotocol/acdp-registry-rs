@@ -463,14 +463,15 @@ jobs:
                  "or delete it and update COVERED/PARTIAL_DIRECT."
             exit 1
           fi
-      # What this step covers (measured 2026-10-03, 110 tests):
-      #   * 89 in the binary's unit tests: 74 config-validation tests from
-      #     main.rs's inline module, plus 15 under `memory_ext::tests` that
+      # What this step covers (measured 2026-10-03, 111 tests):
+      #   * 90 in the binary's unit tests: 74 config-validation tests from
+      #     main.rs's inline module, plus 16 under `memory_ext::tests` that
       #     exercise MemoryStore itself — the shared parity suite
       #     (`acdp_registry_store::parity`: data-period filters, retraction
       #     coherence), trait round-trips (put/get, supersession,
       #     first_version, idempotency replay/evict, the commit_publish
-      #     supersession race) and pinned gaps (no list_contexts, no log or
+      #     supersession race, search disclosure by requester and public-read
+      #     arm) and pinned gaps (no list_contexts, no log or
       #     witness storage, untenanted, and a MEASURED full-text divergence
       #     from the SQL backends: substring match, no stemming/stopwords).
       #   * 21 in integration files: conformance_gate 17,
@@ -487,7 +488,7 @@ jobs:
       # importing it fails with
       #   error[E0433]: unresolved module or unlinked crate `acdp_registry_server`
       # A `MemoryStore::get` that always returned Ok(None) now fails 9 of the
-      # 15 memory_ext tests (falsified locally before merging).
+      # 16 memory_ext tests (falsified locally before merging).
       - name: cargo test (memory backend unit tests; HTTP suites cfg-gated off)
         run: |
           cargo test --locked -p acdp-registry-server \
@@ -656,7 +657,8 @@ jobs:
       # The pg leg stays fail-closed (#228): ACDP_REQUIRE_PG=1 turns a missing
       # database into a failure instead of a silent skip. The env is set for
       # the whole step; the other legs either use it the same way (workspace:
-      # acdp-registry-pg's own tests) or compile no pg code at all.
+      # acdp-registry-pg's own tests, and acdp-registry-auth's pg_revocation
+      # test, which reads the same two variables) or compile no pg code at all.
       #
       # `clean --workspace` first: rust-cache can restore a target dir that
       # still holds profiles from an earlier run, which would otherwise be
