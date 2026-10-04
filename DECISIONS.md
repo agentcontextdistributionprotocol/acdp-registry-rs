@@ -4317,7 +4317,7 @@ assert the table exists, and update the `store_contract.rs:1790` comment.
 
 **Original assumption** (`ASSUMPTIONS.md` "B8 / hardening-remaining Phase 5a"): the maintainer wants
 `lineages` retired (5a then 5b) rather than kept-and-closed — the plan's default (Q2) — and the next
-release is 0.2.1, so the `docs/UPGRADING.md` note sits under `## 0.2.1`.
+release is 0.2.1, so the `docs/UPGRADING.md` note sits under `## 0.2.1`. *(Superseded 2026-10-04: release-plz bumped the minor for `AuthConfig.tenant_header_trust`; this note ships under `## 0.3.0`.)*
 
 **Analysis.** 5a is code-only and reverts cleanly: nothing reads the table, the table, its FKs and
 the applied `001_initial.sql` are untouched, and the both-backend contract test pins that a publish
@@ -4548,3 +4548,23 @@ docs/README.md "Link convention". (e), (f) CONFIRMED. (g) CONFIRMED within its l
 to the first real spec bump.
 
 **Resulting status:** CONFIRMED (partial) — see deferred items.
+
+## Reconcile 2026-10-04 — issues-371-376 (decided by Opus; #372/#373/#374 analysed by Fable; the maintainer delegated the calls to the recommendation)
+
+**Entries.** `ASSUMPTIONS.md` #371, #375, #372, #376, #373, #374 Phase 1 (all tagged `Plan: issues-371-376`) plus the 0.3.0 relabel entry (left UNCONFIRMED, tagged `Plan: release-0.3.0-relabel-and-repin`).
+
+**#371 (mutation re-pin at scope 346) — CONFIRMED, Opus.** The guard design (name membership, synthetic negative control) is still the strongest option; the 143.7 min figure is effectively the job's wall clock. Pins went stale by design as #373-#375 landed; the final re-pin (approach B: commit run 37222567772's outcomes.json byte for byte, scope 358, 108.7 min, with every later edit to the four scoped files line-neutral; a fresh dispatch is the fallback; mapping lines through a diff was rejected because a ledger must stay as measured).
+
+**#375 (charge only a verified actor) — CONFIRMED, Opus; sub-assumption (g) added.** The pre-flight never runs the SDK's event-type and skew checks, so a replayed signed event is charged to its actor; accepted for parity with publish. The lifecycle prove/commit split (acdp-rs#337) has since shipped upstream (acdp-rs#348, merged 2026-10-04, not yet in the pinned acdp 0.14.3); adopting it removes the pre-flight duplicate (#393).
+
+**#376 (revoke 501, envelope scanner) — (a)-(c) CONFIRMED, (d) CHANGED, Opus.** The claim that no test pins the tenant-scoped cursor was wrong; `assert_tenant_scoped_search_parity` does, for SQLite and Postgres. Comments fixed in place without moving lines (context.rs is in the mutants scope).
+
+**#372 (`bearer_jwt`) — CONFIRMED, Fable analysis.** Alternatives rejected: `oauth` (no RFC 6749 grant), `did_jwt` (names a self-signed DID JWT), omitting the field (RFC-ACDP-0007 rule 9). Correction: because every successor id is pattern-valid, a rename is a deprecation window with dual emission, not a second wire break. (c) — whether §6.2 admits a registry-minted DID-bound token — stays UNCONFIRMED until spec issue #72; a recommendation was commented there.
+
+**#373 (refuse to start) — CONFIRMED (a)-(e), Fable analysis.** Strip-on-read inverts `reconcile_retraction`'s fail-closed posture and un-retracts withdrawn content; WARN would routinely fire for restored backups while the document advertises no lifecycle. The two-source OR is exactly the emit set; a defaulted trait method avoids a semver-major on a published crate. Postgres coverage is real (CI `cargo test (postgres)` with `ACDP_REQUIRE_PG=1`). Follow-up #390 (parity-kit assertion).
+
+**#374 Phase 1 (tenant header trust) — (a)-(f) CONFIRMED, Fable analysis; the one-way doors were already confirmed by the maintainer.** No route bypasses the whole-app peer stamp; production serves with `ConnectInfo`; every missing-peer or bad-config path fails closed; corroboration leaks nothing cross-tenant. Stale `require_tenant` comment CHANGED. Deferred items are in #391.
+
+**Release consequence (decided, option A).** The new public `AuthConfig` field makes the next release 0.3.0, not 0.2.1. The relabel (PR #389) renamed the UPGRADING section, moved the default-flip promise to 0.4.0, and changed the Railway guard to follow the newest UPGRADING section so the page is fixed on `main` before the release PR. Rejected: a human commit on the release branch (release-plz closes the PR), shipping the `none` default now (behaviour change, #386).
+
+**Resulting status:** all 6 entries CONFIRMED (#372 with sub-assumption (c) still open, #376 with (d) CHANGED to a comment fix), none changed in behaviour, deferred items tracked in #390/#391/#393; 0 need code follow-up before the next `/ship`.
