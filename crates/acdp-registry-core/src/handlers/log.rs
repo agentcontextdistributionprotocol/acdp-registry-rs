@@ -43,6 +43,7 @@ use serde_json::json;
 use super::context::{caller_from_headers, tenant_for_request};
 use crate::log::LogState;
 use crate::state::AppState;
+use crate::tenant_trust::PeerIp;
 
 /// Page-size cap for `GET /log/entries` (§8.3: the registry MAY cap by
 /// returning fewer entries than requested; RECOMMENDED cap ≥ 256).
@@ -215,6 +216,7 @@ pub struct LogProofQuery {
 pub async fn log_proof<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     Query(q): Query<LogProofQuery>,
 ) -> Result<Json<serde_json::Value>, RegistryError> {
     let log = log_state(&state)?.clone();
@@ -238,7 +240,7 @@ pub async fn log_proof<S: ExtendedRegistryStore + 'static>(
                 .into(),
         ));
     }
-    inclusion_proof_response(&state, &log, &headers, &q).await
+    inclusion_proof_response(&state, &log, &headers, peer, &q).await
 }
 
 /// §8.2 inclusion mode.
@@ -246,12 +248,13 @@ async fn inclusion_proof_response<S: ExtendedRegistryStore + 'static>(
     state: &Arc<AppState<S>>,
     log: &Arc<LogState>,
     headers: &HeaderMap,
+    peer: Option<std::net::IpAddr>,
     q: &LogProofQuery,
 ) -> Result<Json<serde_json::Value>, RegistryError> {
     // Resolve the caller once; a bad bearer or tenant mismatch errors
     // out before any log state is consulted.
     let requester = caller_from_headers(state, headers)?;
-    let requested_tenant = tenant_for_request(state, headers)?;
+    let requested_tenant = tenant_for_request(state, headers, peer)?;
     let current = state.server.store().log_tree_size().await?;
 
     // (record, whether the requester may see the leaf echo)
@@ -443,6 +446,7 @@ pub struct LogEntriesQuery {
 pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     Query(q): Query<LogEntriesQuery>,
 ) -> Result<Json<serde_json::Value>, RegistryError> {
     let log = log_state(&state)?.clone();
@@ -465,7 +469,7 @@ pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
     let capped_end = end.min(start.saturating_add(LOG_ENTRIES_PAGE_CAP));
 
     let requester = caller_from_headers(&state, &headers)?;
-    let requested_tenant = tenant_for_request(&state, &headers)?;
+    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
 
     let records = state.server.store().log_entries(start, capped_end).await?;
 

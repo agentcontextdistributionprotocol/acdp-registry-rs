@@ -121,6 +121,14 @@ The binary validates config before serving and refuses to boot on a misconfig
   (SQLite/Postgres). The memory backend records no tenant and reports the
   reserved `default` for every row, so every tenant-scoped read would
   return zero rows; an untenanted memory registry still starts.
+- **Tenant header trust (#374)** — `auth.tenant_header_trust =
+  "trusted_proxies"` with an empty `rate_limit.trusted_proxies` is refused (no
+  peer could ever be trusted). `require_tenant = true` with no
+  `[[auth.tenant_agents]]` and the header distrusted (`"none"`, which is the
+  default under `require_tenant`) is refused (no request could ever resolve a
+  tenant). Two warnings, not refusals: `any_peer` in effect on a non-loopback
+  `bind`, and the key left unset where it defaults to `any_peer` (the default
+  becomes `none` in 0.3.0).
 - **Bind safety** — a non-loopback `bind` with neither TLS nor auth requires an
   explicit `allow_public_bind = true`.
 - **TLS** — when `tls.enabled`, `cert_path` and `key_path` must exist on disk.
@@ -231,7 +239,8 @@ The binary validates config before serving and refuses to boot on a misconfig
 - **Rate limiting (FEAT-06)** — every `rate_limit.trusted_proxies` entry must
   be a valid CIDR (or bare IP), so a typo fails the boot rather than silently
   disabling XFF trust. A non-empty `trusted_proxies` with `rate_limit.enabled
-  = false` is refused (XFF would be parsed for nothing).
+  = false` is refused (the list would be parsed for nothing) — unless
+  `auth.tenant_header_trust = "trusted_proxies"`, the list's second consumer.
 - **Metrics (FEAT-10)** — when `metrics.enabled`, `duration_buckets` must be
   non-empty, positive, finite, and strictly increasing (Prometheus histogram
   bounds).
@@ -299,6 +308,7 @@ values for illustration. Env var = `ACDP_REGISTRY_` + the bracketed path.
 | `token_leeway_seconds` | u64 | `30` | Clock-skew tolerance for `exp`. |
 | `anonymous_public_reads` | bool | `false` | Allow unauthenticated reads of `public` contexts. Opt in for discovery hubs. |
 | `require_tenant` | bool | `false` | Strict multi-tenancy: requests resolving to no tenant are denied. See [MULTI-TENANCY.md](MULTI-TENANCY.md). |
+| `tenant_header_trust` | `"none"` \| `"trusted_proxies"` \| `"any_peer"` | unset: `"none"` when `require_tenant = true`, else `"any_peer"` (startup warning; becomes `"none"` in 0.3.0) | Who may select a tenant with `X-Tenant-Id` when no signed claim or agent binding applies. `trusted_proxies`: only when the immediate TCP peer (not `X-Forwarded-For`) is in `rate_limit.trusted_proxies`. An untrusted header that disagrees with the claim/binding, or has none to agree with, is 403 `not_authorized`. See [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id). |
 | `admin_tokens` | string[] | `[]` | Bearer tokens for `/admin/*`. Entries must be non-empty and not whitespace-only (startup validation). An empty *list* disables every admin-bearer-gated route: `/admin/status`, `/admin/lineages/{id}/audit`, `/admin/contexts/{id}/retract`, `/admin/contexts/{id}/republish`, `GET /admin/contexts`, `/admin/pinned-keys/reload`. See [HTTP-API.md#admin](HTTP-API.md#admin). |
 
 #### `[[auth.tenant_agents]]`
@@ -362,7 +372,7 @@ attacker-independent.
 | `enabled` | bool | `true` | Master switch. On by default — `/auth/*` is the most attacker-controllable surface. |
 | `per_ip_per_minute` | u32 | `60` | Per-resolved-client-IP cap on `/auth/*`; `0` disables the per-IP bound. |
 | `global_per_minute` | u32 | `6000` | Whole-process ceiling across all IPs; `0` disables it. Bounds a source-IP-rotating flood. |
-| `trusted_proxies` | list\<CIDR\> | `[]` | Reverse-proxy CIDRs whose `X-Forwarded-For` is trusted. Empty = never trust XFF. |
+| `trusted_proxies` | list\<CIDR\> | `[]` | Reverse-proxy CIDRs whose `X-Forwarded-For` is trusted. Empty = never trust XFF. Also the gateway list for `auth.tenant_header_trust = "trusted_proxies"`, matched against the immediate TCP peer; allowed with `enabled = false` in that mode. |
 | `backend` | `"memory"` \| `"postgres"` | `"memory"` | Where the two ceilings above are counted. `memory`: per process (each replica counts for itself). `postgres`: counted once across every replica sharing the database — see **Shared backend** below. |
 | `backend_unavailable` | `"allow"` \| `"deny"` | `"allow"` | Only with `backend = "postgres"`. What to do when the database cannot answer a check: `allow` falls back to the per-process limit; `deny` refuses with `429` + `Retry-After: 5`. |
 | `backend_timeout_ms` | u64 | `250` | Only with `backend = "postgres"`. Per-check timeout against the database; must be `> 0`. |

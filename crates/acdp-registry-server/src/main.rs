@@ -69,7 +69,9 @@ use acdp_registry_auth::{InMemoryChallengeStore, InMemoryRevocationStore};
 use acdp_registry_core::{build_router, AppStateInner};
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::config::SharedLimitBackendKind;
-use acdp_registry_types::{RegistryConfig, StorageBackend, REGISTRY_ADVERTISABLE_PROFILES};
+use acdp_registry_types::{
+    RegistryConfig, StorageBackend, TenantHeaderTrust, REGISTRY_ADVERTISABLE_PROFILES,
+};
 use acdp_registry_webhook::WebhookEmitter;
 
 /// Install the process-wide rustls `CryptoProvider`, before anything can
@@ -320,12 +322,10 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
     // `require_tenant = true` with an empty `tenant_agents` is a real
     // configuration: with no agent bindings no registry-issued token ever
     // carries a `tenant` claim (`tenant_for_agent` over an empty binding list
-    // returns `None`), so on the READ path a caller asserts its tenant with
-    // the `X-Tenant-Id` header via `tenant_for_request`'s no-bearer arm —
-    // exactly what this registry's own default-deny message instructs.
-    // (Publishes are a separate story: `tenant_for_publish`'s
-    // `binding_fallback` deliberately ignores the spoofable header in strict
-    // mode (#2), so with no bindings a publish is denied outright.)
+    // returns `None`), so a caller's tenant can only come from an
+    // `X-Tenant-Id` header stamped by a gateway the operator declared with
+    // `auth.tenant_header_trust` (#374; with the header distrusted too, the
+    // config is refused in `tenant_header_trust_checks`).
     // On this backend the reads then fail identically to the `tenant_agents`
     // arm: any tenant a caller does assert cannot match the `"default"` every
     // row reports. Keying on `tenant_agents` alone left that arm starting
@@ -601,13 +601,22 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
     // would make the registry key rate limits on the proxy IP for everyone).
     acdp_registry_core::rate_limit::TrustedProxies::parse(&cfg.rate_limit.trusted_proxies)
         .map_err(|e| anyhow::anyhow!("rate_limit.trusted_proxies: {e}"))?;
-    // FEAT-06: a non-empty trusted_proxies list only makes sense with the
-    // limiter enabled — otherwise XFF is parsed for nothing.
-    if !cfg.rate_limit.enabled && !cfg.rate_limit.trusted_proxies.is_empty() {
+    // FEAT-06: a non-empty trusted_proxies list only makes sense with a
+    // consumer. It has two: the limiter (XFF trust) and, since #374, the
+    // `X-Tenant-Id` trust boundary under `auth.tenant_header_trust =
+    // "trusted_proxies"`. With neither, the list is parsed for nothing.
+    if !cfg.rate_limit.enabled
+        && !cfg.rate_limit.trusted_proxies.is_empty()
+        && cfg.auth.effective_tenant_header_trust() != TenantHeaderTrust::TrustedProxies
+    {
         anyhow::bail!(
-            "rate_limit.trusted_proxies is configured but rate_limit.enabled=false; \
-             enable the limiter or drop the trusted_proxies list"
+            "rate_limit.trusted_proxies is configured but rate_limit.enabled=false and \
+             auth.tenant_header_trust is not \"trusted_proxies\"; enable the limiter, set \
+             auth.tenant_header_trust = \"trusted_proxies\", or drop the trusted_proxies list"
         );
+    }
+    for w in tenant_header_trust_checks(cfg)? {
+        tracing::warn!("{w}");
     }
     validate_shared_rate_limit(cfg)?;
     if cfg.metrics.enabled {
@@ -676,6 +685,54 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// #374: startup rules for `auth.tenant_header_trust`. Refusals are `Err`;
+/// warnings are returned so the caller owns presentation (and tests can see
+/// them), the same shape as `validate_playground_config`.
+fn tenant_header_trust_checks(cfg: &RegistryConfig) -> anyhow::Result<Vec<String>> {
+    let mode = cfg.auth.effective_tenant_header_trust();
+    if mode == TenantHeaderTrust::TrustedProxies && cfg.rate_limit.trusted_proxies.is_empty() {
+        anyhow::bail!(
+            "auth.tenant_header_trust = \"trusted_proxies\" but rate_limit.trusted_proxies is \
+             empty, so no peer could ever be trusted to send X-Tenant-Id. List the gateway's \
+             address or CIDR in rate_limit.trusted_proxies."
+        );
+    }
+    // Strict mode with no agent bindings has exactly one tenant source left:
+    // the header (registry-issued tokens carry a `tenant` claim only for
+    // agents listed in `[[auth.tenant_agents]]`). Distrusting it too means no
+    // request could ever resolve a tenant — every read and write would 403.
+    if cfg.auth.require_tenant
+        && cfg.auth.tenant_agents.is_empty()
+        && mode == TenantHeaderTrust::None
+    {
+        anyhow::bail!(
+            "auth.require_tenant = true with no [[auth.tenant_agents]] and \
+             auth.tenant_header_trust = \"none\" (the default under require_tenant): no request \
+             can ever resolve a tenant. Bind agents to tenants in [[auth.tenant_agents]], or \
+             declare the boundary that stamps X-Tenant-Id with auth.tenant_header_trust = \
+             \"trusted_proxies\" (plus rate_limit.trusted_proxies)."
+        );
+    }
+    let mut warnings = Vec::new();
+    if cfg.auth.tenant_header_trust.is_none() && mode == TenantHeaderTrust::AnyPeer {
+        warnings.push(
+            "auth.tenant_header_trust is not set and defaulted to \"any_peer\": any client may \
+             select a tenant with X-Tenant-Id. The default becomes \"none\" in 0.3.0; set \
+             auth.tenant_header_trust explicitly (see docs/MULTI-TENANCY.md)."
+                .to_string(),
+        );
+    }
+    if mode == TenantHeaderTrust::AnyPeer && !is_loopback_bind(&cfg.registry.bind) {
+        warnings.push(format!(
+            "auth.tenant_header_trust = \"any_peer\" on non-loopback bind '{}': X-Tenant-Id \
+             is trusted from every peer. RFC-ACDP-0008 §6.4 permits that only behind a \
+             boundary the client cannot cross; otherwise use \"trusted_proxies\" or \"none\".",
+            cfg.registry.bind
+        ));
+    }
+    Ok(warnings)
 }
 
 /// Whether `bind` is a loopback address (`127.0.0.0/8`, `::1`) or `localhost`.
@@ -2580,6 +2637,130 @@ mod tests {
         assert!(validate_config(&cfg).is_ok());
     }
 
+    // ── #374: auth.tenant_header_trust ─────────────────────────────────
+
+    /// A config that passes every other rule, on a loopback bind so the
+    /// non-loopback `any_peer` warning stays out of the way unless asked for.
+    fn trust_cfg() -> RegistryConfig {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.registry.bind = "127.0.0.1".into();
+        cfg
+    }
+
+    #[test]
+    fn trusted_proxies_mode_with_an_empty_list_is_refused() {
+        let mut cfg = trust_cfg();
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::TrustedProxies);
+        let err = validate_config(&cfg).expect_err("no peer could ever be trusted");
+        assert!(
+            err.to_string().contains("rate_limit.trusted_proxies is"),
+            "{err}"
+        );
+        cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into()];
+        assert!(validate_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn strict_without_bindings_and_without_header_trust_is_refused() {
+        let mut cfg = trust_cfg();
+        cfg.auth.require_tenant = true;
+        // Key absent: the 0.2.x default under require_tenant is `none`.
+        let err = validate_config(&cfg).expect_err("no request can resolve a tenant");
+        assert!(
+            err.to_string()
+                .contains("no request can ever resolve a tenant"),
+            "{err}"
+        );
+        // Explicit `none` is refused the same way.
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::None);
+        assert!(validate_config(&cfg).is_err());
+        // Either tenant source makes it a working config.
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
+        assert!(validate_config(&cfg).is_ok());
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::None);
+        cfg.auth.tenant_agents = vec![acdp_registry_types::TenantAgentBinding {
+            agent_did: "did:web:agents.example:a".into(),
+            tenant_id: "tenant-a".into(),
+        }];
+        assert!(validate_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn trusted_proxies_without_the_limiter_is_allowed_only_for_tenant_trust() {
+        let mut cfg = trust_cfg();
+        cfg.rate_limit.enabled = false;
+        cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into()];
+        // No consumer at all: still refused (FEAT-06).
+        let err = validate_config(&cfg).expect_err("the list has no consumer");
+        assert!(
+            err.to_string().contains("rate_limit.enabled=false"),
+            "{err}"
+        );
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
+        assert!(validate_config(&cfg).is_err(), "any_peer is not a consumer");
+        // The tenant-header boundary is a consumer.
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::TrustedProxies);
+        assert!(validate_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn the_tenant_trust_list_is_parsed_strictly() {
+        let mut cfg = trust_cfg();
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::TrustedProxies);
+        cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into(), "10.0.0/8".into()];
+        let err = validate_config(&cfg).expect_err("one bad entry fails startup");
+        assert!(
+            err.to_string().contains("rate_limit.trusted_proxies"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn absent_key_warns_only_when_it_defaults_to_any_peer() {
+        // Lax + absent → any_peer + the Phase-1 warning.
+        let cfg = trust_cfg();
+        let w = tenant_header_trust_checks(&cfg).unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("becomes \"none\" in 0.3.0"), "{w:?}");
+
+        // Explicit any_peer on loopback: quiet.
+        let mut cfg = trust_cfg();
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
+        assert!(tenant_header_trust_checks(&cfg).unwrap().is_empty());
+
+        // Strict + absent defaults to none, which 0.3.0 does not change: no
+        // Phase-1 warning (bindings present so the config is valid).
+        let mut cfg = trust_cfg();
+        cfg.auth.require_tenant = true;
+        cfg.auth.tenant_agents = vec![acdp_registry_types::TenantAgentBinding {
+            agent_did: "did:web:agents.example:a".into(),
+            tenant_id: "tenant-a".into(),
+        }];
+        assert!(tenant_header_trust_checks(&cfg).unwrap().is_empty());
+    }
+
+    #[test]
+    fn any_peer_on_a_non_loopback_bind_warns() {
+        let mut cfg = trust_cfg();
+        cfg.registry.bind = "0.0.0.0".into();
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
+        let w = tenant_header_trust_checks(&cfg).unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("non-loopback bind '0.0.0.0'"), "{w:?}");
+        assert!(w[0].contains("§6.4"), "{w:?}");
+
+        // Absent key on a public bind: both warnings.
+        cfg.auth.tenant_header_trust = None;
+        assert_eq!(tenant_header_trust_checks(&cfg).unwrap().len(), 2);
+
+        // The other modes are quiet on a public bind.
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::None);
+        assert!(tenant_header_trust_checks(&cfg).unwrap().is_empty());
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::TrustedProxies);
+        cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into()];
+        assert!(tenant_header_trust_checks(&cfg).unwrap().is_empty());
+    }
+
     // #161 — an empty or whitespace-only admin token would be matched by a
     // bare `Authorization: Bearer ` header, opening /admin/* to anyone.
     #[test]
@@ -2745,9 +2926,15 @@ mod tests {
             .expect_err("strict tenancy on the memory backend must be refused");
         assert!(err.to_string().contains("tenancy-aware"), "{err}");
 
-        // Strict tenancy on a durable backend still starts...
+        // Strict tenancy on a durable backend still starts once a tenant
+        // source exists -- here a declared gateway (#374: with no bindings and
+        // the header distrusted, nothing could ever resolve a tenant)...
         cfg.storage.backend = StorageBackend::Sqlite;
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::TrustedProxies);
+        cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into()];
         assert!(validate_config(&cfg).is_ok());
+        cfg.auth.tenant_header_trust = None;
+        cfg.rate_limit.trusted_proxies = Vec::new();
 
         // ...and the memory backend is still fine with no tenancy at all,
         // which is the demo/ephemeral case it exists for.

@@ -472,6 +472,44 @@ pub struct AuthConfig {
     ///     can no longer assert one via the spoofable `X-Tenant-Id` header.
     #[serde(default)]
     pub require_tenant: bool,
+
+    /// Who may select a tenant with the `X-Tenant-Id` request header
+    /// (#374, RFC-ACDP-0008 §6.4: an unauthenticated tenant indicator MUST
+    /// NOT be trusted unless a boundary the client cannot cross vouches for
+    /// it). `None` = key absent; read it through
+    /// [`AuthConfig::effective_tenant_header_trust`], never directly. A
+    /// signed `tenant` claim or an `[[auth.tenant_agents]]` binding always
+    /// outranks the header, whatever this says.
+    #[serde(default)]
+    pub tenant_header_trust: Option<TenantHeaderTrust>,
+}
+
+/// `[auth] tenant_header_trust`: when an `X-Tenant-Id` header may select the
+/// tenant of a request that carries no signed claim or agent binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantHeaderTrust {
+    /// The header never selects a tenant. It is accepted only when it equals
+    /// the tenant a signed claim or binding already established.
+    None,
+    /// Trusted only when the immediate TCP peer (not `X-Forwarded-For`) is
+    /// inside `rate_limit.trusted_proxies` — the declared gateway, which must
+    /// strip or overwrite any client-supplied value.
+    TrustedProxies,
+    /// Trusted from every peer: the operator asserts a boundary the registry
+    /// cannot see (a network policy, or loopback-only development).
+    AnyPeer,
+}
+
+impl TenantHeaderTrust {
+    /// The config spelling, for log lines and error messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::TrustedProxies => "trusted_proxies",
+            Self::AnyPeer => "any_peer",
+        }
+    }
 }
 
 /// Reserved tenant identifier. It is the `contexts.tenant_id` column default
@@ -489,6 +527,22 @@ impl AuthConfig {
             .iter()
             .find(|b| b.agent_did == agent_did)
             .map(|b| b.tenant_id.clone())
+    }
+
+    /// The `tenant_header_trust` mode in effect. An explicit value wins; when
+    /// the key is absent the 0.2.x default applies: `none` under
+    /// `require_tenant = true`, otherwise `any_peer` (the pre-#374 behaviour,
+    /// which startup warns about and which becomes `none` in 0.3.0).
+    ///
+    /// Resolved here rather than written back by startup validation so every
+    /// consumer — the binary, embedders calling `serve_with_store`, and test
+    /// harnesses that never run validation — sees the same answer.
+    pub fn effective_tenant_header_trust(&self) -> TenantHeaderTrust {
+        match self.tenant_header_trust {
+            Some(mode) => mode,
+            None if self.require_tenant => TenantHeaderTrust::None,
+            None => TenantHeaderTrust::AnyPeer,
+        }
     }
 }
 
@@ -583,6 +637,7 @@ impl Default for AuthConfig {
             admin_tokens: Vec::new(),
             tenant_agents: Vec::new(),
             require_tenant: false,
+            tenant_header_trust: None,
         }
     }
 }
@@ -1576,6 +1631,61 @@ public_key_b64 = "AAAA"
         assert_eq!(cfg.registry.effective_base_url(), "https://host.example");
     }
 
+    // ── tenant_header_trust (#374) ──────────────────────────────────
+
+    #[test]
+    fn tenant_header_trust_parses_the_three_spellings_and_nothing_else() {
+        for (v, want) in [
+            ("none", TenantHeaderTrust::None),
+            ("trusted_proxies", TenantHeaderTrust::TrustedProxies),
+            ("any_peer", TenantHeaderTrust::AnyPeer),
+        ] {
+            let auth: AuthConfig =
+                toml::from_str(&format!("tenant_header_trust = \"{v}\"")).unwrap();
+            assert_eq!(auth.tenant_header_trust, Some(want));
+            assert_eq!(
+                want.as_str(),
+                v,
+                "as_str must round-trip the config spelling"
+            );
+        }
+        for bad in ["None", "any-peer", "trusted-proxies", "all", ""] {
+            assert!(
+                toml::from_str::<AuthConfig>(&format!("tenant_header_trust = \"{bad}\"")).is_err(),
+                "'{bad}' must be refused"
+            );
+        }
+        assert_eq!(AuthConfig::default().tenant_header_trust, None);
+    }
+
+    #[test]
+    fn effective_tenant_header_trust_applies_the_phase_one_default() {
+        let mut auth = AuthConfig::default();
+        assert_eq!(
+            auth.effective_tenant_header_trust(),
+            TenantHeaderTrust::AnyPeer,
+            "lax + key absent keeps the pre-#374 behaviour"
+        );
+        auth.require_tenant = true;
+        assert_eq!(
+            auth.effective_tenant_header_trust(),
+            TenantHeaderTrust::None,
+            "strict + key absent distrusts the header"
+        );
+        // An explicit value wins in both modes.
+        auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
+        assert_eq!(
+            auth.effective_tenant_header_trust(),
+            TenantHeaderTrust::AnyPeer
+        );
+        auth.require_tenant = false;
+        auth.tenant_header_trust = Some(TenantHeaderTrust::None);
+        assert_eq!(
+            auth.effective_tenant_header_trust(),
+            TenantHeaderTrust::None
+        );
+    }
+
     // ── tenant_for_agent ────────────────────────────────────────────
 
     fn auth_with_bindings(bindings: &[(&str, &str)]) -> AuthConfig {
@@ -1891,6 +2001,37 @@ backend = "sqlite"
             err.to_string().contains("public_arm_open"),
             "the rejection must NAME the offending key, or an operator upgrading \
              into a rename gets a parse failure they cannot act on: {err}"
+        );
+    }
+
+    /// #374: the key is reachable from the environment (Railway-style
+    /// deployments have no config file), and `"none"` arrives as the explicit
+    /// variant, not as "unset" — the two resolve differently in lax mode.
+    #[test]
+    fn tenant_header_trust_loads_from_the_environment() {
+        let mut env = EnvGuard::new();
+        let path = toml_fixture(FIXTURE);
+        let path = path.to_str().unwrap().to_string();
+        let key = "ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST";
+        for (v, want) in [
+            ("none", TenantHeaderTrust::None),
+            ("trusted_proxies", TenantHeaderTrust::TrustedProxies),
+            ("any_peer", TenantHeaderTrust::AnyPeer),
+        ] {
+            env.set(key, v);
+            let cfg = RegistryConfig::load(Some(&path)).unwrap();
+            assert_eq!(cfg.auth.tenant_header_trust, Some(want), "{v}");
+            assert_eq!(cfg.auth.effective_tenant_header_trust(), want, "{v}");
+        }
+        env.set(key, "anyone");
+        assert!(RegistryConfig::load(Some(&path)).is_err());
+        env.unset(key);
+        assert_eq!(
+            RegistryConfig::load(Some(&path))
+                .unwrap()
+                .auth
+                .tenant_header_trust,
+            None
         );
     }
 

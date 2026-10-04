@@ -14,6 +14,7 @@ pub mod rate_limit_shared;
 pub mod receipt;
 pub(crate) mod secure_compare;
 pub mod state;
+pub mod tenant_trust;
 pub mod witness;
 
 pub use state::{AppState, AppStateInner};
@@ -125,8 +126,8 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
             axum::http::header::CACHE_CONTROL,
             HeaderValue::from_static("private"),
         ))
-        // Both axes, not just `authorization`: `tenant_for_request` honours
-        // `x-tenant-id`, and with `auth.enabled = false` it is the ONLY tenant
+        // Both axes, not just `authorization`: `tenant_for_request` honours a
+        // trusted `x-tenant-id`, and with `auth.enabled = false` it is the ONLY tenant
         // signal (`handlers/context.rs`). `Vary: Authorization` alone would be
         // semantically wrong here. `appending` so a future handler-set `Vary`
         // survives -- CorsLayer is the outer layer and appends on its own, so it
@@ -275,7 +276,17 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
         );
     }
 
-    let mut app = acdp.merge(aux).merge(admin).with_state(state);
+    // #374: record the immediate TCP peer on EVERY request, so each handler
+    // that resolves a tenant (contexts, log, admin) can decide whether an
+    // `X-Tenant-Id` header crossed the declared trust boundary. A whole-app
+    // `layer`, not a `route_layer` on one group: a resolver reached without the
+    // stamp sees an unknown peer, which is untrusted -- correct, but a silent
+    // 403 for a gateway deployment. Covering everything rules that out.
+    let mut app = acdp
+        .merge(aux)
+        .merge(admin)
+        .with_state(state)
+        .layer(from_fn(tenant_trust::stamp_peer_ip));
 
     // FEAT-10: request-level metrics, recording count/latency/status by matched
     // route. This layer is applied FIRST, so it is the INNERMOST of the outer

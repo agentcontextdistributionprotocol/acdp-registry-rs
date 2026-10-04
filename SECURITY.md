@@ -43,8 +43,10 @@ issue. We aim to acknowledge reports within 72 hours.
 - Keep `auth.anonymous_public_reads = false` unless the registry is meant to
   serve world-readable public contexts; otherwise require a bearer for reads.
   On multi-tenant deployments set `auth.require_tenant = true` so a request that
-  resolves to no tenant is denied rather than served unscoped
-  (see [docs/MULTI-TENANCY.md](docs/MULTI-TENANCY.md)).
+  resolves to no tenant is denied rather than served unscoped, and set
+  `auth.tenant_header_trust` to say who may send `X-Tenant-Id`: `none` (tokens
+  only) or `trusted_proxies` (your gateway). `any_peer` trusts every client
+  (see [docs/MULTI-TENANCY.md](docs/MULTI-TENANCY.md#who-may-send-x-tenant-id)).
 - Set `auth.admin_tokens` to gate `/admin/*`; an empty list disables those
   routes entirely. Distribute admin tokens out of band. Every entry must be
   non-blank and free of surrounding whitespace — startup refuses otherwise

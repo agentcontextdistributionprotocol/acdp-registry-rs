@@ -31,7 +31,8 @@ mod didweb;
 use std::sync::Arc;
 
 use common::{
-    body_to_json, forged_bearer, get_with_auth, pct_encode_path_segment, publish, Harness,
+    body_to_json, body_to_json_lenient, forged_bearer, get_with_auth, pct_encode_path_segment,
+    publish, Harness,
 };
 
 use acdp::crypto::{P256SigningKey, SigningKey};
@@ -51,7 +52,7 @@ use acdp_registry_types::{
     auth::{AcdpClaims, BearerClaims},
     config::{PinnedAgentKey, TenantAgentBinding},
     AuthConfig, LimitsConfig, PlaygroundConfig, RegistryConfig, RegistrySection, StorageBackend,
-    StorageConfig, WebhookConfig,
+    StorageConfig, TenantHeaderTrust, WebhookConfig,
 };
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -111,6 +112,14 @@ fn config(playground: bool) -> RegistryConfig {
     // The new shipped default for `public_arm_open` is `false`
     // (SEC-07, docs/ENGINEERING-LOG.md; RFC-ACDP-0008 §6.3 makes anonymous
     // reads a MAY), so opt in explicitly inside the test harness.
+    //
+    // #374: `tenant_header_trust` is deliberately left unset, so each test gets
+    // the 0.2.x default for its own mode: `any_peer` for the lax/auth-off tests
+    // (which partition by X-Tenant-Id, and keep doing so), `none` for the
+    // strict ones. Pinning `any_peer` here would have leaked into every strict
+    // test that later flips `require_tenant`, turning the header they spoof
+    // into a trusted gateway assertion and masking the default-distrust they
+    // exist to cover. Tests that need a specific mode set it explicitly.
     let auth = AuthConfig {
         anonymous_public_reads: true,
         ..AuthConfig::default()
@@ -881,12 +890,16 @@ async fn strict_publish_rejects_unbound_producer_tenant_spoof() {
     let (status, v) = publish_with_tenant(&h.router, &ok, None).await;
     assert_eq!(status, StatusCode::OK, "bound producer publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+    // Read back with tenant-bound tokens: strict mode distrusts a bare
+    // X-Tenant-Id by default (#374), so the header can no longer scope a read.
+    let as_a = tenant_bound_token(Some("tenant-a"));
+    let as_b = tenant_bound_token(Some("tenant-b"));
     assert_eq!(
-        retrieve_with_tenant(&h.router, &ctx_id, Some("tenant-a")).await,
+        get_with_auth(&h.router, &ctx_id, Some(&as_a), None).await,
         StatusCode::OK,
     );
     assert_eq!(
-        retrieve_with_tenant(&h.router, &ctx_id, Some("tenant-b")).await,
+        get_with_auth(&h.router, &ctx_id, Some(&as_b), None).await,
         StatusCode::NOT_FOUND,
     );
 
@@ -1047,49 +1060,249 @@ async fn publish_stamps_tenant_from_bound_token_claim() {
 async fn strict_tenant_mode_rejects_unscoped_read() {
     // With `auth.require_tenant = true`, a read that resolves to no tenant
     // (no header, no tenant-bound token) is default-denied instead of running
-    // with the tenant filter disabled.
+    // with the tenant filter disabled. #374: a bare X-Tenant-Id no longer
+    // counts as a tenant signal unless `auth.tenant_header_trust` declares the
+    // boundary -- under the strict default (`none`) the header-only read that
+    // this test used to pin as 200 is now 403; under `any_peer` it is 200.
+    for (mode, header_read) in [
+        (None, StatusCode::FORBIDDEN),
+        (Some(TenantHeaderTrust::None), StatusCode::FORBIDDEN),
+        (Some(TenantHeaderTrust::AnyPeer), StatusCode::OK),
+    ] {
+        let mut cfg = config(true);
+        cfg.auth.enabled = true;
+        cfg.auth.require_tenant = true;
+        cfg.auth.tenant_header_trust = mode;
+        // In strict mode a publish must be tenant-bound (#2): an unbound
+        // producer can no longer assert a tenant via X-Tenant-Id.
+        cfg.auth.tenant_agents = vec![TenantAgentBinding {
+            agent_did: "did:web:agents.test:smoke-33".into(),
+            tenant_id: "tenant-a".into(),
+        }];
+        let h = harness_from_config(cfg).await;
+
+        let req = producer(33)
+            .publish_request()
+            .title("strict-row")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        // A bound producer's header matches its binding (corroboration) —
+        // allowed in every mode.
+        let (status, v) = publish_with_tenant(&h.router, &req, Some("tenant-a")).await;
+        assert_eq!(status, StatusCode::OK, "{mode:?} publish body = {v}");
+        let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+
+        // No tenant signal at all → default-deny, NOT an unfiltered read. The
+        // code is `not_authorized`, which RFC-ACDP-0007 §5 pairs with 403.
+        assert_eq!(
+            get_with_auth(&h.router, &ctx_id, None, None).await,
+            StatusCode::FORBIDDEN,
+            "{mode:?}"
+        );
+        // Header only.
+        let (status, body) = get_tenant_scoped(&h.router, &ctx_id, Some("tenant-a"), None).await;
+        assert_eq!(status, header_read, "{mode:?} header-only read: {body}");
+        if status == StatusCode::FORBIDDEN {
+            assert_eq!(body["error"]["code"], "not_authorized", "{body}");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("X-Tenant-Id is not trusted from this peer"),
+                "{body}"
+            );
+        }
+        // A tenant-bound token works in every mode.
+        let bound = tenant_bound_token(Some("tenant-a"));
+        assert_eq!(
+            get_with_auth(&h.router, &ctx_id, Some(&bound), None).await,
+            StatusCode::OK,
+            "{mode:?}"
+        );
+    }
+}
+
+/// `GET /contexts/{ctx_id}` with an optional `X-Tenant-Id`, optionally from a
+/// given TCP peer (a `ConnectInfo` extension, as production's
+/// `into_make_service_with_connect_info` inserts). Returns status and body.
+async fn get_tenant_scoped(
+    app: &axum::Router,
+    ctx_id: &str,
+    tenant: Option<&str>,
+    peer: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder =
+        Request::builder().uri(format!("/contexts/{}", pct_encode_path_segment(ctx_id)));
+    if let Some(t) = tenant {
+        builder = builder.header("X-Tenant-Id", t);
+    }
+    let mut req = builder.body(Body::empty()).unwrap();
+    if let Some(p) = peer {
+        let addr: std::net::SocketAddr = format!("{p}:40000").parse().unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+    }
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    (status, body_to_json_lenient(resp).await)
+}
+
+/// #374 acceptance: under `trusted_proxies` the header is trusted exactly when
+/// the immediate TCP peer is inside `rate_limit.trusted_proxies` -- a peer
+/// outside it, and a request with no recorded peer at all, get 403. Strict
+/// mode with no agent bindings: the gateway-stamped header is the only tenant
+/// source, which is the deployment this mode exists for.
+#[tokio::test]
+async fn trusted_proxies_mode_trusts_only_the_declared_gateway() {
     let mut cfg = config(true);
     cfg.auth.enabled = true;
     cfg.auth.require_tenant = true;
-    // In strict mode a publish must be tenant-bound (#2): an unbound producer
-    // can no longer assert a tenant via the spoofable X-Tenant-Id header.
+    cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::TrustedProxies);
+    cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into()];
+    // A bound producer seeds the row; reads below carry no bearer at all.
     cfg.auth.tenant_agents = vec![TenantAgentBinding {
-        agent_did: "did:web:agents.test:smoke-33".into(),
+        agent_did: "did:web:agents.test:smoke-37".into(),
         tenant_id: "tenant-a".into(),
     }];
     let h = harness_from_config(cfg).await;
-
-    let req = producer(33)
+    let req = producer(37)
         .publish_request()
-        .title("strict-row")
+        .title("gateway-row")
         .context_type(ContextType::DataSnapshot)
         .visibility(Visibility::Public)
         .build()
         .unwrap();
-    // Publish carries a tenant via the header (no bearer) — allowed.
-    let (status, v) = publish_with_tenant(&h.router, &req, Some("tenant-a")).await;
+    let (status, v) = publish_with_tenant(&h.router, &req, None).await;
     assert_eq!(status, StatusCode::OK, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
-    // No tenant signal at all → default-deny, NOT an unfiltered read. The code
-    // is `not_authorized`, which RFC-ACDP-0007 §5 pairs with HTTP 403.
+    // In CIDR → trusted → scoped to tenant-a → 200.
+    let (status, body) =
+        get_tenant_scoped(&h.router, &ctx_id, Some("tenant-a"), Some("10.9.8.7")).await;
+    assert_eq!(status, StatusCode::OK, "in-CIDR gateway: {body}");
+    // In CIDR, other tenant → trusted, but the row is not theirs → 404.
+    let (status, _) =
+        get_tenant_scoped(&h.router, &ctx_id, Some("tenant-b"), Some("10.9.8.7")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // An IPv4-mapped IPv6 peer is canonicalised before the CIDR test.
+    let (status, body) = get_tenant_scoped(
+        &h.router,
+        &ctx_id,
+        Some("tenant-a"),
+        Some("[::ffff:10.9.8.7]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "v4-mapped gateway: {body}");
+
+    // Out of CIDR → untrusted → 403 not_authorized.
+    let (status, body) =
+        get_tenant_scoped(&h.router, &ctx_id, Some("tenant-a"), Some("203.0.113.9")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "out-of-CIDR peer: {body}");
+    assert_eq!(body["error"]["code"], "not_authorized", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("auth.tenant_header_trust = \"trusted_proxies\""),
+        "{body}"
+    );
+    // No ConnectInfo at all → untrusted (never the limiter's 0.0.0.0 key).
+    let (status, body) = get_tenant_scoped(&h.router, &ctx_id, Some("tenant-a"), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "unknown peer: {body}");
+    assert_eq!(body["error"]["code"], "not_authorized", "{body}");
+    // X-Forwarded-For cannot launder an outside peer into the gateway.
+    let mut req = Request::builder()
+        .uri(format!("/contexts/{}", pct_encode_path_segment(&ctx_id)))
+        .header("X-Tenant-Id", "tenant-a")
+        .header("X-Forwarded-For", "10.9.8.7")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "203.0.113.9:40000".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let resp = h.router.clone().oneshot(req).await.unwrap();
     assert_eq!(
-        get_with_auth(&h.router, &ctx_id, None, None).await,
+        resp.status(),
         StatusCode::FORBIDDEN,
+        "XFF must not confer trust"
     );
-    // Correct tenant header → 200.
-    assert_eq!(
-        get_with_auth(&h.router, &ctx_id, None, Some("tenant-a")).await,
-        StatusCode::OK,
-    );
+
+    // The reserved sentinel is still a 400 first, even from the gateway.
+    let (status, body) =
+        get_tenant_scoped(&h.router, &ctx_id, Some("default"), Some("10.9.8.7")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "schema_violation", "{body}");
+}
+
+/// #374: the untrusted-header rejection covers the write half (#2's open
+/// side) and auth-off registries too. An unbound producer's header in lax
+/// mode lands under `any_peer` (today's behaviour, the 0.2.x lax default) and
+/// is refused under `none`; auth-off + `none` refuses the header as well.
+#[tokio::test]
+async fn untrusted_header_is_refused_on_lax_and_auth_off_writes() {
+    let unbound = || {
+        producer(38)
+            .publish_request()
+            .title("lax-unbound")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap()
+    };
+    for auth_enabled in [true, false] {
+        // `none`: refused, envelope code not_authorized.
+        let mut cfg = config(true);
+        cfg.auth.enabled = auth_enabled;
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::None);
+        let h = harness_from_config(cfg).await;
+        let (status, v) = publish_with_tenant(&h.router, &unbound(), Some("tenant-a")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "auth={auth_enabled}: {v}");
+        assert_eq!(v["error"]["code"], "not_authorized", "{v}");
+        // No header: the unbound write is untenanted, as before.
+        let (status, v) = publish_with_tenant(&h.router, &unbound(), None).await;
+        assert_eq!(status, StatusCode::OK, "auth={auth_enabled}: {v}");
+        let untenanted = v["ctx_id"].as_str().unwrap().to_string();
+        // ...and readable without a header, while a header-only read under
+        // `none` is refused rather than silently ignored.
+        let (status, body) = get_tenant_scoped(&h.router, &untenanted, None, None).await;
+        assert_eq!(status, StatusCode::OK, "auth={auth_enabled}: {body}");
+        let (status, body) =
+            get_tenant_scoped(&h.router, &untenanted, Some("tenant-a"), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "auth={auth_enabled}: {body}");
+        assert_eq!(body["error"]["code"], "not_authorized", "{body}");
+        // The reserved sentinel is still 400 before any trust decision.
+        let (status, v) = publish_with_tenant(&h.router, &unbound(), Some("default")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+
+        // `any_peer`: the header lands the write in tenant-a.
+        let mut cfg = config(true);
+        cfg.auth.enabled = auth_enabled;
+        cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
+        let h = harness_from_config(cfg).await;
+        let (status, v) = publish_with_tenant(&h.router, &unbound(), Some("tenant-a")).await;
+        assert_eq!(status, StatusCode::OK, "auth={auth_enabled}: {v}");
+        let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            retrieve_with_tenant(&h.router, &ctx_id, Some("tenant-a")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            retrieve_with_tenant(&h.router, &ctx_id, Some("tenant-b")).await,
+            StatusCode::NOT_FOUND,
+            "the write landed in tenant-a, not the untenanted bucket"
+        );
+    }
 }
 
 #[tokio::test]
 async fn strict_tenant_mode_ignores_spoofed_header_on_unbound_token() {
     // An authenticated-but-unbound token must not be able to assert a tenant
     // via X-Tenant-Id under strict mode — the claim is the sole authority, so
-    // the spoofed header is ignored and the request default-denies. A token
-    // bound to the tenant works.
+    // the spoofed header is refused (#374: untrusted under the strict default
+    // `none`; it used to be ignored, which default-denied with the same 403).
+    // A token bound to the tenant works.
     let mut cfg = config(true);
     cfg.auth.enabled = true;
     cfg.auth.require_tenant = true;
@@ -1112,8 +1325,8 @@ async fn strict_tenant_mode_ignores_spoofed_header_on_unbound_token() {
     assert_eq!(status, StatusCode::OK, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
-    // Unbound token + spoofed X-Tenant-Id=tenant-a → header ignored →
-    // default-deny. Code `not_authorized` → HTTP 403 (RFC-ACDP-0007 §5).
+    // Unbound token + spoofed X-Tenant-Id=tenant-a → untrusted header →
+    // refused. Code `not_authorized` → HTTP 403 (RFC-ACDP-0007 §5).
     let unbound = tenant_bound_token(None);
     assert_eq!(
         get_with_auth(&h.router, &ctx_id, Some(&unbound), Some("tenant-a")).await,

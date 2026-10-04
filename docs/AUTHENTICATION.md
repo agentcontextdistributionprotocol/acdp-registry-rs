@@ -139,7 +139,12 @@ is not JSON, or is JSON of the wrong shape, is `400 schema_violation` (not
 - `exp` defaults to `iat + auth.token_ttl_seconds` (default 3600 s).
 - `tenant` is present **only** for agents bound via `[[auth.tenant_agents]]`;
   it is the sole authority for an authenticated caller's tenant (see
-  [MULTI-TENANCY.md](MULTI-TENANCY.md)).
+  [MULTI-TENANCY.md](MULTI-TENANCY.md)). An `X-Tenant-Id` header that
+  disagrees with it is refused in every mode. A caller whose token carries no
+  `tenant` claim can name a tenant with the header only when
+  `auth.tenant_header_trust` trusts the request's peer; otherwise a header that
+  is present gets `403 not_authorized`
+  ([who may send `X-Tenant-Id`](MULTI-TENANCY.md#who-may-send-x-tenant-id)).
 
 ### Validation
 

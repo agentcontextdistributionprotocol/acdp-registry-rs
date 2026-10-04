@@ -1,5 +1,6 @@
 //! Context CRUD + search + lineage endpoints.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use acdp::types::primitives::{AgentDid, CtxId, LineageId, Visibility};
@@ -18,6 +19,7 @@ use serde::Deserialize;
 use crate::extract::{AcdpBytes, AcdpQuery};
 use crate::rate_limit::PublishCharge;
 use crate::state::AppState;
+use crate::tenant_trust::PeerIp;
 
 /// Query-string DTO mirroring `acdp::types::search::SearchParams`.
 /// We deserialize this from `?q=foo&type=bar&…` and convert at the
@@ -108,64 +110,39 @@ pub(crate) fn tenant_from_headers(headers: &HeaderMap) -> Option<String> {
 ///
 ///   1. JWT `tenant` claim — authoritative because the issuer signs
 ///      it. A bearer can't assert a tenant they weren't actually
-///      bound to.
-///   2. `X-Tenant-Id` header — legacy / trust-on-input fallback.
-///   3. `None` — no tenant filter (V0 backward-compat).
+///      bound to. A disagreeing `X-Tenant-Id` is rejected (403), in every
+///      `tenant_header_trust` mode.
+///   2. `X-Tenant-Id` header — only when TRUSTED from this `peer` under
+///      `auth.tenant_header_trust` (#374, RFC-ACDP-0008 §6.4). An untrusted
+///      header that no claim corroborates is rejected (403
+///      `not_authorized`), never silently ignored.
+///   3. `None` — no tenant filter (lax) or default-deny (strict).
 ///
-/// When both 1 and 2 are present and disagree, returns
-/// `Err(AuthChallenge("tenant assertion mismatch"))` — the header is
-/// claiming a tenant the JWT didn't bind, which is either misconfig
-/// or hostile. Same shape as a failed-auth error so it surfaces as
-/// a clean 403 at the response layer.
+/// Order of rejections: the reserved `default` sentinel (400) first, then a
+/// claim mismatch, then an untrusted header, then strict default-deny.
+/// Applies with `auth.enabled = false` too: the header is then the only tenant
+/// signal there is, which is exactly when trusting it blindly matters most.
 pub(crate) fn tenant_for_request<S: ExtendedRegistryStore + 'static>(
     state: &AppState<S>,
     headers: &HeaderMap,
+    peer: Option<IpAddr>,
 ) -> Result<Option<String>, RegistryError> {
     let header_tenant = tenant_from_headers(headers);
     reject_reserved_tenant(header_tenant.as_deref())?;
     if !state.config.auth.enabled {
-        // Auth disabled — header is the only signal.
-        return Ok(header_tenant);
+        // Auth disabled — the header is the only signal, and only if trusted.
+        return unbound_header_tenant(state, header_tenant, peer);
     }
     // Strict mode: a multi-tenant deployment that mandates every request be
-    // scoped to a tenant, with the JWT claim as the sole authority for an
-    // authenticated caller.
+    // scoped to a tenant.
     let strict = state.config.auth.require_tenant;
 
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(extract_bearer);
-
-    let resolved = match bearer {
-        // A valid bearer is present: the JWT claim is authoritative.
-        Some(token) => match state.auth.validate_bearer_claims(token) {
-            Ok(claims) => match claims.tenant {
-                // Bound token — claim wins; a disagreeing header is rejected.
-                Some(c) => reconcile_tenant_sources(Some(c), header_tenant)?,
-                // Unbound token. In strict mode the spoofable header must NOT
-                // be allowed to assert a tenant the issuer never bound, so we
-                // ignore it (and fall to the default-deny check below). In
-                // lax mode we preserve V0 behavior and honor the header.
-                None => {
-                    if strict {
-                        None
-                    } else {
-                        header_tenant
-                    }
-                }
-            },
-            Err(_) => {
-                // Token didn't validate. We do NOT short-circuit on a bad
-                // bearer here — `caller_from_headers` is the right place for
-                // that decision (it surfaces the 403). Treat tenant
-                // resolution as header-only when claims can't be read.
-                header_tenant
-            }
-        },
-        // No bearer (e.g. a producer-signed publish): header is the only
-        // signal available.
-        None => header_tenant,
+    let resolved = match bearer_tenant_claim(state, headers) {
+        // Bound token — claim wins; a disagreeing header is rejected.
+        Some(c) => reconcile_tenant_sources(Some(c), header_tenant)?,
+        // No claim (no bearer, unbound or invalid token): the header decides,
+        // and only when it crossed the declared boundary.
+        None => unbound_header_tenant(state, header_tenant, peer)?,
     };
 
     if strict && resolved.is_none() {
@@ -173,7 +150,8 @@ pub(crate) fn tenant_for_request<S: ExtendedRegistryStore + 'static>(
         // request that resolves to no tenant — that would run with the tenant
         // filter disabled and surface cross-tenant rows.
         return Err(RegistryError::AuthChallenge(
-            "this registry requires a tenant scope: send X-Tenant-Id or use a tenant-bound token"
+            "this registry requires a tenant scope: use a tenant-bound token, or send \
+             X-Tenant-Id through the declared gateway"
                 .into(),
         ));
     }
@@ -181,6 +159,55 @@ pub(crate) fn tenant_for_request<S: ExtendedRegistryStore + 'static>(
     // sentinel is never a valid asserted tenant from any source.
     reject_reserved_tenant(resolved.as_deref())?;
     Ok(resolved)
+}
+
+/// The issuer-signed `tenant` claim of the request's bearer, if a VALID
+/// bearer carries one. A bearer that does not validate contributes nothing
+/// here — `caller_from_headers` is the place that surfaces its 403.
+fn bearer_tenant_claim<S: ExtendedRegistryStore + 'static>(
+    state: &AppState<S>,
+    headers: &HeaderMap,
+) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer)
+        .and_then(|token| state.auth.validate_bearer_claims(token).ok())
+        .and_then(|claims| claims.tenant)
+}
+
+/// The tenant a request carrying no claim and no binding resolves to (#374):
+/// a TRUSTED header selects it, an absent header yields `None`, and an
+/// untrusted header is rejected — ignoring it would silently run the request
+/// (or place a write) in the untenanted bucket the caller did not ask for.
+fn unbound_header_tenant<S: ExtendedRegistryStore + 'static>(
+    state: &AppState<S>,
+    header: Option<String>,
+    peer: Option<IpAddr>,
+) -> Result<Option<String>, RegistryError> {
+    let Some(h) = header else {
+        return Ok(None);
+    };
+    let mode = state.tenant_header_trust;
+    if crate::tenant_trust::tenant_header_trusted(mode, peer, &state.tenant_trusted_proxies) {
+        return Ok(Some(h));
+    }
+    let peer = peer.map_or_else(|| "unknown".to_string(), |p| p.to_string());
+    tracing::warn!(
+        peer = %peer,
+        mode = mode.as_str(),
+        "rejecting X-Tenant-Id from an untrusted peer"
+    );
+    Err(untrusted_header_error(mode.as_str()))
+}
+
+/// The 403 for an `X-Tenant-Id` header that crossed no declared boundary and
+/// that no signed claim or agent binding corroborates.
+pub(crate) fn untrusted_header_error(mode: &str) -> RegistryError {
+    RegistryError::AuthChallenge(format!(
+        "X-Tenant-Id is not trusted from this peer (auth.tenant_header_trust = \"{mode}\"); \
+         use a tenant-bound token or send the request through the declared gateway"
+    ))
 }
 
 /// Reject `RESERVED_TENANT` ("default") as an explicitly-asserted tenant from
@@ -205,56 +232,36 @@ pub(crate) fn reject_reserved_tenant(tenant: Option<&str>) -> Result<(), Registr
 ///
 /// Publish is producer-authenticated (the signature over `content_hash` proves
 /// `agent_id`), so — unlike a read — the authoritative tenant is the producer's
-/// `[[auth.tenant_agents]]` binding, NOT a spoofable `X-Tenant-Id` header.
-/// Letting a raw header decide the write tenant allowed any producer to inject
-/// a context into an arbitrary tenant's namespace (#2). Precedence:
-///   * auth disabled → header only (V0), reserved sentinel rejected;
-///   * bound agent → its configured tenant is authoritative; a disagreeing
+/// `[[auth.tenant_agents]]` binding, NOT a raw `X-Tenant-Id` header. Letting
+/// any header decide the write tenant allowed any producer to inject a context
+/// into an arbitrary tenant's namespace (#2). Precedence (#374):
+///   * signed `tenant` claim on a valid bearer → authoritative; a disagreeing
 ///     header is rejected;
-///   * unbound agent → strict mode rejects (no header-asserted tenant on a
-///     write); lax mode preserves V0 header behavior.
+///   * bound agent → its configured tenant; a disagreeing header is rejected;
+///   * unbound agent (and every publish when auth is disabled) → a TRUSTED
+///     header selects the tenant, an absent one means untenanted (strict:
+///     403), an untrusted one is rejected (403).
 pub(crate) fn tenant_for_publish<S: ExtendedRegistryStore + 'static>(
     state: &AppState<S>,
     headers: &HeaderMap,
     agent_id: &str,
+    peer: Option<IpAddr>,
 ) -> Result<Option<String>, RegistryError> {
     let header_tenant = tenant_from_headers(headers);
     reject_reserved_tenant(header_tenant.as_deref())?;
     if !state.config.auth.enabled {
-        return Ok(header_tenant);
+        return unbound_header_tenant(state, header_tenant, peer);
     }
     let strict = state.config.auth.require_tenant;
 
-    // When the producer's `agent_id` is not authoritatively bound to a tenant
-    // by a token claim, fall back to the `[[auth.tenant_agents]]` config
-    // binding for that agent — NOT a raw header. A producer-signed publish that
-    // carries no tenant-bound token must not be able to assert an arbitrary
-    // tenant via the spoofable `X-Tenant-Id` header (#2).
-    let binding_fallback = |header: Option<String>| -> Result<Option<String>, RegistryError> {
-        match state.config.auth.tenant_for_agent(agent_id) {
-            Some(t) => reconcile_tenant_sources(Some(t), header),
-            None => Ok(if strict { None } else { header }),
-        }
-    };
-
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(extract_bearer);
-
-    let resolved = match bearer {
-        // A valid bearer with a `tenant` claim is issuer-signed and
-        // authoritative (same as the read path); a disagreeing header is
-        // rejected. An unbound token (or one that doesn't validate) falls back
-        // to the producer's config binding.
-        Some(token) => match state.auth.validate_bearer_claims(token) {
-            Ok(claims) => match claims.tenant {
-                Some(c) => reconcile_tenant_sources(Some(c), header_tenant)?,
-                None => binding_fallback(header_tenant)?,
-            },
-            Err(_) => binding_fallback(header_tenant)?,
-        },
-        None => binding_fallback(header_tenant)?,
+    // A valid bearer's `tenant` claim is issuer-signed and authoritative (same
+    // as the read path). Without one, the producer's config binding decides; a
+    // producer with neither is unbound and only a trusted header can place it.
+    let authoritative = bearer_tenant_claim(state, headers)
+        .or_else(|| state.config.auth.tenant_for_agent(agent_id));
+    let resolved = match authoritative {
+        Some(t) => reconcile_tenant_sources(Some(t), header_tenant)?,
+        None => unbound_header_tenant(state, header_tenant, peer)?,
     };
 
     if strict && resolved.is_none() {
@@ -300,6 +307,7 @@ pub(crate) fn reconcile_tenant_sources(
 pub async fn publish<S: ExtendedRegistryStore + 'static>(
     state: State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     // U-520: `AcdpBytes` rather than a bare `Bytes`, so `POST /contexts`
     // enforces the media-type gate RFC-ACDP-0007 §4.1/§5 requires and spec
     // fixture `err-002` pins. This handler previously never looked at
@@ -321,7 +329,7 @@ pub async fn publish<S: ExtendedRegistryStore + 'static>(
     // is captured by its wire code. Success outcomes (`inserted` /
     // `idempotent_replay`) plus the receipt / log-leaf counters are recorded
     // inline on the accept path inside `publish_inner`.
-    let result = publish_inner(state, headers, body).await;
+    let result = publish_inner(state, headers, peer, body).await;
     if let Err(e) = &result {
         crate::metrics::record_publish(e.wire_code());
     }
@@ -331,6 +339,7 @@ pub async fn publish<S: ExtendedRegistryStore + 'static>(
 async fn publish_inner<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    peer: Option<IpAddr>,
     body: Bytes,
 ) -> Result<Json<PublishResponse>, RegistryError> {
     // SEC-06: the body length cap is now enforced by
@@ -451,7 +460,7 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
     // The earlier code stamped the row from the raw header, which let any
     // producer inject a context into an arbitrary tenant's namespace (#2).
     // Resolved here, before the expensive verify/persist pipeline.
-    let publish_tenant = tenant_for_publish(&state, &headers, req.agent_id.as_str())?;
+    let publish_tenant = tenant_for_publish(&state, &headers, req.agent_id.as_str(), peer)?;
 
     let server = state.server.clone();
     let resolver = state.auth.resolver.clone();
@@ -892,6 +901,7 @@ fn context_type_str(t: &acdp::types::primitives::ContextType) -> String {
 pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     Path(ctx_id): Path<String>,
 ) -> Result<Json<acdp::types::body::FullContext>, RegistryError> {
     let requester = caller_from_headers(&state, &headers)?;
@@ -939,7 +949,7 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
     // Resolve the tenant scope up front (before the DB read) so a strict-mode
     // default-deny fails fast and doesn't create a 404-vs-403 existence oracle
     // between a missing row and an unscoped request.
-    let requested_tenant = tenant_for_request(&state, &headers)?;
+    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
 
     let server = state.server.clone();
     let ctx_id_typed = CtxId(ctx_id.clone());
@@ -985,9 +995,10 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
 pub async fn retrieve_body<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     Path(ctx_id): Path<String>,
 ) -> Result<Json<acdp::types::body::Body>, RegistryError> {
-    let requested_tenant = tenant_for_request(&state, &headers)?;
+    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
     let requester = caller_from_headers(&state, &headers)?;
     // Tenant gate before fetching the body — saves work when the
     // caller can't see this row anyway.
@@ -1070,12 +1081,13 @@ const SEARCH_LIMIT_MAX: u32 = 100;
 pub async fn search<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     AcdpQuery(q): AcdpQuery<SearchQuery>,
 ) -> Result<Json<SearchResponse>, RegistryError> {
     let requester = caller_from_headers(&state, &headers)?;
     let query_text = q.q.clone();
     let (params, visibility_filter) = q.into_params();
-    let requested_tenant = tenant_for_request(&state, &headers)?;
+    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
 
     let resp = run_search_with_refill(
         &state,
@@ -1278,9 +1290,10 @@ async fn run_search_with_refill<S: ExtendedRegistryStore + 'static>(
 pub async fn lineage<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     Path(lineage_id): Path<String>,
 ) -> Result<Json<Vec<acdp::types::body::FullContext>>, RegistryError> {
-    let requested_tenant = tenant_for_request(&state, &headers)?;
+    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
     let requester = caller_from_headers(&state, &headers)?;
     let server = state.server.clone();
     let id = LineageId(lineage_id);
@@ -1306,9 +1319,10 @@ pub async fn lineage<S: ExtendedRegistryStore + 'static>(
 pub async fn current<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     Path(lineage_id): Path<String>,
 ) -> Result<Json<acdp::types::body::FullContext>, RegistryError> {
-    let requested_tenant = tenant_for_request(&state, &headers)?;
+    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
     let requester = caller_from_headers(&state, &headers)?;
     let server = state.server.clone();
     let id = LineageId(lineage_id);
@@ -1340,6 +1354,7 @@ pub async fn current<S: ExtendedRegistryStore + 'static>(
 pub async fn retract<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     Path(ctx_id): Path<String>,
     // U-524: `AcdpBytes`, the same extractor `publish` (#290) and the two
     // `/admin/*` lifecycle handlers (#293) use -- so all five routed
@@ -1356,6 +1371,7 @@ pub async fn retract<S: ExtendedRegistryStore + 'static>(
     let r = lifecycle_transition(
         state,
         headers,
+        peer,
         ctx_id,
         body,
         acdp::types::lifecycle::LifecycleEventType::Retracted,
@@ -1382,6 +1398,7 @@ fn lifecycle_outcome(e: &RegistryError) -> &'static str {
 pub async fn republish<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
+    PeerIp(peer): PeerIp,
     Path(ctx_id): Path<String>,
     // U-524: `AcdpBytes`, the same extractor `publish` (#290) and the two
     // `/admin/*` lifecycle handlers (#293) use -- so all five routed
@@ -1398,6 +1415,7 @@ pub async fn republish<S: ExtendedRegistryStore + 'static>(
     let r = lifecycle_transition(
         state,
         headers,
+        peer,
         ctx_id,
         body,
         acdp::types::lifecycle::LifecycleEventType::Republished,
@@ -1450,6 +1468,7 @@ pub async fn republish<S: ExtendedRegistryStore + 'static>(
 async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
     state: Arc<AppState<S>>,
     headers: HeaderMap,
+    peer: Option<IpAddr>,
     ctx_id: String,
     body: Bytes,
     event_type: acdp::types::lifecycle::LifecycleEventType,
@@ -1509,7 +1528,7 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
 
     // 5. Tenant gate — same shape as `retrieve`: a ctx_id outside the
     //    caller's tenant is indistinguishable from a missing one.
-    let requested_tenant = tenant_for_request(&state, &headers)?;
+    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
     let stored_tenant = state
         .server
         .store()
@@ -1869,6 +1888,7 @@ mod lifecycle_charge_tests {
         lifecycle_transition(
             state.clone(),
             HeaderMap::new(),
+            None,
             ctx_id.to_string(),
             body,
             LifecycleEventType::Retracted,
@@ -1914,5 +1934,391 @@ mod lifecycle_charge_tests {
         // would make the assertion above vacuous.
         assert!(!post(&state, &ctx_id, signed(200, &ctx_id)).await);
         assert_eq!(limiter.tracked_keys(), 1);
+    }
+}
+
+/// #374: the trust decision inside both tenant resolvers, row by row (the
+/// table in `docs/MULTI-TENANCY.md`), under every `tenant_header_trust` mode.
+#[cfg(test)]
+mod tenant_trust_resolver_tests {
+    use std::net::IpAddr;
+    use std::sync::Arc;
+
+    use acdp::did::WebResolver;
+    use acdp::registry::RegistryServer;
+    use acdp::types::capabilities::CapabilitiesDocument;
+    use acdp_registry_auth::{
+        AuthService, ChallengeStore, InMemoryChallengeStore, JwtSecret, JwtSigner,
+    };
+    use acdp_registry_sqlite::SqliteStore;
+    use acdp_registry_store::ExtendedRegistryStore;
+    use acdp_registry_types::auth::AcdpClaims;
+    use acdp_registry_types::{
+        AuthConfig, BearerClaims, RegistryConfig, RegistryError, TenantAgentBinding,
+        TenantHeaderTrust,
+    };
+    use axum::http::HeaderMap;
+
+    use super::{tenant_for_publish, tenant_for_request};
+    use crate::state::{AppState, AppStateInner};
+
+    const AUTHORITY: &str = "registry.example.com";
+    const BOUND_AGENT: &str = "did:web:agents.example:bound";
+    const UNBOUND_AGENT: &str = "did:web:agents.example:unbound";
+    const GATEWAY: &str = "10.1.2.3";
+    const OUTSIDER: &str = "203.0.113.9";
+
+    /// The outcome of one resolution, reduced to what the table promises.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Out {
+        Tenant(String),
+        Unscoped,
+        /// 403: the header crossed no declared boundary.
+        Untrusted,
+        /// 403: some other tenant refusal (claim/binding mismatch, default-deny).
+        Forbidden,
+        /// 400: the reserved `default` sentinel.
+        Reserved,
+    }
+
+    fn t(s: &str) -> Out {
+        Out::Tenant(s.to_string())
+    }
+
+    fn classify(r: Result<Option<String>, RegistryError>) -> Out {
+        match r {
+            Ok(Some(t)) => Out::Tenant(t),
+            Ok(None) => Out::Unscoped,
+            Err(e @ RegistryError::AuthChallenge(_)) => {
+                assert_eq!(e.wire_code(), "not_authorized");
+                assert_eq!(e.http_status(), 403);
+                if e.to_string().contains("is not trusted from this peer") {
+                    Out::Untrusted
+                } else {
+                    Out::Forbidden
+                }
+            }
+            Err(RegistryError::Acdp(acdp::error::AcdpError::SchemaViolation(_))) => Out::Reserved,
+            Err(e) => panic!("unexpected error {e:?}"),
+        }
+    }
+
+    /// Modes under test, each with the peer the request arrives from.
+    #[derive(Debug, Clone, Copy)]
+    enum Mode {
+        None,
+        ProxiesIn,
+        ProxiesOut,
+        ProxiesUnknownPeer,
+        AnyPeer,
+    }
+    const ALL_MODES: [Mode; 5] = [
+        Mode::None,
+        Mode::ProxiesIn,
+        Mode::ProxiesOut,
+        Mode::ProxiesUnknownPeer,
+        Mode::AnyPeer,
+    ];
+
+    impl Mode {
+        fn trust(self) -> TenantHeaderTrust {
+            match self {
+                Mode::None => TenantHeaderTrust::None,
+                Mode::AnyPeer => TenantHeaderTrust::AnyPeer,
+                _ => TenantHeaderTrust::TrustedProxies,
+            }
+        }
+        fn peer(self) -> Option<IpAddr> {
+            match self {
+                Mode::ProxiesIn => Some(GATEWAY.parse().unwrap()),
+                Mode::ProxiesUnknownPeer => None,
+                _ => Some(OUTSIDER.parse().unwrap()),
+            }
+        }
+        fn trusted(self) -> bool {
+            matches!(self, Mode::ProxiesIn | Mode::AnyPeer)
+        }
+    }
+
+    async fn state(auth_enabled: bool, strict: bool, mode: Mode) -> Arc<AppState<SqliteStore>> {
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        store.migrate().await.unwrap();
+        let caps: CapabilitiesDocument = serde_json::from_value(serde_json::json!({
+            "acdp_version": "0.3.0",
+            "registry_did": format!("did:web:{AUTHORITY}"),
+            "supported_signature_algorithms": ["ed25519"],
+            "supported_did_methods": ["did:web"],
+            "profiles": ["acdp-registry-core"],
+            "limits": {
+                "max_payload_bytes": 1_048_576,
+                "max_embedded_bytes": 65_536,
+                "idempotency_key_ttl_seconds": 86_400
+            },
+            "read_authentication_methods": [],
+            "anonymous_public_reads": true,
+            "supports_idempotency_key": true
+        }))
+        .unwrap();
+        let server = RegistryServer::try_new(store, caps, AUTHORITY).unwrap();
+        let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+        let auth = Arc::new(AuthService::new(
+            AuthConfig::default(),
+            challenges,
+            signer(),
+            Arc::new(WebResolver::new()),
+            AUTHORITY.into(),
+        ));
+        let mut cfg = RegistryConfig::defaults();
+        cfg.registry.authority = AUTHORITY.into();
+        cfg.auth.enabled = auth_enabled;
+        cfg.auth.require_tenant = strict;
+        cfg.auth.tenant_header_trust = Some(mode.trust());
+        cfg.auth.tenant_agents = vec![TenantAgentBinding {
+            agent_did: BOUND_AGENT.into(),
+            tenant_id: "tenant-a".into(),
+        }];
+        cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into()];
+        Arc::new(AppStateInner::new(Arc::new(server), auth, None, cfg, None))
+    }
+
+    fn signer() -> JwtSigner {
+        JwtSigner::new(
+            JwtSecret::from_bytes(&[42u8; 32]),
+            format!("did:web:{AUTHORITY}"),
+            AUTHORITY.into(),
+            30,
+        )
+    }
+
+    fn token(tenant: Option<&str>) -> String {
+        let now = chrono::Utc::now().timestamp();
+        signer()
+            .sign(&BearerClaims {
+                iss: format!("did:web:{AUTHORITY}"),
+                sub: format!("did:web:{AUTHORITY}:agents:caller"),
+                aud: AUTHORITY.into(),
+                jti: uuid::Uuid::new_v4().to_string(),
+                iat: now,
+                exp: now + 3600,
+                acdp: AcdpClaims {
+                    registry: AUTHORITY.into(),
+                    key_id: format!("did:web:{AUTHORITY}:agents:caller#key-1"),
+                },
+                tenant: tenant.map(str::to_string),
+            })
+            .unwrap()
+    }
+
+    fn headers(bearer: Option<&str>, tenant: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(b) = bearer {
+            h.insert("authorization", format!("Bearer {b}").parse().unwrap());
+        }
+        if let Some(t) = tenant {
+            h.insert("x-tenant-id", t.parse().unwrap());
+        }
+        h
+    }
+
+    /// What an unbound caller's header resolves to: trusted → the header,
+    /// untrusted → 403 (never silently ignored).
+    fn header_or_untrusted(mode: Mode) -> Out {
+        if mode.trusted() {
+            t("tenant-b")
+        } else {
+            Out::Untrusted
+        }
+    }
+
+    #[tokio::test]
+    async fn read_resolver_rows() {
+        for mode in ALL_MODES {
+            let peer = mode.peer();
+            // Rows "auth off" and "lax, no bearer / unbound token" share one
+            // shape: absent → unscoped, header → trusted ? header : 403.
+            for (auth, bearer) in [(false, None), (true, None), (true, Some(token(None)))] {
+                let st = state(auth, false, mode).await;
+                let b = bearer.as_deref();
+                let label = format!("{mode:?} auth={auth} bearer={}", b.is_some());
+                assert_eq!(
+                    classify(tenant_for_request(&st, &headers(b, None), peer)),
+                    Out::Unscoped,
+                    "{label} absent"
+                );
+                assert_eq!(
+                    classify(tenant_for_request(&st, &headers(b, Some("tenant-b")), peer)),
+                    header_or_untrusted(mode),
+                    "{label} header"
+                );
+            }
+            // Strict, no bearer and strict + unbound token: absent → default
+            // deny; header → trusted ? header : 403.
+            let st = state(true, true, mode).await;
+            for bearer in [None, Some(token(None))] {
+                let b = bearer.as_deref();
+                let label = format!("{mode:?} strict bearer={}", b.is_some());
+                assert_eq!(
+                    classify(tenant_for_request(&st, &headers(b, None), peer)),
+                    Out::Forbidden,
+                    "{label} absent → default-deny"
+                );
+                assert_eq!(
+                    classify(tenant_for_request(&st, &headers(b, Some("tenant-b")), peer)),
+                    header_or_untrusted(mode),
+                    "{label} header"
+                );
+            }
+            // Tenant-bound token, lax and strict: the claim wins; a matching
+            // header corroborates (accepted even when untrusted); a
+            // disagreeing one is the existing mismatch 403.
+            for strict in [false, true] {
+                let st = state(true, strict, mode).await;
+                let bound = token(Some("tenant-a"));
+                for (hdr, want) in [
+                    (None, t("tenant-a")),
+                    (Some("tenant-a"), t("tenant-a")),
+                    (Some("tenant-b"), Out::Forbidden),
+                ] {
+                    assert_eq!(
+                        classify(tenant_for_request(&st, &headers(Some(&bound), hdr), peer)),
+                        want,
+                        "{mode:?} strict={strict} bound token, header {hdr:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_resolver_rows() {
+        for mode in ALL_MODES {
+            let peer = mode.peer();
+            // Auth off: no binding is consulted; the header decides iff trusted.
+            let st = state(false, false, mode).await;
+            for agent in [UNBOUND_AGENT, BOUND_AGENT] {
+                assert_eq!(
+                    classify(tenant_for_publish(&st, &headers(None, None), agent, peer)),
+                    Out::Unscoped
+                );
+                assert_eq!(
+                    classify(tenant_for_publish(
+                        &st,
+                        &headers(None, Some("tenant-b")),
+                        agent,
+                        peer
+                    )),
+                    header_or_untrusted(mode),
+                    "{mode:?} auth off, {agent}"
+                );
+            }
+            for strict in [false, true] {
+                let st = state(true, strict, mode).await;
+                // Unbound producer: trusted header → it; absent → untenanted
+                // (strict: default-deny); untrusted → 403.
+                assert_eq!(
+                    classify(tenant_for_publish(
+                        &st,
+                        &headers(None, None),
+                        UNBOUND_AGENT,
+                        peer
+                    )),
+                    if strict {
+                        Out::Forbidden
+                    } else {
+                        Out::Unscoped
+                    },
+                    "{mode:?} strict={strict} unbound, absent"
+                );
+                assert_eq!(
+                    classify(tenant_for_publish(
+                        &st,
+                        &headers(None, Some("tenant-b")),
+                        UNBOUND_AGENT,
+                        peer
+                    )),
+                    header_or_untrusted(mode),
+                    "{mode:?} strict={strict} unbound, header"
+                );
+                // Bound producer: the binding, whatever the mode; a matching
+                // header corroborates, a disagreeing one (even trusted) 403s.
+                for (hdr, want) in [
+                    (None, t("tenant-a")),
+                    (Some("tenant-a"), t("tenant-a")),
+                    (Some("tenant-b"), Out::Forbidden),
+                ] {
+                    assert_eq!(
+                        classify(tenant_for_publish(
+                            &st,
+                            &headers(None, hdr),
+                            BOUND_AGENT,
+                            peer
+                        )),
+                        want,
+                        "{mode:?} strict={strict} bound, header {hdr:?}"
+                    );
+                }
+                // A tenant-bound token outranks the binding and the header.
+                let claim_c = token(Some("tenant-c"));
+                assert_eq!(
+                    classify(tenant_for_publish(
+                        &st,
+                        &headers(Some(&claim_c), Some("tenant-c")),
+                        BOUND_AGENT,
+                        peer
+                    )),
+                    t("tenant-c")
+                );
+                assert_eq!(
+                    classify(tenant_for_publish(
+                        &st,
+                        &headers(Some(&claim_c), Some("tenant-b")),
+                        UNBOUND_AGENT,
+                        peer
+                    )),
+                    Out::Forbidden
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_reserved_sentinel_is_refused_first_in_every_mode() {
+        for mode in ALL_MODES {
+            for (auth, strict) in [(false, false), (true, false), (true, true)] {
+                let st = state(auth, strict, mode).await;
+                let h = headers(None, Some("default"));
+                assert_eq!(
+                    classify(tenant_for_request(&st, &h, mode.peer())),
+                    Out::Reserved,
+                    "{mode:?} auth={auth} strict={strict} read"
+                );
+                assert_eq!(
+                    classify(tenant_for_publish(&st, &h, UNBOUND_AGENT, mode.peer())),
+                    Out::Reserved,
+                    "{mode:?} auth={auth} strict={strict} publish"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_untrusted_rejection_names_the_mode() {
+        let st = state(true, true, Mode::ProxiesOut).await;
+        let err = tenant_for_request(
+            &st,
+            &headers(None, Some("tenant-b")),
+            Mode::ProxiesOut.peer(),
+        )
+        .unwrap_err();
+        assert_eq!(err.wire_code(), "not_authorized");
+        assert_eq!(err.http_status(), 403);
+        assert!(
+            err.to_string().contains(
+                "X-Tenant-Id is not trusted from this peer (auth.tenant_header_trust = \
+                 \"trusted_proxies\"); use a tenant-bound token or send the request through \
+                 the declared gateway"
+            ),
+            "got: {err}"
+        );
     }
 }
