@@ -507,6 +507,86 @@ mod lifecycle {
             "append-only history carries exactly the winner"
         );
     }
+
+    /// #373: mirrors the SQLite `has_lifecycle_state_*` tests. The probe is a
+    /// whole-database `EXISTS`, so the shared database (which accretes other
+    /// tests' retractions) cannot answer "empty → false"; this runs in a
+    /// fresh, run-unique schema instead, dropped at the end.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn has_lifecycle_state_sees_events_and_the_retracted_flag() {
+        let Some(url) = pg_url_or_skip() else { return };
+        let schema = format!("lcstate_{}", uuid::Uuid::new_v4().simple());
+        let admin = PgStore::connect(&url, 1).await.expect("pg connect");
+        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+            .execute(admin.pool())
+            .await
+            .expect("create run-unique schema");
+        let sep = if url.contains('?') { '&' } else { '?' };
+        let isolated = PgStore::connect(&format!("{url}{sep}options[search_path]={schema}"), 4)
+            .await
+            .expect("pg connect (isolated schema)");
+        isolated
+            .migrate()
+            .await
+            .expect("pg migrate (isolated schema)");
+        let store = Arc::new(isolated);
+
+        assert!(
+            !store.has_lifecycle_state().await.unwrap(),
+            "a freshly migrated store has no lifecycle state"
+        );
+        let actor = AgentDid::new("did:web:agents.test:contract-64".to_string());
+        let (ctx_id, _) = published_ctx(&store, 64, "lifecycle state probe").await;
+        assert!(
+            !store.has_lifecycle_state().await.unwrap(),
+            "an ordinary published context is not lifecycle state"
+        );
+        store
+            .commit_lifecycle_event(&event(&actor, &ctx_id, LifecycleEventType::Retracted, None))
+            .expect("retract applied");
+        assert!(store.has_lifecycle_state().await.unwrap(), "retracted");
+        store
+            .commit_lifecycle_event(&event(
+                &actor,
+                &ctx_id,
+                LifecycleEventType::Republished,
+                None,
+            ))
+            .expect("republish applied");
+        assert!(
+            !matches!(
+                store.get(&ctx_id).unwrap().unwrap().registry_state.status,
+                Status::Retracted
+            ),
+            "precondition: the context is no longer retracted"
+        );
+        assert!(
+            store.has_lifecycle_state().await.unwrap(),
+            "a republished context keeps its events, which are still lifecycle state"
+        );
+
+        // The flag alone (no event rows) also trips the probe.
+        sqlx::query("DELETE FROM lifecycle_events")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            !store.has_lifecycle_state().await.unwrap(),
+            "precondition: no events and no retracted flag"
+        );
+        sqlx::query("UPDATE contexts SET retracted = TRUE WHERE ctx_id = $1")
+            .bind(ctx_id.as_str())
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(store.has_lifecycle_state().await.unwrap(), "flag only");
+
+        drop(store);
+        sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+            .execute(admin.pool())
+            .await
+            .expect("drop run-unique schema");
+    }
 }
 
 // ─── ACDP 0.3.0: transparency log (RFC-ACDP-0012) ──────────────────────────

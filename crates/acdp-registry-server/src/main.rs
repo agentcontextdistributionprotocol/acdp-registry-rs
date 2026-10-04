@@ -908,6 +908,29 @@ async fn run(_cfg: RegistryConfig) -> anyhow::Result<()> {
     )
 }
 
+/// The #373 startup verdict, kept pure so its whole truth table is
+/// unit-testable without a database.
+///
+/// Refuses exactly one cell: `[lifecycle]` disabled while the store holds
+/// lifecycle state (an event row, or a context marked retracted). Serving
+/// that state would emit what RFC-ACDP-0013 §6 says a non-advertising
+/// registry MUST NOT emit; hiding it would silently un-retract content the
+/// producer withdrew. The error names the two ways out — see
+/// docs/CONFIGURATION.md `[lifecycle]` and docs/UPGRADING.md.
+fn lifecycle_state_gate(enabled: bool, has_state: bool) -> anyhow::Result<()> {
+    if has_state && !enabled {
+        anyhow::bail!(
+            "the store holds RFC-ACDP-0013 lifecycle state (lifecycle events or retracted \
+             contexts) but lifecycle.enabled=false; a registry that does not advertise \
+             acdp-registry-lifecycle MUST NOT serve that state (RFC-ACDP-0013 §6). Either \
+             set [lifecycle] enabled = true (ACDP_REGISTRY_LIFECYCLE__ENABLED=true), or back up the \
+             database and purge the lifecycle state as documented in docs/CONFIGURATION.md \
+             ([lifecycle]) — the purge is IRREVERSIBLE and un-retracts every retracted context"
+        );
+    }
+    Ok(())
+}
+
 async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     cfg: RegistryConfig,
     store: S,
@@ -915,6 +938,20 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     revocations: Option<Arc<dyn RevocationStore>>,
     shared_auth_limiter: Option<Arc<dyn acdp_registry_store::SharedRateLimitBackend>>,
 ) -> anyhow::Result<()> {
+    // #373 / RFC-ACDP-0013 §6: every backend's `run()` has just migrated the
+    // store, and nothing is bound yet. A registry started with `[lifecycle]`
+    // off MUST NOT emit `lifecycle_events` or `retracted`, yet the read paths
+    // project stored lifecycle state unconditionally — so refuse to start
+    // rather than serve it. The memory backend answers `false` by default
+    // (nothing survives a restart).
+    let has_state = store
+        .has_lifecycle_state()
+        .await
+        .map_err(|e| anyhow::anyhow!("lifecycle state probe: {e}"))?;
+    if let Err(e) = lifecycle_state_gate(cfg.lifecycle.enabled, has_state) {
+        tracing::error!(error = %e, "refusing to start: lifecycle state present with [lifecycle] disabled");
+        return Err(e);
+    }
     // Capabilities + RegistryServer.
     let caps = build_capabilities(&cfg);
     let server = RegistryServer::try_new(store, caps, cfg.registry.authority.clone())
@@ -955,7 +992,10 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     // `with_lifecycle` enforces acdp_version >= 0.3.0 and appends the
     // `acdp-registry-lifecycle` profile; the §7.2 status precedence,
     // §8.2 search exclusion, and §8.3 /current head exclusion are
-    // implemented by the storage backends.
+    // implemented by the storage backends — unconditionally, which is why
+    // the flag-off arm below is only conformant because the
+    // `lifecycle_state_gate` at the top of this function already refused a
+    // store holding lifecycle state (#373).
     let server = if cfg.lifecycle.enabled {
         tracing::info!("lifecycle events enabled — advertising acdp-registry-lifecycle");
         server
@@ -2938,6 +2978,41 @@ mod tests {
         cfg.registry.profiles = vec!["acdp-registry-lifecycle".into()];
         cfg.lifecycle.enabled = true;
         assert!(validate_config(&cfg).is_ok());
+    }
+
+    /// #373: the startup gate's full truth table. Only "disabled with state"
+    /// refuses; the refusal names both exits and the flag, because the
+    /// operator reading it has no other pointer to what to change.
+    #[test]
+    fn lifecycle_state_gate_refuses_only_disabled_with_state() {
+        assert!(
+            lifecycle_state_gate(true, true).is_ok(),
+            "on + state serves"
+        );
+        assert!(
+            lifecycle_state_gate(true, false).is_ok(),
+            "on + empty serves"
+        );
+        assert!(
+            lifecycle_state_gate(false, false).is_ok(),
+            "off + never-lifecycle store serves"
+        );
+        let msg = lifecycle_state_gate(false, true)
+            .expect_err("off + state must refuse")
+            .to_string();
+        for needle in [
+            "lifecycle.enabled=false",
+            "enabled = true",
+            "ACDP_REGISTRY_LIFECYCLE__ENABLED",
+            "purge",
+            "IRREVERSIBLE",
+            "RFC-ACDP-0013 §6",
+        ] {
+            assert!(
+                msg.contains(needle),
+                "refusal must mention {needle:?}: {msg}"
+            );
+        }
     }
 
     #[test]

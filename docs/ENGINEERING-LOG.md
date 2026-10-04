@@ -4971,7 +4971,9 @@ was not, and nothing failed loudly.
     Both attach `registry_state.lifecycle_events` and derive the `retracted`
     status from stored columns unconditionally, so a registry that enabled
     lifecycle, accumulated events, then disabled it keeps serving both while
-    answering `501` on the endpoints.
+    answering `501` on the endpoints. **Superseded by #373:** that combination
+    now refuses to start (see the #373 entry at the end of this log); the read
+    paths are unchanged.
   - **`docs/RECEIPTS.md` promised a `Cache-Control: private` posture that does
     not exist.** The only `Cache-Control` this registry emits is
     `public, max-age=300` on three `/.well-known/*` routes, none of them
@@ -7127,3 +7129,30 @@ workflow's own strip rules and asserts that each line is a `scenario.Mutant.name
 declared ledger. Against u552 it fails and names `store.rs:1317:35`. It would have failed
 #331. Scope count and line drift are still detected only by the cron. Catching them at PR time
 needs a path-gated job that installs cargo-mutants and runs `--list`, which is follow-up work.
+
+## #373 — lifecycle state with `[lifecycle]` off: refuse to start, not strip on read
+
+RFC-ACDP-0013 §6 says a registry that does not advertise `acdp-registry-lifecycle` MUST NOT emit
+`lifecycle_events` or `retracted`. Both stores project that state on every read path with no flag
+check, so a deployment that enabled lifecycle, retracted something, then turned the flag off served
+it while advertising neither. `CONFIGURATION.md` documented it as a deviation.
+
+Two fixes were on the table. Threading the flag into every read path and stripping (about ten paths
+per backend, plus the SDK's own `current`/`search`, which read store status) was rejected on cost,
+and more because it silently un-retracts: withdrawn contexts would come back as `active`, searchable
+`/current` heads, which reverses a withdrawal nobody authorised. The binary now asks the store at
+startup, after `migrate()` and before binding, and refuses to start in that one combination, naming
+both ways out: re-enable the flag, or purge (irreversible, documented with SQL).
+
+The probe is a defaulted `ExtendedRegistryStore::has_lifecycle_state` (default `Ok(false)`, for the
+memory backend, which carries nothing across a restart), overridden by SQLite and Postgres. It is
+called once, at the top of the generic `serve_with_store`, so all three backends go through one call
+site. It checks both sources. A republished context has `retracted = 0` but keeps its events, so
+checking the flag alone would miss it. A flag set with no event row (a partial restore, hand-edited
+SQL) is missed by checking the events alone. A test pins each source on its own.
+
+`tests/lifecycle_refuse_start.rs` does the real restart: it spawns the shipped binary with the flag
+on, publishes and retracts over HTTP, restarts it with the flag off (exits non-zero, `ERROR` logged,
+nothing listening), then with the flag on again (GET, `status=retracted` search, lineage, and the
+`/current` 404 are all unchanged). With the gate disabled, the flag-off child keeps running and the
+test fails at that step.

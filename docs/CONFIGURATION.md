@@ -514,27 +514,51 @@ retracted contexts from default search and from `/current`, serves
 (`acdp_version` itself is unconditionally `"0.5.0"` as of REG-3 —
 RFC-ACDP-0016 §10's anchors claim always wins the version max() — and no
 longer moves with this flag). When disabled (the default) both endpoints
-answer `501 not_implemented`, and a registry that has *never* had lifecycle
-enabled emits neither `lifecycle_events` nor the `retracted` status.
+answer `501 not_implemented` and the registry emits neither
+`lifecycle_events` nor the `retracted` status — guaranteed by the startup
+refusal below, not by the read paths.
 
-**Disabling the flag does not retract what a previous enablement recorded.**
-The stores attach `registry_state.lifecycle_events` and derive the `retracted`
-status from stored columns unconditionally — there is no `lifecycle.enabled`
-check anywhere in either store (`get` and `lineage` in
-`crates/acdp-registry-sqlite/src/store.rs` and their counterparts in
-`crates/acdp-registry-pg/src/store.rs` attach the events whenever any exist;
-the `retracted` column is selected on every read path). So a
-registry that enabled lifecycle, accumulated events, then disabled the profile
-keeps serving both while advertising neither and answering `501` on the
-lifecycle endpoints. If you need the emission to stop, the events have to go —
-turning the flag off is not sufficient. `HTTP-API.md`'s wording is the accurate
-one: it describes the emission as a property of the data, not of the flag.
+**Turning the flag off over existing lifecycle state refuses to start.**
+[RFC-ACDP-0013 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints)
+(pinned spec): a registry that does not advertise `acdp-registry-lifecycle`
+MUST NOT emit `lifecycle_events` or the `retracted` status, with no carve-out
+for state recorded while the profile *was* advertised. The stores project
+stored lifecycle state on every read path regardless of the flag, so at
+startup — after migrations, before binding — the binary asks the store whether
+it holds any lifecycle state (`ExtendedRegistryStore::has_lifecycle_state`:
+at least one `lifecycle_events` row, **or** at least one context with the
+`retracted` flag set). With `enabled = false` and state present it logs at
+`ERROR` and exits non-zero naming both ways out:
 
-**Deviation from [RFC-ACDP-0013 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints)
-(pinned spec):** a registry that does not advertise `acdp-registry-lifecycle`
-MUST NOT emit `lifecycle_events` or the `retracted` status. This registry does
-emit both after the flag is turned off, as described above. That is a known
-gap in the code, not a supported or conformant configuration.
+1. **Re-enable** — set `[lifecycle] enabled = true`
+   (`ACDP_REGISTRY_LIFECYCLE__ENABLED=true`). The state is served exactly as
+   before. This is the recommended exit.
+2. **Purge** — back up the database first. Deleting the state is
+   **irreversible**: every retracted context becomes `active` again and
+   reappears in default search and as its lineage's `/current` head, reversing
+   withdrawals the producers (or you) made. With the registry stopped:
+
+   ```sql
+   -- SQLite
+   BEGIN;
+   DELETE FROM lifecycle_events;
+   UPDATE contexts SET retracted = 0 WHERE retracted <> 0;
+   COMMIT;
+
+   -- Postgres
+   BEGIN;
+   DELETE FROM lifecycle_events;
+   UPDATE contexts SET retracted = FALSE WHERE retracted;
+   COMMIT;
+   ```
+
+A republished context counts as state: it is no longer retracted but keeps
+both events, which §6 equally forbids emitting. The check runs once at
+startup; on a multi-replica Postgres deployment every replica must agree on
+`[lifecycle]` (a flag-off replica already running keeps serving whatever a
+flag-on replica records until its next restart, which then refuses). The
+in-memory backend never trips it — nothing survives its restart. See
+[UPGRADING.md](UPGRADING.md) for the pre-upgrade check.
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|

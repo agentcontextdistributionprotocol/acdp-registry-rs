@@ -23,9 +23,65 @@ belongs in the per-crate changelogs.
 
 ## 0.2.1
 
-**No config action needed on upgrade or rollback. One table goes dormant, ahead of its removal,
+**One breaking startup change: a deployment with `[lifecycle] enabled = false` over a database
+that holds lifecycle state no longer starts (#373) — run the pre-upgrade check below. Otherwise no
+config action is needed on upgrade or rollback. One table goes dormant, ahead of its removal,
 lifecycle requests are charged only once their signature verifies, and the advertised read
 authentication method id changes (below).**
+
+**Breaking startup change (#373): lifecycle state with `[lifecycle]` off refuses to start.**
+RFC-ACDP-0013 §6 says a registry that does not advertise `acdp-registry-lifecycle` MUST NOT emit
+`lifecycle_events` or the `retracted` status. Earlier releases did exactly that when lifecycle was
+enabled, used, then turned off: the stores project stored lifecycle state on every read regardless
+of the flag (it was documented as a known deviation). From this release the binary checks the store
+after migrations and before binding; with the flag off and any lifecycle state present it logs at
+`ERROR` and exits non-zero. Stripping the state on read instead was rejected: it would silently turn
+every retracted context back into an `active`, searchable `/current` head — reversing withdrawals
+nobody authorised.
+
+**Who is affected:** only deployments whose config has `[lifecycle] enabled = false` (the default)
+while the database holds lifecycle state — i.e. lifecycle was enabled at some point, a context was
+retracted (or retracted and republished), and the flag was later turned off; or a backup taken
+while lifecycle was on was restored under a flag-off config. A registry that never enabled lifecycle
+is unaffected. **Pre-upgrade check** — run against the live database; `1` / `t` means this release
+will refuse to start under a flag-off config:
+
+```sql
+-- SQLite (`retracted` is an INTEGER 0/1 column): returns 1 or 0
+SELECT EXISTS (SELECT 1 FROM lifecycle_events)
+    OR EXISTS (SELECT 1 FROM contexts WHERE retracted <> 0);
+
+-- Postgres (`retracted` is BOOLEAN): returns t or f
+SELECT EXISTS (SELECT 1 FROM lifecycle_events)
+    OR EXISTS (SELECT 1 FROM contexts WHERE retracted);
+```
+
+These are the exact probes the binary runs (`has_lifecycle_state` in each backend's `store.rs`).
+
+If it returns `1`, choose one exit **before** upgrading:
+
+1. **Re-enable lifecycle** (recommended): `[lifecycle] enabled = true`, or
+   `ACDP_REGISTRY_LIFECYCLE__ENABLED=true`. The state is served exactly as before, now conformantly
+   (the profile is advertised and the retract/republish endpoints answer).
+2. **Purge the lifecycle state** — **irreversible**; back up first. Every retracted context becomes
+   `active` again. The SQL is in [CONFIGURATION.md `[lifecycle]`](CONFIGURATION.md#lifecycle-acdp-030).
+
+**What failure looks like if you skip the check:**
+
+- **Railway:** with the healthcheck configured as [`docker/RAILWAY.md`](../docker/RAILWAY.md)
+  recommends (`/healthz`), the new deploy never passes it (the process exits before binding), so
+  Railway keeps the previous deployment serving and marks the new one failed. The deploy log ends
+  with the `refusing to start` line and the error naming both exits.
+- **docker compose:** the `registry` container exits with status 1 and stays down; if you
+  added a `restart:` policy (the shipped `docker/docker-compose.yml` sets none) it crash-loops.
+  `docker compose logs` shows the error on every attempt.
+- **Mixed Postgres fleet:** all replicas must agree on `[lifecycle]`. A flag-off replica that is
+  already running keeps serving whatever flag-on replicas record until its next restart, which then
+  refuses. Set the flag identically everywhere before rolling.
+
+**Rollback:** re-enable the flag (above), or roll back to the previous binary — there is no schema
+change in this release, so the previous binary boots against the same database and resumes the old
+(non-conformant) behaviour. The purge is the only one-way step, and it is never performed for you.
 
 **Wire value change (#372): `read_authentication_methods` is now `["bearer_jwt"]`.** With
 `auth.enabled = true`, `GET /.well-known/acdp.json` advertised `["bearer-jwt"]`, which fails the
