@@ -23,8 +23,16 @@ belongs in the per-crate changelogs.
 
 ## 0.2.1
 
-**No action needed on upgrade or rollback. One table goes dormant, ahead of its removal, and
-lifecycle requests are charged only once their signature verifies.**
+**No config action needed on upgrade or rollback. One table goes dormant, ahead of its removal,
+lifecycle requests are charged only once their signature verifies, and the advertised read
+authentication method id changes (below).**
+
+**Wire value change (#372): `read_authentication_methods` is now `["bearer_jwt"]`.** With
+`auth.enabled = true`, `GET /.well-known/acdp.json` advertised `["bearer-jwt"]`, which fails the
+capabilities schema (items must match `^[a-z][a-z0-9_]*$`), so strict validators rejected the whole
+document. The auth flow itself is unchanged. **Who needs to act:** no configuration action. A client
+that matches the exact string must accept `bearer_jwt`; one that also must talk to registries still
+on 0.2.0 should accept both. With auth disabled the field is still omitted.
 
 Publishing no longer writes the `lineages` table (both backends). Nothing in the registry ever read
 it — lineage reads (`GET /lineages/{id}`, `/current`, the admin audit) are served from `contexts` —

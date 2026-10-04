@@ -1296,6 +1296,21 @@ fn acdp_version_claim(cfg: &RegistryConfig) -> &'static str {
         .1
 }
 
+/// The `read_authentication_methods` id for this registry's read auth: a DID
+/// challenge (`/auth/challenge`) answered with a registry-minted JWT
+/// (`/auth/token`), presented as `Authorization: Bearer`.
+///
+/// The pinned capabilities schema requires every item to match
+/// `^[a-z][a-z0-9_]*$` (2-64 chars). The id is not registered in the spec's
+/// `registries/auth-methods.md` (an open vocabulary). It is not `oauth`
+/// because the flow is not an RFC 6749 grant. Until 0.2.1 the value was the
+/// hyphenated form, which fails that pattern (#372).
+///
+/// Every `READ_AUTH_METHOD_*` const here is checked against the pinned
+/// schema's item rules by `read_auth_method_ids_satisfy_the_pinned_schema`
+/// in `tests/conformance.rs`, which reads this file's source.
+const READ_AUTH_METHOD_BEARER_JWT: &str = "bearer_jwt";
+
 fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
     CapabilitiesDocument {
         // Plan A4 / REG-3 Phase 4: each rung of the claim is gated on what
@@ -1358,7 +1373,7 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
             max_publish_per_minute: None,
         },
         read_authentication_methods: if cfg.auth.enabled {
-            vec!["bearer-jwt".into()]
+            vec![READ_AUTH_METHOD_BEARER_JWT.into()]
         } else {
             vec![]
         },
@@ -1687,6 +1702,38 @@ mod tests {
         }
     }
 
+    /// The binary's router over an in-memory SQLite store, with `auth.enabled`
+    /// set as given and everything else at defaults.
+    #[cfg(feature = "storage-sqlite")]
+    async fn router_with_auth(enabled: bool) -> axum::Router {
+        use acdp_registry_auth::InMemoryChallengeStore;
+        use acdp_registry_sqlite::SqliteStore;
+        use acdp_registry_types::AuthConfig;
+
+        let mut cfg = RegistryConfig::defaults();
+        cfg.auth.enabled = enabled;
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        store.migrate().await.unwrap();
+        let caps = build_capabilities(&cfg);
+        let authority = cfg.registry.authority.clone();
+        let server = Arc::new(RegistryServer::try_new(store, caps, &authority).unwrap());
+        let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+        let signer = JwtSigner::new(
+            JwtSecret::from_bytes(&[42u8; 32]),
+            format!("did:web:{authority}"),
+            authority.clone(),
+            30,
+        );
+        let auth = Arc::new(AuthService::new(
+            AuthConfig::default(),
+            challenges,
+            signer,
+            Arc::new(WebResolver::new()),
+            authority,
+        ));
+        build_router(AppStateInner::new(server, auth, None, cfg, None))
+    }
+
     /// W3-U5: pins the invariant the auth-off `info!` in `serve_with_store`
     /// asserts — with `auth.enabled = false` the `/auth/*` routes are not
     /// mounted, so the ephemeral key generated on that path never issues or
@@ -1703,35 +1750,7 @@ mod tests {
     #[cfg(feature = "storage-sqlite")]
     #[tokio::test]
     async fn auth_disabled_does_not_mount_the_auth_routes() {
-        use acdp_registry_auth::InMemoryChallengeStore;
-        use acdp_registry_sqlite::SqliteStore;
-        use acdp_registry_types::AuthConfig;
         use tower::ServiceExt as _;
-
-        async fn router_with_auth(enabled: bool) -> axum::Router {
-            let mut cfg = RegistryConfig::defaults();
-            cfg.auth.enabled = enabled;
-            let store = SqliteStore::connect_in_memory().await.unwrap();
-            store.migrate().await.unwrap();
-            let caps = build_capabilities(&cfg);
-            let authority = cfg.registry.authority.clone();
-            let server = Arc::new(RegistryServer::try_new(store, caps, &authority).unwrap());
-            let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
-            let signer = JwtSigner::new(
-                JwtSecret::from_bytes(&[42u8; 32]),
-                format!("did:web:{authority}"),
-                authority.clone(),
-                30,
-            );
-            let auth = Arc::new(AuthService::new(
-                AuthConfig::default(),
-                challenges,
-                signer,
-                Arc::new(WebResolver::new()),
-                authority,
-            ));
-            build_router(AppStateInner::new(server, auth, None, cfg, None))
-        }
 
         async fn post(router: axum::Router, path: &str) -> axum::http::StatusCode {
             router
@@ -1761,6 +1780,84 @@ mod tests {
                  proves nothing about the gate"
             );
         }
+    }
+
+    /// Hand-written check of the pinned capabilities schema's
+    /// `read_authentication_methods.items` rules: `^[a-z][a-z0-9_]*$`, 2-64
+    /// chars. `tests/conformance.rs` ties these rules to the pinned schema
+    /// file; this copy exists because unit tests never see `ACDP_SPEC_DIR`.
+    fn is_schema_valid_read_auth_method(id: &str) -> bool {
+        let mut chars = id.chars();
+        (2..=64).contains(&id.len())
+            && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    }
+
+    #[test]
+    fn read_auth_method_matcher_rejects_what_the_schema_rejects() {
+        assert!(is_schema_valid_read_auth_method("bearer_jwt"));
+        assert!(is_schema_valid_read_auth_method("ab"));
+        // #372: the hyphenated id that shipped until 0.2.1.
+        assert!(!is_schema_valid_read_auth_method("bearer-jwt"));
+        assert!(!is_schema_valid_read_auth_method("a"));
+        assert!(!is_schema_valid_read_auth_method("1abc"));
+        assert!(!is_schema_valid_read_auth_method("_abc"));
+        assert!(!is_schema_valid_read_auth_method("Bearer_jwt"));
+        assert!(!is_schema_valid_read_auth_method(&"a".repeat(65)));
+        assert!(is_schema_valid_read_auth_method(&"a".repeat(64)));
+    }
+
+    /// #372: with auth on, the served `/.well-known/acdp.json` advertises
+    /// exactly `["bearer_jwt"]`, and every item satisfies the pinned schema's
+    /// item rules (pattern, length, uniqueness). With auth off the field is
+    /// omitted. Goes through the router, not `build_capabilities`, so a
+    /// handler-side rewrite of the field would also be caught.
+    #[cfg(feature = "storage-sqlite")]
+    #[tokio::test]
+    async fn capabilities_read_authentication_methods_are_schema_valid() {
+        use tower::ServiceExt as _;
+
+        async fn capabilities(enabled: bool) -> serde_json::Value {
+            let resp = router_with_auth(enabled)
+                .await
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/.well-known/acdp.json")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        let on = capabilities(true).await;
+        let methods = on["read_authentication_methods"]
+            .as_array()
+            .expect("read_authentication_methods must be an array with auth on");
+        assert_eq!(methods, &[serde_json::json!("bearer_jwt")]);
+        let ids: Vec<&str> = methods
+            .iter()
+            .map(|m| m.as_str().expect("each method id is a string"))
+            .collect();
+        for id in &ids {
+            assert!(
+                is_schema_valid_read_auth_method(id),
+                "{id:?} violates the capabilities schema's item rules"
+            );
+        }
+        let unique: std::collections::BTreeSet<&&str> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "method ids must be unique");
+
+        let off = capabilities(false).await;
+        assert!(
+            off.get("read_authentication_methods").is_none(),
+            "the field must be omitted with auth off, got {off}"
+        );
     }
 
     // #8 — insecure-default guard.
