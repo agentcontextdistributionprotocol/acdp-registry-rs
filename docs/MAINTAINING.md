@@ -369,11 +369,12 @@ survivor against that ledger, and it refuses a ledger that is missing any commit
 `every_committed_survivor_is_in_the_prior_ledger` in
 `crates/acdp-registry-server/tests/conformance_gate.rs` runs the same check on every PR.
 
-**Status:** the 2026-09-28 scheduled run (36417581090) failed. #341 had shrunk the scope
-from 351 to 346 (five caught mutants removed, no survivor change), and three cited lines in
-`crates/acdp-registry-core/src/handlers/context.rs` had moved. #371 re-pinned the ratchet
-from that run's own report: scope 346, the same seven survivors at their current lines, and
-the report committed as the new prior ledger. Check
+**Status:** pinned at scope 358 from run 37222567772 (main 27f9875, 108.7 min). #373-#376
+added twelve caught or unviable mutants and moved every cited line; the seven survivors are
+the same mutants on new lines, and the run's report is committed unchanged as the prior
+ledger. (History: the 2026-09-28 run 36417581090 failed after #341 shrank the scope from
+351 to 346; #371 re-pinned it the same way.) Edits to the four scoped files after a re-pin
+must be line-neutral until the next one. Check
 `gh run list --workflow mutants.yml --limit 3` for the current state.
 
 ## Spec bumps

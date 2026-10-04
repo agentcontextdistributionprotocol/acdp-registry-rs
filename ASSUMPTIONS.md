@@ -4896,3 +4896,11 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** a human commit on the release branch (rejected: release-plz closes the PR); skipping the guard until release (rejected: reopens the D3 defect); shipping the `none` default in 0.3.0 (rejected: a behaviour change, belongs to #386).
 - **Blast radius if wrong:** a release PR red on the Railway guard or upgrade-notes check; the page naming a not-yet-pullable tag for the days between merge and tag. Docs and a test only; revert restores the old guard.
 - **Status:** UNCONFIRMED
+
+## Final mutants re-pin at scope 358 from run 37222567772
+- **Plan:** plans/release-0.3.0-relabel-and-repin.md (Phase 3; BINDING REVISIONS R7, R11, R12)
+- **Assumed:** (a) the run (main 27f9875) still describes the tree because every later edit to the four scoped files (context.rs comments only, line count 2324 unchanged) was a `//` line: checked by `cargo mutants --list` names == the run's `mutants.json` names (358) and an empty non-comment diff, but a changed comment cannot affect a verdict only by inspection. (b) The 7 survivors are the same mutants as at scope 346: matched by expression and function, not by a stripped-name diff against the old ledger (the old ledger is superseded, not re-read for equality). (c) The 180-minute cap stands: 108.7 min measured (cargo-mutants' own clock; setup adds seconds). The runner was faster than for run 36417581090 (143.7 min), so the real spread is 109-144 min on this scope. (d) The whole-workspace denominator 1427 (a66e1f2) was not re-measured; 358 of 1427 = 25.1% is labelled as such.
+- **Chose:** option B (re-pin from the finished run, merged last) over a fresh dispatch (~1 h 50 m) and over mapping lines through a diff (a ledger must stay as measured). The ratchet itself was exercised offline with `classify_removed_survivors.py` against the new ledger (exit 0).
+- **Alternatives:** a fresh `workflow_dispatch` on final main (the fallback if the name/diff checks had failed); asserting set equality with the old ledger.
+- **Blast radius if wrong:** the Monday 2026-10-05 05:17 UTC cron (not PR-blocking) fails on scope or survivor-name drift, and the next re-pin is another single PR. Workflow config, docs, a committed ledger.
+- **Status:** UNCONFIRMED

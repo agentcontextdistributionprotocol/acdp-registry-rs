@@ -6,17 +6,19 @@ per-mutant verdicts for 95 of this file's 138 mutants were lost exactly that way
 
 ## Index — which ledgers are CURRENT
 
-**One ledger is CURRENT for the whole CI scope: `run36417581090-scope-346-outcomes.json`.**
-It is the unmodified `outcomes.json` of `mutants.yml` run 36417581090 (sha 5a6dfd8), committed
-by #371. Everything below it is history, kept for the reasons each section gives. A reader summing
+**One ledger is CURRENT for the whole CI scope: `run37222567772-scope-358-outcomes.json`.**
+It is the unmodified `outcomes.json` of `mutants.yml` run 37222567772 (sha 27f9875), committed
+by the final re-pin of `plans/issues-371-376` (the scope grew 346 -> 358 as #373-#376 landed;
+the seven survivors are the same mutants on new lines). Everything below it is history, kept for the reasons each section gives. A reader summing
 the `u549-*` set gets 19 survivors; a reader summing `u549` + `u550` gets 8; the tranche has
 been at **2** since U-552 paid six of them off with tests. Sum nothing — read the current
 ledger.
 
 | ledger | scope | result | status |
 |---|---|---|---|
-| `run36417581090-scope-346-outcomes.json` | **346** — context.rs 134 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 138 | 214 caught / **7 missed** / 124 unviable / 1 timeout | **CURRENT** |
-| `u552-union-scope-351-outcomes.json` | 351 — core 213 + `sqlite/src/store.rs` 138 | 219 caught / 7 missed / 124 unviable / 1 timeout | SUPERSEDED by `run36417581090` |
+| `run37222567772-scope-358-outcomes.json` | **358** — context.rs 144 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 225 caught / **7 missed** / 125 unviable / 1 timeout (108.7 min) | **CURRENT** |
+| `run36417581090-scope-346-outcomes.json` | 346 — context.rs 134 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 138 | 214 caught / 7 missed / 124 unviable / 1 timeout | SUPERSEDED by `run37222567772` |
+| `u552-union-scope-351-outcomes.json` | 351 — core 213 + `sqlite/src/store.rs` 138 | 219 caught / 7 missed / 124 unviable / 1 timeout | SUPERSEDED by `run37222567772` (via `run36417581090`) |
 | `u551-core-scope-213-outcomes.json` | 213 | 134 caught / 5 missed / 73 unviable / 1 timeout | SUPERSEDED by `u552` |
 | `u549`/`u550` store.rs shards (11 files) | 138, in 8 shards | 8 missed across the set | SUPERSEDED by `u552` |
 

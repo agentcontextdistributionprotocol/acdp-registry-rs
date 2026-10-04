@@ -46,7 +46,7 @@ env:
   # or deleted -- the survivor count falls with it, and a `<=` budget would read
   # that as an improvement. This assertion is what makes the budget below mean
   # anything.
-  MUTANTS_EXPECTED_SCOPE: "346"
+  MUTANTS_EXPECTED_SCOPE: "358"
 
   # The ONE committed ledger that a drifted survivor line is paired against, to
   # recover its identity (enclosing function + fn-relative offset + column, and
@@ -58,12 +58,27 @@ env:
   # which would trip the classifier's own duplicate-name assertion on every run.
   # docs/mutation-runs/README.md indexes which ledgers are CURRENT, in prose;
   # this variable is the machine-readable half of that index.
-  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/run36417581090-scope-346-outcomes.json"
+  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/run37222567772-scope-358-outcomes.json"
 
   # Surviving mutants at that sha. Each is enumerated with its own written reason
   # below; this number is the machine-readable half of that list. It ratchets DOWN
   # as survivors are killed and must never be raised without a reason recorded in
   # the same commit.
+  #
+  # SCOPE 346 -> 358 (#373, #375, #376, #374; final re-pin of plans/issues-371-376).
+  # NOT a budget change: the floor stays 7 and the survivor SET is the same seven
+  # mutants, each only on a new line. The scoped files gained 12 mutants -- all
+  # CAUGHT or UNVIABLE (context.rs 134 -> 144: #375's lifecycle pre-flight and
+  # #374's tenant-trust resolver; store.rs 138 -> 140: #373's `has_lifecycle_state`;
+  # log.rs 65 and receipt.rs 9 unchanged) -- and shifted every cited line:
+  # context.rs :81:9 -> :83:9, :82:9 -> :84:9, :600:39 -> :609:39, :1206:16 ->
+  # :1222:16 (timeout :1260:12 -> :1258:12); log.rs :131:18 -> :132:18; store.rs
+  # :994:35 -> :1007:35, :1317:35 -> :1330:35. Measured by run 37222567772 (main
+  # 27f9875): 358 / 225 caught / 7 missed / 125 unviable / 1 timeout, `end_time`
+  # present, 108.7 min. Its outcomes.json is committed unchanged as the new
+  # MUTANTS_PRIOR_LEDGER, and this list is its `missed.txt` verbatim. Later edits
+  # to the four scoped files were comment-only and line-neutral (verified: the
+  # `cargo mutants --list` names equal the run's `mutants.json` names).
   #
   # SCOPE 351 -> 346 (#341, re-pinned by #371). NOT a budget change: the floor
   # stays 7 and the survivor SET is the same seven mutants. #341 removed code
@@ -133,20 +148,20 @@ env:
   # Verified by reading each line, not by arithmetic. Cited as `file:line` plus the
   # expression, so the next reader can re-locate them after the next shift.
   #
-  #   handlers/log.rs:131:18   `== -> !=` in root_for. Carried unchanged from
+  #   handlers/log.rs:132:18   `== -> !=` in root_for. Carried unchanged from
   #     U-502 and NOT re-argued here: it guards only `log.cache_root(...)`,
   #     `root_for` returns the same root either way, and append-only makes any
   #     (size -> root) pair immutable. Only WHICH sizes get cached changes.
-  #   handlers/context.rs:1206:16  `delete !` on `if !matches.is_empty()` in
-  #     run_search_with_refill (was cited :1223:16, then :1238:16; #341 moved
-  #     it). H-H-w moved the tenant predicate into the search SQL, so every row
+  #   handlers/context.rs:1222:16  `delete !` on `if !matches.is_empty()` in
+  #     run_search_with_refill (was cited :1223:16, :1238:16, then :1206:16; #341
+  #     and #375 moved it). H-H-w moved the tenant predicate into the search SQL, so every row
   #     reaching this retain already belongs to the caller's tenant and skipping
   #     the block removes nothing.
   #     Positive evidence, not inference: the retain's OWN comparison `t == tenant`
   #     was CAUGHT at the same site. Two mutations at one site with opposite
   #     verdicts is the signature of a redundant guard.
-  #   handlers/context.rs:81:9  delete match arm `"public"` in parse_visibility
-  #   handlers/context.rs:82:9  delete match arm `"restricted"` in parse_visibility
+  #   handlers/context.rs:83:9  delete match arm `"public"` in parse_visibility
+  #   handlers/context.rs:84:9  delete match arm `"restricted"` in parse_visibility
   #     Measured, not assumed: search returns only PUBLIC rows to every requester
   #     -- probed with an anonymous caller, an audience member, and the row's own
   #     producer, all of which see only the public row. So `?visibility=public`
@@ -157,8 +172,9 @@ env:
   #     yield the visible public rows. These two become observable the moment
   #     search starts serving restricted rows to entitled requesters, and at that
   #     point they are coverage gaps and this budget must drop to 3.
-  #   handlers/context.rs:600:39  `>` -> `>=` on `rec.expires_at > Utc::now()` in
-  #     publish_inner (was cited :627:39, then :642:39; #341 moved it). The two
+  #   handlers/context.rs:609:39  `>` -> `>=` on `rec.expires_at > Utc::now()` in
+  #     publish_inner (was cited :627:39, :642:39, then :600:39; #341 and #374
+  #     moved it). The two
   #     differ only when a stored expiry equals the clock to the nanosecond.
   #     `expired_idempotency_key_is_not_matched` already pins the behaviour either side of the boundary; the boundary itself
   #     is not reachable deterministically, and a test that waited for it would be
@@ -169,8 +185,8 @@ env:
   # become real coverage gaps if search ever serves restricted rows, and at that
   # point those five drop to 3.
   #
-  # CURRENT FLOOR: 7, at the 346 scope (was 7 at 351; #341 removed only caught
-  # mutants). See the 5 -> 7 entry above for why the
+  # CURRENT FLOOR: 7, at the 358 scope (was 7 at 346 and 351; #341 removed only
+  # caught mutants, #373-#376 added only caught/unviable ones). See the 5 -> 7 entry above for why the
   # two store.rs additions are carried rather than killed.
   #
   # MEASURED at 8768b07 over six verified shards, not one run: 213 total / 134
@@ -197,26 +213,26 @@ env:
   #
   # Granularity is site + REPLACEMENT, not site: one site can hold several
   # mutants with different verdicts, and this scope contains that case --
-  # `run_search_with_refill` has a `delete !` that is MISSED (:1206:16) and
-  # another that TIMES OUT (:1260:12). A site-level list cannot tell them apart.
+  # `run_search_with_refill` has a `delete !` that is MISSED (:1222:16) and
+  # another that TIMES OUT (:1258:12). A site-level list cannot tell them apart.
   #
   # FORMAT: one `cargo mutants --list` line per survivor, verbatim. `#` lines and
   # blank lines are stripped before comparison, so each identifier carries its
   # reason HERE rather than only in the prose above -- an identifier and its
   # justification that live in two places drift apart, and the drift is invisible.
   #
-  # MEASURED, not transcribed: the list below is run 36417581090's `missed.txt`
-  # verbatim -- a full single 346-mutant run of THIS workflow (so the
+  # MEASURED, not transcribed: the list below is run 37222567772's `missed.txt`
+  # verbatim -- a full single 358-mutant run of THIS workflow (so the
   # CI-equivalent environment: ACDP_SPEC_DIR at the pinned spec revision and
   # ACDP_REQUIRE_CONFORMANCE=1 -- without those, fixture-replay tests skip and
   # the survivor set comes out wider than CI's).
   #
-  # Result 346 / 214 caught / 7 missed / 124 unviable / 1 timeout, `end_time`
+  # Result 358 / 225 caught / 7 missed / 125 unviable / 1 timeout, `end_time`
   # present, and `missed.txt`'s line count cross-checked against outcomes.json's
   # `missed`. The run is committed at
-  # docs/mutation-runs/run36417581090-scope-346-outcomes.json and is what
-  # MUTANTS_PRIOR_LEDGER points at. (Previously u552-union-scope-351, a 351-scope
-  # run; SUPERSEDED, see docs/mutation-runs/README.md.)
+  # docs/mutation-runs/run37222567772-scope-358-outcomes.json and is what
+  # MUTANTS_PRIOR_LEDGER points at. (Previously run36417581090-scope-346 and
+  # u552-union-scope-351; SUPERSEDED, see docs/mutation-runs/README.md.)
   # Re-measure with: cargo mutants -j1 && cat mutants.out/missed.txt
   #
   # HOW MANY TESTS THE SPEC ENV GOVERNS -- re-measured at c41bf14 by U-552:
@@ -227,17 +243,17 @@ env:
   # with ACDP_SPEC_DIR UNSET -- 63 of 87 fail with the require-mode panic; with it
   # set to the pinned spec root, 87 pass and 0 skip.
   MUTANTS_SURVIVORS: |
-    # log.rs:131:18 -- guards only `log.cache_root(...)`; `root_for` returns the
+    # log.rs:132:18 -- guards only `log.cache_root(...)`; `root_for` returns the
     # same root either way and append-only makes any (size -> root) pair
     # immutable. Only WHICH sizes get cached changes.
-    crates/acdp-registry-core/src/handlers/log.rs:131:18: replace == with != in root_for
-    # context.rs:1206:16 -- every row reaching this retain already belongs to the
+    crates/acdp-registry-core/src/handlers/log.rs:132:18: replace == with != in root_for
+    # context.rs:1222:16 -- every row reaching this retain already belongs to the
     # caller's tenant (H-H-w moved the predicate into the SQL), so skipping the
     # block removes nothing. The retain's OWN `t == tenant` was CAUGHT at the
     # same site: two mutations, opposite verdicts, the signature of a redundant
-    # guard. Its sibling `delete !` at :1260:12 is the budgeted TIMEOUT.
-    crates/acdp-registry-core/src/handlers/context.rs:1206:16: delete ! in run_search_with_refill
-    # context.rs:81:9 and :82:9 -- search returns only PUBLIC rows to every
+    # guard. Its sibling `delete !` at :1258:12 is the budgeted TIMEOUT.
+    crates/acdp-registry-core/src/handlers/context.rs:1222:16: delete ! in run_search_with_refill
+    # context.rs:83:9 and :84:9 -- search returns only PUBLIC rows to every
     # requester (probed with an anonymous caller, an audience member and the
     # row's own producer), so `?visibility=public` selects everything already
     # visible and `?visibility=restricted` selects nothing, for anyone. The same
@@ -245,18 +261,18 @@ env:
     # COVERAGE GAPS the moment search serves restricted rows to entitled
     # requesters; at that point delete these two lines rather than raising a
     # number, and the set check will require exactly that.
-    crates/acdp-registry-core/src/handlers/context.rs:81:9: delete match arm "public" in parse_visibility
-    crates/acdp-registry-core/src/handlers/context.rs:82:9: delete match arm "restricted" in parse_visibility
-    # context.rs:600:39 -- `>` vs `>=` differ only when a stored expiry equals the
+    crates/acdp-registry-core/src/handlers/context.rs:83:9: delete match arm "public" in parse_visibility
+    crates/acdp-registry-core/src/handlers/context.rs:84:9: delete match arm "restricted" in parse_visibility
+    # context.rs:609:39 -- `>` vs `>=` differ only when a stored expiry equals the
     # clock to the nanosecond. `expired_idempotency_key_is_not_matched` already
     # pins behaviour either side of the boundary; the boundary itself is not
     # reachable deterministically and a test that waited for it would be a flake
     # generator.
-    crates/acdp-registry-core/src/handlers/context.rs:600:39: replace > with >= in publish_inner
+    crates/acdp-registry-core/src/handlers/context.rs:609:39: replace > with >= in publish_inner
     # ----- sqlite/src/store.rs, admitted by U-552 (scope 213 -> 351) -----
-    # store.rs:994:35 -- EQUIVALENT, and by a stronger argument than the
-    # millisecond-boundary one used for context.rs:600:39 above. Step 1 first runs
-    # `DELETE ... WHERE expires_at_ms <= ?` bound to `now` (store.rs:963-966), so a
+    # store.rs:1007:35 -- EQUIVALENT, and by a stronger argument than the
+    # millisecond-boundary one used for context.rs:609:39 above. Step 1 first runs
+    # `DELETE ... WHERE expires_at_ms <= ?` bound to `now` (store.rs:976-979), so a
     # row that SURVIVES that delete necessarily has `expires_at_ms >= now_ms + 1`
     # and `expires_at > now` is unconditionally TRUE for it. `>=` is therefore true
     # on exactly the same inputs -- no clock-resolution claim needed, because the
@@ -264,18 +280,18 @@ env:
     # same site, `> with <` and `> with ==`, were EQUIVALENT-labelled by U-544 and
     # KILLED by U-552 once probed with a SUPERSEDING request, so this entry is what
     # is left after that correction rather than an inherited assumption.
-    crates/acdp-registry-sqlite/src/store.rs:994:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
-    # store.rs:1317:35 -- UNREACHABLE BY DESIGN, not a coverage gap. It sits inside
-    # the `if inserted == 0` branch (store.rs:1284), reached only when a concurrent
+    crates/acdp-registry-sqlite/src/store.rs:1007:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
+    # store.rs:1330:35 -- UNREACHABLE BY DESIGN, not a coverage gap. It sits inside
+    # the `if inserted == 0` branch (store.rs:1297), reached only when a concurrent
     # publish claims the same idempotency key between this transaction's step-1
-    # SELECT and its step-7 INSERT. `BEGIN IMMEDIATE` (store.rs:954) takes the write
+    # SELECT and its step-7 INSERT. `BEGIN IMMEDIATE` (store.rs:967) takes the write
     # lock for the whole transaction, so no other connection can commit in that
     # window: every loser instead finds the record at step 1 and is refused there.
     # The deterministic route is closed too -- step 1 DELETEs an expired record for
     # the key precisely so the claim cannot collide with a stale row.
     # WHAT CARRIES THIS LABEL is the `BEGIN IMMEDIATE` argument above, and nothing
     # else. A corroborating observation, offered as corroboration and NOT as proof:
-    # the sibling GUARD mutant at :1284:29 is CAUGHT while this BODY mutant is
+    # the sibling GUARD mutant at :1297:29 is CAUGHT while this BODY mutant is
     # MISSED (both verdicts are in the committed ledger). That pattern is CONSISTENT
     # with a branch that never executes -- but it does not discriminate, because it
     # is equally consistent with a branch that does execute and whose flip nothing
@@ -288,11 +304,12 @@ env:
     # The in-code comment at this site used to contradict this label (it read as
     # asserting the branch IS reachable); U-574 (2ed7499) corrected it to match
     # this UNREACHABLE-BY-DESIGN argument, and its rewrite shifted the `!=`
-    # comparison from :1306:35 to :1317:35 without content change. Line number
+    # comparison from :1306:35 to :1317:35 without content change (now :1330:35, #373-#375). Line number
     # updated here to match; the reconciliation itself is done, not pending.
     # The LEDGER was not updated with it, though: u552 still said :1306:35 until
-    # #371 committed run 36417581090's report, which records :1317:35.
-    crates/acdp-registry-sqlite/src/store.rs:1317:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
+    # #371 committed run 36417581090's report, which records :1317:35; run 37222567772
+    # (scope 358) records :1330:35 and :1007:35.
+    crates/acdp-registry-sqlite/src/store.rs:1330:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
 
   # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
   # unconditional `timeout != 0` until U-504, on the stated reasoning that "a
@@ -300,14 +317,15 @@ env:
   # That reasoning is about SLOW TESTS and it still holds. It does not cover a
   # mutant that provably cannot terminate, and the new scope contains exactly one:
   #
-  #   handlers/context.rs:1260:12  `delete !` on `if !should_refill { break; }` in
+  #   handlers/context.rs:1258:12  `delete !` on `if !should_refill { break; }` in
   #     run_search_with_refill (was cited :1277:12, then :1292:12; #295 shifted it
   #     +15 and #341 -32). Inverting it breaks when the loop SHOULD refill and loops forever when it should not
   #     -- which is every unfiltered search in the suite. Non-termination cannot be
   #     converted into a fast assertion failure by any test: the binary hangs and
   #     the verdict is TIMEOUT. Re-measured at 8768b07 in shard 4/8: still exactly
-  #     one timeout, still this mutant, 300s. Run 36417581090 (346 scope): still
-  #     exactly one, this mutant. The sibling `delete !` at :1206:16 (was
+  #     one timeout, still this mutant, 300s. Runs 36417581090 (346 scope) and
+  #     37222567772 (358 scope, now :1258:12): still exactly one, this mutant. The
+  #     sibling `delete !` at :1222:16 (was :1206:16, then
   #     :1223:16, then :1238:16) is the MISSED equivalent above -- two `delete !` mutants in
   #     one function with different verdicts, which is why both are cited by
   #     expression and not by line alone.
@@ -336,6 +354,7 @@ jobs:
     #   35038109840  213 mutants  success    71.6 min
     #   35457316722  351 mutants  CANCELLED  90.4 min   <- hit the 90 cap
     #   36417581090  346 mutants  completed 143.7 min   <- 36 min under 180
+    #   37222567772  358 mutants  completed 108.7 min   <- 71 min under 180
     #     (cargo-mutants' own start/end time in outcomes.json; the job failed
     #     only because the ratchet's pins were stale, see #371)
     #
@@ -357,6 +376,9 @@ jobs:
     # measurement with a shelf life, not a constant. Re-derived at 346 (#371):
     # 143.7 min against 180 leaves 20% headroom, about the runner variance the
     # two 213 runs showed, so the cap stands -- but it is tight, not roomy.
+    # Re-derived at 358: 108.7 min (cargo-mutants' own clock, +~6 s setup) leaves
+    # 40% headroom, the runner was faster than for the 346 run; the cap stands.
+    # Run-to-run spread on this scope is 109-144 min, so do not tighten it.
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
