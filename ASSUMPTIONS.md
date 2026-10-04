@@ -4871,6 +4871,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Not tested locally:** the Postgres override and its `store_contract.rs` test (run-unique schema; fresh false, retracted true, republished true, flag-only true). No local Postgres. It compiles under clippy, and CI's `cargo test (postgres)` step runs `cargo test -p acdp-registry-pg` with `ACDP_REGISTRY_TEST_PG_URL` and `ACDP_REQUIRE_PG=1`, so it cannot silently skip there. The Postgres pre-upgrade SQL in UPGRADING.md is the probe's exact text.
 - **Alternatives:** inherent methods in a new trailing impl block (rejected, see above. Its only advantage was no pin shift, which REVISION 1 makes moot). A `purge_on_disable` config (rejected: it hides a one-way door in a flag). A runtime re-check (rejected: the flag only changes at restart).
 - **Blast radius if wrong:** a deployment in the old deviation state stops booting on upgrade (Railway keeps the previous deploy, compose exits, mixed PG fleets must agree on `[lifecycle]`). If (b) is too wide (for example a stray `lifecycle_events` row for a deleted context), the operator must re-enable or purge.
+- **Status:** UNCONFIRMED
 
 ## #374 Phase 1 — `X-Tenant-Id` is honoured only from a declared boundary
 - **Plan:** Plan: issues-371-376 (Phase 6, #374 Phase 1; BINDING REVISION 6)
