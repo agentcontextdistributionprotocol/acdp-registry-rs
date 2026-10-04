@@ -4274,7 +4274,7 @@ that owns the change.
 **Why retire it.** (1) It is still read by nothing: lineage reads, `current`,
 `first_version_ctx_id` and the admin audit all derive from `contexts` (re-verified; the only
 `lineages` references in `crates/` are the two per-publish upserts, the two `001_initial.sql`
-`CREATE TABLE`s, and the `pg_integration.rs` TRUNCATE). (2) Its `first_version_ctx` and
+`CREATE TABLE`s, the `pg_integration.rs` TRUNCATE, and a `pg/tests/store_contract.rs` comment that 5b updates). (2) Its `first_version_ctx` and
 `latest_ctx` columns are foreign keys onto `contexts(ctx_id)` **without `ON DELETE`**, so it
 blocks any future hard delete of a context — the PG store-contract test already has to restore a
 row instead of deleting it for exactly this reason. (3) A table named "lineage head index" that
@@ -4307,3 +4307,8 @@ advisory lock is untouched.
 **Rejected:** single-release drop (breaks N-1 on PG); keep-and-close (keeps the FK that blocks hard
 delete). If the maintainer prefers keep-and-close (plan Q2), revert 5a and record "a hard-delete
 feature" as the re-open trigger; until 5b ships nothing is one-way.
+
+**5b follow-up note (B8):** when `lineages` is dropped, also delete (or flip to "table is gone") the
+two `publishing_and_superseding_leave_the_dormant_lineages_table_untouched` tests in
+`acdp-registry-sqlite/tests/store_contract.rs` and `acdp-registry-pg/tests/store_contract.rs`, which
+assert the table exists, and update the `store_contract.rs:1790` comment.
