@@ -297,8 +297,11 @@ Gates a release PR must pass:
   therefore **blocks**, and in `docker.yml`, which **reports only** while
   `docker (build + smoke)` is advisory (that copy also covers the tag push, which
   `ci.yml` never sees).
-- **Railway image tags.** A minor version bump fails `conformance_gate` until
-  `docker/RAILWAY.md` names the new major.minor tag.
+- **Railway image tags.** `conformance_gate` requires `docker/RAILWAY.md` to name the
+  major.minor of the newest `## X.Y.Z` section of `docs/UPGRADING.md` (or the workspace
+  version, if newer). For a breaking release, merge the UPGRADING section and the
+  RAILWAY.md tags on `main` *before* the release PR: release-plz closes and reopens a
+  release PR that carries a human commit, so the page cannot be fixed on its branch.
 
 ## CI behaviour worth knowing
 

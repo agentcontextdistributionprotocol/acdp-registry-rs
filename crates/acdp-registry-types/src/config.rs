@@ -467,9 +467,10 @@ pub struct AuthConfig {
     /// with no tenant filter (gated only by visibility). When `true`, a
     /// multi-tenant deployment is hardened:
     ///   * a request that resolves to no tenant is rejected (default-deny);
-    ///   * when a valid bearer is present, the tenant is taken ONLY from the
-    ///     JWT `tenant` claim — a token the issuer did not bind to a tenant
-    ///     can no longer assert one via the spoofable `X-Tenant-Id` header.
+    ///   * when a valid bearer is present, the tenant comes from the JWT
+    ///     `tenant` claim or the agent's binding; a token the issuer did not
+    ///     bind to a tenant can assert one via `X-Tenant-Id` only from a
+    ///     declared boundary (see `tenant_header_trust`), else it is a 403.
     #[serde(default)]
     pub require_tenant: bool,
 
@@ -530,9 +531,9 @@ impl AuthConfig {
     }
 
     /// The `tenant_header_trust` mode in effect. An explicit value wins; when
-    /// the key is absent the 0.2.x default applies: `none` under
+    /// the key is absent the 0.3.x default applies: `none` under
     /// `require_tenant = true`, otherwise `any_peer` (the pre-#374 behaviour,
-    /// which startup warns about and which becomes `none` in 0.3.0).
+    /// which startup warns about and which becomes `none` in 0.4.0).
     ///
     /// Resolved here rather than written back by startup validation so every
     /// consumer — the binary, embedders calling `serve_with_store`, and test

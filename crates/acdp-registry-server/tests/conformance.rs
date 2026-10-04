@@ -16758,7 +16758,7 @@ fn read_auth_method_ids_satisfy_the_pinned_schema() {
          READ_AUTH_METHOD_* in main.rs against it"
     );
 
-    // Synthetic negative: the hyphenated id that shipped until 0.2.1 must fail,
+    // Synthetic negative: the hyphenated id that shipped through 0.2.0 must fail,
     // or the matcher accepts everything and the loop below proves nothing.
     assert!(read_auth_method_violation(items, "bearer-jwt").is_some());
     assert!(read_auth_method_violation(items, "x").is_some());

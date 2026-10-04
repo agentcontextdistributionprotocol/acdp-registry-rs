@@ -114,7 +114,7 @@ fn config(playground: bool) -> RegistryConfig {
     // reads a MAY), so opt in explicitly inside the test harness.
     //
     // #374: `tenant_header_trust` is deliberately left unset, so each test gets
-    // the 0.2.x default for its own mode: `any_peer` for the lax/auth-off tests
+    // the 0.3.x default for its own mode: `any_peer` for the lax/auth-off tests
     // (which partition by X-Tenant-Id, and keep doing so), `none` for the
     // strict ones. Pinning `any_peer` here would have leaked into every strict
     // test that later flips `require_tenant`, turning the header they spoof
@@ -1238,7 +1238,7 @@ async fn trusted_proxies_mode_trusts_only_the_declared_gateway() {
 
 /// #374: the untrusted-header rejection covers the write half (#2's open
 /// side) and auth-off registries too. An unbound producer's header in lax
-/// mode lands under `any_peer` (today's behaviour, the 0.2.x lax default) and
+/// mode lands under `any_peer` (today's behaviour, the 0.3.x lax default) and
 /// is refused under `none`; auth-off + `none` refuses the header as well.
 #[tokio::test]
 async fn untrusted_header_is_refused_on_lax_and_auth_off_writes() {

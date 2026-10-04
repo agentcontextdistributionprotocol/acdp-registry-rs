@@ -61,7 +61,7 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// peer is always used as the client IP.
     pub trusted_proxies: TrustedProxies,
     /// #374: the `auth.tenant_header_trust` mode in effect (the config value,
-    /// or the 0.2.x default when the key is absent).
+    /// or the 0.3.x default when the key is absent).
     pub tenant_header_trust: TenantHeaderTrust,
     /// #374: the same `[rate_limit] trusted_proxies` list, parsed STRICTLY for
     /// the tenant-header trust test. The limiter's copy above is lossy (a bad

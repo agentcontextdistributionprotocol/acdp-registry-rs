@@ -99,7 +99,7 @@ require_tenant = false
 #                       gateway must strip or overwrite the client's header
 #   "any_peer"        - from every client (a boundary the registry can't see)
 # Unset: "none" when require_tenant = true, otherwise "any_peer" with a startup
-# warning — the default becomes "none" for every mode in 0.3.0, so set it.
+# warning — the default becomes "none" for every mode in 0.4.0, so set it.
 # See docs/MULTI-TENANCY.md.
 #   tenant_header_trust = "none"
 # Bearer tokens accepted by every /admin/* route (require_admin_bearer).

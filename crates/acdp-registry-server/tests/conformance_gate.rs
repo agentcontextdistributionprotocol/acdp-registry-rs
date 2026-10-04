@@ -3012,15 +3012,30 @@ fn operator_docs_never_cite_source_by_line_number() {
 
 /// D3 guard (b). `docker/RAILWAY.md` told operators to deploy `:0.1` after
 /// 0.2.0 shipped. Every image version tag on the page must share the
-/// major.minor of the server crate (= the workspace version, which release-plz
-/// tags as `acdp-registry-server/v<version>` and docker.yml turns into the
-/// image tags). Compared at major.minor so a patch release does not redden the
-/// release PR; a minor bump (a breaking 0.x release) must update the page.
+/// major.minor of the release the page is documenting: the newest `## X.Y.Z`
+/// section of `docs/UPGRADING.md`, or the workspace version when that is
+/// newer (see [`expected_mm`]). release-plz owns the version bump and tags
+/// `acdp-registry-server/v<version>`, which docker.yml turns into the image
+/// tags; a breaking 0.x release has its UPGRADING section merged on `main`
+/// before the bump, so the page must already name that minor, and once the
+/// release lands the two coincide. Compared at major.minor so a patch release
+/// does not redden the release PR.
 #[test]
 fn railway_image_tags_track_the_workspace_version() {
     let root = repo_root();
     let version = env!("CARGO_PKG_VERSION");
-    let mm: String = version.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+    let upgrading =
+        std::fs::read_to_string(root.join("docs/UPGRADING.md")).expect("read UPGRADING.md");
+    let headings = upgrading_versions(&upgrading);
+    assert!(
+        !headings.is_empty(),
+        "no `## X.Y.Z` section found in docs/UPGRADING.md; the heading scanner or the page changed shape"
+    );
+    let mm = expected_mm(version, &upgrading);
+    assert!(
+        headings.iter().any(|h| format!("{}.{}", h.0, h.1) == mm),
+        "expected major.minor {mm} (workspace {version}) is not an UPGRADING section"
+    );
     let doc = std::fs::read_to_string(root.join("docker/RAILWAY.md")).expect("read RAILWAY.md");
 
     let tags = railway_version_tags(&doc);
@@ -3036,9 +3051,10 @@ fn railway_image_tags_track_the_workspace_version() {
         .collect();
     assert!(
         stale.is_empty(),
-        "docker/RAILWAY.md names image tags {stale:?}, but the server is {version}: \
-         operators following the page would deploy an old minor. Update every \
-         version tag on the page to {mm} / {mm}.<patch>."
+        "docker/RAILWAY.md names image tags {stale:?}, but the release being documented is \
+         {mm} (workspace {version}, newest docs/UPGRADING.md section): operators following \
+         the page would deploy an old minor. Update every version tag on the page to \
+         {mm} / {mm}.<patch>."
     );
     assert!(
         doc.contains(&format!("acdp-registry:{mm}` — a")),
@@ -3051,6 +3067,76 @@ fn railway_image_tags_track_the_workspace_version() {
         railway_version_tags("img `acdp-registry:0.1` or (`:0.1.3`) and `:latest`"),
         vec!["0.1".to_string(), "0.1.3".to_string()]
     );
+}
+
+/// `## X.Y.Z` section headings of an UPGRADING page as numeric triples. Only
+/// level-2 headings count (`###` does not), trailing text is allowed
+/// (`## 0.1.3 and earlier`) and a pre-release suffix is ignored (`0.3.0-rc.1`
+/// reads as 0.3.0).
+fn upgrading_versions(text: &str) -> Vec<(u64, u64, u64)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("## ") else {
+            continue;
+        };
+        let head = rest.split(|c: char| c.is_whitespace()).next().unwrap_or("");
+        let mut parts = head.splitn(3, '.');
+        let (Some(a), Some(b), Some(c)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let lead = |p: &str| -> Option<u64> {
+            let digits: String = p.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse().ok()
+        };
+        if let (Ok(a), Ok(b), Some(c)) = (a.parse::<u64>(), b.parse::<u64>(), lead(c)) {
+            out.push((a, b, c));
+        }
+    }
+    out
+}
+
+/// The major.minor `docker/RAILWAY.md` must name: the newest of the workspace
+/// version and every `## X.Y.Z` heading in the UPGRADING text, compared
+/// numerically (0.10 is newer than 0.9).
+fn expected_mm(workspace: &str, upgrading_text: &str) -> String {
+    let mut best: Option<(u64, u64)> = None;
+    let mut parts = workspace.splitn(3, '.');
+    if let (Some(a), Some(b)) = (parts.next(), parts.next()) {
+        if let (Ok(a), Ok(b)) = (a.parse::<u64>(), b.parse::<u64>()) {
+            best = Some((a, b));
+        }
+    }
+    for (a, b, _) in upgrading_versions(upgrading_text) {
+        if best.is_none_or(|cur| (a, b) > cur) {
+            best = Some((a, b));
+        }
+    }
+    let (a, b) = best.expect("no workspace version or UPGRADING heading to compare");
+    format!("{a}.{b}")
+}
+
+#[test]
+fn expected_mm_follows_the_newest_of_workspace_and_upgrading() {
+    // A pending minor: UPGRADING already documents 0.3.0, the workspace is 0.2.0.
+    assert_eq!(
+        expected_mm("0.2.0", "# Upgrading\n## 0.3.0\nx\n## 0.2.0\ny\n"),
+        "0.3"
+    );
+    // Released: they coincide.
+    assert_eq!(expected_mm("0.3.0", "## 0.3.0\n## 0.2.0\n"), "0.3");
+    // An older heading never pulls the page backwards.
+    assert_eq!(expected_mm("0.3.0", "## 0.2.0\n## 0.1.0\n"), "0.3");
+    // Numeric, not lexical: 0.10 is newer than 0.9; the first heading is not special.
+    assert_eq!(
+        expected_mm("0.9.0", "## 0.9.0\n## 0.10.0\n## 0.2.0\n"),
+        "0.10"
+    );
+    // Only level-2 headings count; trailing text and pre-release suffixes are fine.
+    assert_eq!(expected_mm("0.2.0", "### 0.9.0\n## 0.2.0\n"), "0.2");
+    assert_eq!(expected_mm("0.2.0", "## 0.3.0-rc.1 (draft)\n"), "0.3");
+    assert_eq!(expected_mm("0.2.0", "## 0.1.3 and earlier\n"), "0.2");
+    // Non-version headings are ignored.
+    assert!(upgrading_versions("## Overview\n## 1.2\n## v0.3.0\n").is_empty());
 }
 
 /// Version-shaped image tags: `acdp-registry:<v>` and inline `` `:<v>` ``.
