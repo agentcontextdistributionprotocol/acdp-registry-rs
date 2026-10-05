@@ -118,9 +118,13 @@ At that time:
   baseline records `enforce_admins: true` and the `protect-release-tags` tag ruleset with
   `pending_settings: true`.
 
-So `enforce_admins` and the tag ruleset are **not yet applied**, and the
-`advisory_pending` checks are not yet required. The drift job warns about both every
-day by design. The next section is how to apply them.
+**Applied 2026-10-05.** After the v0.3.0 release, the tag ruleset `protect-release-tags`
+(id 24481366, sole bypass actor the `acdp-deps-bot` App 4260407, confirmed as the identity
+that created the v0.3.0 tags) and `enforce_admins` were applied, and `msrv`, `rustdoc`,
+`coverage`, `docker (build + smoke)` and `mutants pins` were promoted to required;
+`cargo-vet` stays advisory. The probe tag creation was rejected with HTTP 422. The baseline
+now has `pending_settings: false`. The runbook below is kept for re-applying after a
+rollback or in a fork.
 
 ## Runbook: enforce_admins, the tag ruleset, and promoting advisory checks
 
