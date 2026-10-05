@@ -43,8 +43,13 @@ LISTING = [
 ]
 
 
-def workflow(scope=5, survivors=(SURVIVOR,), budget=1, ledger="ledger.json"):
+VERSION = "27.1.0"
+
+
+def workflow(scope=5, survivors=(SURVIVOR,), budget=1, ledger="ledger.json", tool=VERSION):
     body = "\n".join("    # reason for the next line\n    " + s for s in survivors)
+    install = ("      - uses: taiki-e/install-action@0000 # v2\n        with:\n"
+               "          tool: cargo-mutants%s\n" % ("" if tool is None else "@" + tool))
     return (
         "name: mutants\n"
         "on:\n  workflow_dispatch:\n"
@@ -53,7 +58,8 @@ def workflow(scope=5, survivors=(SURVIVOR,), budget=1, ledger="ledger.json"):
         '  MUTANTS_PRIOR_LEDGER: "%s"\n'
         "  MUTANTS_SURVIVORS: |\n%s\n\n"
         '  MUTANTS_TIMEOUT_BUDGET: "%d"\n'
-        "jobs: {}\n" % (scope, ledger, body or "    # none", budget)
+        "jobs:\n  mutants:\n    runs-on: ubuntu-latest\n    steps:\n%s"
+        % (scope, ledger, body or "    # none", budget, install)
     )
 
 
@@ -70,15 +76,16 @@ def config(rows=((A, 3), (B, 2)), total=5, globs=(A, B)):
     )
 
 
-def ledger(timeouts=(TIMEOUT,)):
+def ledger(timeouts=(TIMEOUT,), version=VERSION):
     outs = [{"scenario": "Baseline", "summary": "Success"}]
     outs += [{"scenario": {"Mutant": {"name": n}}, "summary": "Timeout"} for n in timeouts]
     outs += [{"scenario": {"Mutant": {"name": SURVIVOR}}, "summary": "MissedMutant"}]
-    return {"outcomes": outs}
+    return {"outcomes": outs, "cargo_mutants_version": version}
 
 
 class Base(unittest.TestCase):
-    def run_check(self, *, wf=None, cfg=None, led=None, listing=LISTING, raw_listing=None):
+    def run_check(self, *, wf=None, cfg=None, led=None, listing=LISTING, raw_listing=None,
+                  cmd=None):
         d = tempfile.mkdtemp()
         os.makedirs(os.path.join(d, ".github", "workflows"))
         os.makedirs(os.path.join(d, ".cargo"))
@@ -92,8 +99,11 @@ class Base(unittest.TestCase):
         lp = os.path.join(d, "list.txt")
         with open(lp, "w") as fh:
             fh.write(raw_listing if raw_listing is not None else "\n".join(listing) + "\n")
-        p = subprocess.run([sys.executable, SCRIPT, "--root", d, "check", "--listing", lp],
+        argv = ["check", "--listing", lp] if cmd is None else cmd
+        p = subprocess.run([sys.executable, SCRIPT, "--root", d] + argv,
                            capture_output=True, text=True)
+        if cmd is not None:
+            return p.returncode, p.stdout, p.stderr
         return p.returncode, p.stdout + p.stderr
 
     def run_relevant(self, changed, cfg=None):
@@ -204,6 +214,66 @@ class Falsification(Base):
         self.assertIn("duplicate line", out)
 
 
+class ToolVersion(Base):
+    """The tool that lists must be the tool that measured the ledger (#384 gap 4)."""
+
+    def test_the_install_pin_is_printed(self):
+        rc, out, _ = self.run_check(cmd=["tool-version"])
+        self.assertEqual((rc, out.strip()), (EXIT_OK, VERSION))
+
+    def test_a_version_that_differs_from_the_ledger_is_drift(self):
+        rc, out = self.run_check(wf=workflow(tool="27.2.0"))
+        self.assertEqual(rc, EXIT_DRIFT, out)
+        self.assertIn("installs 27.2.0, but MUTANTS_PRIOR_LEDGER was measured with '27.1.0'", out)
+
+    def test_a_ledger_without_a_version_is_drift(self):
+        rc, out = self.run_check(led=ledger(version=None))
+        self.assertEqual(rc, EXIT_DRIFT, out)
+
+    def test_an_unpinned_install_is_unsound(self):
+        rc, out = self.run_check(wf=workflow(tool=None))
+        self.assertEqual(rc, EXIT_UNSOUND, out)
+        self.assertIn("exactly one `tool: cargo-mutants@<version>`", out)
+        rc, out, err = self.run_check(wf=workflow(tool=None), cmd=["tool-version"])
+        self.assertEqual((rc, out), (EXIT_UNSOUND, ""))
+
+
+class FalsifyTarget(Base):
+    """The falsification step shifts a file that HOLDS a cited line, chosen from
+    the pins rather than hard-coded, so a re-pin cannot make it red spuriously."""
+
+    def target(self, **kw):
+        rc, out, err = self.run_check(cmd=["falsify-target"], **kw)
+        self.assertEqual(rc, EXIT_OK, out + err)
+        return out.strip()
+
+    def test_a_file_with_a_cited_survivor(self):
+        self.assertEqual(self.target(), A)
+
+    def test_the_timeout_alone_is_enough(self):
+        self.assertEqual(self.target(wf=workflow(survivors=())), A)
+
+    def test_the_first_cited_file_in_sorted_order(self):
+        b_surv = "%s:20:9: replace > with >= in g" % B
+        self.assertEqual(self.target(wf=workflow(survivors=(b_surv,)), led=ledger(timeouts=())), B)
+
+    def test_nothing_cited_prints_nothing(self):
+        self.assertEqual(self.target(wf=workflow(survivors=()), led=ledger(timeouts=())), "")
+
+    def test_a_cited_file_outside_the_scope_is_not_a_target(self):
+        out_of_scope = "crates/x/src/other.rs:1:1: replace f with ()"
+        self.assertEqual(self.target(wf=workflow(survivors=(out_of_scope,)),
+                                     led=ledger(timeouts=())), "")
+
+    def test_shifting_the_target_really_is_drift(self):
+        """Ties the two halves together: whatever falsify-target names, a one-line
+        shift of it must fail `check`."""
+        for wf, led in ((workflow(), ledger()), (workflow(survivors=()), ledger())):
+            target = self.target(wf=wf, led=led)
+            rc, out = self.run_check(wf=wf, led=led, listing=shifted(LISTING, target, 1))
+            self.assertEqual(rc, EXIT_DRIFT, out)
+
+
 class Unsound(Base):
     """Inputs that cannot support a conclusion must never read as a pass."""
 
@@ -278,6 +348,22 @@ class Relevance(Base):
     def test_an_unparseable_config_fails_toward_running(self):
         self.assertEqual(self.run_relevant(["README.md"], cfg="nothing here\n"), "true")
 
+    def test_relevant_does_not_need_pyyaml(self):
+        """A missing PyYAML must not crash the gate: `relevant` never imports it.
+        (The workflow ALSO runs the check on any crash or non-`false` output.)"""
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, ".cargo"))
+        with open(os.path.join(d, ".cargo", "mutants.toml"), "w") as fh:
+            fh.write(config())
+        cp = os.path.join(d, "changed.txt")
+        with open(cp, "w") as fh:
+            fh.write("README.md\n")
+        code = ("import runpy, sys; sys.modules['yaml'] = None; sys.argv = %r; "
+                "runpy.run_path(%r, run_name='__main__')"
+                % ([SCRIPT, "--root", d, "relevant", "--changed-files", cp], SCRIPT))
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual((p.returncode, p.stdout.strip()), (0, "false"), p.stderr)
+
 
 class TheRealRepo(unittest.TestCase):
     """The readers against the COMMITTED files. A reformatted table or env block
@@ -291,10 +377,27 @@ class TheRealRepo(unittest.TestCase):
         self.assertEqual(total, int(env["MUTANTS_EXPECTED_SCOPE"]))
         self.assertEqual(sum(table.values()), total)
         self.assertEqual(sorted(table), sorted(globs))
-        self.assertTrue(cmp.committed_survivors(env["MUTANTS_SURVIVORS"]))
+        # NOT asserted non-empty: an empty MUTANTS_SURVIVORS is legitimate.
+        cmp.committed_survivors(env["MUTANTS_SURVIVORS"])
         with open(os.path.join(REPO, str(env["MUTANTS_PRIOR_LEDGER"]))) as fh:
-            timeouts = cmp.ledger_timeouts(json.load(fh))
+            led = json.load(fh)
+        timeouts = cmp.ledger_timeouts(led)
         self.assertLessEqual(len(timeouts), int(env["MUTANTS_TIMEOUT_BUDGET"]))
+
+    def test_the_cron_installs_the_version_that_measured_the_ledger(self):
+        with open(os.path.join(REPO, cmp.WORKFLOW_REL)) as fh:
+            text = fh.read()
+        env = cmp.read_workflow_env(text)
+        with open(os.path.join(REPO, str(env["MUTANTS_PRIOR_LEDGER"]))) as fh:
+            led = json.load(fh)
+        self.assertEqual(cmp.read_tool_version(text), led.get("cargo_mutants_version"))
+
+    def test_the_pins_job_installs_the_crons_version_not_its_own(self):
+        """Single source of truth: mutants-pins.yml must not carry a version literal."""
+        with open(os.path.join(REPO, ".github/workflows/mutants-pins.yml")) as fh:
+            text = fh.read()
+        self.assertNotIn("cargo-mutants@2", text, "mutants-pins.yml pins its own version")
+        self.assertIn("tool-version", text)
 
     def test_the_relevance_list_names_this_workflow_and_it_exists(self):
         self.assertTrue(os.path.exists(os.path.join(REPO, ".github/workflows/mutants-pins.yml")))

@@ -439,9 +439,14 @@ jobs:
           # one repository while this job checked out another.
           repository: ${{ steps.pin.outputs.repository }}
           ref: ${{ steps.pin.outputs.ref }}
+      # THE ONE PLACE the cargo-mutants version is written. Mutant names and
+      # line:col are this tool's output, so it must be the version that measured
+      # MUTANTS_PRIOR_LEDGER (its `cargo_mutants_version`); check_mutants_pins.py
+      # asserts that on every relevant PR, and mutants-pins.yml installs the
+      # version it reads from THIS line. Bump it only together with a re-pin.
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
 
       # No --file, no --test-workspace, no scope flags: every one of those lives
       # in .cargo/mutants.toml, which cargo-mutants reads automatically. That is

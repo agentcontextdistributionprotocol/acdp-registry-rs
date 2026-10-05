@@ -28,10 +28,21 @@ Subcommands:
   relevant  --changed-files FILE   print `true` if any changed path can move a
             pin, else `false`. Used by the PR job to skip the check (in-step,
             so the job still reports a status) on PRs that cannot affect it.
+            Needs no PyYAML, so a missing module cannot make it crash; the
+            workflow ALSO treats a crash or any output but `false` as `true`.
+  tool-version      print the cargo-mutants version pinned on mutants.yml's
+            install line -- the ONE place it is written. The PR job installs
+            exactly this, and `check` requires it to equal the prior ledger's
+            `cargo_mutants_version` (mutant names are the tool's output).
+  falsify-target    print a scoped file that holds a cited survivor or timeout
+            line, or nothing if none does. The PR job's falsification step
+            shifts that file, so a re-pin that empties one file of cited lines
+            cannot turn the falsification red spuriously.
 
-python3 + PyYAML only (preinstalled on GitHub runners; `pip3 install --user
-pyyaml` on a stock macOS python3). Python 3.9 compatible, so no `tomllib`:
-`examine_globs` is read with a narrow regex that FAILS LOUD if it cannot find it.
+python3 + PyYAML (preinstalled on GitHub runners; `pip3 install --user pyyaml` on
+a stock macOS python3), imported lazily so `relevant` works without it. Python
+3.9 compatible, so no `tomllib`: `examine_globs` is read with a narrow regex that
+FAILS LOUD if it cannot find it.
 """
 
 from __future__ import annotations
@@ -44,8 +55,6 @@ import re
 import sys
 from collections import Counter
 
-import yaml
-
 # Same exit-code convention as classify_removed_survivors.py, for the same
 # reason: an unhandled exception exits 1 and an argparse error exits 2, so those
 # values must never mean "drift found" -- a crashed checker would read as a
@@ -53,6 +62,9 @@ import yaml
 EXIT_OK = 0
 EXIT_DRIFT = 10    # the pins disagree with the listing: an edit is required
 EXIT_UNSOUND = 11  # the inputs cannot support a conclusion (missing/malformed)
+
+# `tool: cargo-mutants@X.Y.Z` -- the install line in mutants.yml.
+TOOL_PIN_RE = re.compile(r"^\s*tool:\s*cargo-mutants@(?P<v>\S+)\s*$", re.M)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 WORKFLOW_REL = ".github/workflows/mutants.yml"
@@ -81,8 +93,10 @@ class Unsound(Exception):
     """The inputs cannot support a conclusion. Never guess past this."""
 
 
-def err(msg: str) -> None:
-    print("::error::" + msg)
+def err(msg: str, file=None) -> None:
+    # Subcommands whose STDOUT is captured by the workflow pass file=sys.stderr,
+    # so an error can never be mistaken for a version or a path.
+    print("::error::" + msg, file=file or sys.stdout)
 
 
 # --------------------------------------------------------------------------
@@ -90,7 +104,18 @@ def err(msg: str) -> None:
 # empty pin compared against an empty listing is a vacuous pass.
 # --------------------------------------------------------------------------
 
+def read_tool_version(text: str) -> str:
+    """The cargo-mutants version pinned on mutants.yml's install line."""
+    found = TOOL_PIN_RE.findall(text)
+    if len(found) != 1:
+        raise Unsound("expected exactly one `tool: cargo-mutants@<version>` install line in"
+                      " %s, found %d -- an unpinned install lets the cron list mutants"
+                      " differently from the ledger it is compared with" % (WORKFLOW_REL, len(found)))
+    return found[0]
+
+
 def read_workflow_env(text: str) -> dict:
+    import yaml  # lazy: `relevant` must work where PyYAML is missing
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as e:
@@ -191,8 +216,14 @@ def strip_pos(name: str) -> tuple:
 
 
 def find_drift(env: dict, globs: list, table: dict, table_total: int,
-               listing: list, timeouts: list) -> list:
+               listing: list, timeouts: list, tool_version=None, ledger_version=None) -> list:
     findings = []
+    # (0) The tool that lists must be the tool that measured the ledger.
+    if tool_version is not None and tool_version != ledger_version:
+        findings.append(
+            "cargo-mutants version: %s installs %s, but MUTANTS_PRIOR_LEDGER was measured with"
+            " %r. Names and line:col are the tool's output; bump the version only together"
+            " with a re-pin from a run of the new version." % (WORKFLOW_REL, tool_version, ledger_version))
     expected = int(str(env["MUTANTS_EXPECTED_SCOPE"]).strip())
     listed = set(listing)
     split = Counter(NAME_RE.match(ln).group("file") for ln in listing)
@@ -266,20 +297,13 @@ REMEDY = (
 
 
 def cmd_check(args) -> int:
-    root = args.root
     try:
-        with open(os.path.join(root, args.workflow)) as fh:
-            env = read_workflow_env(fh.read())
-        with open(os.path.join(root, args.config)) as fh:
-            globs, table, table_total = read_config(fh.read())
+        wf_text, env, globs, ledger = _load_pins(args.root, args.workflow, args.config)
+        tool_version = read_tool_version(wf_text)
+        with open(os.path.join(args.root, args.config)) as fh:
+            _, table, table_total = read_config(fh.read())
         with open(args.listing) as fh:
             listing = read_listing(fh.read())
-        ledger_path = os.path.join(root, str(env["MUTANTS_PRIOR_LEDGER"]).strip())
-        try:
-            with open(ledger_path) as fh:
-                ledger = json.load(fh)
-        except (OSError, ValueError) as e:
-            raise Unsound("MUTANTS_PRIOR_LEDGER (%s) is unreadable: %s" % (ledger_path, e))
         timeouts = ledger_timeouts(ledger)
     except OSError as e:
         err("cannot read an input: %s" % e)
@@ -288,7 +312,8 @@ def cmd_check(args) -> int:
         err(str(e))
         return EXIT_UNSOUND
 
-    findings = find_drift(env, globs, table, table_total, listing, timeouts)
+    findings = find_drift(env, globs, table, table_total, listing, timeouts,
+                          tool_version, ledger.get("cargo_mutants_version"))
     print("listed=%d expected=%s survivors=%d timeouts=%d files=%d"
           % (len(listing), env["MUTANTS_EXPECTED_SCOPE"],
              len(committed_survivors(env["MUTANTS_SURVIVORS"])), len(timeouts), len(table)))
@@ -300,6 +325,54 @@ def cmd_check(args) -> int:
         err(f)
     err(REMEDY)
     return EXIT_DRIFT
+
+
+def cited_files(env: dict, timeouts: list, globs: list) -> list:
+    """Scoped files holding at least one cited survivor or timeout line, sorted.
+    Shifting any of them by a line must move a cited name, i.e. must be drift."""
+    out = set()
+    for n in committed_survivors(env["MUTANTS_SURVIVORS"]) + list(timeouts):
+        m = NAME_RE.match(n)
+        if m and any(fnmatch.fnmatchcase(m.group("file"), g) for g in globs):
+            out.add(m.group("file"))
+    return sorted(out)
+
+
+def _load_pins(root, workflow, config):
+    with open(os.path.join(root, workflow)) as fh:
+        wf_text = fh.read()
+    env = read_workflow_env(wf_text)
+    with open(os.path.join(root, config)) as fh:
+        globs, _, _ = read_config(fh.read())
+    ledger_path = os.path.join(root, str(env["MUTANTS_PRIOR_LEDGER"]).strip())
+    try:
+        with open(ledger_path) as fh:
+            ledger = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise Unsound("MUTANTS_PRIOR_LEDGER (%s) is unreadable: %s" % (ledger_path, e))
+    return wf_text, env, globs, ledger
+
+
+def cmd_tool_version(args) -> int:
+    try:
+        with open(os.path.join(args.root, args.workflow)) as fh:
+            print(read_tool_version(fh.read()))
+    except (OSError, Unsound) as e:
+        err(str(e), sys.stderr)
+        return EXIT_UNSOUND
+    return EXIT_OK
+
+
+def cmd_falsify_target(args) -> int:
+    try:
+        _, env, globs, ledger = _load_pins(args.root, args.workflow, args.config)
+        files = cited_files(env, ledger_timeouts(ledger), globs)
+    except (OSError, Unsound) as e:
+        err(str(e), sys.stderr)
+        return EXIT_UNSOUND
+    if files:
+        print(files[0])
+    return EXIT_OK
 
 
 def is_relevant(changed: list, globs: list) -> bool:
@@ -334,8 +407,11 @@ def main(argv=None) -> int:
     c.add_argument("--listing", required=True, help="saved `cargo mutants --list` output")
     r = sub.add_parser("relevant")
     r.add_argument("--changed-files", required=True, help="one changed path per line")
+    sub.add_parser("tool-version")
+    sub.add_parser("falsify-target")
     args = p.parse_args(argv)
-    return cmd_check(args) if args.cmd == "check" else cmd_relevant(args)
+    return {"check": cmd_check, "relevant": cmd_relevant, "tool-version": cmd_tool_version,
+            "falsify-target": cmd_falsify_target}[args.cmd](args)
 
 
 if __name__ == "__main__":

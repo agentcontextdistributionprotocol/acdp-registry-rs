@@ -39,10 +39,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The version that measured MUTANTS_PRIOR_LEDGER (its `cargo_mutants_version`).
-  # Mutant names and line:col are the tool's output, so a different version can
-  # list differently; bump this together with a re-pin, never alone.
-  CARGO_MUTANTS_VERSION: "27.1.0"
 
 jobs:
   pins:
@@ -56,8 +52,12 @@ jobs:
         with:
           fetch-depth: 2
 
-      # FAILS TOWARD RUNNING: a push to main always runs, and a diff that cannot
-      # be computed leaves no file, which the script answers with `true`.
+      # FAILS TOWARD RUNNING, at every layer: a push to main always runs; a diff
+      # that cannot be computed leaves no file, which the script answers `true`;
+      # `relevant` imports no PyYAML, so a missing module cannot crash it; and
+      # if the script crashes anyway, or prints ANYTHING but the literal `false`,
+      # `run` is forced to `true`. Only a clean, explicit `false` skips the check
+      # -- an empty `run` would otherwise skip every later step and go green.
       - name: does this change touch the mutation scope or its pins?
         id: gate
         run: |
@@ -71,7 +71,11 @@ jobs:
           else
             rm -f "$changed"
           fi
-          run="$(python3 .github/scripts/check_mutants_pins.py relevant --changed-files "$changed")"
+          if ! run="$(python3 .github/scripts/check_mutants_pins.py relevant --changed-files "$changed")"; then
+            echo "::warning::the relevance check crashed; running the pin check anyway"
+            run=true
+          fi
+          [ "$run" = "false" ] || run=true
           echo "run=$run" >> "$GITHUB_OUTPUT"
           if [ "$run" = "true" ]; then
             echo "scoped files or ratchet pins may have changed: checking the pins"
@@ -84,10 +88,22 @@ jobs:
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
+      # The version comes from mutants.yml's install line -- the single place
+      # it is written -- so the PR check and the cron cannot list with different
+      # tools. `check` then requires it to equal the ledger's version. A failure
+      # to read it fails the step (no silent fallback to "latest").
+      - name: read the cron's pinned cargo-mutants version
+        id: tool
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          v="$(python3 .github/scripts/check_mutants_pins.py tool-version)"
+          echo "cargo-mutants $v (from mutants.yml)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
       - if: steps.gate.outputs.run == 'true'
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
-          tool: cargo-mutants@${{ env.CARGO_MUTANTS_VERSION }}
+          tool: cargo-mutants@${{ steps.tool.outputs.version }}
 
       # The cron's command, no scope flags: the scope comes from
       # .cargo/mutants.toml. `--colors never` IS LOAD-BEARING: cargo-mutants
@@ -118,20 +134,34 @@ jobs:
           esac
 
       # FALSIFICATION, against the real tree and the real tool: one blank line
-      # inserted at the top of context.rs moves every cited line in it, and the
+      # inserted at the top of a scoped file moves every cited line in it, and the
       # check MUST then report drift (exit 10). If it passes, this check cannot
       # see the failure it exists for and the green above means nothing.
+      #
+      # The file is CHOSEN FROM THE PINS (`falsify-target`: the first scoped file
+      # holding a cited survivor or timeout line), not hard-coded, so a re-pin
+      # that leaves some file with no cited line cannot turn this red. If no file
+      # holds one, there is nothing a shift could move: it says so and passes.
       - name: falsification -- a one-line shift in a scoped file must fail
         if: steps.gate.outputs.run == 'true'
         run: |
           set -uo pipefail
-          f=crates/acdp-registry-core/src/handlers/context.rs
-          cp "$f" "$RUNNER_TEMP/context.rs.orig"
-          { echo; cat "$RUNNER_TEMP/context.rs.orig"; } > "$f"
+          if ! f="$(python3 .github/scripts/check_mutants_pins.py falsify-target)"; then
+            echo "::error::falsify-target failed; see above."
+            exit 1
+          fi
+          if [ -z "$f" ]; then
+            echo "::notice::no scoped file holds a cited survivor or timeout line, so a" \
+                 "one-line shift cannot move a pin; falsification skipped."
+            exit 0
+          fi
+          echo "shifting $f by one line"
+          cp "$f" "$RUNNER_TEMP/falsify.orig"
+          { echo; cat "$RUNNER_TEMP/falsify.orig"; } > "$f"
           cargo mutants --list --colors never > "$RUNNER_TEMP/shifted.txt"
           rc=0
           python3 .github/scripts/check_mutants_pins.py check --listing "$RUNNER_TEMP/shifted.txt" > "$RUNNER_TEMP/shifted.out" || rc=$?
-          cp "$RUNNER_TEMP/context.rs.orig" "$f"
+          cp "$RUNNER_TEMP/falsify.orig" "$f"
           if [ "$rc" -ne 10 ]; then
             cat "$RUNNER_TEMP/shifted.out"
             echo "::error::a one-line shift in $f did not fail the pin check (exit $rc, expected 10)."

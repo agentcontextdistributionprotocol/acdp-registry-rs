@@ -386,10 +386,14 @@ PR that can move them, so the Monday run is not the first to find out:
 
 The logic is [`.github/scripts/check_mutants_pins.py`](../.github/scripts/check_mutants_pins.py);
 its unit tests (`test_check_mutants_pins.py`) run in the required `tests` job on every PR.
-The job pins cargo-mutants to the version that measured the prior ledger
-(`CARGO_MUTANTS_VERSION`), and after a green check it inserts one blank line at the top of
-`handlers/context.rs` and requires the same check to fail — a falsification against the
-real tree and tool. Run it locally with:
+The cargo-mutants version is written once, on `mutants.yml`'s install line
+(`tool: cargo-mutants@27.1.0`); the PR job reads and installs that same version, and the
+check requires it to equal the prior ledger's `cargo_mutants_version`, so the cron, the PR
+check and the ledger cannot list with different tools. Bump it only with a re-pin. After a
+green check the job inserts one blank line at the top of a scoped file that holds a cited
+survivor or timeout line (chosen from the pins, not hard-coded) and requires the same
+check to fail — a falsification against the real tree and tool. If no scoped file holds a
+cited line, it skips the falsification with a notice. Run it locally with:
 
 ```sh
 cargo mutants --list --colors never > /tmp/listing.txt
@@ -408,8 +412,9 @@ that run: survivor lines are verdicts and must match the prior ledger, which
 starts, and its first step diffs the PR's merge commit against `main` (`HEAD^1..HEAD`).
 Unless a scoped file (`examine_globs`), `.cargo/mutants.toml`, `mutants.yml`,
 `mutants-pins.yml`, the script or its tests, or anything under `docs/mutation-runs/`
-changed, the remaining steps are skipped and the job is green in seconds. A push to
-`main`, or a diff that cannot be computed, always runs the check.
+changed, the remaining steps are skipped and the job is green in seconds. It fails
+toward running: a push to `main`, a diff that cannot be computed, a relevance step that
+crashes, or any relevance answer other than an explicit `false` runs the check.
 
 **Advisory, not required — and why it can be promoted.** It is listed under
 `advisory_pending` in `.github/required-checks.json`. A trigger-level `paths:` filter or a
