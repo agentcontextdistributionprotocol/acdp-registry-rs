@@ -429,8 +429,10 @@ runs first). It reads three committed files:
 - [`supply-chain/crypto-exemptions-allowed.txt`](../supply-chain/crypto-exemptions-allowed.txt):
   the exact (crate, version) pairs that may stay exempted for now, each with a tracking
   issue and a reason. Today these are the older RustCrypto line (acdp-rs never locks
-  those versions, so its audits will not cover them), zeroize 1.9.0 (exempt in acdp-rs
-  too), and versions acdp-rs already audits but our `imports.lock` predates.
+  those versions, so its audits will not cover them) and zeroize 1.9.0 (exempt in
+  acdp-rs too). A version acdp-rs already audits but our `imports.lock` predates does
+  not belong here: refresh the imports instead (`cargo vet regenerate imports`, then
+  `cargo vet regenerate exemptions`).
 - `supply-chain/config.toml`: the exemptions themselves.
 
 The guard fails when a guarded crate is exempted at a version that is not on the
