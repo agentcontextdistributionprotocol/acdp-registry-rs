@@ -1,0 +1,65 @@
+# Crypto-critical crates guarded by .github/scripts/check_crypto_exemptions.py (#405).
+#
+# `cargo vet` passes a crate covered by an exemption exactly like an audited
+# one. For the crates listed here that is not good enough: an exemption in
+# supply-chain/config.toml is a guard failure unless the exact
+# (crate, version) is on supply-chain/crypto-exemptions-allowed.txt.
+#
+# One crate name per line. A line whose first non-blank character is `#` is a
+# comment. Every name must appear in Cargo.lock (a typo would guard nothing).
+#
+# The set mirrors acdp-rs's scripts/crypto-critical.txt (its Tier A and the
+# Tier B supporting crates, acdp-rs#322/#339), because this registry imports
+# acdp-rs's audits for exactly these crates. When acdp-rs adds a crate to its
+# list, add it here too (and allow-list any version of it this repo exempts).
+#
+# cargo-vet rewrites config.toml, audits.toml and imports.lock (dropping
+# comments); it does not touch this file.
+
+# Tier A
+ed25519-dalek
+curve25519-dalek
+signature
+sha2
+zeroize
+subtle
+p256
+ecdsa
+elliptic-curve
+rustls
+ring
+
+# Tier B: RustCrypto and rustls support crates
+wnaf
+ff
+spki
+crypto-common
+zeroize_derive
+ed25519
+hmac
+rfc6979
+pkcs8
+sec1
+primefield
+digest
+untrusted
+cpubits
+hyper-rustls
+group
+tokio-rustls
+primeorder
+rand_core
+ctutils
+webpki-roots
+typenum
+base16ct
+base64ct
+rustls-pki-types
+const-oid
+der
+curve25519-dalek-derive
+cpufeatures
+block-buffer
+cmov
+hybrid-array
+crypto-bigint
