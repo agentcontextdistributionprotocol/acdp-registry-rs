@@ -380,7 +380,10 @@ cargo-deny catches it. They share no configuration. An `ignore` in `deny.toml` d
 exempt anything from vet, and a vet exemption does not silence deny.
 
 When `cargo-vet` goes red (a Dependabot bump, a `bump-acdp` PR, or a new dependency),
-the job does not block the merge. To make it green again, on the PR's branch:
+the job does not block the merge. Expect this on any change to `Cargo.lock`. A PR that
+adds or bumps dependencies must refresh `supply-chain/` in the same PR, even though the
+job is advisory, so that `main` stays green and the next PR's vet result means
+something. To make it green again, on the PR's branch:
 
 ```sh
 cargo vet                         # lists what is unvetted and suggests audits
