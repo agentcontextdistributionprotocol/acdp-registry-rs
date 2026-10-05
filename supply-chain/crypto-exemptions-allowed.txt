@@ -16,16 +16,16 @@
 #   - a listed pair that config.toml no longer exempts (stale: delete the
 #     line in the same PR that removes the exemption).
 #
-# Two kinds of entry today:
+# Kinds of entry today:
 #   older-line   a version acdp-rs does not lock, so its audits will never
 #                cover it. Mostly the RustCrypto 0.10/0.13 line pulled in by
 #                jsonwebtoken, ed25519-dalek 2.x and sqlx. Ends with an audit
 #                here, or when that dependency moves to the current line.
-#   import-lag   acdp-rs's audits.toml on main already certifies this (or a
-#                neighbouring) version, but supply-chain/imports.lock predates
-#                it. Ends with `cargo vet regenerate imports` +
-#                `cargo vet regenerate exemptions` (review the imports diff),
-#                tracked in #410.
+#   zeroize      exempt in acdp-rs as well (see its entry below).
+# A version that acdp-rs's audits.toml on main already certifies, but that
+# supply-chain/imports.lock predates ("import-lag"), is not listed here: run
+# `cargo vet regenerate imports` + `cargo vet regenerate exemptions` (review
+# the imports diff) instead. The last such entries were retired in #410.
 
 # --- older-line (acdp-rs Tier B certification: acdp-rs#339) ---
 digest            0.10.7   acdp-rs#339  older-line: RustCrypto 0.10 via jsonwebtoken, ecdsa 0.16, curve25519-dalek 4
@@ -47,17 +47,3 @@ webpki-roots      0.26.11  acdp-rs#339  older-line: via sqlx 0.8 (tls-rustls)
 
 # --- zeroize: acdp-rs keeps 1.9.0 exempt too (its DECISIONS 322-zeroize) ---
 zeroize           1.9.0    acdp-rs#341  exempt in acdp-rs as well; ends with the zeroize 1.9.1 delta audit
-
-# --- import-lag (acdp-rs audits on main; refresh imports.lock to drop) ---
-base16ct          1.0.0    #410  import-lag: acdp-rs audits 1.0.0
-base64ct          1.8.3    #410  import-lag: acdp-rs audits 1.8.3
-block-buffer      0.12.1   #410  import-lag: acdp-rs audits 0.12.1
-cmov              0.5.4    #410  import-lag: acdp-rs audits 0.5.4
-const-oid         0.10.2   #410  import-lag: acdp-rs audits 0.10.2
-crypto-bigint     0.7.5    #410  import-lag: acdp-rs audits 0.7.5
-curve25519-dalek-derive 0.1.1 #410  import-lag: acdp-rs audits 0.1.1
-der               0.8.1    #410  import-lag: acdp-rs audits 0.8.1
-hybrid-array      0.4.14   #410  import-lag: acdp-rs audits 0.4.14
-cpufeatures       0.3.0    #410  import-lag: acdp-rs audits 0.3.1, not 0.3.0 (bump or audit)
-rustls-pki-types  1.15.0   #410  import-lag: acdp-rs audits 1.15.1 (bump or audit)
-webpki-roots      1.0.8    #410  import-lag: acdp-rs audits 1.0.9 (bump or audit)

@@ -156,16 +156,8 @@ criteria = "safe-to-deploy"
 version = "0.2.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.base16ct]]
-version = "1.0.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.base64]]
 version = "0.23.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.base64ct]]
-version = "1.8.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.bitflags]]
@@ -174,10 +166,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.block-buffer]]
 version = "0.10.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.block-buffer]]
-version = "0.12.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.borrow-or-share]]
@@ -220,10 +208,6 @@ criteria = "safe-to-deploy"
 version = "0.1.58"
 criteria = "safe-to-deploy"
 
-[[exemptions.cmov]]
-version = "0.5.4"
-criteria = "safe-to-deploy"
-
 [[exemptions.concurrent-queue]]
 version = "2.5.0"
 criteria = "safe-to-deploy"
@@ -236,16 +220,8 @@ criteria = "safe-to-deploy"
 version = "0.9.6"
 criteria = "safe-to-deploy"
 
-[[exemptions.const-oid]]
-version = "0.10.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.cpufeatures]]
 version = "0.2.17"
-criteria = "safe-to-deploy"
-
-[[exemptions.cpufeatures]]
-version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.crc]]
@@ -272,21 +248,9 @@ criteria = "safe-to-deploy"
 version = "0.5.5"
 criteria = "safe-to-deploy"
 
-[[exemptions.crypto-bigint]]
-version = "0.7.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.curve25519-dalek-derive]]
-version = "0.1.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.data-encoding]]
 version = "2.11.1"
 criteria = "safe-to-run"
-
-[[exemptions.der]]
-version = "0.8.1"
-criteria = "safe-to-deploy"
 
 [[exemptions.der-parser]]
 version = "10.0.0"
@@ -478,10 +442,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.httparse]]
 version = "1.10.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.hybrid-array]]
-version = "0.4.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.hyper]]
@@ -868,10 +828,6 @@ criteria = "safe-to-run"
 version = "1.1.4"
 criteria = "safe-to-run"
 
-[[exemptions.rustls-pki-types]]
-version = "1.15.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.rustls-webpki]]
 version = "0.103.15"
 criteria = "safe-to-deploy"
@@ -1202,10 +1158,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.webpki-roots]]
 version = "0.26.11"
-criteria = "safe-to-deploy"
-
-[[exemptions.webpki-roots]]
-version = "1.0.8"
 criteria = "safe-to-deploy"
 
 [[exemptions.whoami]]
