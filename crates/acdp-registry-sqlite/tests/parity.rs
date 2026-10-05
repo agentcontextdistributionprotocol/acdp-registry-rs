@@ -73,6 +73,14 @@ async fn the_lifecycle_state_probe_sees_a_retraction() {
     parity::assert_lifecycle_state_probe_sees_retraction(&store, "sqlite").await;
 }
 
+/// RFC-ACDP-0013 §6: a lifecycle retry differing only in `signature.value` is
+/// different content (`SchemaViolation`), while a byte-identical retry replays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_signature_only_lifecycle_retry_is_different_content() {
+    let (store, _tmp) = store().await;
+    parity::assert_lifecycle_retry_requires_identical_signature(&store, "sqlite").await;
+}
+
 /// B6: a corrupt `contributors` column must FAIL a superseding publish, not
 /// silently decode to an empty list.
 ///
