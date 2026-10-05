@@ -7,11 +7,16 @@
     {"context": "tests", "app_id": 15368},
     {"context": "conformance (spec fixtures)", "app_id": 15368},
     {"context": "cargo-deny", "app_id": 15368},
-    {"context": "lint", "app_id": 15368}
+    {"context": "lint", "app_id": 15368},
+    {"context": "msrv", "app_id": 15368},
+    {"context": "rustdoc", "app_id": 15368},
+    {"context": "coverage", "app_id": 15368},
+    {"context": "docker (build + smoke)", "app_id": 15368},
+    {"context": "mutants pins", "app_id": 15368}
   ],
-  "advisory_pending": ["msrv", "rustdoc", "coverage", "docker (build + smoke)", "cargo-vet", "mutants pins"],
+  "advisory_pending": ["cargo-vet"],
   "enforce_admins": true,
-  "pending_settings": true,
+  "pending_settings": false,
   "tag_ruleset": {
     "name": "protect-release-tags",
     "target": "tag",
