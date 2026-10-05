@@ -1,5 +1,6 @@
 
 
+
 ## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-webhook/v0.2.0...acdp-registry-webhook/v0.3.0) - 2026-10-04
 
 ### Other

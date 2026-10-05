@@ -1,5 +1,13 @@
 
 
+## [0.4.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-pg/v0.3.0...acdp-registry-pg/v0.4.0) - 2026-10-05
+
+### Other
+
+- *(parity)* a signature-only lifecycle retry is different content on both stores ([#406](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/406))
+- *(store)* parity kit pins that has_lifecycle_state sees a retraction ([#390](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/390)) ([#397](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/397))
+
+
 ## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-pg/v0.2.0...acdp-registry-pg/v0.3.0) - 2026-10-04
 
 ### Fixed
