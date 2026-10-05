@@ -49,7 +49,7 @@ env:
   # or deleted -- the survivor count falls with it, and a `<=` budget would read
   # that as an improvement. This assertion is what makes the budget below mean
   # anything.
-  MUTANTS_EXPECTED_SCOPE: "358"
+  MUTANTS_EXPECTED_SCOPE: "354"
 
   # The ONE committed ledger that a drifted survivor line is paired against, to
   # recover its identity (enclosing function + fn-relative offset + column, and
@@ -61,12 +61,30 @@ env:
   # which would trip the classifier's own duplicate-name assertion on every run.
   # docs/mutation-runs/README.md indexes which ledgers are CURRENT, in prose;
   # this variable is the machine-readable half of that index.
-  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/run37222567772-scope-358-outcomes.json"
+  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/run37248684286-scope-354-outcomes.json"
 
   # Surviving mutants at that sha. Each is enumerated with its own written reason
   # below; this number is the machine-readable half of that list. It ratchets DOWN
   # as survivors are killed and must never be raised without a reason recorded in
   # the same commit.
+  #
+  # SCOPE 358 -> 354 (#401; final re-pin of plans/final-closeout). NOT a budget
+  # change: the floor stays 7, the survivor SET is the same seven mutants, and
+  # every cited line is UNCHANGED. #401 replaced #375's lifecycle charge
+  # pre-flight with the SDK's prove/commit split, which deleted exactly four
+  # CAUGHT mutants from context.rs (144 -> 140; log.rs 65, receipt.rs 9,
+  # store.rs 140 unchanged) and gained none -- diffed against the
+  # run37222567772 ledger by name with line:col stripped:
+  # `lifecycle_actor_signature_verifies -> bool` with `true` and with `false`
+  # (the function is gone), the pre-flight's `&&` -> `||` in
+  # lifecycle_transition, and one `delete match arm LifecycleEventType::Retracted`
+  # (the separate did:key and did:web retract/republish dispatches became one
+  # `LifecycleEndpoint` match). Purely subtractive: -4 caught, 0 survivor change.
+  # Measured by run 37248684286 (workflow_dispatch on main 09615e9): 354 / 221
+  # caught / 7 missed / 125 unviable / 1 timeout, `end_time` present, 101.2 min.
+  # Its outcomes.json is committed unchanged as the new MUTANTS_PRIOR_LEDGER, and
+  # this list is its `missed.txt` verbatim. The four scoped files are identical
+  # between 09615e9 and the re-pin's base (empty diff).
   #
   # SCOPE 346 -> 358 (#373, #375, #376, #374; final re-pin of plans/issues-371-376).
   # NOT a budget change: the floor stays 7 and the survivor SET is the same seven
@@ -188,8 +206,8 @@ env:
   # become real coverage gaps if search ever serves restricted rows, and at that
   # point those five drop to 3.
   #
-  # CURRENT FLOOR: 7, at the 358 scope (was 7 at 346 and 351; #341 removed only
-  # caught mutants, #373-#376 added only caught/unviable ones). See the 5 -> 7 entry above for why the
+  # CURRENT FLOOR: 7, at the 354 scope (was 7 at 358, 346 and 351; #341 and #401
+  # removed only caught mutants, #373-#376 added only caught/unviable ones). See the 5 -> 7 entry above for why the
   # two store.rs additions are carried rather than killed.
   #
   # MEASURED at 8768b07 over six verified shards, not one run: 213 total / 134
@@ -224,18 +242,19 @@ env:
   # reason HERE rather than only in the prose above -- an identifier and its
   # justification that live in two places drift apart, and the drift is invisible.
   #
-  # MEASURED, not transcribed: the list below is run 37222567772's `missed.txt`
-  # verbatim -- a full single 358-mutant run of THIS workflow (so the
+  # MEASURED, not transcribed: the list below is run 37248684286's `missed.txt`
+  # verbatim -- a full single 354-mutant run of THIS workflow (so the
   # CI-equivalent environment: ACDP_SPEC_DIR at the pinned spec revision and
   # ACDP_REQUIRE_CONFORMANCE=1 -- without those, fixture-replay tests skip and
   # the survivor set comes out wider than CI's).
   #
-  # Result 358 / 225 caught / 7 missed / 125 unviable / 1 timeout, `end_time`
+  # Result 354 / 221 caught / 7 missed / 125 unviable / 1 timeout, `end_time`
   # present, and `missed.txt`'s line count cross-checked against outcomes.json's
   # `missed`. The run is committed at
-  # docs/mutation-runs/run37222567772-scope-358-outcomes.json and is what
-  # MUTANTS_PRIOR_LEDGER points at. (Previously run36417581090-scope-346 and
-  # u552-union-scope-351; SUPERSEDED, see docs/mutation-runs/README.md.)
+  # docs/mutation-runs/run37248684286-scope-354-outcomes.json and is what
+  # MUTANTS_PRIOR_LEDGER points at. (Previously run37222567772-scope-358,
+  # run36417581090-scope-346 and u552-union-scope-351; SUPERSEDED, see
+  # docs/mutation-runs/README.md.)
   # Re-measure with: cargo mutants -j1 && cat mutants.out/missed.txt
   #
   # HOW MANY TESTS THE SPEC ENV GOVERNS -- re-measured at c41bf14 by U-552:
@@ -310,8 +329,8 @@ env:
     # comparison from :1306:35 to :1317:35 without content change (now :1330:35, #373-#375). Line number
     # updated here to match; the reconciliation itself is done, not pending.
     # The LEDGER was not updated with it, though: u552 still said :1306:35 until
-    # #371 committed run 36417581090's report, which records :1317:35; run 37222567772
-    # (scope 358) records :1330:35 and :1007:35.
+    # #371 committed run 36417581090's report, which records :1317:35; runs 37222567772
+    # (scope 358) and 37248684286 (scope 354) record :1330:35 and :1007:35.
     crates/acdp-registry-sqlite/src/store.rs:1330:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
 
   # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
@@ -326,8 +345,9 @@ env:
   #     -- which is every unfiltered search in the suite. Non-termination cannot be
   #     converted into a fast assertion failure by any test: the binary hangs and
   #     the verdict is TIMEOUT. Re-measured at 8768b07 in shard 4/8: still exactly
-  #     one timeout, still this mutant, 300s. Runs 36417581090 (346 scope) and
-  #     37222567772 (358 scope, now :1258:12): still exactly one, this mutant. The
+  #     one timeout, still this mutant, 300s. Runs 36417581090 (346 scope),
+  #     37222567772 (358 scope, now :1258:12) and 37248684286 (354 scope, still
+  #     :1258:12): still exactly one, this mutant. The
   #     sibling `delete !` at :1222:16 (was :1206:16, then
   #     :1223:16, then :1238:16) is the MISSED equivalent above -- two `delete !` mutants in
   #     one function with different verdicts, which is why both are cited by
@@ -358,6 +378,7 @@ jobs:
     #   35457316722  351 mutants  CANCELLED  90.4 min   <- hit the 90 cap
     #   36417581090  346 mutants  completed 143.7 min   <- 36 min under 180
     #   37222567772  358 mutants  completed 108.7 min   <- 71 min under 180
+    #   37248684286  354 mutants  completed 101.2 min   <- 79 min under 180
     #     (cargo-mutants' own start/end time in outcomes.json; the job failed
     #     only because the ratchet's pins were stale, see #371)
     #
@@ -382,6 +403,12 @@ jobs:
     # Re-derived at 358: 108.7 min (cargo-mutants' own clock, +~6 s setup) leaves
     # 40% headroom, the runner was faster than for the 346 run; the cap stands.
     # Run-to-run spread on this scope is 109-144 min, so do not tighten it.
+    # Re-derived at 354 (#401): 101.2 min (cargo-mutants' own clock; the job's
+    # wall clock was 101.5 min) leaves 44% headroom. That run's test suite
+    # already includes the schema-validation conformance tests #400 added and
+    # #401's lifecycle tests (#400 projected ~1 s per mutant from them and a
+    # worst case of ~13% headroom), so the larger suite did not eat the margin;
+    # the cap stands. Spread across these scopes is now 101-144 min.
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7

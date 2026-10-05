@@ -396,6 +396,199 @@ where
     ctx_id
 }
 
+/// **#390 — a durable backend's `has_lifecycle_state` must see a retraction.**
+///
+/// The server's startup refusal (RFC-ACDP-0013 §6: no lifecycle state may be
+/// served while `acdp-registry-lifecycle` is not advertised) asks the store
+/// [`ExtendedRegistryStore::has_lifecycle_state`]. That method is *defaulted*
+/// to `Ok(false)` so non-durable backends keep compiling — which also means a
+/// durable backend that forgets to override it compiles cleanly and silently
+/// disables the refusal. Each backend's own contract suite pins its SQL; this
+/// pins the obligation itself, once, so a new backend that runs the kit cannot
+/// inherit the default unnoticed.
+///
+/// # Only the "sees it" direction
+///
+/// There is deliberately no "a fresh store reports `false`" leg. The Postgres
+/// suite runs against one shared database that accretes retractions from
+/// every test and every run, so a fresh-false leg would fail there for a
+/// reason unrelated to the probe. Each backend's isolated contract suite owns
+/// that direction.
+///
+/// # Pass the raw store
+///
+/// Call this with the backend itself, never a delegating wrapper: a wrapper
+/// that does not forward `has_lifecycle_state` (the kit's own `DefaultOnly`
+/// does not) answers with the default and fails this assertion — which is
+/// exactly the defect it exists to catch.
+pub async fn assert_lifecycle_state_probe_sees_retraction<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let ctx_id = publish_then_retract(store, 250, "lifecycle probe fixture").await;
+    let seen = store
+        .has_lifecycle_state()
+        .await
+        .expect("has_lifecycle_state must not error");
+    assert!(
+        seen,
+        "[{label}] has_lifecycle_state() returned false after {ctx_id} was retracted. \
+         The server's RFC-ACDP-0013 §6 startup refusal relies on this probe; a \
+         durable backend that leaves it at the trait default (Ok(false)) lets a \
+         registry restarted with [lifecycle] off serve retracted state. Override \
+         `ExtendedRegistryStore::has_lifecycle_state` to check both the event \
+         store and the retracted flag."
+    );
+}
+
+/// **RFC-ACDP-0013 §6 — a retry is "identical" only if `signature.value` matches too.**
+///
+/// A lifecycle retry carrying an already-appended `event_id` is an idempotent
+/// replay only when the whole event — signature included — is byte-identical;
+/// any other difference is "different content" and is refused with
+/// `SchemaViolation`. Both backends implement that as `*prior == event`, and
+/// each backend's contract suite pins a difference in `reason`. Nothing pinned
+/// a difference confined to the signature, which is the case that matters for
+/// ECDSA P-256: a high-S twin of a valid signature is a *different, still
+/// valid* signature over the same preimage (the server test
+/// `lc001b_p256_malleated_signature_retry_is_different_content` covers it end
+/// to end on SQLite only). A backend whose comparison drops the signature —
+/// say, comparing a projection of the stored row that omits the signature
+/// column — would replay the twin as success and serve the original
+/// signature in its response.
+///
+/// The store does not verify signatures (that is the server's §6 step 3), so
+/// the twin here only needs to be *well formed*: the same `algorithm` and
+/// `key_id`, and a `value` that is a real Ed25519 signature produced by a
+/// different key. Only `signature.value` differs.
+///
+/// Legs, in order: the first commit applies; the signature-only twin is
+/// refused with `SchemaViolation`; the byte-identical original still replays
+/// idempotently with nothing appended and the original signature stored.
+pub async fn assert_lifecycle_retry_requires_identical_signature<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::error::AcdpError;
+    use acdp::registry::LifecycleCommitOutcome;
+
+    const SEED: u8 = 251;
+    let ctx_id = publish_titled(store, SEED, "lifecycle signature retry fixture").await;
+    // Same event_id derivation as `publish_then_retract`: unique per run and a
+    // canonical UUID by construction.
+    let event_id = ctx_id
+        .rsplit('/')
+        .next()
+        .expect("ctx_id ends in a UUID segment")
+        .to_string();
+    let key_id = format!("{}#key-1", agent_did(SEED));
+    let unsigned = LifecycleEvent::new(
+        event_id,
+        CtxId(ctx_id.clone()),
+        LifecycleEventType::Retracted,
+        Utc::now(),
+        AgentDid::new(agent_did(SEED)),
+        Some("parity: signature retry fixture".to_string()),
+    )
+    .expect("valid lifecycle event");
+    let original = unsigned
+        .clone()
+        .sign_with(SigningKey::from_bytes(&[SEED; 32]), key_id.clone())
+        .expect("sign original");
+    // A real signature over the same preimage by another key: well formed,
+    // same algorithm, same key_id field — only `value` differs.
+    let other_value = unsigned
+        .sign_with(SigningKey::from_bytes(&[SEED ^ 0xff; 32]), key_id)
+        .expect("sign twin")
+        .signature
+        .expect("signed")
+        .value;
+    let mut twin = original.clone();
+    let original_sig = original.signature.clone().expect("signed");
+    {
+        let sig = twin.signature.as_mut().expect("signed");
+        assert_ne!(
+            sig.value, other_value,
+            "fixture is wrong: the twin's signature must differ"
+        );
+        sig.value = other_value;
+    }
+    assert_eq!(
+        (
+            &twin.event_id,
+            &twin.ctx_id,
+            &twin.event_type,
+            twin.occurred_at,
+            &twin.actor,
+            &twin.reason
+        ),
+        (
+            &original.event_id,
+            &original.ctx_id,
+            &original.event_type,
+            original.occurred_at,
+            &original.actor,
+            &original.reason
+        ),
+        "fixture is wrong: the twin must differ from the original ONLY in signature.value"
+    );
+
+    let commit = |event: LifecycleEvent| {
+        let s = Arc::clone(store);
+        async move {
+            tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&event))
+                .await
+                .expect("commit task")
+        }
+    };
+
+    // Leg 1: the first commit applies.
+    match commit(original.clone()).await {
+        Ok(LifecycleCommitOutcome::Applied(_)) => {}
+        other => panic!("[{label}] fixture is wrong: the first commit must apply, got {other:?}"),
+    }
+
+    // Leg 2: signature-only difference → different content.
+    match commit(twin).await {
+        Err(AcdpError::SchemaViolation(_)) => {}
+        Ok(LifecycleCommitOutcome::IdempotentReplay(_)) => panic!(
+            "[{label}] a retry differing ONLY in signature.value was replayed as \
+             idempotent. RFC-ACDP-0013 §6: a retry is identical only if the whole \
+             event, signature included, matches; a signature-only difference (e.g. a \
+             malleated P-256 high-S twin) is different content and MUST be refused"
+        ),
+        other => panic!(
+            "[{label}] a retry differing ONLY in signature.value must be refused with \
+             SchemaViolation (different content), got {other:?}"
+        ),
+    }
+
+    // Leg 3: the byte-identical retry still replays, nothing appended, and the
+    // stored signature is the original one.
+    let ctx = match commit(original).await {
+        Ok(LifecycleCommitOutcome::IdempotentReplay(c)) => c,
+        other => panic!(
+            "[{label}] a byte-identical lifecycle retry must be an IdempotentReplay, \
+             got {other:?}"
+        ),
+    };
+    let events = ctx
+        .registry_state
+        .lifecycle_events
+        .as_deref()
+        .unwrap_or(&[]);
+    assert_eq!(
+        events.len(),
+        1,
+        "[{label}] the refused twin or the replay appended an event"
+    );
+    assert_eq!(
+        events[0].signature.as_ref(),
+        Some(&original_sig),
+        "[{label}] the stored signature must be the original one"
+    );
+}
+
 /// **B3 — a context and its lifecycle events must never contradict each other.**
 ///
 /// `get()` and `lineage()` read the context row and its lifecycle events as two
@@ -1485,4 +1678,173 @@ where
         "batched visibility diverged from the retrieve contract:\n{}",
         violations.join("\n")
     );
+}
+
+/// Falsification for [`assert_lifecycle_state_probe_sees_retraction`]: the
+/// assertion is only worth running if a backend that inherits the trait's
+/// `Ok(false)` default actually fails it. Also the falsification for
+/// [`assert_lifecycle_retry_requires_identical_signature`]: a store that
+/// ignores signatures must fail it.
+#[cfg(test)]
+mod lifecycle_probe_tests {
+    use super::*;
+    use acdp::error::AcdpError;
+    use acdp::registry::{IdempotencyRecord, InMemoryStore, LifecycleCommitOutcome};
+    use acdp::types::body::{Body, FullContext};
+    use acdp::types::primitives::{ContentHash, LineageId};
+    use acdp::types::publish::PublishResponse;
+    use acdp::types::search::SearchResponse;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The SDK's in-memory store, plus an honest `has_lifecycle_state`: it
+    /// remembers whether a lifecycle event was ever committed. That stands in
+    /// for a durable backend that overrides the probe correctly.
+    ///
+    /// With `ignore_signatures` set it is instead the double for
+    /// [`assert_lifecycle_retry_requires_identical_signature`]: every event
+    /// has its signature stripped before it reaches the inner store, so a
+    /// retry differing only in `signature.value` compares equal — the defect
+    /// that assertion exists to catch.
+    #[derive(Default)]
+    struct Recording {
+        inner: InMemoryStore,
+        saw_event: AtomicBool,
+        ignore_signatures: bool,
+    }
+
+    impl acdp::registry::RegistryStore for Recording {
+        fn put(&self, body: Body) -> Result<(), AcdpError> {
+            self.inner.put(body)
+        }
+        fn get(&self, ctx_id: &CtxId) -> Result<Option<FullContext>, AcdpError> {
+            self.inner.get(ctx_id)
+        }
+        fn lineage(&self, lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError> {
+            self.inner.lineage(lineage_id)
+        }
+        fn current(&self, lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError> {
+            self.inner.current(lineage_id)
+        }
+        fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), AcdpError> {
+            self.inner.mark_superseded(ctx_id)
+        }
+        fn first_version_ctx_id(&self, lineage_id: &LineageId) -> Result<Option<CtxId>, AcdpError> {
+            self.inner.first_version_ctx_id(lineage_id)
+        }
+        fn search(
+            &self,
+            params: &SearchParams,
+            requester: Option<&AgentDid>,
+            public_arm_open: bool,
+        ) -> Result<SearchResponse, AcdpError> {
+            self.inner.search(params, requester, public_arm_open)
+        }
+        fn idempotency_lookup(
+            &self,
+            agent_id: &AgentDid,
+            key: &str,
+        ) -> Result<Option<IdempotencyRecord>, AcdpError> {
+            self.inner.idempotency_lookup(agent_id, key)
+        }
+        fn idempotency_record(
+            &self,
+            agent_id: &AgentDid,
+            key: &str,
+            hash: &ContentHash,
+            response: &PublishResponse,
+            expires_at: DateTime<Utc>,
+        ) -> Result<(), AcdpError> {
+            self.inner
+                .idempotency_record(agent_id, key, hash, response, expires_at)
+        }
+        fn idempotency_evict_expired(&self, now: DateTime<Utc>) -> Result<(), AcdpError> {
+            self.inner.idempotency_evict_expired(now)
+        }
+        fn commit_publish(
+            &self,
+            commit: PublishCommit<'_>,
+        ) -> Result<PublishCommitOutcome, AcdpError> {
+            self.inner.commit_publish(commit)
+        }
+        fn commit_lifecycle_event(
+            &self,
+            event: &LifecycleEvent,
+        ) -> Result<LifecycleCommitOutcome, AcdpError> {
+            let outcome = if self.ignore_signatures {
+                let mut blind = event.clone();
+                blind.signature = None;
+                self.inner.commit_lifecycle_event(&blind)?
+            } else {
+                self.inner.commit_lifecycle_event(event)?
+            };
+            self.saw_event.store(true, Ordering::SeqCst);
+            Ok(outcome)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExtendedRegistryStore for Recording {
+        async fn health(&self) -> Result<(), AcdpError> {
+            Ok(())
+        }
+        async fn migrate(&self) -> Result<(), AcdpError> {
+            Ok(())
+        }
+        async fn list_contexts(
+            &self,
+            _limit: u32,
+            _cursor: Option<&str>,
+            _requester: Option<&AgentDid>,
+            _tenant: Option<&str>,
+            _public_arm_open: bool,
+        ) -> Result<crate::Page<FullContext>, AcdpError> {
+            unimplemented!("not reached by the lifecycle probe kit")
+        }
+        async fn has_lifecycle_state(&self) -> Result<bool, AcdpError> {
+            Ok(self.saw_event.load(Ordering::SeqCst))
+        }
+    }
+
+    /// Positive control: a store that overrides the probe passes. Without
+    /// this, the `should_panic` below could be passing because the fixture
+    /// itself panics (a publish or retract failing), not because the probe
+    /// answered `false`.
+    #[tokio::test]
+    async fn a_store_that_overrides_the_probe_passes() {
+        let store = Arc::new(Recording::default());
+        assert_lifecycle_state_probe_sees_retraction(&store, "recording").await;
+    }
+
+    /// The falsification: the same store behind `DefaultOnly`, which forwards
+    /// every write but does NOT forward `has_lifecycle_state`, so the trait
+    /// default answers. The retraction lands in the inner store, the probe
+    /// still says `false`, and the kit must fail.
+    #[tokio::test]
+    #[should_panic(expected = "has_lifecycle_state() returned false")]
+    async fn a_store_that_inherits_the_default_probe_fails() {
+        let store = Arc::new(DefaultOnly(Arc::new(Recording::default())));
+        assert_lifecycle_state_probe_sees_retraction(&store, "default-only").await;
+    }
+
+    /// Positive control for the signature-retry assertion: the SDK's
+    /// in-memory store compares whole events, so it passes. Without this the
+    /// `should_panic` below could be passing on a fixture failure.
+    #[tokio::test]
+    async fn a_store_that_compares_signatures_passes_the_retry_check() {
+        let store = Arc::new(Recording::default());
+        assert_lifecycle_retry_requires_identical_signature(&store, "recording").await;
+    }
+
+    /// The falsification: a store that ignores signatures replays the
+    /// signature-only twin as idempotent, and the kit must fail on exactly
+    /// that leg.
+    #[tokio::test]
+    #[should_panic(expected = "a retry differing ONLY in signature.value was replayed")]
+    async fn a_store_that_ignores_signatures_fails_the_retry_check() {
+        let store = Arc::new(Recording {
+            ignore_signatures: true,
+            ..Recording::default()
+        });
+        assert_lifecycle_retry_requires_identical_signature(&store, "signature-blind").await;
+    }
 }

@@ -21,6 +21,70 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.4.0
+
+**One breaking default and one new startup refusal. Lax and auth-off registries that let clients
+pick a tenant with `X-Tenant-Id` must now say so (#386), and a `/0` entry in
+`rate_limit.trusted_proxies` no longer starts (#391). Rolling back to 0.3.x is safe once the
+key is set explicitly (below).**
+
+**Breaking default (#386): an unset `[auth] tenant_header_trust` means `none` in every mode.**
+0.3.0 applied `none` only under `require_tenant = true` and fell back to `any_peer` (with a startup
+warning) otherwise. The fallback and its warning are gone. Strict registries see no change.
+
+- **Who is affected:** registries with `require_tenant = false` (lax, or `auth.enabled = false`)
+  that leave the key unset and receive `X-Tenant-Id`. The registry no longer trusts that header, so
+  any request carrying it without a signed `tenant` claim or matching `[[auth.tenant_agents]]`
+  binding gets `403 not_authorized` with `X-Tenant-Id is not trusted from this peer
+  (auth.tenant_header_trust = "none"); …`. 0.3.0 printed `auth.tenant_header_trust is not set and
+  defaulted to "any_peer"` at startup on exactly these registries, so check the old logs for it.
+  Requests without the header are unchanged. `GET /admin/status` now reports the mode in effect
+  (`tenancy.tenant_header_trust`), so you can check a running registry instead.
+- **What to do before upgrading:** if callers name their tenant with the header, declare who may
+  send it. Set `tenant_header_trust = "trusted_proxies"` and list the gateway that stamps the
+  header in `rate_limit.trusted_proxies`, or set `"any_peer"` to keep the 0.3.0 behaviour (a dev
+  or test registry, or a boundary the registry cannot see; a non-loopback bind still warns).
+  Environment: `ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST`. If nobody sends the header, do nothing:
+  this is the safe default. The shipped `docker/config.docker.toml` now sets `"none"` explicitly.
+  See [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id).
+- **Rollback:** 0.3.x knows the key, so a config that sets it explicitly behaves the same on both
+  versions. With the key unset, 0.3.x silently goes back to `any_peer` on a lax registry, so set
+  it before rolling back. 0.2.x refuses the key (see the 0.3.0 rollback note).
+
+**New startup refusal (#391): a `/0` entry in `rate_limit.trusted_proxies`.** `0.0.0.0/0`, `::/0`
+(or any `address/0`) contains every address of its family, so it trusted `X-Forwarded-For` from
+any client for the `/auth/*` limiter and, under `tenant_header_trust = "trusted_proxies"`, let any
+client select a tenant. Startup now exits with an error naming the entry. **Who needs to act:**
+only configs with such an entry; list the proxy's own addresses instead, or use `any_peer` if
+trusting every peer really is the intent. Entries are matched as written: list IPv4 gateways in
+IPv4 form (an `::ffff:…` entry never matches, because peers are compared after IPv4
+canonicalisation).
+
+Smaller changes, no action needed:
+
+- `GET /admin/status` gains a `tenancy` group: `require_tenant`, the effective
+  `tenant_header_trust`, whether that key was set, and the number of `trusted_proxies` entries.
+  Strict JSON consumers that reject unknown keys should allow it.
+  See [HTTP-API.md](HTTP-API.md#get-adminstatus).
+- `GET /admin/contexts` (playground builds only) honours `X-Tenant-Id` from an admin-bearer caller
+  in every `tenant_header_trust` mode. Under `require_tenant` with `none` it used to answer 403.
+  The admin token is already cross-tenant, so the header only narrows the listing.
+- **Lifecycle charging (#393).** `POST /contexts/{ctx_id}/retract` and `/republish` now charge the
+  per-agent bucket only for an event the `acdp` SDK proves: the context is visible to the caller,
+  the actor is its producer, and the signature verifies. Such an event is charged on every outcome
+  (success, `409`, a store error, a byte-identical replay), as in 0.3.0. **Changed from 0.3.0:** a
+  validly signed event from an actor that is not the context's producer (`403`), or for an unknown
+  or invisible context (`404`), is no longer charged to anyone; 0.3.0 charged it to its actor. The
+  signature is now verified once per request instead of twice, and a non-producer `did:web` actor
+  is no longer resolved. No response code, header, config key or metric label changed.
+- **`acdp` SDK 0.14.4.** 0.3.0 already shipped with it; this release adopts the lifecycle
+  prove/commit split it added (above). Its other change, also in effect since 0.3.0: Ed25519
+  signatures are verified strictly (small-order public keys and nonce points are refused) on every
+  path that verifies one — publish, lifecycle events, the auth challenge. No honest key is
+  small-order.
+
+---
+
 ## 0.3.0
 
 **Two behaviour changes need a look before upgrading: a deployment with `[lifecycle] enabled = false`
@@ -144,7 +208,8 @@ strip or overwrite any client-supplied value. See [MULTI-TENANCY.md](MULTI-TENAN
 - **Lax and auth-off registries keep today's behaviour** under the temporary default `any_peer`, and
   log a startup warning while the key is unset. **The default becomes `none` in 0.4.0** for every
   mode: set the key now (`any_peer` to keep partitioning by header on a dev or test registry). A
-  separate warning fires whenever `any_peer` is in effect on a non-loopback bind.
+  separate warning fires whenever `any_peer` is in effect on a non-loopback bind. *(Done in 0.4.0:
+  see [0.4.0](#040).)*
 - With `none` (or an untrusted peer under `trusted_proxies`), a header that is present but
   uncorroborated is refused with 403, not ignored, in every mode including auth-off.
 - **Rollback:** 0.2.0 refuses unknown `[auth]` keys. Remove `tenant_header_trust` from the config

@@ -125,7 +125,7 @@ request-id pair, `SetRequestId` must be applied last so it runs first, because
 
 The protocol-critical part of `POST /contexts` is **not** implemented here — it
 is `acdp`'s `RegistryServer`, which implements the ordered algorithm of
-[RFC-ACDP-0003 §2.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0003-publish.md#21-registry-processing).
+[RFC-ACDP-0003 §2.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/6d5cdb8cedf9d610c8a6dfba497ae98265901cc9/rfcs/RFC-ACDP-0003-publish.md#21-registry-processing).
 The steps and their one invariant are specified there and explained in
 [acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/registry.md#the-publish-pipeline--the-one-rule);
 this page does not restate them. We reuse it unchanged and add storage
@@ -185,12 +185,15 @@ The four-way charge split is pinned by
 
 The producer lifecycle routes (`/retract`, `/republish`) share that per-agent
 bucket, keyed by the event `actor`, and follow the same rule: a read-only peek
-before verification, a `PublishCharge` armed once the signer is proven. The SDK
-has no prove/commit split for lifecycle events (`retract_verified` and
-`republish_verified` bundle verify and commit), so `lifecycle_transition` proves
-the actor itself first with the SDK's public `verify_lifecycle_event*`, using the
-same resolver instance, then makes the bundled call unchanged; the bundled call
-alone decides the response.
+before verification, a `PublishCharge` armed once the signer is proven. They
+use the SDK's lifecycle prove/commit split (`acdp` 0.14.4): after the tenant
+gate and the bearer check, `prove_lifecycle_identity*` runs RFC-ACDP-0013 §6
+steps 1–3 (visibility, event validation and endpoint binding, actor ==
+producer) and the signature verification, persisting nothing; the charge arms;
+then `commit_lifecycle_proven` runs the store's locked strict-alternation check
+and append. The signature is verified once, and only a proven producer is
+charged; an event refused before its signature is checked (unknown or
+invisible context, actor ≠ producer, wrong `event_type`) costs nobody.
 
 DID verification reuses `acdp`'s `WebResolver` (LRU-cached, SSRF-policy-gated —
 see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md#ssrfpolicy)) for **both** publish and

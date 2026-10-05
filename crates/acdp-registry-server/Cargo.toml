@@ -110,3 +110,12 @@ rcgen          = "0.14"
 # `parity`. Dev-only: under `resolver = "2"` the feature never reaches the
 # shipped binary (see the note on `rcgen` above).
 acdp-registry-store = { path = "../acdp-registry-store", version = "0.3.0", features = ["test-support"] }
+# #385: full JSON-Schema validation of the documents the spawned binary SERVES
+# (`/.well-known/acdp.json` and friends) against the pinned spec's
+# `schemas/json/*.schema.json`, in `tests/conformance.rs`. Default features OFF
+# on purpose: they are `resolve-http` (reqwest plus a second rustls/aws-lc-rs
+# edge) and `resolve-file`, and the test must never fetch a `$ref`. Every spec
+# schema is registered locally by its `$id`, so an unregistered `$ref` fails the
+# build of the validator instead of reaching the network. Dev-only under
+# resolver 2 (see the note on `rcgen` above).
+jsonschema     = { version = "0.58", default-features = false }

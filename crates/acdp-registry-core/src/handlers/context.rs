@@ -1447,21 +1447,17 @@ pub async fn republish<S: ExtendedRegistryStore + 'static>(
 ///    are writes), keyed by the event actor like publish is keyed by the
 ///    signing agent. #375: this is a read-only `peek` (it never charges and
 ///    never inserts a bucket); the charge is a [`PublishCharge`] armed only
-///    once the event's signature verifies for `event.actor` (step 6a).
+///    once the SDK has proven the event (step 6).
 /// 5. Tenant gate (mirrors `retrieve`): a cross-tenant ctx_id 404s.
-/// 6. The SDK server pipeline: visibility-first resolution, event
-///    validation + endpoint binding, actor authentication
-///    (`actor == body.agent_id`), signature verification through the full
-///    RFC-ACDP-0001 §5.11 resolver pipeline (`did:web`) or the pure
-///    offline path (`did:key`), strict-alternation transition validation,
-///    and the atomic append — returning the post-transition
+/// 6. The SDK server pipeline, as prove then commit (#393, acdp-rs#348).
+///    Prove: visibility-first resolution, event validation + endpoint
+///    binding, actor authentication (`actor == body.agent_id`), and
+///    signature verification through the full RFC-ACDP-0001 §5.11 resolver
+///    pipeline (`did:web`) or the pure offline path (`did:key`). The charge
+///    arms here, between the two. Commit: strict-alternation transition
+///    validation and the atomic append — returning the post-transition
 ///    full-retrieval envelope (or the current state on a byte-identical
 ///    `event_id` retry).
-///
-/// Between 5 and 6 sits the #375 charge pre-flight (step "6a" in the body):
-/// the SDK's public lifecycle-event verifier checks the signature against
-/// `event.actor` itself, and only a verified actor is charged. Its result
-/// never changes the response.
 ///
 /// The producer's authentication is the event signature itself (like a
 /// publish); a bearer token is only consulted for read visibility.
@@ -1474,6 +1470,7 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
     event_type: acdp::types::lifecycle::LifecycleEventType,
 ) -> Result<Json<acdp::types::body::FullContext>, RegistryError> {
     use acdp::error::AcdpError;
+    use acdp::registry::LifecycleEndpoint;
     use acdp::types::lifecycle::LifecycleEventType;
 
     // 1. Profile gate (§6: non-advertising registries MUST 501).
@@ -1523,7 +1520,8 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
 
     // #375: the charge for this event, disarmed. Mirrors publish (#242): once
     // armed it fires on EVERY exit -- success, 409, store error, `?`, panic,
-    // cancellation -- and it is armed only where `event.actor` is proven.
+    // cancellation -- and it is armed only between the SDK's prove and
+    // commit (step 6), where `event.actor` is proven.
     let mut charge = PublishCharge::new(state.rate_limiter.clone(), event.actor.as_str());
 
     // 5. Tenant gate — same shape as `retrieve`: a ctx_id outside the
@@ -1542,62 +1540,67 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
         }
     }
 
-    // 6. Full §6 pipeline in the SDK server. Visibility is evaluated for
-    //    the bearer-authenticated requester (anonymous otherwise) BEFORE
+    // 6. Full §6 pipeline in the SDK server, split into prove and commit
+    //    (acdp 0.14.4, acdp-rs#348). Visibility is evaluated for the
+    //    bearer-authenticated requester (anonymous otherwise) BEFORE
     //    actor/signature checks — error ordering never lets an
     //    unauthorized caller learn a context exists (§14).
     //    `requester` is computed once, here, after the tenant gate, so the
     //    error precedence stays tenant 404 → bearer 403 → SDK pipeline.
     let requester = caller_from_headers(&state, &headers)?;
 
-    // 6a. #375 charge pre-flight. Arm only when the signature verifies for
-    //     `event.actor`. Deliberately independent of the context: an
-    //     actor ≠ producer event that is validly signed is charged to its
-    //     actor (who proved key possession), and the charge cannot act as an
-    //     existence oracle because it never looks at the store. The bundled
-    //     SDK call below re-verifies and remains the sole authority for the
-    //     response; this pre-flight only decides the charge.
-    //     With no limiter configured there is nothing to charge, so the
-    //     pre-flight (and its possible DID resolution) is skipped entirely.
-    if state.rate_limiter.is_some() && lifecycle_actor_signature_verifies(&state, &event).await {
-        charge.arm();
-    }
-
+    // #393: prove (§6 steps 1-3 plus the §5 signature verification), arm the
+    // charge, then commit (steps 4-5: the store's locked strict-alternation
+    // check and append). Mirrors publish's `prove_publish_identity*` /
+    // `commit_proven`: the charge arms exactly when the SDK has proven the
+    // actor -- who is then always the context's producer -- so every proven
+    // event is charged however the commit ends (409, store error, panic,
+    // byte-identical replay), and nothing that fails to prove is. This
+    // replaced #375's charge pre-flight, which verified the signature a
+    // second time (and resolved a did:web actor the SDK might never resolve).
+    let endpoint = match event_type {
+        LifecycleEventType::Retracted => LifecycleEndpoint::Retract,
+        _ => LifecycleEndpoint::Republish,
+    };
     let server = state.server.clone();
-    let ctx = if event.actor.as_str().starts_with("did:key:") {
+    let outcome = if event.actor.as_str().starts_with("did:key:") {
         // did:key verification is pure/offline — run on the blocking pool
-        // like the other synchronous store pipelines.
+        // like the other synchronous store pipelines. `charge` is moved in
+        // and armed between prove and commit so a panic inside the commit
+        // still charges (its `Drop` fires on unwind), exactly as publish.
         let event2 = event.clone();
         let requester2 = requester.clone();
-        tokio::task::spawn_blocking(move || match event_type {
-            LifecycleEventType::Retracted => {
-                server.retract_verified_did_key(&event2, requester2.as_ref())
-            }
-            _ => server.republish_verified_did_key(&event2, requester2.as_ref()),
+        let (charge_back, outcome) = tokio::task::spawn_blocking(move || {
+            let mut charge = charge;
+            let outcome = server
+                .prove_lifecycle_identity_did_key(&event2, endpoint, requester2.as_ref())
+                .and_then(|proven| {
+                    charge.arm();
+                    server.commit_lifecycle_proven(proven)
+                });
+            (charge, outcome)
         })
         .await
-        .map_err(|e| RegistryError::Internal(format!("join: {e}")))??
+        .map_err(|e| RegistryError::Internal(format!("join: {e}")))?;
+        // Nothing below re-arms it: dropping it here fires the charge iff
+        // the proof succeeded.
+        drop(charge_back);
+        outcome?
     } else {
         // did:web (and any future resolvable method): the full
-        // RFC-ACDP-0001 §5.11 resolver pipeline, as at publish.
+        // RFC-ACDP-0001 §5.11 resolver pipeline, as at publish. Like
+        // publish's production branch, the commit runs on the async task.
         let resolver = state.auth.resolver.clone();
-        match event_type {
-            LifecycleEventType::Retracted => {
-                server
-                    .retract_verified(&event, requester.as_ref(), &resolver)
-                    .await?
-            }
-            _ => {
-                server
-                    .republish_verified(&event, requester.as_ref(), &resolver)
-                    .await?
-            }
-        }
+        let proven = server
+            .prove_lifecycle_identity(&event, endpoint, requester.as_ref(), &resolver)
+            .await?;
+        charge.arm();
+        server.commit_lifecycle_proven(proven)?
     };
-    // Success means the SDK verified the event, so it is charged regardless
-    // of the pre-flight (mirrors publish's success-path arm; arming is
-    // monotonic, so this never double-charges).
-    charge.arm();
+    // A success needs a proof, so the charge is already armed (did:web: it
+    // fires when `charge` drops at the end of this function; did:key: it
+    // fired above).
+    let ctx = outcome.into_context();
 
     if let Some(emitter) = &state.webhook {
         let webhook_tenant = stored_tenant.filter(|t| t != "default");
@@ -1632,47 +1635,6 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
     }
 
     Ok(Json(ctx))
-}
-
-/// #375 charge pre-flight: does `event`'s signature verify for
-/// `event.actor`?
-///
-/// Uses the SDK's public RFC-ACDP-0013 §5 verifier with `producer_did`
-/// set to the actor itself, so the answer is "the actor holds the signing
-/// key", not "the actor may transition this context" (the bundled SDK call
-/// still decides that). The event is serialised exactly as the SDK
-/// serialises it before verifying (`serde_json::to_value(event)`), so the
-/// two verifications see the same bytes. `did:key` is pure/offline;
-/// anything else goes through the SAME `state.auth.resolver` instance the
-/// SDK call uses, so its DID-document cache and SSRF guard are shared and
-/// the SDK's re-verification is a cache hit.
-///
-/// Any failure (unsigned, mis-bound key_id, bad signature, resolution
-/// error) is `false`: the request is not charged, and the SDK call
-/// produces the response. This partially reintroduces a pre-flight
-/// duplicate of the kind U-501/#336 removed from publish; it goes away once
-/// the SDK exposes a lifecycle prove/commit split (ASSUMPTIONS.md).
-async fn lifecycle_actor_signature_verifies<S: ExtendedRegistryStore + 'static>(
-    state: &AppState<S>,
-    event: &acdp::types::lifecycle::LifecycleEvent,
-) -> bool {
-    let Ok(raw) = serde_json::to_value(event) else {
-        return false;
-    };
-    if event.actor.as_str().starts_with("did:key:") {
-        acdp::verify::verify_lifecycle_event_offline(&raw, &event.ctx_id, &event.actor, None)
-            .is_ok()
-    } else {
-        acdp::verify::verify_lifecycle_event(
-            &raw,
-            &event.ctx_id,
-            &event.actor,
-            None,
-            &state.auth.resolver,
-        )
-        .await
-        .is_ok()
-    }
 }
 
 /// Pull an authenticated caller DID out of the `Authorization` header.
@@ -1928,12 +1890,42 @@ mod lifecycle_charge_tests {
              the bucket map empty"
         );
 
-        // Control: the accessor does see an insert. A validly signed event
-        // (here for a context that does not exist, so the SDK 404s) proves
-        // its actor's key and is charged -- without this, a broken accessor
-        // would make the assertion above vacuous.
+        // #393: a validly signed event for a context that does not exist is
+        // refused by the SDK's prove step (visibility, §6 step 1) before the
+        // signature is looked at, so it is not charged either.
         assert!(!post(&state, &ctx_id, signed(200, &ctx_id)).await);
+        assert_eq!(limiter.tracked_keys(), 0);
+
+        // Control: the accessor does see an insert. The producer's own valid
+        // retract proves and is charged -- without this, a broken accessor
+        // would make the assertions above vacuous. The context is seeded
+        // through the SDK directly, so the bucket map stays untouched by it.
+        let real = seed_context(&state, 201).await;
+        assert!(post(&state, &real, signed(201, &real)).await);
         assert_eq!(limiter.tracked_keys(), 1);
+    }
+
+    /// Publish one public context as the did:key producer for `seed`
+    /// straight through the SDK (not the handler, so nothing is charged);
+    /// returns its ctx_id.
+    async fn seed_context(state: &Arc<AppState<SqliteStore>>, seed: u8) -> String {
+        use acdp::producer::Producer;
+        use acdp::types::primitives::{ContextType, Visibility};
+        let req = Producer::new_did_key(SigningKey::from_bytes(&[seed; 32]))
+            .publish_request()
+            .title("lc393 seed")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let server = state.server.clone();
+        tokio::task::spawn_blocking(move || server.publish_verified_did_key(&req, None))
+            .await
+            .unwrap()
+            .unwrap()
+            .ctx_id
+            .as_str()
+            .to_string()
     }
 }
 

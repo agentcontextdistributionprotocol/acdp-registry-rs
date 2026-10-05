@@ -7173,3 +7173,27 @@ which is valid only because every later edit to the four scoped files was a line
 comment change (context.rs stayed 2324 lines). Checked on the merge base: `cargo mutants
 --list` produced exactly the run's 358 names, and `git diff` of the four files since 27f9875
 held only `//` lines. The whole-workspace denominator (1427 at a66e1f2) was not re-measured.
+
+## 2026-10-05 — mutants ratchet re-pinned at scope 354 (final close-out)
+
+Run 37248684286, a `workflow_dispatch` on main 09615e9, measured the post-#401 tree: 354
+mutants, 221 caught / 7 missed / 125 unviable / 1 timeout, 101.2 min on cargo-mutants' own
+clock (101.5 min job wall clock, 79 min under the 180 cap). The job failed only because the
+pins still said 358. #401 replaced #375's lifecycle charge pre-flight with the SDK's
+prove/commit split, and context.rs went from 144 to 140 mutants (log.rs 65, receipt.rs 9 and
+store.rs 140 unchanged). Diffed against the run37222567772 ledger by name with line:col
+stripped, the change is purely subtractive: four caught mutants left and none arrived. They
+are `lifecycle_actor_signature_verifies -> bool` with `true` and with `false` (the function
+is gone), the pre-flight's `&&` -> `||` in `lifecycle_transition`, and one
+`delete match arm LifecycleEventType::Retracted` (the separate did:key and did:web
+retract/republish dispatches became one `LifecycleEndpoint` match). The seven survivors and
+the one timeout are the same mutants on the same lines, so `MUTANTS_SURVIVORS` is unchanged
+apart from its comments. The run's `outcomes.json` is committed byte for byte as
+`docs/mutation-runs/run37248684286-scope-354-outcomes.json`, and `MUTANTS_EXPECTED_SCOPE` is
+354.
+
+The run is valid for current main because the four scoped files are identical between
+09615e9 and fdd156a (empty `git diff`). It already includes the schema-validation
+conformance tests from #400, which W2 projected at about 1 s per mutant and a worst case of
+about 13% cap headroom. The measured headroom is 44%. The whole-workspace denominator (1427
+at a66e1f2) was not re-measured.

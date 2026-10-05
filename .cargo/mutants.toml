@@ -89,21 +89,28 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 358 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 354 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
-# MEASURED by mutants.yml run 37222567772 (sha 27f9875; the final re-pin of
-# plans/issues-371-376), whose outcomes.json is committed as
-# docs/mutation-runs/run37222567772-scope-358-outcomes.json.
+# MEASURED by mutants.yml run 37248684286 (workflow_dispatch on main 09615e9;
+# the final re-pin of plans/final-closeout), whose outcomes.json is committed as
+# docs/mutation-runs/run37248684286-scope-354-outcomes.json.
 # The command that reproduces the split:
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
-#     crates/acdp-registry-core/src/handlers/context.rs   144
+#     crates/acdp-registry-core/src/handlers/context.rs   140
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs              9
 #     crates/acdp-registry-sqlite/src/store.rs            140
 #     ----------------------------------------------------------
-#     total                                               358
+#     total                                               354
+#
+# 358 -> 354 (#401): context.rs 144 -> 140, PURELY SUBTRACTIVE. #401 replaced
+# #375's lifecycle charge pre-flight with the SDK's prove/commit split, which
+# deleted four CAUGHT mutants (`lifecycle_actor_signature_verifies` -> true and
+# -> false, the pre-flight's `&&` -> `||`, and one duplicated
+# `LifecycleEventType::Retracted` dispatch arm) and added none; the seven
+# survivors are the same mutants on the SAME lines.
 #
 # 346 -> 358 (#373-#376): context.rs 134 -> 144 (#375's lifecycle pre-flight,
 # #374's tenant-trust resolver) and store.rs 138 -> 140 (#373's
@@ -131,9 +138,9 @@ copy_vcs = true
 #
 # At the ~6.2s/mutant marginal cost measured in DECISIONS.md #17 that is ~2.5h,
 # and #216 lists "blocking PRs on a full mutation run" as a non-goal. This is a
-# scheduled job over a bounded set, by design. 358 of 1427 is 25.1% (the 1427 is
-# a66e1f2's figure and was NOT re-measured after #341 or #373-#376). (Was 346 of
-# 1427 = 24.2%. 351 of 1427 = 24.6%
+# scheduled job over a bounded set, by design. 354 of 1427 is 24.8% (the 1427 is
+# a66e1f2's figure and was NOT re-measured after #341, #373-#376 or #401). (Was
+# 358 of 1427 = 25.1%. 346 of 1427 = 24.2%. 351 of 1427 = 24.6%
 # before #341, and 213 of 1427 = 14.9% before U-552 added sqlite/src/store.rs.)
 #
 # ---------------------------------------------------------------------------

@@ -141,7 +141,9 @@ out of band and distribute them to operators / monitoring.
 
 - `GET /admin/status` — always shipped, admin-bearer gated. An operational
   snapshot: build identity, storage health, idempotency record count, webhook
-  queue depth, configured revocation feeds, and migration state. Good for a
+  queue depth, configured revocation feeds, migration state, and the tenancy
+  policy in effect (`tenancy.tenant_header_trust` is the effective
+  `X-Tenant-Id` trust mode, #391). Good for a
   readiness probe richer than `/healthz`. Shape in
   [HTTP-API.md](HTTP-API.md#get-adminstatus).
 
@@ -221,7 +223,9 @@ with `into_make_service_with_connect_info`, so the peer IP is available behind
 `axum_server`.
 
 By default all of these are per-process. Behind a load balancer set
-`trusted_proxies` so per-IP limits track real clients; the `global_per_minute`
+`trusted_proxies` to the balancer's own addresses (IPv4 gateways in IPv4 form;
+entries are matched as written, and a `/0` entry is refused at startup) so
+per-IP limits track real clients; the `global_per_minute`
 ceiling is then per replica. With more than one replica you have three options
 for the `/auth/*` bound:
 
@@ -371,7 +375,7 @@ changed**: rows removed, reordered, or rewritten. The realistic causes are a
 database restore that rolled the log back, a partial restore that mixed two
 datasets, or direct writes to the log table.
 
-**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
+**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/6d5cdb8cedf9d610c8a6dfba497ae98265901cc9/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
 (pinned spec): a registry whose tree is lost **MUST NOT serve a reconstructed
 history under the same `log_id`**; it MUST start a new instantiation with a new
 `<instance>` component, and SHOULD publish an operational notice. "Serve" here
