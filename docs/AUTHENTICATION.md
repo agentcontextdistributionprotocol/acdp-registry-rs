@@ -142,7 +142,8 @@ is not JSON, or is JSON of the wrong shape, is `400 schema_violation` (not
   [MULTI-TENANCY.md](MULTI-TENANCY.md)). An `X-Tenant-Id` header that
   disagrees with it is refused in every mode. A caller whose token carries no
   `tenant` claim can name a tenant with the header only when
-  `auth.tenant_header_trust` trusts the request's peer; otherwise a header that
+  `auth.tenant_header_trust` trusts the request's peer (unset means `none`, so
+  by default it never does); otherwise a header that
   is present gets `403 not_authorized`
   ([who may send `X-Tenant-Id`](MULTI-TENANCY.md#who-may-send-x-tenant-id)).
 

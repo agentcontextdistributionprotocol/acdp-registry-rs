@@ -10,7 +10,7 @@ its domain lapse.
 
 This doc is the operator runbook. The receipt wire format, signing
 construction, and consumer-side verification procedure are normative in
-[RFC-ACDP-0010](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0010-registry-receipts.md); the verifying client lives in `acdp-rs`
+[RFC-ACDP-0010](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/6d5cdb8cedf9d610c8a6dfba497ae98265901cc9/rfcs/RFC-ACDP-0010-registry-receipts.md); the verifying client lives in `acdp-rs`
 (`VerificationPolicy`, `ReceiptPolicy::Require`).
 
 ## Enabling receipts
@@ -93,7 +93,7 @@ With `head_receipts = true` the registry:
 
 What a head receipt attests — `as_of` semantics, the byte-match against the
 served head, freshness, and key lifecycle — is normative in
-[RFC-ACDP-0011 §6–§8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0011-lineage-head-receipts.md#6-issuance)
+[RFC-ACDP-0011 §6–§8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/6d5cdb8cedf9d610c8a6dfba497ae98265901cc9/rfcs/RFC-ACDP-0011-lineage-head-receipts.md#6-issuance)
 and is not restated here.
 
 Because head receipts are requester-relative (the head is selected under
@@ -167,7 +167,7 @@ The active signing key appears in both `verificationMethod` and
 ## The key-retention rule (read before rotating)
 
 The rule is
-[RFC-ACDP-0010 §9](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0010-registry-receipts.md#9-registry-receipt-key-lifecycle-normative)
+[RFC-ACDP-0010 §9](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/6d5cdb8cedf9d610c8a6dfba497ae98265901cc9/rfcs/RFC-ACDP-0010-registry-receipts.md#9-registry-receipt-key-lifecycle-normative)
 (**MUST**), and it is what keeps old receipts verifiable after rotation. For an
 operator it comes down to one thing: **removing a retired key from
 `verificationMethod` bricks every receipt that key ever signed.** In this
@@ -203,7 +203,7 @@ backfill: a receipt attests publish-time facts — above all the producer key
 the registry *actually resolved at that moment* — and minting one later would
 be a false attestation.
 
-**Deviation from a SHOULD in [RFC-ACDP-0010 §7](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0010-registry-receipts.md#7-issuance)
+**Deviation from a SHOULD in [RFC-ACDP-0010 §7](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/6d5cdb8cedf9d610c8a6dfba497ae98265901cc9/rfcs/RFC-ACDP-0010-registry-receipts.md#7-issuance)
 (pinned spec):** a registry advertising `acdp-registry-receipts` SHOULD backfill
 receipts for previously published contexts, attesting the stored `created_at`.
 This implementation does not, for the reason above, so those contexts are served
@@ -272,6 +272,6 @@ Consumer-side verification is the SDK's job, not this registry's: set
 It checks the receipt against this registry's `/.well-known/did.json` — so run
 it from a machine that reaches the registry over TLS at its bare authority —
 and applies the
-[RFC-ACDP-0010 §8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/9deb7e7bdabfa7416fcc0e25a7fcac6eb642b6dd/rfcs/RFC-ACDP-0010-registry-receipts.md#8-verification-procedure-normative)
+[RFC-ACDP-0010 §8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/6d5cdb8cedf9d610c8a6dfba497ae98265901cc9/rfcs/RFC-ACDP-0010-registry-receipts.md#8-verification-procedure-normative)
 procedure. A receipt failure does not invalidate the body; the SDK reports the
 two verdicts separately.

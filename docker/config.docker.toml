@@ -33,6 +33,12 @@ anonymous_public_reads = true
 # GET /admin/contexts (playground feature) — there is no working admin
 # surface without at least one token configured here.
 # admin_tokens = ["<generate out of band>"]
+# Who may select a tenant with X-Tenant-Id (docs/MULTI-TENANCY.md). "none" is
+# the default in every mode from 0.4.0 and is spelled out so an older image
+# (0.3.x fell back to "any_peer" with auth off) reads this file the same way.
+# This container binds 0.0.0.0 behind an edge whose addresses you cannot list,
+# so "trusted_proxies" does not fit and "any_peer" lets any client pick a tenant.
+tenant_header_trust = "none"
 
 [webhook]
 enabled        = false

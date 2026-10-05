@@ -55,10 +55,18 @@ trusted_proxies = ["10.0.0.0/8"]          # the gateway(s) that stamp X-Tenant-I
 | `trusted_proxies` | the **immediate TCP peer** is inside `rate_limit.trusted_proxies`. `X-Forwarded-For` plays no part, and a request with no recorded peer is untrusted. The gateway must strip or overwrite any `X-Tenant-Id` a client sends; the registry cannot check that. |
 | `any_peer` | always — you assert a boundary the registry cannot observe (a network policy whose ingress addresses you cannot enumerate, or loopback-only development) |
 
-When the key is absent, 0.3.x applies `none` under `require_tenant = true` and
-`any_peer` otherwise (the pre-#374 behaviour), and warns at startup in the
-`any_peer` case. **The default becomes `none` for every mode in 0.4.0** — set the
-key explicitly. See [UPGRADING.md](UPGRADING.md).
+When the key is absent the mode is **`none`, in every mode** (since 0.4.0, #386;
+0.3.x fell back to `any_peer` when `require_tenant = false`). A lax or auth-off
+registry that partitions by header must say `any_peer` (or `trusted_proxies`)
+explicitly. See [UPGRADING.md](UPGRADING.md#040). The mode in effect, and whether
+the key was set, are reported by [`GET /admin/status`](HTTP-API.md#get-adminstatus)
+under `tenancy`.
+
+`rate_limit.trusted_proxies` entries are **matched as written**, against the
+peer after an IPv4-mapped address (`::ffff:a.b.c.d`) is canonicalised to IPv4.
+List IPv4 gateways in IPv4 form (`10.0.0.0/8`): an `::ffff:10.0.0.0/104` entry
+never matches anything. A `/0` entry (`0.0.0.0/0`, `::/0`) would trust every
+peer, so startup refuses it; if that is really the intent, say `any_peer`.
 
 A header that is present but **untrusted** is rejected, not ignored — unless it
 equals the claim or binding the request already carries:
@@ -96,7 +104,8 @@ gateway is the authenticator (§6.4's second bullet), and strict mode with no
 `[[auth.tenant_agents]]` has no other way to name a tenant.
 
 **`any_peer` is the operator's declaration, not the registry's.** With
-`any_peer` (the 0.3.x default in lax and auth-off mode) the registry trusts
+`any_peer` (the 0.3.x default in lax and auth-off mode; explicit-only since
+0.4.0) the registry trusts
 every client's header, so it meets §6.4 only if something in front of it
 strips or overwrites `X-Tenant-Id` from clients (or sets it from an
 authenticated identity). Startup warns when `any_peer` is in effect on a
@@ -112,12 +121,17 @@ On an enforced multi-tenant deployment:
   cross-tenant rows.
 - A caller's tenant comes from the JWT `tenant` claim, the producer's binding
   (writes), or a header trusted under `auth.tenant_header_trust`. With the key
-  absent, strict mode distrusts the header (`none`).
+  absent, the header is distrusted (`none`), as in every mode.
 - Configuring any `[[auth.tenant_agents]]` requires `require_tenant = true`;
   startup validation enforces this so tenancy can't be half-enabled.
 - `require_tenant = true` with no `[[auth.tenant_agents]]` and
   `tenant_header_trust = "none"` is refused at startup: no request could ever
   resolve a tenant.
+- `GET /admin/contexts` (playground builds) honours `X-Tenant-Id` from a caller
+  holding an admin bearer whatever `tenant_header_trust` says (#391). The admin
+  credential is already cross-tenant, so the header can only narrow the listing.
+  Without a header, strict mode still default-denies it, and `default` is still
+  refused.
 - Strict mode itself requires a tenancy-aware storage backend (`sqlite` or
   `postgres`): startup validation refuses `storage.backend = "memory"` when
   **either** `require_tenant = true` or a non-empty `[[auth.tenant_agents]]`
