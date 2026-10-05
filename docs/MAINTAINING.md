@@ -368,7 +368,8 @@ in `Cargo.lock` to be covered by one of:
   `jsonwebtoken` pulls in (for example digest 0.10, hmac 0.12, ed25519 2.x, pkcs8 0.10,
   sec1 0.7, spki 0.7), zeroize 1.9.0 (acdp-rs exempts it too), and the `acdp-*` crates
   from crates.io. An exemption means "trusted for now, not reviewed". It is a backlog,
-  not a verdict.
+  not a verdict. A crypto-critical crate may be exempted only at a version on the
+  allow-list (see [below](#crypto-critical-crates-may-not-be-quietly-exempted)).
 
 The workspace's own crates carry `audit-as-crates-io = false` policies. release-plz has
 `publish = false`, so they are not on crates.io; the policies keep `cargo vet` from
@@ -393,6 +394,7 @@ something. To make it green again, on the PR's branch:
 cargo vet                         # lists what is unvetted and suggests audits
 cargo vet regenerate exemptions   # exempt the new versions (no review claimed)
 cargo vet --locked                # what CI runs
+python3 .github/scripts/check_crypto_exemptions.py   # the crypto guard below
 ```
 
 `cargo vet regenerate exemptions` also drops exemptions that an audit now covers. Run
@@ -409,6 +411,44 @@ should say what was read and what is not claimed, as acdp-rs's worksheets do. Ea
 `acdp` bump changes the `acdp-*` versions, so a `bump-acdp` PR always needs the
 regenerate step until those crates are trusted some other way (for example a
 `cargo vet trust` entry for their publisher, which is a maintainer decision).
+
+### Crypto-critical crates may not be quietly exempted
+
+`cargo vet` passes an exempted crate exactly like an audited one, so the regenerate step
+above would exempt a bump of ed25519-dalek just as readily as a bump of axum. The same
+`cargo-vet` job therefore runs
+[`check_crypto_exemptions.py`](../.github/scripts/check_crypto_exemptions.py) after
+`cargo vet --locked` (its self-test,
+[`test_check_crypto_exemptions.py`](../.github/scripts/test_check_crypto_exemptions.py),
+runs first). It reads three committed files:
+
+- [`supply-chain/crypto-critical.txt`](../supply-chain/crypto-critical.txt): the guarded
+  crates. It mirrors acdp-rs's `scripts/crypto-critical.txt` (the signing, hashing,
+  curve and TLS crates whose audits this repository imports). When acdp-rs adds a crate
+  there, add it here.
+- [`supply-chain/crypto-exemptions-allowed.txt`](../supply-chain/crypto-exemptions-allowed.txt):
+  the exact (crate, version) pairs that may stay exempted for now, each with a tracking
+  issue and a reason. Today these are the older RustCrypto line (acdp-rs never locks
+  those versions, so its audits will not cover them), zeroize 1.9.0 (exempt in acdp-rs
+  too), and versions acdp-rs already audits but our `imports.lock` predates.
+- `supply-chain/config.toml`: the exemptions themselves.
+
+The guard fails when a guarded crate is exempted at a version that is not on the
+allow-list, and when an allow-list entry is no longer exempted. The second rule means
+the allow-list only shrinks: the PR whose audit or import retires an exemption must
+also delete its line. A name in `crypto-critical.txt` that is not in `Cargo.lock`, or an
+exemption written in a shape the guard cannot read, is an error rather than a pass.
+
+When it fails on a bump, do not reach for the allow-list first. Get the version
+audited: wait for (or ask for) an acdp-rs audit and pull it in with
+`cargo vet regenerate imports`, or record one here with `cargo vet certify` (a delta from
+the audited version is usually small). Adding an allow-list line is a reviewed decision
+that a crypto crate stays unreviewed for now. It needs a tracking issue that ends it.
+
+The guard is advisory because the job is. It reads `config.toml` rather than
+`cargo vet`'s JSON (acdp-rs's `scripts/check-crypto-vet.sh` reads the JSON), so it says
+"exempted or not", not "fully audited or not". A crate trusted through a
+`[[trusted.*]]` or wildcard entry is not an exemption and passes.
 
 The cargo-vet version is pinned in `ci.yml` (installed with `cargo install --locked`
 because the pinned `taiki-e/install-action` has no manifest for it). Keep it in step with

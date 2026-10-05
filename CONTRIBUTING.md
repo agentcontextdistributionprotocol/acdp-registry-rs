@@ -69,6 +69,10 @@ cargo deny check
 # "Supply-chain audits (cargo vet)". Install the version CI pins:
 #   cargo install --locked cargo-vet --version 0.10.2
 cargo vet --locked
+# A crypto-critical crate (supply-chain/crypto-critical.txt) must be audited,
+# not exempted, unless its exact version is on
+# supply-chain/crypto-exemptions-allowed.txt. Same advisory job:
+python3 .github/scripts/check_crypto_exemptions.py
 
 # Spec conformance — replays HTTP-shaped fixtures from the ACDP spec
 # against a live server built from this crate. ACDP_SPEC_DIR must point
