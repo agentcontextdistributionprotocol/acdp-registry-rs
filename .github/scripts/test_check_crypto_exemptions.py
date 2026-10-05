@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """Self-test for check_crypto_exemptions.py (#405).
 
-Runs in the advisory `cargo-vet` job, before the guard itself, so a broken
-reader cannot pass silently. Every fixture is a scratch repo with the four
-files the guard reads, in their real shapes (config.toml as cargo-vet writes
-it, Cargo.lock as cargo writes it); the real supply-chain/ is never modified.
-The last test runs the guard against the real tree.
+Runs in two places. In the advisory `cargo-vet` job, before the guard itself,
+in full. In the required `tests` job's script-test loop with
+ACDP_CRYPTO_GUARD_SKIP_REAL_TREE=1, so a broken guard script goes red on every
+PR even when `cargo vet --locked` is red, while the policy verdict on the real
+tree (the RealTree class) stays advisory.
+
+Every fixture is a scratch repo with the four files the guard reads, in their
+real shapes (config.toml as cargo-vet writes it, Cargo.lock as cargo writes
+it); the real supply-chain/ is never modified. The behaviour cases run under
+both config.toml readers (tomllib, and the 3.9 line-reader fallback), and
+ReadersAgree checks that both return the same exemptions on the real
+config.toml. TomlParser and ReadersAgree skip on Python < 3.11.
 """
 
 from __future__ import annotations
@@ -20,6 +27,10 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "check_crypto_exemptions.py")
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
+sys.path.insert(0, HERE)
+import check_crypto_exemptions as cge  # noqa: E402
+
+SKIP_REAL_TREE = "ACDP_CRYPTO_GUARD_SKIP_REAL_TREE"
 
 EXIT_OK, EXIT_VIOLATION, EXIT_UNREADABLE = 0, 1, 2
 
@@ -78,7 +89,14 @@ version = "0.10.9"
 """
 
 
+# The verifier's case: a quoted dotted key at top level is a real exemption of
+# sha2 0.11.0 (tomllib reads it so), which the line reader cannot parse.
+QUOTED_DOTTED = '"exemptions".sha2 = [{ version = "0.11.0", criteria = "safe-to-deploy" }]\n'
+
+
 class Fixture(unittest.TestCase):
+    PARSER = "auto"
+
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="crypto-exemptions-")
         self.addCleanup(shutil.rmtree, self.root)
@@ -96,9 +114,9 @@ class Fixture(unittest.TestCase):
                 with open(os.path.join(self.root, rel), "w", encoding="utf-8") as f:
                     f.write(text)
 
-    def run_guard(self, root=None):
+    def run_guard(self, root=None, parser=None):
         p = subprocess.run(
-            [sys.executable, SCRIPT, "--root", root or self.root],
+            [sys.executable, SCRIPT, "--root", root or self.root, "--parser", parser or self.PARSER],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
@@ -113,7 +131,10 @@ class Fixture(unittest.TestCase):
         return out
 
 
-class Passes(Fixture):
+class GuardCases:
+    """Behaviour that must hold under BOTH config.toml readers."""
+
+    # --- passes ---
     def test_allow_listed_exemption_and_non_crypto_exemption_pass(self):
         out = self.assertGuard(EXIT_OK, "allowed exempt: digest 0.10.7 (acdp-rs#339)")
         self.assertNotIn("axum", out)
@@ -122,10 +143,7 @@ class Passes(Fixture):
         self.write(config=CONFIG.replace("[[exemptions.digest]]", '[[exemptions."digest"]]'))
         self.assertGuard(EXIT_OK, "allowed exempt: digest 0.10.7")
 
-
-class FailureModeA_ExemptedNotAllowListed(Fixture):
-    """(a) a crypto-critical crate exempted but not on the allow-list."""
-
+    # --- failure mode (a): exempted, not allow-listed ---
     def test_audited_crypto_crate_becoming_exempted_fails(self):
         # The issue's acceptance case: ed25519-dalek is audited (no exemption),
         # then a bump gets exempted by `cargo vet regenerate exemptions`.
@@ -140,8 +158,8 @@ class FailureModeA_ExemptedNotAllowListed(Fixture):
         )
 
     def test_moving_an_allowed_exemption_to_a_new_version_fails(self):
-        # Allow-list pins the exact version: re-exempting a bump is not covered,
-        # and the old entry goes stale at the same time.
+        # The allow-list pins the exact version: re-exempting a bump is not
+        # covered, and the old entry goes stale at the same time.
         self.write(config=CONFIG.replace('version = "0.10.7"', 'version = "0.10.8"'))
         self.assertGuard(
             EXIT_VIOLATION,
@@ -150,10 +168,7 @@ class FailureModeA_ExemptedNotAllowListed(Fixture):
             "2 violation(s)",
         )
 
-
-class FailureModeB_StaleAllowListEntry(Fixture):
-    """(b) an allow-list entry that config.toml no longer exempts."""
-
+    # --- failure mode (b): stale allow-list entry ---
     def test_entry_whose_exemption_was_removed_fails(self):
         self.write(
             config=CONFIG.replace(
@@ -167,16 +182,7 @@ class FailureModeB_StaleAllowListEntry(Fixture):
         )
         self.assertNotIn("EXEMPTED", out)
 
-
-class Unreadable(Fixture):
-    def test_unknown_exemption_shape_fails_loud(self):
-        self.write(config=CONFIG + '\n[exemptions]\nsha2 = [{ version = "0.10.9" }]\n')
-        self.assertGuard(EXIT_UNREADABLE, "unrecognised exemptions table")
-
-    def test_dotted_exemption_key_fails_loud(self):
-        self.write(config=CONFIG + '\nexemptions.sha2 = [{ version = "0.10.9" }]\n')
-        self.assertGuard(EXIT_UNREADABLE, "dotted or inline key")
-
+    # --- unreadable input ---
     def test_exemption_without_version_fails_loud(self):
         self.write(config=CONFIG + '\n[[exemptions.sha2]]\ncriteria = "safe-to-deploy"\n')
         self.assertGuard(EXIT_UNREADABLE, "[[exemptions.sha2]] has no version line")
@@ -209,15 +215,116 @@ class Unreadable(Fixture):
         self.write(critical="# nothing\n")
         self.assertGuard(EXIT_UNREADABLE, "names no crates")
 
+    # --- other TOML spellings of an exemption: never a silent pass ---
+    def test_quoted_dotted_key_exemption_never_passes(self):
+        self.write(config=QUOTED_DOTTED + CONFIG)
+        rc, out = self.run_guard()
+        self.assertNotEqual(rc, EXIT_OK, out)
+        self.assertIn(rc, (EXIT_VIOLATION, EXIT_UNREADABLE), out)
 
+    def test_dotted_key_exemption_never_passes(self):
+        self.write(config='exemptions.sha2 = [{ version = "0.10.9" }]\n' + CONFIG)
+        rc, out = self.run_guard()
+        self.assertIn(rc, (EXIT_VIOLATION, EXIT_UNREADABLE), out)
+
+    def test_plain_exemptions_table_never_passes(self):
+        self.write(config=CONFIG + '\n[exemptions]\nsha2 = [{ version = "0.10.9" }]\n')
+        rc, out = self.run_guard()
+        self.assertIn(rc, (EXIT_VIOLATION, EXIT_UNREADABLE), out)
+
+    def test_spaced_header_never_passes(self):
+        self.write(config=CONFIG + '\n[[ exemptions.sha2 ]]\nversion = "0.10.9"\n')
+        rc, out = self.run_guard()
+        self.assertIn(rc, (EXIT_VIOLATION, EXIT_UNREADABLE), out)
+
+
+class LinesParser(GuardCases, Fixture):
+    """The 3.9/3.10 fallback: refuses what it cannot parse."""
+
+    PARSER = "lines"
+
+    def test_quoted_dotted_key_is_refused(self):
+        self.write(config=QUOTED_DOTTED + CONFIG)
+        self.assertGuard(EXIT_UNREADABLE, "dotted or inline key")
+
+    def test_single_quoted_dotted_key_is_refused(self):
+        self.write(config=QUOTED_DOTTED.replace('"exemptions"', "'exemptions'") + CONFIG)
+        self.assertGuard(EXIT_UNREADABLE, "dotted or inline key")
+
+    def test_bare_dotted_key_is_refused(self):
+        self.write(config='exemptions.sha2 = [{ version = "0.10.9" }]\n' + CONFIG)
+        self.assertGuard(EXIT_UNREADABLE, "dotted or inline key")
+
+    def test_plain_exemptions_table_is_refused(self):
+        self.write(config=CONFIG + '\n[exemptions]\nsha2 = [{ version = "0.10.9" }]\n')
+        self.assertGuard(EXIT_UNREADABLE, "unrecognised exemptions table")
+
+    def test_spaced_header_is_refused(self):
+        self.write(config=CONFIG + '\n[[ exemptions.sha2 ]]\nversion = "0.10.9"\n')
+        self.assertGuard(EXIT_UNREADABLE, "unrecognised exemptions table")
+
+
+@unittest.skipUnless(cge.tomllib, "tomllib needs Python 3.11+")
+class TomlParser(GuardCases, Fixture):
+    """The tomllib reader (CI): reads every spelling, so each is a violation."""
+
+    PARSER = "toml"
+
+    def test_quoted_dotted_key_is_read_as_an_exemption(self):
+        self.write(config=QUOTED_DOTTED + CONFIG)
+        self.assertGuard(EXIT_VIOLATION, "sha2 0.11.0 is crypto-critical but EXEMPTED")
+
+    def test_bare_dotted_key_is_read_as_an_exemption(self):
+        self.write(config='exemptions.sha2 = [{ version = "0.10.9" }]\n' + CONFIG)
+        self.assertGuard(EXIT_VIOLATION, "sha2 0.10.9 is crypto-critical but EXEMPTED")
+
+    def test_spaced_header_is_read_as_an_exemption(self):
+        self.write(config=CONFIG + '\n[[ exemptions.sha2 ]]\nversion = "0.10.9"\n')
+        self.assertGuard(EXIT_VIOLATION, "sha2 0.10.9 is crypto-critical but EXEMPTED")
+
+    def test_invalid_toml_is_refused(self):
+        self.write(config=CONFIG + "\n[[exemptions.sha2]\n")
+        self.assertGuard(EXIT_UNREADABLE, "is not valid TOML")
+
+
+@unittest.skipUnless(cge.tomllib, "tomllib needs Python 3.11+")
+class ReadersAgree(Fixture):
+    """Both readers return the same exemptions, so the verdict cannot depend
+    on the runner's Python version. Reader-level only: no policy verdict."""
+
+    def test_readers_agree_on_the_fixture(self):
+        path = os.path.join(self.root, "supply-chain", "config.toml")
+        self.assertEqual(cge.read_exemptions_lines(path), cge.read_exemptions_toml(path))
+
+    def test_readers_agree_on_the_real_config(self):
+        path = os.path.join(REPO, "supply-chain", "config.toml")
+        lines = cge.read_exemptions_lines(path)
+        self.assertEqual(lines, cge.read_exemptions_toml(path))
+        self.assertGreater(len(lines), 100)  # a reader that found nothing agrees too
+
+
+@unittest.skipIf(
+    os.environ.get(SKIP_REAL_TREE) == "1",
+    "%s=1: the policy verdict on the real tree runs only in the advisory cargo-vet job"
+    % SKIP_REAL_TREE,
+)
 class RealTree(Fixture):
+    """The guard's verdict on the real tree. Skipped in the REQUIRED `tests`
+    job (which sets SKIP_REAL_TREE) so the guard stays advisory there; that
+    job still runs every fixture test, so a broken script goes red."""
+
     def test_guard_passes_on_the_real_tree(self):
         rc, out = self.run_guard(root=REPO)
         self.assertEqual(rc, EXIT_OK, out)
-        # The real allow-list is not empty today, so a reader that silently
-        # found no exemptions would show up here as a stale-entry failure, and
-        # one that found no allow-list as violations; pin a known entry too.
+        # A reader that silently found no exemptions would fail on stale
+        # entries, one that found no allow-list on violations; pin one too.
         self.assertIn("allowed exempt: digest 0.10.7", out)
+
+    def test_both_readers_give_the_same_verdict_on_the_real_tree(self):
+        lines = self.run_guard(root=REPO, parser="lines")
+        self.assertEqual(lines[0], EXIT_OK, lines[1])
+        if cge.tomllib is not None:
+            self.assertEqual(self.run_guard(root=REPO, parser="toml"), lines)
 
 
 if __name__ == "__main__":

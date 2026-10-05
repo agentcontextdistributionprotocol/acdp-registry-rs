@@ -445,7 +445,12 @@ audited: wait for (or ask for) an acdp-rs audit and pull it in with
 the audited version is usually small). Adding an allow-list line is a reviewed decision
 that a crypto crate stays unreviewed for now. It needs a tracking issue that ends it.
 
-The guard is advisory because the job is. It reads `config.toml` rather than
+The guard is advisory because the job is. Its fixture tests also run in the required
+`tests` job, so a broken guard script fails a required check. Only its verdict on this
+repository's own `supply-chain/` is advisory. It reads `config.toml` with Python's
+`tomllib` (3.11+, as on CI). On older Pythons it falls back to a line reader that
+refuses any exemption spelling other than cargo-vet's own, and the self-test checks
+that both readers agree on the real file. It reads `config.toml` rather than
 `cargo vet`'s JSON (acdp-rs's `scripts/check-crypto-vet.sh` reads the JSON), so it says
 "exempted or not", not "fully audited or not". A crate trusted through a
 `[[trusted.*]]` or wildcard entry is not an exemption and passes.

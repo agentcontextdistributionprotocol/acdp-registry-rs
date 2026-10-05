@@ -416,10 +416,20 @@ jobs:
       # check_mutants_pins.py (#384) rides in the same step for the same reason:
       # its own PR job (mutants-pins.yml) skips its check on PRs that touch no
       # scoped file or pin, so a PR that breaks the script must go red HERE.
-      - name: mutation-ratchet script unit tests (classifier + pin check)
+      #
+      # test_check_crypto_exemptions.py (#405) rides here too, so a broken
+      # crypto exemption guard goes red in a required context even while the
+      # advisory cargo-vet job is red for another reason (e.g. `cargo vet
+      # --locked` failing before the guard step runs). The env var skips ONLY
+      # its RealTree class -- the guard's policy verdict on this repo's own
+      # supply-chain/ -- which stays advisory in the cargo-vet job; every
+      # fixture test of the script still runs here.
+      - name: CI script unit tests (mutation ratchet + crypto exemption guard)
+        env:
+          ACDP_CRYPTO_GUARD_SKIP_REAL_TREE: "1"
         run: |
           set -uo pipefail
-          for suite in test_classify_removed_survivors.py test_check_mutants_pins.py; do
+          for suite in test_classify_removed_survivors.py test_check_mutants_pins.py test_check_crypto_exemptions.py; do
             # The exit code is captured rather than left to `set -e` ON PURPOSE.
             # A suite that collects ZERO tests exits 5 on Python 3.12+ and 0 on
             # older versions -- so under `set -e` the run would abort before the
@@ -779,7 +789,8 @@ jobs:
       # is no longer exempted (stale), so the list only shrinks as audits land.
       # Advisory like the rest of this job. The self-test runs first so a broken
       # reader cannot pass silently; `-v` + exit code (Python 3.12 exits non-zero
-      # on a suite that ran nothing).
+      # on a suite that ran nothing). Its fixture tests also run in the required
+      # `tests` job's script loop; only the real-tree verdict is advisory-only.
       - name: crypto exemption guard self-test
         run: python3 .github/scripts/test_check_crypto_exemptions.py -v
       - name: crypto-critical crates are audited, or allow-listed exempt

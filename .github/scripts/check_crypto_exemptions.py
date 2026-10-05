@@ -27,11 +27,15 @@ the question is "is it exempted", which config.toml answers without a cargo-vet
 run, so the self-test needs no cargo-vet and no network. `cargo vet --locked`
 runs in the same job first and answers "is everything covered at all".
 
-Python 3.9 compatible (no tomllib). config.toml is written by cargo-vet in a
-fixed shape (`[[exemptions.<crate>]]` followed by `version = "<v>"`), and the
-reader fails loud on any other mention of exemptions.
+config.toml is read with the stdlib `tomllib` when it exists (Python 3.11+, so
+on CI), which reads every TOML spelling of an exemption. On Python 3.9/3.10 a
+line reader is the fallback: cargo-vet writes config.toml in a fixed shape
+(`[[exemptions.<crate>]]` followed by `version = "<v>"`), and the line reader
+refuses (exit 2) any other mention of `exemptions` -- quoted, dotted, inline or
+spaced -- rather than guess. The self-test checks that both readers return the
+same set on the real config.toml.
 
-Usage: check_crypto_exemptions.py [--root DIR]
+Usage: check_crypto_exemptions.py [--root DIR] [--parser auto|toml|lines]
 Exit: 0 pass, 1 violation(s), 2 unreadable input.
 """
 
@@ -41,6 +45,11 @@ import argparse
 import os
 import re
 import sys
+
+try:  # Python 3.11+
+    import tomllib
+except ImportError:  # pragma: no cover - exercised on 3.9/3.10
+    tomllib = None
 
 EXIT_OK, EXIT_VIOLATION, EXIT_UNREADABLE = 0, 1, 2
 
@@ -112,8 +121,48 @@ def read_allowed(path):
     return entries
 
 
-def read_exemptions(path):
-    """{(crate, version)} from cargo-vet's `[[exemptions.<crate>]]` tables."""
+def read_exemptions_toml(path):
+    """{(crate, version)} via tomllib: every TOML spelling of an exemption."""
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except OSError as e:
+        raise Unreadable("cannot read %s: %s" % (path, e))
+    except tomllib.TOMLDecodeError as e:
+        raise Unreadable("%s is not valid TOML: %s" % (path, e))
+    table = data.get("exemptions", {})
+    if not isinstance(table, dict):
+        raise Unreadable("%s: `exemptions` is not a table" % path)
+    exempted = set()
+    for crate, entries in table.items():
+        if not isinstance(entries, list):
+            raise Unreadable("%s: exemptions.%s is not an array of tables" % (path, crate))
+        for entry in entries:
+            version = entry.get("version") if isinstance(entry, dict) else None
+            if not isinstance(version, str):
+                raise Unreadable("%s: [[exemptions.%s]] has no version line" % (path, crate))
+            exempted.add((crate, version))
+    return exempted
+
+
+def read_exemptions(path, parser="auto"):
+    """{(crate, version)} exempted in config.toml, by the chosen reader."""
+    if parser == "toml" or (parser == "auto" and tomllib is not None):
+        if tomllib is None:
+            raise Unreadable("--parser toml needs Python 3.11+ (tomllib)")
+        return read_exemptions_toml(path)
+    return read_exemptions_lines(path)
+
+
+# A line that may assign or open `exemptions` in any spelling the line reader
+# does not parse: bare, "quoted" or 'quoted', followed by `.`, `=` or space.
+OTHER_EXEMPTIONS_KEY_RE = re.compile(r"""^(?:exemptions|"exemptions"|'exemptions')\s*[.=]""")
+
+
+def read_exemptions_lines(path):
+    """{(crate, version)} from cargo-vet's `[[exemptions.<crate>]]` tables.
+
+    The 3.9 fallback. Refuses any other mention of exemptions."""
     exempted = set()
     current = None  # crate of the open exemption table
     seen_version = True
@@ -144,7 +193,7 @@ def read_exemptions(path):
                 )
             current, seen_version = None, True
             continue
-        if re.match(r"^exemptions\s*[.=]", line):
+        if OTHER_EXEMPTIONS_KEY_RE.match(line):
             raise Unreadable(
                 "%s:%d: exemptions written as a dotted or inline key (%r); this guard "
                 "reads only cargo-vet's [[exemptions.<crate>]] form" % (path, i, line)
@@ -171,11 +220,11 @@ def read_lock_names(path):
     return names
 
 
-def check(root):
+def check(root, parser="auto"):
     """(violations, notes). Raises Unreadable."""
     critical = read_critical(os.path.join(root, CRITICAL))
     allowed = read_allowed(os.path.join(root, ALLOWED))
-    exempted = read_exemptions(os.path.join(root, CONFIG))
+    exempted = read_exemptions(os.path.join(root, CONFIG), parser)
     locked = read_lock_names(os.path.join(root, LOCK))
 
     missing = [n for n in critical if n not in locked]
@@ -225,9 +274,15 @@ def main(argv=None):
         default=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
         help="repository root (default: this script's repo)",
     )
+    ap.add_argument(
+        "--parser",
+        choices=("auto", "toml", "lines"),
+        default="auto",
+        help="config.toml reader: auto (tomllib if available), toml, or lines (3.9 fallback)",
+    )
     args = ap.parse_args(argv)
     try:
-        violations, notes = check(args.root)
+        violations, notes = check(args.root, args.parser)
     except Unreadable as e:
         print("check-crypto-exemptions: ERROR: %s" % e, file=sys.stderr)
         return EXIT_UNREADABLE
