@@ -336,7 +336,9 @@
 //! rather than the unpinned playground branch that accepts any signature. `sig-003` and
 //! `dk-003` were already covered by the pre-existing `did_key_golden_vector_accepted_and_
 //! gated` (above), merely not yet registered in `COVERED`; Phase 13 registers it under
-//! both families. `dk-001`/`dk-002`/`dk-004` get DIRECT coverage via
+//! both families. `sig-004` (spec pin `6d5cdb8`, strict Ed25519) is covered the same
+//! pinned-key way by `sig004_ed25519_small_order_forgery_rejected_offline_and_over_http`.
+//! `dk-001`/`dk-002`/`dk-004` get DIRECT coverage via
 //! `dk001_002_004_did_key_resolution_negatives_hit_the_resolver`. Through acdp
 //! 0.13.1 this repo's `acdp` dependency rejected all three with `schema_violation`
 //! instead of the fixtures' pinned `key_resolution_failed` -- spec-sanctioned for
@@ -639,6 +641,7 @@
 #![cfg(feature = "storage-sqlite")]
 
 mod common;
+mod spawned_registry;
 
 use std::path::{Path, PathBuf};
 #[cfg(feature = "playground")]
@@ -9725,6 +9728,7 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
             "sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_publish",
             "sig001_signature_byte_perturbation_is_rejected",
             "sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected",
+            "sig004_ed25519_small_order_forgery_rejected_offline_and_over_http",
             "did_key_golden_vector_accepted_and_gated",
         ])],
     ),
@@ -9993,10 +9997,11 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// This is the ratchet that would have caught `err-002`: the count was 143
 /// before the `16211e6` bump and 144 after. It caught the next one too: 144
 /// before the `9deb7e7` bump (rev-003, rev-004 added; rev-002 only modified,
-/// not counted again) and 146 after. A `>=` floor passes the very scanner
+/// not counted again) and 146 after; 147 after the `6d5cdb8` bump (sig-004
+/// added). A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 146;
+const TOTAL_FIXTURES_AT_PIN: usize = 147;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
@@ -10109,6 +10114,7 @@ const DIRECT_FNS: &[(&str, fn())] = &[
     direct_fn!(sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_publish),
     direct_fn!(sig001_signature_byte_perturbation_is_rejected),
     direct_fn!(sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected),
+    direct_fn!(sig004_ed25519_small_order_forgery_rejected_offline_and_over_http),
     direct_fn!(did_key_golden_vector_accepted_and_gated),
     direct_fn!(rev001_key_revocation_context_golden_accepted_and_self_signed_rejected),
     direct_fn!(rev003_publish_time_rejection_matrix),
@@ -11569,6 +11575,137 @@ async fn sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected() {
     assert_eq!(
         body["error"]["code"], "invalid_signature",
         "sig-002 vector 1 body = {body}"
+    );
+}
+
+const EXPECTED_SIG004_VECTOR_COUNT: usize = 1;
+const EXPECTED_SIG004_SMALL_ORDER_POINTS: usize = 8;
+
+/// sig-004 (RFC-ACDP-0001 §5.10 strict Ed25519 verification, added at spec
+/// pin `6d5cdb8`; listed under `acdp-registry-core` in `profiles.json`): a
+/// NEGATIVE vector. Identity public key `A`, identity nonce point `R` and
+/// `s = 0` satisfy the cofactorless equation `[s]B = R + [k]A` for every
+/// message, so a non-strict verifier accepts it as a signature over
+/// anything. The registry MUST reject it with `invalid_signature`.
+///
+/// Three layers, each needed for the next to mean something:
+///   1. Positive control: ed25519-dalek's NON-strict `verify` accepts the
+///      vector for the fixture's message AND for an unrelated one. Without
+///      this, layers 2 and 3 could pass because the vector is merely
+///      malformed, which proves nothing about strictness.
+///   2. Offline: `acdp::crypto::verify::verify_ed25519` (the primitive every
+///      registry Ed25519 path calls) rejects it, and rejects every listed
+///      small-order point used as `A` with an identity `R`.
+///   3. Over HTTP: the sig-001 golden body, re-signed with the forged
+///      signature, POSTed to a registry that pins the identity key for the
+///      producer DID, is refused 400 `invalid_signature`. The forgery is
+///      valid for that body's `content_hash` under loose verification
+///      (layer 1 shows it is message-independent), so only strictness
+///      stands between it and a 200.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sig004_ed25519_small_order_forgery_rejected_offline_and_over_http() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use ed25519_dalek::Verifier as _;
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping sig-004 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "sig-004") else {
+        return;
+    };
+    let vectors = fx["vectors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sig-004: vectors missing or not an array: {fx}"));
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_SIG004_VECTOR_COUNT,
+        "sig-004 must carry exactly {EXPECTED_SIG004_VECTOR_COUNT} vector at spec pin 6d5cdb8: {fx}"
+    );
+    let v = &vectors[0];
+    assert_eq!(v["negative"], true, "sig-004 vector must be negative: {v}");
+    assert_eq!(v["expected"]["strict_result"], "reject");
+    assert_eq!(v["expected"]["error"], "invalid_signature");
+
+    let hex32 = |s: &str, what: &str| -> [u8; 32] {
+        hex::decode(s)
+            .unwrap_or_else(|e| panic!("sig-004: {what} is not hex: {e}"))
+            .try_into()
+            .unwrap_or_else(|b: Vec<u8>| panic!("sig-004: {what} is {} bytes, want 32", b.len()))
+    };
+    let pub_bytes = hex32(v["public_key_hex"].as_str().unwrap(), "public_key_hex");
+    let sig_bytes: [u8; 64] = hex::decode(v["signature_value_hex"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap_or_else(|b: Vec<u8>| panic!("sig-004: signature is {} bytes, want 64", b.len()));
+    let sig_b64 = STANDARD.encode(sig_bytes);
+    let message = v["signature_input"].as_str().unwrap();
+
+    // Layer 1: positive control -- the loose equation really holds, for the
+    // fixture's message and for one it never mentions.
+    let loose_key = ed25519_dalek::VerifyingKey::from_bytes(&pub_bytes)
+        .expect("sig-004: identity point must decompress");
+    let loose_sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+    for msg in [message, "sha256:not-the-fixture-message"] {
+        assert!(
+            loose_key.verify(msg.as_bytes(), &loose_sig).is_ok(),
+            "sig-004 positive control: non-strict verify must accept the forgery for {msg:?}; \
+             if it does not, the layers below prove nothing about strictness"
+        );
+    }
+
+    // Layer 2: the registry's verification primitive rejects it.
+    assert!(
+        matches!(
+            acdp::crypto::verify::verify_ed25519(&pub_bytes, &sig_b64, message),
+            Err(acdp::AcdpError::InvalidSignature(_))
+        ),
+        "sig-004: verify_ed25519 must reject the small-order forgery with InvalidSignature"
+    );
+    let points = fx["small_order_points"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sig-004: small_order_points missing: {fx}"));
+    assert_eq!(points.len(), EXPECTED_SIG004_SMALL_ORDER_POINTS);
+    for p in points {
+        let a = hex32(p["encoding_hex"].as_str().unwrap(), "small-order point");
+        assert!(
+            acdp::crypto::verify::verify_ed25519(&a, &sig_b64, message).is_err(),
+            "sig-004: small-order public key {p} with identity R must be rejected"
+        );
+    }
+
+    // Layer 3: over HTTP, against a registry pinning the identity key.
+    let Some(sig001) = find_fixture_by_id(&fixtures, "sig-001") else {
+        panic!("sig-004 layer 3 reuses sig-001's publish body, which is missing");
+    };
+    let mut req_body = sig001["vectors"][0]["expected"]["publish_request_body"].clone();
+    assert!(
+        req_body.is_object(),
+        "sig-001 must carry vectors[0].expected.publish_request_body"
+    );
+    req_body["signature"]["value"] = Value::String(sig_b64.clone());
+    let content_hash = req_body["content_hash"]
+        .as_str()
+        .expect("sig-001 publish_request_body.content_hash");
+    assert!(
+        loose_key
+            .verify(content_hash.as_bytes(), &loose_sig)
+            .is_ok(),
+        "sig-004 layer 3: the forgery must loosely verify over the body actually posted"
+    );
+    let app = pinned_producer_harness(caps(), &STANDARD.encode(pub_bytes), "ed25519").await;
+    let (status, body) = post_publish_json(&app, req_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "sig-004: a small-order forgery must be refused, got body = {body}"
+    );
+    assert_eq!(
+        body["error"]["code"], "invalid_signature",
+        "sig-004 body = {body}"
     );
 }
 
@@ -16779,5 +16916,356 @@ fn read_auth_method_ids_satisfy_the_pinned_schema() {
             panic!("{name} violates the pinned capabilities schema: {v}");
         }
         assert!(seen.insert(value), "{name} repeats the id {value:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #385: the documents the shipped binary SERVES, validated whole against the
+// pinned spec's JSON Schemas.
+//
+// `read_auth_method_ids_satisfy_the_pinned_schema` above checks one field's
+// item rules by hand, because until #385 this repository had no JSON-Schema
+// validator. `acdp_validation::validate_capabilities` does not cover that field,
+// and nothing checked the rest of the served document against the schema. The
+// tests below spawn the real binary (see `spawned_registry`), read what it
+// serves, and run the pinned `schemas/json/*.schema.json` over it with the
+// `jsonschema` crate. For the SERVED document they are a superset of that field
+// check. The older test stays because it also pins the schema's item rules to
+// the values this repository was written against, which a validator alone would
+// follow silently across a spec bump.
+// ---------------------------------------------------------------------------
+
+/// Every `schemas/json/*.schema.json` in the pinned tree, keyed by its `$id`.
+/// Registering them all is what makes validation OFFLINE: the capabilities
+/// schema `$ref`s `acdp-common.schema.json` by absolute `https://` URL, and with
+/// `jsonschema`'s default features off and `.offline()` set, a reference that
+/// is not registered here fails the validator build instead of being fetched.
+fn pinned_json_schemas(root: &Path) -> std::collections::BTreeMap<String, Value> {
+    let dir = root.join("schemas/json");
+    let mut out = std::collections::BTreeMap::new();
+    let entries =
+        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("dir entry").path();
+        if !path.to_string_lossy().ends_with(".schema.json") {
+            continue;
+        }
+        let schema: Value = serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display())),
+        )
+        .unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()));
+        let id = schema["$id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{} has no string $id", path.display()))
+            .to_string();
+        assert!(
+            out.insert(id.clone(), schema).is_none(),
+            "two schemas in {} share the $id {id}",
+            dir.display()
+        );
+    }
+    assert!(
+        out.len() >= 2,
+        "found {} schemas under {}; the capabilities schema needs at least itself and \
+         acdp-common, so this is not the pinned tree's layout",
+        out.len(),
+        dir.display()
+    );
+    out
+}
+
+/// Validates documents against one pinned schema, resolving `$ref`s only
+/// through the locally registered spec schemas.
+struct PinnedSchema {
+    file: &'static str,
+    schemas: std::collections::BTreeMap<String, Value>,
+    id: String,
+}
+
+impl PinnedSchema {
+    fn load(root: &Path, file: &'static str) -> Self {
+        let schemas = pinned_json_schemas(root);
+        let suffix = format!("/{file}");
+        let id = schemas
+            .keys()
+            .find(|id| id.ends_with(&suffix))
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!("no schema with an $id ending in {suffix} in the pinned tree")
+            });
+        Self { file, schemas, id }
+    }
+
+    /// Every schema violation in `doc`, as `<instance path>: <message>`.
+    /// Empty means valid. Panics if the validator cannot be built, which is
+    /// what an unregistered (would-be-fetched) `$ref` produces.
+    fn violations(&self, doc: &Value) -> Vec<String> {
+        let registry = jsonschema::Registry::new()
+            .extend(self.schemas.iter().map(|(id, s)| (id.as_str(), s.clone())))
+            .expect("register the pinned schemas by $id")
+            .prepare()
+            .expect("prepare the pinned-schema registry offline");
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .offline()
+            .with_registry(&registry)
+            .build(&self.schemas[&self.id])
+            .unwrap_or_else(|e| {
+                panic!(
+                    "building a validator for {} offline failed: {e}. An unresolved $ref \
+                     here means the schema references something outside schemas/json/.",
+                    self.file
+                )
+            });
+        validator
+            .iter_errors(doc)
+            .map(|e| format!("{}: {e}", e.instance_path()))
+            .collect()
+    }
+
+    fn assert_valid(&self, what: &str, doc: &Value, reg: &spawned_registry::SpawnedRegistry) {
+        let v = self.violations(doc);
+        assert!(
+            v.is_empty(),
+            "{what} violates the pinned {}:\n  {}\ndocument: {doc:#}\n{}",
+            self.file,
+            v.join("\n  "),
+            reg.output()
+        );
+    }
+}
+
+/// Standard base64 of 32 copies of `byte`: a receipt seed or an HS256 secret.
+fn b64_32(byte: u8) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode([byte; 32])
+}
+
+/// `[auth]` for the spawned registries. `did:key` is listed so a spawned
+/// registry can accept a `did:key`-signed publish without a resolver.
+fn served_auth_toml(enabled: bool) -> String {
+    let secret = if enabled {
+        format!("jwt_secret = \"{}\"\n", b64_32(0x5a))
+    } else {
+        String::new()
+    };
+    format!(
+        "[auth]\nenabled = {enabled}\n{secret}did_methods = [\"did:web\", \"did:key\"]\n\
+         anonymous_public_reads = true\n"
+    )
+}
+
+/// The `[receipt]`, `[lifecycle]` and `[log]` tables that back every optional
+/// registry profile (receipts, head receipts, lifecycle, transparency log).
+fn served_full_features_toml() -> String {
+    format!(
+        "[receipt]\nsigning_key_seed_b64 = \"{}\"\nhead_receipts = true\n\n\
+         [lifecycle]\nenabled = true\n\n[log]\nenabled = true\n",
+        b64_32(0x2c)
+    )
+}
+
+/// #385: the WHOLE `/.well-known/acdp.json` the shipped binary serves, with
+/// read auth OFF and ON and with every profile it can advertise switched on,
+/// satisfies the pinned `acdp-capabilities.schema.json`.
+///
+/// Three configurations, because the document's shape depends on config:
+///   * auth off, default profiles: `read_authentication_methods` omitted;
+///   * auth on, default profiles: `read_authentication_methods` present (the
+///     field #372 found shipping a hyphenated id);
+///   * auth on with EVERY entry of `REGISTRY_ADVERTISABLE_PROFILES` listed and
+///     its backing feature enabled (receipt key, head receipts, lifecycle,
+///     log): the widest `profiles` array the binary can serve.
+///
+/// Synthetic negatives run against the same validator, on one-field edits of a
+/// served document that just passed, so a validator that accepts everything
+/// (or silently skips a `$ref` it could not resolve) cannot pass this test:
+///   * the hyphenated `bearer-jwt` id that shipped through 0.2.0 (#372);
+///   * an extra key in `limits`, a closed sub-object;
+///   * a `registry_did` that is not a DID. That rule lives in
+///     `acdp-common.schema.json` and is reached only through the cross-file
+///     `$ref`, so this one proves the offline registry resolves it.
+#[test]
+fn served_capabilities_documents_satisfy_the_pinned_schema() {
+    let Some(root) = spec_root() else {
+        eprintln!("ACDP_SPEC_DIR not set; skipping");
+        return;
+    };
+    let schema = PinnedSchema::load(&root, "acdp-capabilities.schema.json");
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let all_profiles = REGISTRY_ADVERTISABLE_PROFILES
+        .iter()
+        .map(|p| format!("\"{p}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cases: [(&str, String, String); 3] = [
+        ("auth-off", String::new(), served_auth_toml(false)),
+        ("auth-on", String::new(), served_auth_toml(true)),
+        (
+            "all-profiles",
+            format!("profiles = [{all_profiles}]"),
+            format!(
+                "{}\n{}",
+                served_auth_toml(true),
+                served_full_features_toml()
+            ),
+        ),
+    ];
+
+    let mut served = std::collections::BTreeMap::new();
+    for (tag, registry_extra, extra) in &cases {
+        let reg = spawned_registry::SpawnedRegistry::start(dir.path(), tag, registry_extra, extra);
+        let (status, doc) = reg.get("/.well-known/acdp.json");
+        assert_eq!(status, 200, "{tag}: {doc}\n{}", reg.output());
+        schema.assert_valid(&format!("{tag} /.well-known/acdp.json"), &doc, &reg);
+        served.insert(*tag, doc);
+    }
+
+    // The three really differ where they should, so "valid three times" is not
+    // one document measured thrice.
+    assert!(
+        served["auth-off"]
+            .get("read_authentication_methods")
+            .is_none(),
+        "auth off must omit read_authentication_methods: {}",
+        served["auth-off"]
+    );
+    assert_eq!(
+        served["auth-on"]["read_authentication_methods"],
+        json!(["bearer_jwt"])
+    );
+    let advertised: std::collections::BTreeSet<&str> = served["all-profiles"]["profiles"]
+        .as_array()
+        .expect("profiles is an array")
+        .iter()
+        .map(|p| p.as_str().expect("profile ids are strings"))
+        .collect();
+    let expected: std::collections::BTreeSet<&str> =
+        REGISTRY_ADVERTISABLE_PROFILES.iter().copied().collect();
+    assert_eq!(
+        advertised, expected,
+        "the all-profiles registry must advertise exactly REGISTRY_ADVERTISABLE_PROFILES"
+    );
+
+    let on = &served["auth-on"];
+    let mut hyphenated = on.clone();
+    hyphenated["read_authentication_methods"] = json!(["bearer-jwt"]);
+    let mut open_limits = on.clone();
+    open_limits["limits"]["not_a_spec_limit"] = json!(1);
+    let mut bad_did = on.clone();
+    bad_did["registry_did"] = json!("not-a-did");
+    for (what, doc) in [
+        ("the hyphenated bearer-jwt id (#372)", &hyphenated),
+        ("an extra key in the closed limits object", &open_limits),
+        ("a non-DID registry_did (cross-file $ref)", &bad_did),
+    ] {
+        assert!(
+            !schema.violations(doc).is_empty(),
+            "the validator accepted {what}; it is not enforcing the pinned schema, so \
+             every positive above proves nothing. Document: {doc:#}"
+        );
+    }
+}
+
+/// #385, the cheap extension: the other documents one fully featured spawned
+/// registry serves, each validated whole against its pinned schema: a publish
+/// response, the stored context, a search response, a transparency-log
+/// checkpoint and an error envelope. One publish feeds all of them.
+///
+/// Each document also gets a synthetic negative on the same validator, for the
+/// same reason as above.
+#[test]
+fn served_registry_documents_satisfy_the_pinned_schemas() {
+    let Some(root) = spec_root() else {
+        eprintln!("ACDP_SPEC_DIR not set; skipping");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let extra = format!(
+        "{}\n{}",
+        served_auth_toml(false),
+        served_full_features_toml()
+    );
+    let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "documents", "", &extra);
+
+    let producer = Producer::new_did_key(SigningKey::from_bytes(&[0x85; 32]));
+    let req = producer
+        .publish_request()
+        .title("issue 385 served documents")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("publish request");
+    let (status, published) = reg.post(
+        "/contexts",
+        &serde_json::to_value(&req).expect("serialize the publish request"),
+    );
+    assert_eq!(status, 200, "publish: {published}\n{}", reg.output());
+    let ctx_id = published["ctx_id"].as_str().expect("ctx_id").to_string();
+
+    let (status, context) = reg.get(&format!("/contexts/{}", pct_encode_path_segment(&ctx_id)));
+    assert_eq!(status, 200, "get: {context}\n{}", reg.output());
+    let (status, search) = reg.get("/contexts/search?q=served");
+    assert_eq!(status, 200, "search: {search}\n{}", reg.output());
+    assert!(
+        search["matches"].as_array().is_some_and(|m| !m.is_empty()),
+        "the search must find the publish, or its schema check covers an empty list: {search}"
+    );
+    let (status, checkpoint) = reg.get("/log/checkpoint");
+    assert_eq!(status, 200, "checkpoint: {checkpoint}\n{}", reg.output());
+    let (status, error) = reg.get("/contexts/search?limit=not-a-number");
+    assert!(
+        (400..500).contains(&status),
+        "expected a 4xx error envelope, got {status}: {error}"
+    );
+
+    // (what, document, schema file, a one-field edit that schema must reject)
+    let cases: [(&str, &Value, &'static str, (&str, Value)); 5] = [
+        (
+            "the publish response",
+            &published,
+            "acdp-publish-response.schema.json",
+            ("ctx_id", json!(42)),
+        ),
+        (
+            "the stored context",
+            &context,
+            "acdp-context.schema.json",
+            ("body", json!("not-an-object")),
+        ),
+        (
+            "a search response",
+            &search,
+            "acdp-search-response.schema.json",
+            ("matches", json!("not-an-array")),
+        ),
+        (
+            "a log checkpoint",
+            &checkpoint,
+            "acdp-log-checkpoint.schema.json",
+            ("tree_size", json!("not-an-integer")),
+        ),
+        (
+            "an error envelope",
+            &error,
+            "acdp-error.schema.json",
+            ("error", json!({"code": "not_an_acdp_code", "message": "x"})),
+        ),
+    ];
+    for (what, doc, file, (field, bad)) in cases {
+        let schema = PinnedSchema::load(&root, file);
+        schema.assert_valid(what, doc, &reg);
+        let mut negative = doc.clone();
+        assert!(
+            negative.get(field).is_some(),
+            "{what} has no `{field}`, so the negative below would not be an edit: {doc:#}"
+        );
+        negative[field] = bad;
+        assert!(
+            !schema.violations(&negative).is_empty(),
+            "{file} accepted {what} with `{field}` corrupted; the validator is not enforcing it"
+        );
     }
 }

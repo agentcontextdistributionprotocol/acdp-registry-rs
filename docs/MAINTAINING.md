@@ -463,6 +463,15 @@ must be line-neutral until the next one. Check
 count are updated by hand — the steps are in
 [CONTRIBUTING.md](../CONTRIBUTING.md#adopting-a-new-acdp-spec-revision).
 
+A bump that changes `schemas/json/` can also turn `conformance` red without touching a
+fixture: `served_capabilities_documents_satisfy_the_pinned_schema` and
+`served_registry_documents_satisfy_the_pinned_schemas` (in `tests/conformance.rs`) spawn
+the built binary and validate what it serves (`/.well-known/acdp.json` with auth off, auth
+on and every advertisable profile on, plus a publish response, a context, a search
+response, a log checkpoint and an error body) against the new revision's schemas (#385).
+The digest covers only fixtures, so that failure is the signal that a served document no
+longer matches the spec; fix the document, not the test.
+
 Docs that link into the spec repository at the pinned revision must be re-pointed to the
 new `ref:` in the same bump PR. `sibling_repo_links_are_pinned` (in `conformance_gate.rs`)
 requires every spec link's ref to equal the `ref:` in `.spec-pin` (the one exception is

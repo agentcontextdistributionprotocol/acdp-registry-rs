@@ -94,6 +94,12 @@ bump can be driven by running the `bump spec` workflow from the Actions tab
 (optionally with an explicit SHA), which opens a PR for review rather than
 committing directly.
 
+The same `--test conformance` run also spawns the built `acdp-registry` binary
+and validates the documents it serves against the spec's `schemas/json/*.schema.json`
+with the `jsonschema` dev-dependency (#385), so the spec checkout must include
+`schemas/json/`. Validation is offline: every spec schema is registered by its
+`$id`, and a `$ref` outside that set fails the test rather than being fetched.
+
 CI also measures coverage with `cargo llvm-cov`: one number merged across the
 workspace, playground, Postgres-integration and memory-backend legs, with a floor
 of 88% lines (summary on the run page, lcov artifact attached). The `coverage`

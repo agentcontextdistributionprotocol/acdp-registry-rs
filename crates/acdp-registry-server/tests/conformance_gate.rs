@@ -3905,8 +3905,10 @@ const SPEC_REPO: &str = "agentcontextdistributionprotocol";
 /// The SDK repository. Its links must use an `acdp-v<semver>` tag or a full SHA.
 const SDK_REPO: &str = "acdp-rs";
 /// The ONE spec ref allowed besides the pin, and only on the spec's
-/// non-normative `docs/` pages: `fb76f6d`, the spec docs refresh that followed
-/// the pinned revision (see the Link-convention block in `docs/README.md`).
+/// non-normative `docs/` pages: `fb76f6d`, a spec docs refresh that landed
+/// after the `9deb7e7` pin (see the Link-convention block in `docs/README.md`).
+/// Since the `6d5cdb8` pin it is an ancestor of the pin and no link uses it;
+/// it is kept as the slot for the next docs refresh that runs ahead of a pin.
 /// Normative paths (`rfcs/`, `registries/`, `schemas/`, ...) must use the pin.
 const SPEC_DOCS_REF: &str = "fb76f6d54ba25f583ce526b2bdee30503a5d8e59";
 
