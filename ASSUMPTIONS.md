@@ -4853,8 +4853,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** emitting both ids (rejected: every item must match, so the document stays invalid); `jsonschema` dev-dep for whole-document validation (rejected here: new supply-chain entry, and `build_capabilities` is unreachable from integration tests); spawning the binary (rejected: a unit test can call the router).
 - **Follow-up (not filed):** a spec-repo issue to register the id in `registries/auth-methods.md` and to answer whether §6.2's list admits a registry-minted DID-bound JWT.
 - **Blast radius if wrong:** a lenient client matching the old string stops recognising the method; a later rename is another wire change.
-- **Status:** CONFIRMED 2026-10-04 except (c) UNCONFIRMED pending spec issue #72 (Fable analysis; decided by Opus on the maintainer's delegation)
-- **Reconciled 2026-10-04:** `bearer_jwt` is the strongest id (`oauth` is the wrong flow; `did_jwt` means a self-signed DID JWT; omitting the field breaks RFC-ACDP-0007 rule 9). (a) corrected: a later rename is a deprecation via dual emission (both ids are pattern-valid), not a second wire break. (c) stays open until the spec answers; a recommendation was commented on spec #72. See DECISIONS.md "Reconcile 2026-10-04 — issues-371-376".
+- **Status:** CONFIRMED (a)-(c) (c) on 2026-10-05 by spec 34f14ab, adopted in #415; (a),(b) on 2026-10-04 (Fable analysis; decided by Opus on the maintainer's delegation)
+- **Reconciled 2026-10-04:** `bearer_jwt` is the strongest id (`oauth` is the wrong flow; `did_jwt` means a self-signed DID JWT; omitting the field breaks RFC-ACDP-0007 rule 9). (a) corrected: a later rename is a deprecation via dual emission (both ids are pattern-valid), not a second wire break. (c) was open until the spec answered; settled 2026-10-05 (spec 34f14ab, #415; see DECISIONS.md "#372 open question (c)"). See DECISIONS.md "Reconcile 2026-10-04 — issues-371-376".
 
 ## #376 — stale comments, and the revoke envelope routed through `RegistryError`
 - **Plan:** Plan: issues-371-376 (Phase 4, #376)
