@@ -4923,3 +4923,9 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** waiting for the Monday cron (it would fail on the stale scope); re-running locally (not the CI-equivalent environment).
 - **Blast radius if wrong:** the next scheduled mutants run fails on scope or survivor drift and needs another single re-pin PR. Workflow config, docs, a committed ledger.
 - **Status:** UNCONFIRMED
+
+## Final close-out, last round (2026-10-05) — executor assumptions
+- **Plan:** plans/final-closeout.md
+- **#405/#412 crypto vet guard:** the guard reads `supply-chain/config.toml` (tomllib when available, a strict line reader as the Python 3.9 fallback that refuses unfamiliar spellings of `exemptions`) rather than cargo-vet JSON, so it cannot see delta-audit chains; the crypto-critical list is a copy of acdp-rs's `scripts/crypto-critical.txt` and must be kept in step by hand; the guard stays advisory because `cargo-vet` does. **Status:** UNCONFIRMED
+- **#410/#414 imports refresh:** a single-crate patch bump onto the acdp-rs-audited version is safe and minimal (cpufeatures 0.3.1, rustls-pki-types 1.15.1, webpki-roots 1.0.9, each a one-package `Cargo.lock` change; webpki-roots also refreshes the CA bundle, one root removed, four added); strict "only acdp-rs audits count" parity was NOT built (see DECISIONS.md). **Status:** UNCONFIRMED
+- **#415 spec 34f14ab:** `.spec-pin` changes only `ref:` because fixtures are byte-identical (digest unchanged, 147 fixtures); the registry already meets RFC-ACDP-0008 §6.2 for `bearer_jwt` (code cited in docs/AUTHENTICATION.md); "tokens MUST only be sent over TLS" is a deployment duty, the registry does not refuse plain-HTTP bearers (it cannot see TLS ended upstream); "reads only" means a bearer never replaces a producer signature on a write (`/auth/token/revoke` and `/admin/*` fall outside); the default `token_ttl_seconds = 3600` satisfies "short lifetimes". **Status:** UNCONFIRMED

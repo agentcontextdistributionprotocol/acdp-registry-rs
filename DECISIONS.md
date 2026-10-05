@@ -4578,3 +4578,9 @@ Merged this round: #364 (release v0.3.0, tags and images published), #394, #395,
 **#402 default flip — CONFIRMED (the one-way door was decided on 2026-10-04 and verified as safe by Fable).** Unset `tenant_header_trust` means `none` in every mode in 0.4.0; admin-bearer header selection on `/admin/contexts` is sound; `#[non_exhaustive]` deferred. The release label is 0.4.0 and a stale v0.3.1 release PR (#403) must not be merged.
 
 **Deferred / open:** Postgres coverage of the signature-only lifecycle retry (parity kit); crypto-critical vet guard; Vercel app installation check (needs `gh auth refresh -s read:user`); `Cargo.lock`-triggered vet refreshes; sibling-repo issues (acdp-ci #29/#30, acdp-ui-console #158/#159, spec #72) need per-change approval.
+
+## Last round — 2026-10-05 (Opus, on the maintainer's delegation)
+- **#372 open question (c) — CONFIRMED by the spec.** Spec 34f14ab (RFC-ACDP-0008 §6.2, registries/auth-methods.md) registers `bearer_jwt` and admits registry-minted DID-bound JWTs; `did_jwt` is explicitly not registered. Adopted in #415.
+- **#411 — CLOSED, strict parity not built.** The #405/#412 guard blocks any new exemption of a crypto-critical crate and #414 retired 12 exemptions; requiring only acdp-rs audits would need delta-chain logic for little gain. Revisit if a crypto-critical crate is ever audited only by a non-acdp source.
+- **Phase 6 settings applied** (tag ruleset 24481366, enforce_admins, msrv/rustdoc/coverage/docker/mutants pins required; cargo-vet advisory). v0.4.0 released (breaking: tenant_header_trust defaults to none).
+- **Open for the maintainer:** Vercel app installation check (needs read:user); sibling-repo issues need per-change approval (acdp-ci#29 is urgent: standardize.sh would revert the applied protection).
