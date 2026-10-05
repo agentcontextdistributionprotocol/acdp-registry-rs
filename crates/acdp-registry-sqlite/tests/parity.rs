@@ -63,6 +63,16 @@ async fn a_desynced_retraction_is_not_served_as_active() {
     parity::assert_desynced_retraction_is_not_served_active(&store, "sqlite", &ctx_id).await;
 }
 
+/// #390: a retraction must be visible to `has_lifecycle_state`, the probe the
+/// server's RFC-ACDP-0013 §6 startup refusal relies on. Called on the raw
+/// store — a wrapper that does not forward the method would answer with the
+/// trait default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_lifecycle_state_probe_sees_a_retraction() {
+    let (store, _tmp) = store().await;
+    parity::assert_lifecycle_state_probe_sees_retraction(&store, "sqlite").await;
+}
+
 /// B6: a corrupt `contributors` column must FAIL a superseding publish, not
 /// silently decode to an empty list.
 ///
