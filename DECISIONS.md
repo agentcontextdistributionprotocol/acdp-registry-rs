@@ -4568,3 +4568,13 @@ to the first real spec bump.
 **Release consequence (decided, option A).** The new public `AuthConfig` field makes the next release 0.3.0, not 0.2.1. The relabel (PR #389) renamed the UPGRADING section, moved the default-flip promise to 0.4.0, and changed the Railway guard to follow the newest UPGRADING section so the page is fixed on `main` before the release PR. Rejected: a human commit on the release branch (release-plz closes the PR), shipping the `none` default now (behaviour change, #386).
 
 **Resulting status:** all 6 entries CONFIRMED (#372 with sub-assumption (c) still open, #376 with (d) CHANGED to a comment fix), none changed in behaviour, deferred items tracked in #390/#391/#393; 0 need code follow-up before the next `/ship`.
+
+## Final close-out round — 2026-10-04/05 (decided by Opus on the maintainer's delegation; #402 verified by Fable as an auth-model change)
+
+Merged this round: #364 (release v0.3.0, tags and images published), #394, #395, #397, #399 (spec 6d5cdb8; closes #388), #400, #402, #396, plus #401 and #398 (see below). Each PR got an independent fresh-Opus verifier PASS before merge (Fable for #402).
+
+**#401 behaviour change — ACCEPTED (Opus, after a verifier assessment).** Charging only after the SDK proves a signature moves two classes of event (non-producer / unknown or invisible context) from "charged to the actor" to "charged to nobody". The uncharged path costs two store reads and no cryptography, the 404 stays indistinguishable, and per-IP limits plus the over-budget peek still apply; the old pre-flight cost an outbound DID fetch per request. Supersedes #375 (a), (e), (g) and BINDING REVISION 5.
+
+**#402 default flip — CONFIRMED (the one-way door was decided on 2026-10-04 and verified as safe by Fable).** Unset `tenant_header_trust` means `none` in every mode in 0.4.0; admin-bearer header selection on `/admin/contexts` is sound; `#[non_exhaustive]` deferred. The release label is 0.4.0 and a stale v0.3.1 release PR (#403) must not be merged.
+
+**Deferred / open:** Postgres coverage of the signature-only lifecycle retry (parity kit); crypto-critical vet guard; Vercel app installation check (needs `gh auth refresh -s read:user`); `Cargo.lock`-triggered vet refreshes; sibling-repo issues (acdp-ci #29/#30, acdp-ui-console #158/#159, spec #72) need per-change approval.
