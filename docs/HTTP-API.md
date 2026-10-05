@@ -406,7 +406,7 @@ Request headers:
 |--------|----------|-------|
 | `Idempotency-Key` | optional | 1–256 ASCII chars; replays return the prior result within `limits.idempotency_key_ttl_seconds`. |
 | `X-Run-Id`        | optional | ≤256 chars; correlation id echoed into the `context.published` webhook. |
-| `X-Tenant-Id`     | optional | Selects the tenant only when no signed `tenant` claim (or, for writes, `[[auth.tenant_agents]]` binding) applies **and** `auth.tenant_header_trust` trusts the sender: `none` never, `trusted_proxies` only from a listed gateway peer, `any_peer` always. A header that is present but untrusted, and does not simply repeat the claim/binding, is `403 not_authorized`; `default` is `400 schema_violation`. See [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id). |
+| `X-Tenant-Id`     | optional | Selects the tenant only when no signed `tenant` claim (or, for writes, `[[auth.tenant_agents]]` binding) applies **and** `auth.tenant_header_trust` trusts the sender: `none` (the default in every mode since 0.4.0) never, `trusted_proxies` only from a listed gateway peer, `any_peer` always. A header that is present but untrusted, and does not simply repeat the claim/binding, is `403 not_authorized`; `default` is `400 schema_violation`. See [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id). |
 
 Body: an RFC-ACDP-0003 `PublishRequest` (JSON). Response: `200` with a
 `PublishResponse` (assigned `ctx_id`, `lineage_id`, `version`, `status`, and —
@@ -753,7 +753,9 @@ Operational snapshot. Always shipped.
   "idempotency": { "records": 128 },
   "webhook":     { "enabled": true, "queue_in_flight": 0, "queue_capacity": 1024 },
   "revocation":  { "configured_feeds": 2 },
-  "migrations":  { "backend": "Sqlite", "applied": true }
+  "migrations":  { "backend": "Sqlite", "applied": true },
+  "tenancy":     { "require_tenant": true, "tenant_header_trust": "trusted_proxies",
+                   "tenant_header_trust_configured": true, "trusted_proxies": 1 }
 }
 ```
 
@@ -776,9 +778,26 @@ carries only `enabled`, and `build` carries no `commit`:
   "idempotency": { "records": 0 },
   "webhook":     { "enabled": false },
   "revocation":  { "configured_feeds": 0 },
-  "migrations":  { "backend": "Sqlite", "applied": true }
+  "migrations":  { "backend": "Sqlite", "applied": true },
+  "tenancy":     { "require_tenant": false, "tenant_header_trust": "none",
+                   "tenant_header_trust_configured": false, "trusted_proxies": 0 }
 }
 ```
+
+#### The `tenancy` group (#391)
+
+The tenant-resolution policy the running process applies, so it can be
+checked without reading startup logs.
+
+- **`require_tenant`** — `auth.require_tenant`.
+- **`tenant_header_trust`** — the **effective** mode: `"none"`,
+  `"trusted_proxies"` or `"any_peer"`
+  ([who may send `X-Tenant-Id`](MULTI-TENANCY.md#who-may-send-x-tenant-id)).
+- **`tenant_header_trust_configured`** — whether the key was set (file or
+  environment). `false` means the mode is the default, `none` (since 0.4.0).
+- **`trusted_proxies`** — how many `rate_limit.trusted_proxies` entries are
+  configured: the gateway list the `trusted_proxies` mode matches against. A
+  count only; the CIDRs are not disclosed.
 
 #### The `build` group (#117)
 
@@ -897,9 +916,13 @@ configured `auth.anonymous_public_reads`, which instead governs whether an
 anonymous (no-bearer) caller of `GET /contexts/search` sees public rows. That
 flag is carried on the `CapabilitiesDocument`, and `RegistryServer::search`
 reads it
-off `self.caps`. The tenant filter applies only when a tenant is asserted (a
-trusted `X-Tenant-Id` header or a JWT `tenant` claim); with none, the listing spans
-every tenant rather than defaulting to one.
+off `self.caps`. The tenant filter applies only when a tenant is asserted; with
+none, the listing spans every tenant rather than defaulting to one (in strict mode
+an unscoped listing is `403`, as for any other request). On this route an
+`X-Tenant-Id` header is honoured from the admin-bearer caller whatever
+`auth.tenant_header_trust` says (#391): the admin credential is already
+cross-tenant, so the header only narrows the listing. `default` is still
+`400 schema_violation`.
 
 ### `POST /admin/pinned-keys/reload` *(playground feature)*
 
