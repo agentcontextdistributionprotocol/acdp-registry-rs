@@ -477,9 +477,9 @@ pub struct AuthConfig {
     /// Who may select a tenant with the `X-Tenant-Id` request header
     /// (#374, RFC-ACDP-0008 §6.4: an unauthenticated tenant indicator MUST
     /// NOT be trusted unless a boundary the client cannot cross vouches for
-    /// it). `None` = key absent; read it through
-    /// [`AuthConfig::effective_tenant_header_trust`], never directly. A
-    /// signed `tenant` claim or an `[[auth.tenant_agents]]` binding always
+    /// it). `None` = key absent, which means `none` in every mode (#386,
+    /// 0.4.0); read it through [`AuthConfig::effective_tenant_header_trust`].
+    /// A signed `tenant` claim or an `[[auth.tenant_agents]]` binding always
     /// outranks the header, whatever this says.
     #[serde(default)]
     pub tenant_header_trust: Option<TenantHeaderTrust>,
@@ -530,20 +530,17 @@ impl AuthConfig {
             .map(|b| b.tenant_id.clone())
     }
 
-    /// The `tenant_header_trust` mode in effect. An explicit value wins; when
-    /// the key is absent the 0.3.x default applies: `none` under
-    /// `require_tenant = true`, otherwise `any_peer` (the pre-#374 behaviour,
-    /// which startup warns about and which becomes `none` in 0.4.0).
+    /// The `tenant_header_trust` mode in effect: the explicit value, else
+    /// `none` in every mode (#386). 0.3.x defaulted an absent key to
+    /// `any_peer` when `require_tenant = false`; 0.4.0 dropped that fallback,
+    /// so a lax or auth-off registry that partitions by header must now say
+    /// `any_peer` (or `trusted_proxies`) explicitly.
     ///
     /// Resolved here rather than written back by startup validation so every
     /// consumer — the binary, embedders calling `serve_with_store`, and test
     /// harnesses that never run validation — sees the same answer.
     pub fn effective_tenant_header_trust(&self) -> TenantHeaderTrust {
-        match self.tenant_header_trust {
-            Some(mode) => mode,
-            None if self.require_tenant => TenantHeaderTrust::None,
-            None => TenantHeaderTrust::AnyPeer,
-        }
+        self.tenant_header_trust.unwrap_or(TenantHeaderTrust::None)
     }
 }
 
@@ -1660,12 +1657,12 @@ public_key_b64 = "AAAA"
     }
 
     #[test]
-    fn effective_tenant_header_trust_applies_the_phase_one_default() {
+    fn effective_tenant_header_trust_defaults_to_none_in_every_mode() {
         let mut auth = AuthConfig::default();
         assert_eq!(
             auth.effective_tenant_header_trust(),
-            TenantHeaderTrust::AnyPeer,
-            "lax + key absent keeps the pre-#374 behaviour"
+            TenantHeaderTrust::None,
+            "lax + key absent distrusts the header (#386: no any_peer fallback)"
         );
         auth.require_tenant = true;
         assert_eq!(
@@ -2007,7 +2004,8 @@ backend = "sqlite"
 
     /// #374: the key is reachable from the environment (Railway-style
     /// deployments have no config file), and `"none"` arrives as the explicit
-    /// variant, not as "unset" — the two resolve differently in lax mode.
+    /// variant, not as "unset" (they resolve alike since #386, but the raw
+    /// field still records whether the operator set the key).
     #[test]
     fn tenant_header_trust_loads_from_the_environment() {
         let mut env = EnvGuard::new();
