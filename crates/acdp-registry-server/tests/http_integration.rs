@@ -5380,6 +5380,116 @@ async fn lc001_retraction_flow_end_to_end() {
     assert_eq!(v["error"]["code"], "invalid_lifecycle_transition");
 }
 
+/// The P-256 group order `n`, big-endian.
+const P256_ORDER: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51,
+];
+
+/// The third-party ECDSA malleation: `(r, s)` -> `(r, n - s)`, on the
+/// base64 IEEE 1363 `r‖s` wire form. Needs no private key, and the result
+/// verifies under the same key and message.
+fn malleate_p256_signature(sig_b64: &str) -> String {
+    let mut sig = B64.decode(sig_b64).expect("base64 signature");
+    assert_eq!(sig.len(), 64, "IEEE 1363 r‖s is 64 bytes");
+    let s: [u8; 32] = sig[32..].try_into().unwrap();
+    let mut borrow = 0i16;
+    for i in (0..32).rev() {
+        let mut d = i16::from(P256_ORDER[i]) - i16::from(s[i]) - borrow;
+        borrow = if d < 0 {
+            d += 256;
+            1
+        } else {
+            0
+        };
+        sig[32 + i] = d as u8;
+    }
+    assert_eq!(borrow, 0, "s must be below n");
+    B64.encode(sig)
+}
+
+/// RFC-ACDP-0013 §6 retry idempotency, as clarified at spec pin `6d5cdb8`:
+/// "byte-identical" includes `signature.value`. An `ecdsa-p256` signature is
+/// malleable (`registries/signature-algorithms.md`), so anyone who sees a
+/// stored event can produce the high-S twin of its signature. That twin
+///   * MUST still verify (verifiers accept high-S), and
+///   * MUST NOT be treated as an idempotent retry of the stored event: it is
+///     different content, rejected `schema_violation`, and nothing changes.
+///
+/// A registry that compared events ignoring signature bytes would answer 200
+/// here; one that rejected high-S would answer `invalid_signature`. Both are
+/// wrong, so the exact code is the assertion. The genuine retry (the bytes
+/// the producer signed) stays a 200 replay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lc001b_p256_malleated_signature_retry_is_different_content() {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+
+    let h = lifecycle_harness(false).await;
+    let key = P256SigningKey::from_bytes(&[52u8; 32]).expect("p256 key");
+    let p = Producer::new_did_key_p256(P256SigningKey::from_bytes(&[52u8; 32]).unwrap())
+        .expect("did:key p256 producer");
+    let req = p
+        .publish_request()
+        .title("lc001b p256")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+
+    let did = acdp::did::key::did_key_from_p256_sec1(&key.verifying_key_sec1()).unwrap();
+    let key_id = acdp::did::key::did_key_url(&did).unwrap();
+    let event = LifecycleEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        acdp::types::primitives::CtxId(ctx_id.clone()),
+        LifecycleEventType::parse("retracted").unwrap(),
+        chrono::Utc::now(),
+        AgentDid::new(did),
+        Some("p256 retraction".into()),
+    )
+    .unwrap()
+    .sign_with(key, key_id)
+    .unwrap();
+    let envelope = json!({ "event": serde_json::to_value(&event).unwrap() });
+    assert_eq!(envelope["event"]["signature"]["algorithm"], "ecdsa-p256");
+
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+
+    // The malleated twin: same event, same key, still a valid signature.
+    let original_sig = envelope["event"]["signature"]["value"].as_str().unwrap();
+    let flipped_sig = malleate_p256_signature(original_sig);
+    assert_ne!(flipped_sig, original_sig);
+    let mut twin = envelope.clone();
+    twin["event"]["signature"]["value"] = Value::String(flipped_sig);
+    let twin_event = LifecycleEvent::from_value(&twin["event"]).unwrap();
+    acdp::verify::verify_lifecycle_event_offline(
+        &twin["event"],
+        &twin_event.ctx_id,
+        &twin_event.actor,
+        None,
+    )
+    .expect("the high-S twin must verify: verifiers MUST accept high-S");
+
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &twin).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a signature-only difference is different content, not a retry; body = {v}"
+    );
+    assert_eq!(v["error"]["code"], "schema_violation", "body = {v}");
+
+    // The genuine retry is still an idempotent replay, and the stored
+    // signature is the original one.
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+    assert_eq!(status, StatusCode::OK, "genuine retry body = {v}");
+    let events = v["registry_state"]["lifecycle_events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "nothing appended");
+    assert_eq!(events[0]["signature"]["value"], original_sig);
+}
+
 /// lc-002 — request-shape policing and authentication: body-content
 /// members → `immutable_field` (the category error, NOT a generic
 /// schema_violation); other unknown members → `schema_violation`;

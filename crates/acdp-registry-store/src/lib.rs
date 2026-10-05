@@ -172,6 +172,13 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
     /// started with the flag off. A durable backend that stores lifecycle
     /// state MUST override this, or the startup refusal cannot see it. Added
     /// as a defaulted method so existing implementors keep compiling.
+    ///
+    /// Because a missing override compiles cleanly, durable implementors
+    /// should run the parity kit's
+    /// `parity::assert_lifecycle_state_probe_sees_retraction` (feature
+    /// `test-support`) from their test suite against the raw store, as the
+    /// SQLite and Postgres backends do: it fails a backend that inherits this
+    /// default.
     async fn has_lifecycle_state(&self) -> Result<bool, AcdpError> {
         Ok(false)
     }

@@ -336,7 +336,9 @@
 //! rather than the unpinned playground branch that accepts any signature. `sig-003` and
 //! `dk-003` were already covered by the pre-existing `did_key_golden_vector_accepted_and_
 //! gated` (above), merely not yet registered in `COVERED`; Phase 13 registers it under
-//! both families. `dk-001`/`dk-002`/`dk-004` get DIRECT coverage via
+//! both families. `sig-004` (spec pin `6d5cdb8`, strict Ed25519) is covered the same
+//! pinned-key way by `sig004_ed25519_small_order_forgery_rejected_offline_and_over_http`.
+//! `dk-001`/`dk-002`/`dk-004` get DIRECT coverage via
 //! `dk001_002_004_did_key_resolution_negatives_hit_the_resolver`. Through acdp
 //! 0.13.1 this repo's `acdp` dependency rejected all three with `schema_violation`
 //! instead of the fixtures' pinned `key_resolution_failed` -- spec-sanctioned for
@@ -9726,6 +9728,7 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
             "sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_publish",
             "sig001_signature_byte_perturbation_is_rejected",
             "sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected",
+            "sig004_ed25519_small_order_forgery_rejected_offline_and_over_http",
             "did_key_golden_vector_accepted_and_gated",
         ])],
     ),
@@ -9994,10 +9997,11 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// This is the ratchet that would have caught `err-002`: the count was 143
 /// before the `16211e6` bump and 144 after. It caught the next one too: 144
 /// before the `9deb7e7` bump (rev-003, rev-004 added; rev-002 only modified,
-/// not counted again) and 146 after. A `>=` floor passes the very scanner
+/// not counted again) and 146 after; 147 after the `6d5cdb8` bump (sig-004
+/// added). A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 146;
+const TOTAL_FIXTURES_AT_PIN: usize = 147;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
@@ -10110,6 +10114,7 @@ const DIRECT_FNS: &[(&str, fn())] = &[
     direct_fn!(sig001_ed25519_golden_verified_offline_and_accepted_via_pinned_publish),
     direct_fn!(sig001_signature_byte_perturbation_is_rejected),
     direct_fn!(sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected),
+    direct_fn!(sig004_ed25519_small_order_forgery_rejected_offline_and_over_http),
     direct_fn!(did_key_golden_vector_accepted_and_gated),
     direct_fn!(rev001_key_revocation_context_golden_accepted_and_self_signed_rejected),
     direct_fn!(rev003_publish_time_rejection_matrix),
@@ -11570,6 +11575,137 @@ async fn sig002_ecdsa_p256_golden_accepted_and_der_signature_rejected() {
     assert_eq!(
         body["error"]["code"], "invalid_signature",
         "sig-002 vector 1 body = {body}"
+    );
+}
+
+const EXPECTED_SIG004_VECTOR_COUNT: usize = 1;
+const EXPECTED_SIG004_SMALL_ORDER_POINTS: usize = 8;
+
+/// sig-004 (RFC-ACDP-0001 §5.10 strict Ed25519 verification, added at spec
+/// pin `6d5cdb8`; listed under `acdp-registry-core` in `profiles.json`): a
+/// NEGATIVE vector. Identity public key `A`, identity nonce point `R` and
+/// `s = 0` satisfy the cofactorless equation `[s]B = R + [k]A` for every
+/// message, so a non-strict verifier accepts it as a signature over
+/// anything. The registry MUST reject it with `invalid_signature`.
+///
+/// Three layers, each needed for the next to mean something:
+///   1. Positive control: ed25519-dalek's NON-strict `verify` accepts the
+///      vector for the fixture's message AND for an unrelated one. Without
+///      this, layers 2 and 3 could pass because the vector is merely
+///      malformed, which proves nothing about strictness.
+///   2. Offline: `acdp::crypto::verify::verify_ed25519` (the primitive every
+///      registry Ed25519 path calls) rejects it, and rejects every listed
+///      small-order point used as `A` with an identity `R`.
+///   3. Over HTTP: the sig-001 golden body, re-signed with the forged
+///      signature, POSTed to a registry that pins the identity key for the
+///      producer DID, is refused 400 `invalid_signature`. The forgery is
+///      valid for that body's `content_hash` under loose verification
+///      (layer 1 shows it is message-independent), so only strictness
+///      stands between it and a 200.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sig004_ed25519_small_order_forgery_rejected_offline_and_over_http() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use ed25519_dalek::Verifier as _;
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping sig-004 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "sig-004") else {
+        return;
+    };
+    let vectors = fx["vectors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sig-004: vectors missing or not an array: {fx}"));
+    assert_eq!(
+        vectors.len(),
+        EXPECTED_SIG004_VECTOR_COUNT,
+        "sig-004 must carry exactly {EXPECTED_SIG004_VECTOR_COUNT} vector at spec pin 6d5cdb8: {fx}"
+    );
+    let v = &vectors[0];
+    assert_eq!(v["negative"], true, "sig-004 vector must be negative: {v}");
+    assert_eq!(v["expected"]["strict_result"], "reject");
+    assert_eq!(v["expected"]["error"], "invalid_signature");
+
+    let hex32 = |s: &str, what: &str| -> [u8; 32] {
+        hex::decode(s)
+            .unwrap_or_else(|e| panic!("sig-004: {what} is not hex: {e}"))
+            .try_into()
+            .unwrap_or_else(|b: Vec<u8>| panic!("sig-004: {what} is {} bytes, want 32", b.len()))
+    };
+    let pub_bytes = hex32(v["public_key_hex"].as_str().unwrap(), "public_key_hex");
+    let sig_bytes: [u8; 64] = hex::decode(v["signature_value_hex"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap_or_else(|b: Vec<u8>| panic!("sig-004: signature is {} bytes, want 64", b.len()));
+    let sig_b64 = STANDARD.encode(sig_bytes);
+    let message = v["signature_input"].as_str().unwrap();
+
+    // Layer 1: positive control -- the loose equation really holds, for the
+    // fixture's message and for one it never mentions.
+    let loose_key = ed25519_dalek::VerifyingKey::from_bytes(&pub_bytes)
+        .expect("sig-004: identity point must decompress");
+    let loose_sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+    for msg in [message, "sha256:not-the-fixture-message"] {
+        assert!(
+            loose_key.verify(msg.as_bytes(), &loose_sig).is_ok(),
+            "sig-004 positive control: non-strict verify must accept the forgery for {msg:?}; \
+             if it does not, the layers below prove nothing about strictness"
+        );
+    }
+
+    // Layer 2: the registry's verification primitive rejects it.
+    assert!(
+        matches!(
+            acdp::crypto::verify::verify_ed25519(&pub_bytes, &sig_b64, message),
+            Err(acdp::AcdpError::InvalidSignature(_))
+        ),
+        "sig-004: verify_ed25519 must reject the small-order forgery with InvalidSignature"
+    );
+    let points = fx["small_order_points"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sig-004: small_order_points missing: {fx}"));
+    assert_eq!(points.len(), EXPECTED_SIG004_SMALL_ORDER_POINTS);
+    for p in points {
+        let a = hex32(p["encoding_hex"].as_str().unwrap(), "small-order point");
+        assert!(
+            acdp::crypto::verify::verify_ed25519(&a, &sig_b64, message).is_err(),
+            "sig-004: small-order public key {p} with identity R must be rejected"
+        );
+    }
+
+    // Layer 3: over HTTP, against a registry pinning the identity key.
+    let Some(sig001) = find_fixture_by_id(&fixtures, "sig-001") else {
+        panic!("sig-004 layer 3 reuses sig-001's publish body, which is missing");
+    };
+    let mut req_body = sig001["vectors"][0]["expected"]["publish_request_body"].clone();
+    assert!(
+        req_body.is_object(),
+        "sig-001 must carry vectors[0].expected.publish_request_body"
+    );
+    req_body["signature"]["value"] = Value::String(sig_b64.clone());
+    let content_hash = req_body["content_hash"]
+        .as_str()
+        .expect("sig-001 publish_request_body.content_hash");
+    assert!(
+        loose_key
+            .verify(content_hash.as_bytes(), &loose_sig)
+            .is_ok(),
+        "sig-004 layer 3: the forgery must loosely verify over the body actually posted"
+    );
+    let app = pinned_producer_harness(caps(), &STANDARD.encode(pub_bytes), "ed25519").await;
+    let (status, body) = post_publish_json(&app, req_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "sig-004: a small-order forgery must be refused, got body = {body}"
+    );
+    assert_eq!(
+        body["error"]["code"], "invalid_signature",
+        "sig-004 body = {body}"
     );
 }
 
