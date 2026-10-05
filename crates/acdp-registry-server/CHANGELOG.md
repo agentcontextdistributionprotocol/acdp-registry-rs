@@ -1,5 +1,18 @@
 
 
+## [0.4.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.3.0...acdp-registry-server/v0.4.0) - 2026-10-05
+
+### Added
+
+- *(lifecycle)* adopt the acdp prove/commit split and drop the charge pre-flight ([#401](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/401))
+- *(tenancy)* [**breaking**] default tenant_header_trust to none in every mode (#386, #391) ([#402](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/402))
+
+### Other
+
+- *(conformance)* validate served documents against the pinned JSON Schemas ([#385](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/385)) ([#400](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/400))
+- *(spec)* adopt ACDP spec @ 6d5cdb8 (strict Ed25519, P-256 non-uniqueness) ([#399](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/399))
+
+
 ## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.2.0...acdp-registry-server/v0.3.0) - 2026-10-04
 
 ### Fixed

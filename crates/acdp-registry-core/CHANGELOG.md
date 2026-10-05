@@ -1,5 +1,13 @@
 
 
+## [0.4.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.3.0...acdp-registry-core/v0.4.0) - 2026-10-05
+
+### Added
+
+- *(lifecycle)* adopt the acdp prove/commit split and drop the charge pre-flight ([#401](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/401))
+- *(tenancy)* [**breaking**] default tenant_header_trust to none in every mode (#386, #391) ([#402](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/402))
+
+
 ## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.2.0...acdp-registry-core/v0.3.0) - 2026-10-04
 
 ### Fixed
