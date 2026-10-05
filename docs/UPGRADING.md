@@ -69,6 +69,19 @@ Smaller changes, no action needed:
 - `GET /admin/contexts` (playground builds only) honours `X-Tenant-Id` from an admin-bearer caller
   in every `tenant_header_trust` mode. Under `require_tenant` with `none` it used to answer 403.
   The admin token is already cross-tenant, so the header only narrows the listing.
+- **Lifecycle charging (#393).** `POST /contexts/{ctx_id}/retract` and `/republish` now charge the
+  per-agent bucket only for an event the `acdp` SDK proves: the context is visible to the caller,
+  the actor is its producer, and the signature verifies. Such an event is charged on every outcome
+  (success, `409`, a store error, a byte-identical replay), as in 0.3.0. **Changed from 0.3.0:** a
+  validly signed event from an actor that is not the context's producer (`403`), or for an unknown
+  or invisible context (`404`), is no longer charged to anyone; 0.3.0 charged it to its actor. The
+  signature is now verified once per request instead of twice, and a non-producer `did:web` actor
+  is no longer resolved. No response code, header, config key or metric label changed.
+- **`acdp` SDK 0.14.4.** 0.3.0 already shipped with it; this release adopts the lifecycle
+  prove/commit split it added (above). Its other change, also in effect since 0.3.0: Ed25519
+  signatures are verified strictly (small-order public keys and nonce points are refused) on every
+  path that verifies one — publish, lifecycle events, the auth challenge. No honest key is
+  small-order.
 
 ---
 
