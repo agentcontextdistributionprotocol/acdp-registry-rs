@@ -451,11 +451,12 @@ survivor against that ledger, and it refuses a ledger that is missing any commit
 `every_committed_survivor_is_in_the_prior_ledger` in
 `crates/acdp-registry-server/tests/conformance_gate.rs` runs the same check on every PR.
 
-**Status:** pinned at scope 358 from run 37222567772 (main 27f9875, 108.7 min). #373-#376
-added twelve caught or unviable mutants and moved every cited line; the seven survivors are
-the same mutants on new lines, and the run's report is committed unchanged as the prior
-ledger. (History: the 2026-09-28 run 36417581090 failed after #341 shrank the scope from
-351 to 346; #371 re-pinned it the same way.) Edits to the four scoped files after a re-pin
+**Status:** pinned at scope 354 from run 37248684286 (a `workflow_dispatch` on main
+09615e9, 101.2 min of the 180-minute cap). #401 removed the lifecycle charge pre-flight and
+with it four caught mutants; the seven survivors are the same mutants on the same lines, and
+the run's report is committed unchanged as the prior ledger. (History: #395 pinned scope 358
+from run 37222567772 after #373-#376 added twelve; the 2026-09-28 run 36417581090 failed
+after #341 shrank the scope from 351 to 346, and #371 re-pinned it the same way.) Edits to the four scoped files after a re-pin
 must be line-neutral until the next one. Check
 `gh run list --workflow mutants.yml --limit 3` for the current state.
 
