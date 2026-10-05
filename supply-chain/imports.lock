@@ -1,0 +1,1490 @@
+
+# cargo-vet imports lock
+
+[[publisher.bumpalo]]
+version = "3.20.3"
+when = "2026-05-22"
+user-id = 696
+user-login = "fitzgen"
+user-name = "Nick Fitzgerald"
+
+[[publisher.unicode-normalization]]
+version = "0.1.25"
+when = "2025-10-30"
+user-id = 1139
+user-login = "Manishearth"
+user-name = "Manish Goregaokar"
+
+[[publisher.utf8_iter]]
+version = "1.0.4"
+when = "2023-12-01"
+user-id = 4484
+user-login = "hsivonen"
+user-name = "Henri Sivonen"
+
+[[publisher.wasip2]]
+version = "1.0.4+wasi-0.2.12"
+when = "2026-06-12"
+user-id = 1
+user-login = "alexcrichton"
+user-name = "Alex Crichton"
+
+[[publisher.wit-bindgen]]
+version = "0.57.1"
+when = "2026-04-17"
+trusted-publisher = "github:bytecodealliance/wit-bindgen"
+
+[[audits.acdp-rs.audits.cpubits]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.1.1"
+notes = """
+Scope: full audit of 0.1.1 (no prior audit; 462 src lines in src/lib.rs, read in full, including every arm of the #[macro_export] cpubits! and cfg_if! macros, which expand in the caller crate crypto-bigint).
+Source: crates.io tarball sha256 15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae == Cargo.lock checksum.
+unsafe: 0 sites, including all macro bodies (full-source grep; no forbid(unsafe_code) attribute or Cargo.toml lint, so the grep is the evidence).
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: none (#![no_std]; include_str! for README docs only). The macros emit only #[cfg]-gated copies of the caller's tokens, or compile_error! for an unsupported pointer width.
+Behaviour: compile-time word-size selection from target_pointer_width, with 64-bit promotion for ARMv7 and wasm32 and an optional --cfg cpubits override (unused by ACDP). Observation CB-1 (worksheet): the single-size `16 => {..}` arm (src/lib.rs:156-161) emits a stray comma and fails to compile; compile-time only, unused by any dependent.
+New deps: none. ACDP features: none. Reached via crypto-bigint under rfc6979/ecdsa/p256; locked identically in root and py/node/wasm bindings.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/cpubits-0.1.1.md (issue #339 Tier B batch B3 PR)."""
+
+[[audits.acdp-rs.audits.crypto-common]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.2.2"
+notes = """
+Scope: full audit of 0.2.2 (no prior audit, ours or imported; 853 src lines, every file read).
+Source: crates.io tarball sha256 ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453 == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep; forbid is capped by --cap-lints for registry deps, so the grep is the evidence); #![forbid(unsafe_code)] is at src/lib.rs:8.
+asm/SIMD: none.
+build.rs / proc-macro: none.
+Powerful imports: none directly (#![no_std]). OS entropy by delegation: with the `getrandom` feature (on in ACDP via elliptic-curve) Generate::try_generate/generate read getrandom::SysRng (src/generate.rs:28-45; generate panics on OS RNG failure, documented). Explicit key-generation API; the syscall lives in getrandom (Tier B, still exempted). ACDP passes its own SysRng to generate_from_rng and does not call these.
+Behaviour: size/constructor traits (KeyInit, KeyIvInit, InnerIvInit, ...) with length-checked slice constructors, Generate impls, and hazmat SerializableState. Observation CC-1 (not a vet concern): the [u128; N] SerializableState impls use an 8-byte element size (src/hazmat.rs:162-168), so serialize/deserialize always panic (safe copy_from_slice / unwrap, never UB); unused in ACDP's graph; fixed upstream in RustCrypto/traits#2471 (unreleased).
+New deps: hybrid-array 0.4.7; optional getrandom 0.4 (sys_rng), rand_core 0.10. ACDP features: getrandom, rand_core (root and py/node/wasm bindings identical). Tier B hybrid-array, getrandom, rand_core still exempted.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/crypto-common-0.2.2.md (https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/355, issue #339 batch B1)."""
+
+[[audits.acdp-rs.audits.ctutils]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.4.2"
+notes = """
+Scope: full audit of 0.4.2 (no prior audit of ctutils; 3425 src lines; every non-test line of src/lib.rs, choice.rs, ct_option.rs, traits.rs and traits/*.rs read, including the two #[macro_export] macros map! and unwrap_or!; #[cfg(test)] modules and tests/proptests.rs grep-scanned).
+Source: crates.io tarball sha256 7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e == Cargo.lock checksum.
+unsafe: 0 sites, including both exported macros (full-source grep, comment lines excluded; the grep is the evidence). #![forbid(unsafe_code)] at src/lib.rs:7 is only a corroborating hint (cargo builds registry deps with --cap-lints allow). The crate's own comment says unsafe "should go in cmov": all predication is delegated to cmov 0.5 (Cmov::cmovnz, CmovEq::cmoveq), whose unsafe/asm is a separate Tier B crate, still exempted.
+asm/SIMD: none in this crate (delegated to cmov).
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: none. #![no_std]; alloc only behind the alloc feature (off in ACDP); include_str! for README docs.
+Exported macros: map! (src/ct_option.rs:12-15) and unwrap_or! (src/ct_option.rs:27-32) expand in caller crates to calls of the safe CtOption::new / to_inner_unchecked / as_inner_unchecked / is_some and a caller-supplied path; no unsafe.
+Behaviour: Choice is a u8 restricted to 0/1 by its constructors; select/mask/compare are wrapping bit arithmetic. Panics only in safe code: ct_assign_slice length assert (traits/ct_assign.rs:42-48), CtOption::expect/unwrap asserts, NonZeroU* ct_neg expect (traits/ct_neg.rs:89, unreachable: the wrapping negation of a non-zero value is non-zero), signed ct_neg of MIN (debug overflow panic), and ct_lookup's index counter (traits/ct_lookup.rs:36), which overflows for slices longer than the index type (upstream TODO). All are safe-code panics, not memory-safety issues. A grep of the ctutils dependents in ACDP's graph (crypto-bigint 0.7.5, sec1 0.8.1, digest 0.11.3) and of p256, elliptic-curve, primefield, primeorder, ecdsa, rfc6979 and hmac found no use of CtLookup or CtFind.
+New deps: cmov ^0.5.3 (locked 0.5.4); optional subtle 2 (feature subtle, enabled in ACDP; locked 2.6.1). Dev-only: proptest.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour (this is a constant-time utility crate; its constant-time property is explicitly NOT claimed and rests on cmov and the compiler), side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/ctutils-0.4.2.md (issue #339 Tier B batch B4 PR)."""
+
+[[audits.acdp-rs.audits.curve25519-dalek]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "4.1.3"
+notes = "Canonical dalek-cryptography Curve25519 arithmetic underpinning ed25519-dalek. Reviewed 4.1.3: audited unsafe in gated SIMD backends plus 3 sound non-SIMD sites (serial scalar read_volatile black_box x2, Ristretto table cast; corrected 2026-10 during the 5.0.0 delta review); constant-time subtle-based ops; no I/O. 4.1.3 carries the fix for the <=4.1.2 timing issue. Latest 4.x; cargo audit clean 2026-07-05."
+
+[[audits.acdp-rs.audits.curve25519-dalek]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+delta = "4.1.3 -> 5.0.0"
+notes = """
+Scope: delta 4.1.3 -> 5.0.0 (73 files, +5045/-2187 per scripts/vet-facts.sh; 7232 changed / 34619 src lines = 0.21, so delta per the #322 method rule; ~1100 lines are mod.rs -> foo.rs moves, each pair diffed). Base 4.1.3 spot-check: its "unsafe confined to gated SIMD backends" wording was imprecise (3 non-SIMD sites: serial u32/u64 scalar.rs read_volatile black_box, constants.rs Ristretto table cast); all re-read and sound, and every 5.0.0 unsafe site was verdicted independently, so no unsafe reasoning is inherited from the base.
+Source: crates.io tarball sha256 b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23 == Cargo.lock checksum.
+unsafe: 33 code lines (was 35); reviewed each. packed_simd.rs (15), avx2/field.rs (8), ifma/field.rs (9, one test-only): register-to-register core::arch::x86_64 intrinsics only (no load/store/pointer intrinsics anywhere under backend/vector), plus two const transmutes [u64;4]/[u32;8] -> __m256i (same size, all bit patterns valid). They sit in #[unsafe_target_feature] safe wrappers (curve25519-dalek-derive); soundness rests on every entry into backend::vector being in src/backend.rs behind get_selected_backend() cpufeatures detection (avx512ifma+avx512vl, then avx2, else serial), with backend pub(crate). constants.rs:85 casts &EdwardsBasepointTable to the #[repr(transparent)] RistrettoBasepointTable ('static). The 4.1.3 serial read_volatile black_box (RUSTSEC-2024-0344 barrier) was removed in favour of subtle conditional_select (subtle 2.6.1 Choice::from keeps its read_volatile barrier).
+asm/SIMD: no asm!. build.rs selects bits from pointer width and backend: serial, or simd (AVX2) on x86_64 64-bit; IFMA (avx512) now stable on rustc >= 1.89 but only when the target statically enables avx512ifma+avx512vl (formerly cfg(nightly)), still runtime-dispatched. ACDP builds: x86_64 = AVX2 runtime dispatch + serial u64 fallback (no target-feature/target-cpu flags anywhere, so IFMA is not compiled); aarch64 = serial u64 (no NEON backend exists; build output confirmed); wasm32 binding = serial u32; fiat only under a forced cfg.
+Discretion: under --cfg docsrs, src/lib.rs:89-92 makes backend pub, exposing the safe avx2 target-feature wrappers (packed_simd u64x4/u32x8) to external safe code, which would be UB on a CPU without AVX2. docsrs also enables #![feature(doc_cfg)] (lib.rs:13), rejected on stable (E0554), so it is nightly- and docs-only and unreachable in any stable build of any ACDP artifact (Policy 6 carve-out); the same pattern was present in 4.1.3.
+build.rs / proc-macro: build.rs reads only CARGO_CFG_TARGET_{ARCH,POINTER_WIDTH,FEATURE} and CARGO_CFG_CURVE25519_DALEK_{BITS,BACKEND}, runs $RUSTC -vV via rustc_version (as in 4.1.3), and emits only rustc-cfg lines plus one warning; no fs/network. Not a proc-macro; depends on the curve25519-dalek-derive proc-macro (Tier B, still exempted) on x86_64.
+Powerful imports: none in src (#![no_std]; include_str! for docs only). No binary blobs; vendor/ristretto.sage and tests/build_tests.sh are not built.
+Zeroize: every Zeroize impl targets fully initialized integer arrays or IterMut over them (no Option/MaybeUninit/padded types), so zeroize 1.9.0's Z-1 (DECISIONS 322-zeroize, still exempt) is not triggered by this crate; barrier efficacy is zeroize's property, not claimed.
+New deps: digest 0.10 -> 0.11 (block-api), ff/group 0.13 -> 0.14 (optional), rand_core 0.6.4 -> 0.10, subtle 2.3 -> 2.6 (const-generics), cpufeatures 0.2.6 -> 0.3, fiat-crypto 0.2.1 -> 0.3.0 (forced cfg only); group-bits feature removed, lizard added. ACDP features: digest, precomputed-tables, rand_core, zeroize (alloc off). Tier B digest/rand_core/cpufeatures/curve25519-dalek-derive/rustc_version still exempted.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness (serial, fiat, AVX2, IFMA, new hash_to_curve), constant-time behaviour, side-channel resistance. Behavioural evidence only: ACDP sig-001 golden vector pins Ed25519 output.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/curve25519-dalek-5.0.0.md (issue #322 Phase 3 PR)."""
+
+[[audits.acdp-rs.audits.digest]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.11.3"
+notes = """
+Scope: full audit of 0.11.3 (no prior audit of 0.11.x; 2857 src lines, all files read, including every arm of the #[macro_export] buffer_fixed!/buffer_ct_variable!/buffer_xof! macros, which expand in caller crates such as sha2 and hmac where this crate's forbid(unsafe_code) does not apply).
+Source: crates.io tarball sha256 f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2 == Cargo.lock checksum.
+unsafe: 0 sites, including all macro bodies, per a grep of the full source (comment lines excluded); the grep is the evidence. #![forbid(unsafe_code)] at src/lib.rs:4 is only a corroborating hint (cargo builds registry deps with --cap-lints allow, which caps both Cargo.toml lints and source-level forbid attributes).
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: none in compiled ACDP code (#![no_std]; alloc only behind alloc; include_str! for README docs). The three include_bytes! (src/dev.rs:36, 71; src/dev/mac.rs:147) are inside test-generating macros of the dev module (feature dev, off in ACDP).
+Discretion: binary test fixture tests/data/fixed_hash_serialization.bin (16 bytes, a serialized dummy hash state) is read only by the tests/dummy_fixed.rs integration test; not compiled into any non-test build. src/dev/variable.rs is not declared as a module and is never compiled.
+Behaviour: generated buffer_* impls are safe forwards to the core type and block-buffer; Mac::verify_truncated_* reject n == 0 or n > OutputSize before slicing; CtOutWrapper truncation is bounded by the IsLessOrEqual type bound; CtOutput Drop zeroizes only with the zeroize feature (off).
+New deps: crypto-common 0.2; optional blobby 0.4 (dev), block-buffer 0.12, const-oid 0.10, ctutils 0.4, zeroize 1.7. ACDP features: alloc, block-api, default, mac, oid, rand_core (root and py/node/wasm bindings identical). Dependencies block-buffer, crypto-common, const-oid, ctutils are Tier B crates covered by their own vet entries; this audit is per crate.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/digest-0.11.3.md (issue #339 Tier B batch B2 PR)."""
+
+[[audits.acdp-rs.audits.ecdsa]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.16.9"
+notes = "RustCrypto 'ecdsa' generic ECDSA over elliptic-curve traits; backs p256 verification. Reviewed 0.16.9: constant-time via rfc6979/signature, no unsafe of concern, no I/O. Canonical, latest 0.16.x. cargo audit clean 2026-07-05."
+
+[[audits.acdp-rs.audits.ecdsa]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.17.0"
+notes = """
+Scope: full audit of 0.17.0 (delta 0.16.9 -> 0.17.0 is 13 files, +1516/-1259 per scripts/vet-facts.sh = 0.83x the 3336 src lines, so full per the #322 method rule).
+Source: crates.io tarball sha256 c0681a4fc24c767085329728d8dfba959af91228aa4610cca4f8ce317ba46ae0 == Cargo.lock checksum.
+unsafe: 0 sites (grep; Cargo.toml lints forbid unsafe_code, but cargo caps lints for registry deps, so the grep is the evidence).
+asm/SIMD: none.
+build.rs / proc-macro: none.
+Powerful imports: none in compiled code (#![no_std]; include_str! for README docs). The only include_bytes! is in the new_wycheproof_test! macro in the dev module (feature dev, off in ACDP), expanded only by tests.
+Discretion: binary test fixture src/test_vectors/data/wycheproof-mock.blb (2 bytes, an empty blobby file) is read only by the cfg(test) wycheproof_mock test (src/dev.rs:308-319); not compiled into any non-test build.
+Verification path: Signature::from_slice requires 64 bytes and r, s in [1, n-1]; Verifier::verify hashes with C::Digest (SHA-256 for P-256) and runs hazmat::verify_prehashed; high-S is rejected only when C::NORMALIZE_S (false for P-256), so (r, n-s) also verifies (ACDP-relevant malleability finding P-1, p256 worksheet; not a vet concern). Signing is RFC 6979 (rfc6979 0.6) with non-vartime k*G.
+Zeroize: SigningKey has an explicit Drop zeroizing its NonZeroScalar (plus ZeroizeOnDrop marker); Signature::zeroize writes ONE. Fully initialized integers only, so zeroize 1.9.0's Z-1 (DECISIONS 322-zeroize, still exempt) is not triggered. Secret-derived temporaries in the RFC 6979 path (d.to_repr(), k_bytes, rfc6979 HMAC-DRBG state) are not zeroized, as in the audited 0.16.9; hygiene only, outside safe-to-deploy.
+New deps: der 0.8, digest 0.11, elliptic-curve 0.14, rfc6979 0.6, serdect 0.4, sha2 0.11 (optional), signature 3, spki 0.8; added zeroize 1.5. ACDP features: algorithm, alloc, der, digest, spki, std (root and py/node/wasm bindings identical). Tier B rfc6979, hmac, der, spki, digest still exempted.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/ecdsa-0.17.0.md (issue #322 Phase 4 PR)."""
+
+[[audits.acdp-rs.audits.ed25519]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "3.0.0"
+notes = """
+Scope: full audit of 3.0.0 (no prior audit, ours or imported; 947 src lines, every src file read, plus tests/ for imports and fixtures).
+Source: crates.io tarball sha256 29fcf32e6c73d1079f83ab4d782de2d81620346a5f38c6237a86a22f8368980a == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep; forbid is capped by --cap-lints for registry deps, so the grep is the evidence); #![forbid(unsafe_code)] is at src/lib.rs:6.
+asm/SIMD: none.
+build.rs / proc-macro: none (optional zerocopy derives are off; on repr(C)/repr(transparent) u8 arrays with no padding they would be layout-sound).
+Powerful imports: none (#![no_std]; alloc only behind `alloc`; include_str! README for docs only).
+Discretion: binary test fixtures tests/examples/{pkcs8-v1,pkcs8-v2,pubkey}.der (48/116/44 bytes), each byte-identical to the base64 body of its sibling .pem; read only by tests/pkcs8.rs via include_bytes!; not compiled into any non-test build.
+Behaviour: Signature is an unvalidated 64-byte R||s container (from_slice length check, hex Display/FromStr with mixed-case rejection, optional serde/zeroize); optional RFC 8410 PKCS#8/SPKI KeypairBytes/PublicKeyBytes with OID and nested OCTET STRING checks. ACDP uses only the Signature container (from_slice / to_bytes / from_components): from_slice on verify (crates/acdp-crypto/src/verify.rs:38), to_bytes on sign (crates/acdp-crypto/src/sign.rs:67-68,104-105), and ed25519-dalek's own from_components/to_bytes conversions (ed25519-dalek-3.0.0/src/signature.rs:167,173); all verification checks are in ed25519-dalek/curve25519-dalek (audited; safe-to-deploy only; correctness not claimed). Hygiene note (feature-gated, off): without `zeroize`, KeypairBytes Drop does not clear the secret, and to_pkcs8_der skips its zeroize on early-return errors.
+New deps: signature 3 (audited 3.0.0); optional pkcs8 0.11, serdect 0.4, zeroize 1, zerocopy 0.8. ACDP features: none (ed25519-dalek uses default-features = false and ACDP leaves ed25519-dalek/alloc off; root and py/node/wasm bindings identical).
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/ed25519-3.0.0.md (https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/355, issue #339 batch B1)."""
+
+[[audits.acdp-rs.audits.ed25519-dalek]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "2.2.0"
+notes = "Canonical dalek-cryptography Ed25519 impl. Mandatory ACDP signature primitive (RFC-ACDP-0002); acdp-crypto sign/verify builds on it. Reviewed 2.2.0: no build.rs, unsafe only via vetted curve25519-dalek backends, zeroizes secret material, no network/fs/process access. Latest 2.x; no open RUSTSEC advisory (cargo audit clean 2026-07-05)."
+
+[[audits.acdp-rs.audits.ed25519-dalek]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+delta = "2.2.0 -> 3.0.0"
+notes = """
+Scope: delta 2.2.0 -> 3.0.0 (17 files, +770/-264; 1034 changed / 3552 src lines = 0.29, so delta per the #322 method rule). Base 2.2.0 spot-checked: forbid(unsafe_code) outside tests, no build.rs, Drop zeroizes secrets.
+Source: crates.io tarball sha256 6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de == Cargo.lock checksum.
+unsafe: 0 sites in every feature configuration. forbid(unsafe_code) is now conditional: src/lib.rs:246 #![cfg_attr(not(any(test, feature = "batch")), forbid(unsafe_code))]; ACDP does not enable batch (features: default, fast, rand_core, signature, zeroize in the root workspace and the py/node/wasm bindings), so the lint is active in every ACDP build.
+asm/SIMD: none (sha2/asm feature removed).
+build.rs / proc-macro: none.
+Powerful imports: none (#![no_std]; std only under cfg(test); the std feature was removed).
+Changes read: multipart Signer/Verifier forwarding (single-slice hash input byte-identical), closure-based DigestSigner/DigestVerifier, KeySizeUser/TryKeyInit/Generate impls, rand_core 0.10 CryptoRng in generate, pkcs8 SignatureAlgorithmIdentifier, vendored Merlin transcript over strobe-rs for batch. verify (used by ACDP) is unchanged: canonical-s check (from_canonical_bytes; legacy_compatibility off), R compared by encoding; it accepts small-order keys/R, which verify_strict rejects (worksheet finding E-1, ACDP-side follow-up, not a vet concern). SigningKey/ExpandedSecretKey Drop zeroize unchanged, all on initialized [u8;32]/Scalar.
+New deps: curve25519-dalek 4 -> 5.0.0, ed25519 2.2 -> 3, sha2 0.10 -> 0.11, signature 2 -> 3, rand_core 0.6.4 -> 0.10; merlin removed; keccak 0.2 and strobe-rs 0.13 added (optional, batch only, not in ACDP's graph). Tier B ed25519/rand_core/digest still exempted.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance. Behavioural evidence only: ACDP sig-001 golden vector pins Ed25519 signature bytes.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/ed25519-dalek-3.0.0.md (issue #322 Phase 3 PR)."""
+
+[[audits.acdp-rs.audits.elliptic-curve]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.13.8"
+notes = "RustCrypto 'elliptic-curve' trait/framework crate underpinning p256/ecdsa. Reviewed 0.13.8: generic curve arithmetic traits, constant-time helpers, no I/O/build script. Canonical, latest 0.13.x. cargo audit clean 2026-07-05."
+
+[[audits.acdp-rs.audits.elliptic-curve]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.14.1"
+notes = """
+Scope: full audit of 0.14.1 (delta 0.13.8 -> 0.14.1 is 38 files, +3422/-4284 per scripts/vet-facts.sh = 1.47x the 5243 src lines, so full per the #322 method rule).
+Source: crates.io tarball sha256 9d65aa39b3a5c1c9c1b745c9a019234bb7a21b77abcb4f4d266d706e2d577d65 == Cargo.lock checksum.
+unsafe: 4 sites, all reviewed and sound; crate root is #![deny(unsafe_code)] with a local allow at each. src/point/non_identity.rs:63,73 (NonIdentity::array_as_inner / slice_as_inner) and src/scalar/nonzero.rs:73,83 (NonZeroScalar::cast_array_as_inner / cast_slice_as_inner) cast &[Newtype; N] / &[Newtype] to the inner type; both newtypes are #[repr(transparent)] over a single field, the borrow keeps its lifetime and is shared (read-only), and the slice cast preserves length metadata.
+asm/SIMD: none.
+build.rs / proc-macro: none.
+Powerful imports: #![no_std] (no extern crate std; std feature only forwards); include_str! for README docs only. The getrandom feature (enabled in ACDP via p256 std) gives BlindedScalar::new/try_new access to getrandom SysRng (OS entropy only). No fs/net/process/env.
+Zeroize: SecretKey Drop, NonZeroScalar (zeroize then ONE), BlindedScalar Drop, and Zeroizing<FieldBytes> all target fully initialized limb/byte arrays (no Option/MaybeUninit/padded types), so zeroize 1.9.0's Z-1 (DECISIONS 322-zeroize, still exempt) is not triggered; barrier efficacy not claimed.
+New deps: generic-array -> hybrid-array 0.4, crypto-bigint 0.5 -> 0.7.5 (adds ctutils CtOption/Choice), crypto-common 0.2 (new), digest 0.11, ff/group 0.14, rand_core 0.10, sec1 0.8, pkcs8 0.11, base16ct 1; removed base64ct, serde_json, tap. ACDP features: alloc, arithmetic, digest, ff, getrandom, group, sec1, std (root and py/node/wasm bindings identical). Tier B deps (crypto-bigint, ctutils, hybrid-array, crypto-common, digest, ff, group, sec1, base16ct, rand_core, getrandom) still exempted.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/elliptic-curve-0.14.1.md (issue #322 Phase 4 PR)."""
+
+[[audits.acdp-rs.audits.ff]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.14.0"
+notes = """
+Scope: full audit of 0.14.0 (no prior audit, ours or imported; 771 src lines, every src file read). The optional ff_derive proc-macro (feature `derive`) is not in ACDP's Cargo.lock and was not reviewed.
+Source: crates.io tarball sha256 a1f686ab92a9fb0eaf188f6c6c87b89490baa6fdb0db4544ba4dc47f7942489f == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep; forbid is capped by --cap-lints for registry deps, so the grep is the evidence); #![forbid(unsafe_code)] is at src/lib.rs:7.
+asm/SIMD: none.
+build.rs / proc-macro: none (not a proc-macro; optional ff_derive dependency is off and absent from the lock).
+Powerful imports: none (#![no_std]; alloc only behind `alloc`).
+Behaviour: Field/PrimeField/FromUniformBytes/PrimeFieldBits trait definitions with default methods (pow, pow_vartime, from_str_vartime, from_u128), Montgomery batch inversion (src/batch.rs), generic sqrt helpers (src/helpers.rs). Only panics are assert!/unwrap on broken Field invariants or mismatched scratch lengths.
+New deps: rand_core 0.10, subtle 2.2.1 (both default-features = false); optional bitvec, byteorder, ff_derive (not in the lock). ACDP features: alloc only (root and py/node/wasm bindings identical).
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/ff-0.14.0.md (https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/355, issue #339 batch B1)."""
+
+[[audits.acdp-rs.audits.group]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.14.0"
+notes = """
+Scope: full audit of 0.14.0 (no prior audit; 1256 src lines, all files read, including src/tests/mod.rs behind the tests feature).
+Source: crates.io tarball sha256 7fd1a1c7a5206c5b7a3f5a0d7ccd3ff85d0c8f5133d62a02680255b0004af5f4 == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep; no forbid(unsafe_code) attribute or Cargo.toml lint, so the grep is the evidence).
+asm/SIMD: none.
+build.rs / proc-macro: none (no build script; not a proc-macro).
+Powerful imports: none (#![no_std]; alloc only behind alloc; no include_* or env!).
+Behaviour: elliptic-curve group trait definitions plus an alloc-backed wNAF helper (src/wnaf.rs) with bounds-checked indexing. No crate in ACDP's graph calls group's wNAF helpers (primeorder uses the separate wnaf crate). Observation G-1 (worksheet): degenerate window sizes 0 and 64, allowed only by debug_assert, overflow a shift (src/wnaf.rs:20, 107); a panic or wrong result, never memory unsafety, and unreachable from ACDP.
+New deps: ff 0.14, rand_core 0.10, subtle 2.2.1; optional rand, rand_xorshift, memuse (off). ACDP features: alloc only (root, acdp --no-default-features, py/node/wasm bindings). Reached via elliptic-curve and wnaf under p256.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/group-0.14.0.md (issue #339 Tier B batch B3 PR)."""
+
+[[audits.acdp-rs.audits.hmac]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.13.0"
+notes = """
+Scope: full audit of 0.13.0 (no prior audit; 466 src lines, all files read, including the digest::buffer_fixed! expansions it invokes at src/lib.rs:34-52).
+Source: crates.io tarball sha256 6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f == Cargo.lock checksum.
+unsafe: 0 sites, per a grep of the full source (comment lines excluded); the grep is the evidence. The Cargo.toml [lints.rust] unsafe_code = "forbid" is only a corroborating hint (cargo builds registry deps with --cap-lints allow, which caps both Cargo.toml lints and source-level forbid attributes).
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: none (#![no_std], no alloc; include_str! for README docs only).
+Discretion: binary test fixtures tests/data/*.blb (11 blobby RFC 2104/4231, Wycheproof and GOST vector files) are read only by the tests/mod.rs integration-test macro; not compiled into any non-test build.
+Behaviour: get_der_key (src/utils.rs:9-32) bounds every copy by the length comparisons; new_from_slice always returns Ok, so the KeyInit::new expect is unreachable; Debug impls print no key material. Key-derived blocks and core states are not zeroized (zeroize feature off in ACDP); hygiene only, outside safe-to-deploy.
+New deps: digest 0.11.2 (mac). ACDP features: none (root and py/node/wasm bindings identical). Reached via rfc6979 -> ecdsa signing.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/hmac-0.13.0.md (issue #339 Tier B batch B2 PR)."""
+
+[[audits.acdp-rs.audits.hyper-rustls]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.27.9"
+notes = """
+Scope: full audit of 0.27.9 (no prior audit; 1138 src lines, all files read; the tarball ships only src/, licences and README).
+Source: crates.io tarball sha256 33ca68d021ef39cf6463ab54c1d0f5daf03377b70561305bb89a8f83aab66e0f == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep; no forbid(unsafe_code) attribute or Cargo.toml lint, so the grep is the evidence).
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: none outside tests. It is an HTTPS connector adapter: network I/O goes only through the caller's inner connector and tokio-rustls. tokio::net::TcpStream appears only in the cfg(test) module (src/connector.rs:214-307).
+Behaviour: in the features ACDP compiles it builds no certificate verifier (only the off rustls-platform-verifier feature installs one, src/config.rs:66-71) and never touches ClientConfig::dangerous(); the only ClientConfig field it writes is alpn_protocols. reqwest wraps its own rustls ClientConfig (webpki roots, plus any caller-supplied root added through ACDP's with_root_cert_pem / root_cert_pem APIs; nothing disables verification) via HttpsConnector::from((http, tls)) (src/connector.rs:126-138: force_https false, DefaultServerNameResolver from the URI host). call() rejects unknown or missing schemes and passes http:// through in cleartext; ACDP rejects non-https URLs itself by default (SsrfPolicy.allow_http defaults to false; it is a public opt-in), which is not attributed to this crate.
+New deps: http, hyper, hyper-util, rustls, tokio, tokio-rustls, tower-service; optional log, rustls-native-certs, rustls-platform-verifier, webpki-roots. ACDP features: http1, ring, tls12, webpki-roots, webpki-tokio (root, normal and dev edges); defaults native-tokio/logging/aws-lc-rs off, so rustls-native-certs and aws-lc-rs are not compiled. Only dependent: reqwest. Lock-only in the py/node bindings, absent from wasm.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance, TLS protocol or certificate-validation correctness.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/hyper-rustls-0.27.9.md (issue #339 Tier B batch B3 PR)."""
+
+[[audits.acdp-rs.audits.p256]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.13.2"
+notes = "RustCrypto 'p256' (NIST P-256/secp256r1) used by ACDP for did:web ES256/P-256 verification-method support. Reviewed 0.13.2: pure Rust, no unsafe of concern, no I/O/build script; builds on ecdsa/elliptic-curve/primeorder. Canonical, latest 0.13.x. cargo audit clean 2026-07-05."
+
+[[audits.acdp-rs.audits.p256]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.14.0"
+notes = """
+Scope: full audit of 0.14.0 (delta 0.13.2 -> 0.14.0 is 27 files, +1857/-1304 per scripts/vet-facts.sh = 0.91x the 3486 src lines, so full per the #322 method rule).
+Source: crates.io tarball sha256 d2c9239b2dbc807adbbe147e8cf72ea7450c3a0aabe62cb8e75ff4ec22e1f72a == Cargo.lock checksum.
+unsafe: 0 sites (grep; no unsafe lint configured, so the grep is the evidence).
+asm/SIMD: none; no fiat-crypto. Field: Montgomery form via primefield macros over crypto-bigint 0.7 U256 with hand-written add/sub/reduce (field64.rs/field32.rs); scalar: Barrett reduction (scalar64.rs/scalar32.rs). cpubits selects the 64-bit files on x86_64, aarch64 and wasm32 (cpubits treats wasm32 as 64-bit). precomputed-tables is off in ACDP, so Backend = VariableOnly (k*G via GENERATOR * k; verification via vartime lincomb on public data).
+build.rs / proc-macro: none.
+Powerful imports: none (#![no_std]; include_str! for README docs; the getrandom feature only forwards to elliptic-curve/getrandom). tests/pkcs8.rs include_bytes! is integration-test only.
+Discretion: binary test fixture src/test_vectors/data/wycheproof.blb (31510 bytes of blobby-encoded Wycheproof vectors; the audited 0.13.2 shipped it at 31508 bytes) is read only by the new_wycheproof_test! macro in #[cfg(all(test, feature = "ecdsa"))] mod tests (src/ecdsa.rs:75-170); not compiled into any non-test build.
+ACDP use: verifies (VerifyingKey::from_sec1_bytes, Signature::from_slice, verify over SHA-256 of the content_hash string) and also signs (P256SigningKey: generate via getrandom SysRng, from_bytes, RFC 6979 sign, seed_bytes). Point validation: sec1 tag/length check, on-curve check or checked sqrt decompression in primeorder, identity rejected; cofactor 1. ACDP-relevant findings recorded in the worksheet, not vet concerns: P-1 NORMALIZE_S = false, so high-S verifies and ecdsa-p256 signature bytes are malleable; P-2 from_sec1_bytes also accepts the 0x05 compact tag (unreachable from ACDP wire paths); P-3 ACDP signs with P-256 too.
+Zeroize: Scalar is DefaultIsZeroes over a U256 limb array (no padding); no Option/MaybeUninit zeroization, so zeroize 1.9.0's Z-1 (DECISIONS 322-zeroize, still exempt) is not triggered, including on the wasm32 binding.
+New deps: ecdsa 0.17, elliptic-curve 0.14.1, primeorder 0.14, sha2 0.11, serdect 0.4; added primefield 0.14 and hash2curve 0.14 (optional, off). ACDP features: alloc, arithmetic, digest, ecdsa, ecdsa-core, getrandom, sha2, sha256, std (root and py/node/wasm bindings identical). Tier B primeorder, primefield, crypto-bigint, cpubits, sec1, ff, group, wnaf, hybrid-array, rfc6979, hmac still exempted.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance. Behavioural evidence only: ACDP sig-002 conformance tests.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/p256-0.14.0.md (issue #322 Phase 4 PR)."""
+
+[[audits.acdp-rs.audits.pkcs8]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.11.0"
+notes = """
+Scope: full audit of 0.11.0 (no prior audit; 1153 src lines, all files read).
+Source: crates.io tarball sha256 451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7 == Cargo.lock checksum.
+unsafe: 0 sites, per a grep of the full source (comment lines excluded); the grep is the evidence. #![forbid(unsafe_code)] at src/lib.rs:8 is only a corroborating hint (cargo builds registry deps with --cap-lints allow, which caps both Cargo.toml lints and source-level forbid attributes).
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: filesystem only, behind std (enabled in ACDP): std::path::Path (src/traits.rs:21-22) for the explicit caller-invoked trait helpers read_pkcs8_der_file / write_pkcs8_der_file (src/traits.rs:90-93, 170-173), delegating to der::SecretDocument; PEM variants need pem (off). Unused by the crate and by ACDP. No network, process or env access; getrandom::SysRng is behind the getrandom feature (off).
+Discretion: binary test fixtures tests/examples/*.der (14 small ASN.1 test keys) and .pem are read only by tests/; not compiled into any non-test build.
+Behaviour: PrivateKeyInfo::decode_value (src/private_key_info.rs:217-248) accepts version 0/1 only, rejects a version/public-key mismatch and delegates all parsing to der's bounded reader; Debug omits the private key. encrypted_private_key_info.rs compiles only with pkcs5 (off).
+New deps: der 0.8 (oid), spki 0.8; optional ctutils, getrandom, pkcs5, rand_core (all off). ACDP features: alloc, std (root and py/node/wasm bindings identical). Reached via elliptic-curve 0.14.1.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/pkcs8-0.11.0.md (issue #339 Tier B batch B2 PR)."""
+
+[[audits.acdp-rs.audits.primefield]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.14.0"
+notes = """
+Scope: full audit of 0.14.0 (no prior audit; 2501 src lines, all files read, including every #[macro_export] macro body, which expands in caller crates such as p256 where this crate's forbid(unsafe_code) does not apply).
+Source: crates.io tarball sha256 c555a6e4eb7d4e158fcb028c835c3b8642206ddc279b5c6b202ef9a8bdb592f4 == Cargo.lock checksum.
+unsafe: 0 sites, including all macro bodies (monty_field_params!, monty_field_element!, monty_field_arithmetic!, monty_field_reduce!, field_op!, fiat_monty_field_arithmetic!, fiat_bernstein_yang_invert!, test/bench macros, and the internal unexported monty_field_op!), per a grep of the full source (comment lines excluded); the grep is the evidence. #![forbid(unsafe_code)] at src/lib.rs:8 is only a corroborating hint (cargo builds registry deps with --cap-lints allow, which caps both Cargo.toml lints and source-level forbid attributes).
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: none (#![no_std], no alloc; include_str! for README docs only; dev.rs bench macros reference ::criterion and compile only where a bench invokes them).
+Behaviour: from_bytes/from_uint range-check against the modulus and return CtOption; from_u64 asserts only that the modulus exceeds 64 bits (also reached at runtime via From<u64>, but it cannot fire for P-256), and the other const-fn assert/expect paths are used for compile-time constants; arithmetic and subtle/ctutils impls forward to crypto-bigint ConstMontyForm; the macro-emitted DefaultIsZeroes zeroizes fully initialized values, so zeroize 1.9.0's Z-1 (DECISIONS 322-zeroize) is not triggered.
+New deps: crypto-bigint 0.7.5, crypto-common 0.2, ff 0.14, rand_core 0.10, subtle 2.6, zeroize 1.7. No features defined. Reached via p256 0.14.0, primeorder 0.14.0, wnaf 0.14.1.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/primefield-0.14.0.md (issue #339 Tier B batch B2 PR)."""
+
+[[audits.acdp-rs.audits.primeorder]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.14.0"
+notes = """
+Scope: full audit of 0.14.0 (no prior audit; 2899 src lines, all files read, including the feature-gated basepoint-table, hash2curve and dev code and the #[macro_export] test_projective_arithmetic! macro).
+Source: crates.io tarball sha256 5c9f42978c78a00e3d68f69fc03e57a234debae69da4020a4fb588fcdcd07b06 == Cargo.lock checksum.
+unsafe: 0 sites, including the macro body (full-source grep; no forbid(unsafe_code) attribute, and the Cargo.toml [lints] do not set unsafe_code, so the grep is the evidence).
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: none (#![no_std]; extern crate std only for std::sync::LazyLock in the basepoint-table code, off in ACDP; include_str! for README docs).
+Behaviour: generic Renes-Costello-Batina point formulas as straight-line field arithmetic; p256 binds EquationAIsMinusThree and the VariableOnly backend. Untrusted SEC1 keys (p256 VerifyingKey::from_sec1_bytes) reach AffinePoint::from_sec1_point (src/affine.rs:222-231), which checks the curve equation or decompresses; identity rejection is elliptic-curve's. Indexing in LookupTable/Radix16Decomposition/lincomb is bounds-checked and digits stay in [-8, 8]. Verification uses lincomb_vartime via the wnaf crate.
+New deps: elliptic-curve 0.14.1 (arithmetic, sec1), primefield 0.14, wnaf 0.14; optional once_cell, serdect (off). ACDP features: alloc, std (root, acdp --no-default-features, py/node/wasm bindings). Only dependent: p256.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/primeorder-0.14.0.md (issue #339 Tier B batch B3 PR)."""
+
+[[audits.acdp-rs.audits.rand_core]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.9.5"
+notes = """
+Scope: full audit of 0.9.5 (no prior audit of rand_core; 1701 src lines, every file read: src/lib.rs, block.rs, impls.rs, le.rs, os.rs). In ACDP 0.9.5 is a dev-only dependency (proptest -> rand 0.9), previously exempted as safe-to-run; this review meets safe-to-deploy, which also covers safe-to-run.
+Source: crates.io tarball sha256 76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep, comment lines excluded; the grep is the evidence). The crate has no forbid(unsafe_code) attribute or lint.
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro). No macros exported.
+Powerful imports: OS randomness only, under feature os_rng (enabled in ACDP's graph by rand 0.9): OsRng (src/os.rs:83-100) and SeedableRng::try_from_os_rng (src/lib.rs:570-576) call getrandom 0.3 fill/u32/u64. Under std, RngReadAdapter (src/lib.rs:590-604) implements io::Read over an RNG; it opens nothing. No std::{fs,net,process,env}, env!, include_bytes!.
+Behaviour: trait definitions plus safe helpers. BlockRng/BlockRng64 (src/block.rs:126-424) bound every index by results.len() before slicing; generate_and_set asserts index < len. UnwrapErr/UnwrapMut unwrap inner errors (panic by design). le::read_u*_into assert the source length.
+New deps: optional getrandom 0.3 (os_rng; locked 0.3.4) and serde 1 (serde feature, off in ACDP). ACDP features: os_rng, std.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance, or RNG quality; getrandom 0.3.4 is a separate Tier B crate, still exempted.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/rand_core-0.9.5.md (issue #339 Tier B batch B4 PR)."""
+
+[[audits.acdp-rs.audits.rand_core]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.10.1"
+notes = """
+Scope: full audit of 0.10.1 (no prior audit of rand_core in audits.toml or the imported sets; 1073 src lines, every file read: src/lib.rs, block.rs, seedable_rng.rs, unwrap_err.rs, utils.rs, word.rs; tests/ inspected).
+Source: crates.io tarball sha256 63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69 == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep, comment lines excluded; the grep is the evidence). The crate has no forbid(unsafe_code) attribute or lint; forbid would in any case be capped by --cap-lints allow for registry deps.
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro). No macros exported.
+Powerful imports: none. #![no_std], no alloc, no features, no dependencies; the only include is include_str!("../README.md") for docs. No std::{fs,net,process,env}, env!, include_bytes!.
+Behaviour: trait definitions (TryRng, Rng, TryCryptoRng, CryptoRng, SeedableRng) plus safe helpers. BlockRng (src/block.rs:114-308) stores its read index in results[0], set only to values in 1..=N or N; every slice index is bounded by N. UnwrapErr (src/unwrap_err.rs:30-53) panics on an inner RNG error by design. word.rs from_usize/into_usize unwrap only for N > u32::MAX. ACDP calls rand_core::UnwrapErr(getrandom::SysRng) in crates/acdp-crypto/src/sign.rs:56 and :143 (key generation).
+New deps: none.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance, or the quality of any RNG; randomness comes from getrandom (Tier B, still exempted).
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/rand_core-0.10.1.md (issue #339 Tier B batch B4 PR)."""
+
+[[audits.acdp-rs.audits.rfc6979]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.6.0"
+notes = """
+Scope: full audit of 0.6.0 (no prior audit; 513 src lines, all files read).
+Source: crates.io tarball sha256 b4a459cddafb3fe76b31fd8f1108007566c40301feb64dc7b54656eb7388172b == Cargo.lock checksum.
+unsafe: 0 sites, per a grep of the full source (comment lines excluded); the grep is the evidence. The Cargo.toml [lints.rust] unsafe_code = "forbid" is only a corroborating hint (cargo builds registry deps with --cap-lints allow, which caps both Cargo.toml lints and source-level forbid attributes).
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: none (#![no_std], no alloc; include_str! for README docs only).
+Behaviour: KGenerator::new slices the scratch buffer to x.len() (safe panic if the secret is longer than the modulus encoding; ecdsa passes d.to_repr() of exactly that length); fill_next_k rejection-samples 0 < k < q; HmacDrbg over hmac::SimpleHmac, whose new_from_slice is infallible, so its expect is unreachable. DRBG K/V state is not zeroized (no zeroize dependency), as already noted in the ecdsa 0.17.0 audit; hygiene only, outside safe-to-deploy.
+New deps: crypto-bigint 0.7.5 (default-features = false), hmac 0.13. No features defined. Reached via ecdsa 0.17.0 RFC 6979 signing (P-256).
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness (including RFC 6979 conformance), constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/rfc6979-0.6.0.md (issue #339 Tier B batch B2 PR)."""
+
+[[audits.acdp-rs.audits.ring]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.17.14"
+notes = "briansmith 'ring' crypto primitives (BoringSSL-derived) used as the default rustls crypto provider. Reviewed 0.17.14: unsafe/asm inherent to the C+asm primitives, upstream is the canonical widely-audited source; no Rust-level I/O beyond getrandom. Latest 0.17.x; cargo audit clean 2026-07-05."
+
+[[audits.acdp-rs.audits.rustls]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.23.40"
+notes = "Canonical rustls TLS stack (github.com/rustls/rustls) providing the HTTPS transport for WebResolver/RegistryClient (reqwest+rustls, RFC-ACDP-0008 HTTPS-only). Reviewed 0.23.40: memory-safe TLS in Rust, unsafe limited to vetted crypto providers (ring/aws-lc-rs); actively maintained, ISRG-backed. Latest 0.23.x; cargo audit clean 2026-07-05."
+
+[[audits.acdp-rs.audits.rustls]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+delta = "0.23.40 -> 0.23.45"
+notes = """
+Scope: delta 0.23.40 -> 0.23.45 (40 files, +732/-135 per scripts/vet-facts.sh; 867 changed / 48215 src lines = 0.02, so delta per the #322 method rule); every hunk of the 1952-line diff read. Base 0.23.40 spot-checked: same forbid(unsafe_code), byte-identical build.rs.
+Source: crates.io tarball sha256 0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634 == Cargo.lock checksum (base 0.23.40 ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b == crates.io index cksum and this repo's pre-8c7a21b Cargo.lock).
+unsafe: 0 sites; #![forbid(unsafe_code, unused_must_use)] unconditional at src/lib.rs:332 (the one plain-word hit is prose, src/manual/features.rs:75).
+asm/SIMD: none (crypto is in the ring / aws-lc-rs providers).
+build.rs / proc-macro: build.rs unchanged (13 lines): emits cargo:rustc-cfg=read_buf only with the read_buf feature on nightly; no fs/network/env. Not a proc-macro.
+Powerful imports: src/key_log_file.rs reads SSLKEYLOGFILE (std::env::var_os) and appends key material via std::fs::OpenOptions; opt-in only via ClientConfig::key_log (builder default NoKeyLog, src/client/builder.rs:178); reqwest 0.12.28 / hyper-rustls 0.27.9 never set key_log and ACDP never constructs KeyLogFile, so it is inert in ACDP. Delta hardens it (unix create mode 0o600). std::net/std::fs/SystemTime elsewhere are doc/test-only; all include_bytes! are test-only and their targets are excluded from the package.
+ACDP build: normal graph enables rustls features ring, std, tls12 (reqwest rustls-tls -> ring provider fallback; ALL_VERSIONS = TLS 1.3 + 1.2; logging off). aws-lc-rs only in the dev graph (TLS test harness). py/node binding locks list 0.23.45 (same checksum) but do not compile it; wasm binding has no rustls.
+Changes read: RUSTSEC-2026-0285 fix (deframer is_aligned now = no pending handshake data; conn.rs recomputes aligned_handshake per taken message; key changes fail closed via check_aligned_handshake); ServerHello suite must be one offered; Protocol-aware version/suite checks (QUIC TLS 1.3 only); SignatureScheme::algorithm -> Option with fail-closed callers incl. webpki/verify.rs TLS 1.2 signature check; ECH-reject authenticates outer public_name (ECH unused by ACDP); RFC 9149 ticket_request (off by default); server HRR PSK/suite checks; aws-lc-rs ML-DSA (dev-only for ACDP); Zeroizing around load_private_key DER; checked_sub/saturating_sub/saturating_mul replace underflow/overflow (ticketer, binders, ticket age); debug-only PayloadU24 asserts; empty OCSP rejected. Client early data stays off (reqwest sets it only under http3, unused).
+Zeroize: new Zeroizing<PrivateKeyDer> targets initialized DER bytes; rustls is not built into the wasm binding (the only artifact on zeroize's non-asm fallback), so zeroize 1.9.0's Z-1 (DECISIONS 322-zeroize, still exempt) is unreachable via rustls.
+New deps: none (lock dependency set identical); requirement floors aws-lc-rs 1.14 -> 1.18 (optional) and rustls-webpki 0.103.5 -> 0.103.14 (locked 0.103.15). Tier B rustls-webpki, rustls-pki-types, hyper-rustls, tokio-rustls, webpki-roots, untrusted, once_cell still exempted.
+Advisories: cargo deny check advisories clean on 2026-10-04 (RUSTSEC-2026-0285 patched >= 0.23.45).
+Not claimed: TLS protocol correctness (including completeness of the RUSTSEC-2026-0285 fix), certificate-validation correctness, cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/rustls-0.23.45.md (issue #322 Phase 5 PR)."""
+
+[[audits.acdp-rs.audits.sec1]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.8.1"
+notes = """
+Scope: full audit of 0.8.1 (no prior audit; 1274 src lines, all files read).
+Source: crates.io tarball sha256 d56d437c2f19203ce5f7122e507831de96f3d2d4d3be5af44a0b0a09d8a80e4d == Cargo.lock checksum.
+unsafe: 0 sites, per a grep of the full source (comment lines excluded); the grep is the evidence. #![forbid(unsafe_code)] at src/lib.rs:8 is only a corroborating hint (cargo builds registry deps with --cap-lints allow, which caps both Cargo.toml lints and source-level forbid attributes).
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: filesystem only, behind std (enabled in ACDP): std::path::Path (src/traits.rs:7-8) for the explicit caller-invoked trait helpers read_sec1_der_file / write_sec1_der_file (src/traits.rs:36-39, 66-69), delegating to der::SecretDocument; PEM variants need pem (off). Unused by the crate and by ACDP. No network, process or env access.
+Discretion: binary test fixture tests/examples/p256-priv.der (121 bytes, ASN.1 test key) and .pem are read only by tests/; not compiled into any non-test build.
+Behaviour: EncodedPoint::from_bytes (src/point.rs:82-102), which ACDP reaches with untrusted input via p256 VerifyingKey::from_sec1_bytes, validates the tag and requires the exact encoded length before copying into a max-size array; every constructor keeps bytes[0] a valid tag, so the expect calls in tag()/coordinates() are unreachable. The compact tag 0x05 is accepted (p256 worksheet finding P-2, informational). EcPrivateKey decode requires version 1; Debug omits the private key.
+New deps: optional base16ct 1, ctutils 0.4, der 0.8, hybrid-array 0.4.6, serdect 0.4, subtle 2, zeroize 1. ACDP features: alloc, ctutils, default, der, point, std, subtle, zeroize (root and py/node/wasm bindings identical). Reached via elliptic-curve 0.14.1.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/sec1-0.8.1.md (issue #339 Tier B batch B2 PR)."""
+
+[[audits.acdp-rs.audits.sha2]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.10.9"
+notes = "RustCrypto 'sha2'. SHA-256 for ACDP content_hash + lineage_id (RFC-ACDP-0001 5.7). Reviewed 0.10.9: unsafe confined to cpufeatures-gated asm/SIMD backends; no I/O. Canonical, latest 0.10.x. cargo audit clean 2026-07-05."
+
+[[audits.acdp-rs.audits.sha2]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.11.0"
+notes = """
+Scope: full audit of 0.11.0 (delta 0.10.9 -> 0.11.0 is 57 files, +2766/-1858 = 1.47x the 3151 src lines, so full per the #322 method rule).
+Source: crates.io tarball sha256 446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4 == Cargo.lock checksum.
+unsafe: 50 non-comment unsafe code lines (53 raw grep hits, of which 3 are asm-template comments at src/sha256/riscv_zknh/utils.rs:51 and src/sha512/riscv_zknh/utils.rs:51,101); reviewed each. Calls into #[target_feature] backends are guarded by compile_error! static target_feature checks (forced --cfg backends) or cpufeatures runtime detection (default path). x86 SHA-NI / AVX2 SHA-512, aarch64 SHA2/SHA3 NEON and wasm32 simd128 loads/stores stay inside state/block arrays and the K constant tables (unaligned loadu/v128_load; index arithmetic checked); cast_ms/cast_rs reinterpret [__m128i;N] as [u64;2N] (same size, compatible alignment, all bit patterns valid); soft rk() reads in-bounds constants.
+asm/SIMD: asm! in loongarch64_asm (empty-input early return, stack scratch restored, all clobbers declared) and riscv_zknh/utils.rs; intrinsics elsewhere. Default path: soft + cpufeatures dispatch (x86 CPUID+xgetbv; aarch64 getauxval / Apple sysctlbyname), fallback to soft when undetected.
+Discretion: opt-in riscv-zknh backend does ptr::add on a wrapping_sub-derived pointer that may precede the allocation (src/sha256/riscv_zknh/utils.rs:44,61; src/sha512/riscv_zknh/utils.rs:44,61,94,110). Reachable only with --cfg sha2_backend="riscv-zknh" or --cfg sha2_256_backend="riscv-zknh" (the only keys that select it, in both src/sha256.rs:5 and src/sha512.rs:5; sha2_512_backend has no riscv-zknh arm) on nightly (or stable with RUSTC_BOOTSTRAP=1, which is not a supported configuration) (#![feature(riscv_ext_intrinsics)], lib.rs:9-16) on riscv; no Cargo feature; unreachable in any stable build. Fixed upstream in RustCrypto/hashes#879 (0.11.1, unreleased).
+Discretion: default aarch64 backend loads 16 bytes via vld1q_u32(&K32[t]) / vld1q_u64(&K64[t]) from a one-element reference (src/sha256/aarch64_sha2.rs:33-80, src/sha512/aarch64_sha3.rs:39-153); the read stays within the immutable K table; Stacked-Borrows-only concern; same pattern as audited 0.10.9; unfixed upstream.
+build.rs / proc-macro: none.
+Powerful imports: none (#![no_std]; only include_str!("../README.md") for docs). tests/data/*.blb binary KAT blobs are test-only, not built into the library.
+New deps: digest 0.10 -> 0.11, cpufeatures 0.2 -> 0.3; sha2-asm removed (Tier B digest/block-buffer/cpufeatures/hybrid-array/crypto-common still exempted). ACDP features: alloc, default, oid.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance. Behavioural evidence only: ACDP sig-001/can-001 golden vectors pin SHA-256 content_hash.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/sha2-0.11.0.md (issue #322 Phase 2 PR)."""
+
+[[audits.acdp-rs.audits.signature]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "2.2.0"
+notes = "RustCrypto 'signature' trait crate. Pure trait/marker defs used by ed25519/ecdsa; no unsafe, no I/O, no build script. Canonical upstream, latest 2.x. cargo audit clean 2026-07-05."
+
+[[audits.acdp-rs.audits.signature]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "3.0.0"
+notes = """
+Scope: full audit of 3.0.0 (delta 2.2.0 -> 3.0.0 is 11 files, +632/-431 = 1.33x the 798 src lines, so full per the #322 method rule).
+Source: crates.io tarball sha256 28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5 == Cargo.lock checksum.
+unsafe: 0 sites; #![forbid(unsafe_code)] unconditional at src/lib.rs:8.
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro; the optional signature_derive proc-macro dependency of 2.x was removed).
+Powerful imports: none (#![no_std]; alloc only behind the `alloc` feature; only include_str!("../README.md") for docs).
+Trait surface: Signer/Verifier families (multipart, digest, randomized, async, hazmat prehash), Keypair, SignatureEncoding, opaque non_exhaustive Error with optional boxed source; blanket impls only forward; default infallible methods panic via expect on try_* errors (documented).
+New deps: digest 0.10 -> 0.11 and rand_core 0.6 -> 0.10 (both optional, default-features = false; Tier B, still exempted); removed signature_derive, dev hex-literal/sha2. ACDP features: alloc, digest, rand_core.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/signature-3.0.0.md (issue #322 Phase 2 PR)."""
+
+[[audits.acdp-rs.audits.spki]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.8.0"
+notes = """
+Scope: full audit of 0.8.0 (no prior audit, ours or imported; 828 src lines, every src file read, plus tests/ and benches/ for imports and fixtures).
+Source: crates.io tarball sha256 1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep; forbid is capped by --cap-lints for registry deps, so the grep is the evidence); #![forbid(unsafe_code)] is at src/lib.rs:8.
+asm/SIMD: none.
+build.rs / proc-macro: none (optional `arbitrary` derive is off).
+Powerful imports: filesystem only behind the `std` feature (off in every ACDP build): DecodePublicKey::read_public_key_{der,pem}_file and EncodePublicKey::write_public_key_{der,pem}_file (src/traits.rs:55-70,105-122) take a caller-supplied Path and delegate to der::Document; explicit, documented API, not ambient I/O. No net/process/env.
+Discretion: binary test fixtures tests/examples/{ed25519-pub,p256-pub,rsa2048-pub}.der (44/91/294 bytes), each byte-identical to the base64 body of its sibling .pem; read only by tests/*.rs and the nightly benches/mod.rs via include_bytes!; not compiled into any non-test build.
+Behaviour: AlgorithmIdentifier and SubjectPublicKeyInfo DER structs plus encode/decode traits; all parsing delegated to der (no own length or buffer arithmetic). ACDP never decodes SPKI (P-256 keys are SEC1 points); the crate is pulled in by ecdsa's `spki` feature.
+New deps: der 0.8 (oid); optional arbitrary, base64ct, digest, sha2. ACDP features: alloc only (root and py/node/wasm bindings identical). Tier B der still exempted.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/spki-0.8.0.md (https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/355, issue #339 batch B1)."""
+
+[[audits.acdp-rs.audits.subtle]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "2.6.1"
+notes = "dalek 'subtle' constant-time primitives (Choice/ConditionallySelectable) guarding against timing side-channels across the crypto stack. Reviewed 2.6.1: no_std, no I/O, no concerning unsafe. Canonical, latest 2.x. cargo audit clean 2026-07-05."
+
+[[audits.acdp-rs.audits.tokio-rustls]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.26.4"
+notes = """
+Scope: full audit of 0.26.4 (no prior audit; 2191 src lines, all files read, including the cfg(test) src/common/test_stream.rs; tests/ inspected for imports and fixtures).
+Source: crates.io tarball sha256 1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61 == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep, src/ and tests/; no forbid(unsafe_code) attribute or Cargo.toml lint, so the grep is the evidence).
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: none in library code. It is an async I/O adapter that only reads and writes the caller's AsyncRead/AsyncWrite stream; AsRawFd/AsRawSocket only forward the inner descriptor. Sockets (tests/test.rs, early-data.rs, badssl.rs) and std::fs::File (#[ignore] cert regenerator tests/certs/main.rs) are integration-test-only; include_bytes!(README) in cfg(test) test_stream.rs.
+Discretion: test PEM certificates tests/certs/{root,chain}.pem and the PEM EC test private key tests/certs/end.key are read only by tests/utils.rs via include_str!; text, not compiled into any non-test build.
+Behaviour: TlsConnector wraps the caller's Arc<ClientConfig> unchanged and calls ClientConnection::new_with_alpn (src/client.rs:68); no dangerous(), custom verifier or key-log hook in the crate. Record shuffling is bounded by min(); EOF mid-handshake is an error. Server side (TlsAcceptor) is reached only via the dev-only axum-server test harness.
+New deps: rustls 0.23.27 (std), tokio 1. ACDP features: ring, tls12 (root, normal and dev edges); early-data, logging, aws_lc_rs, fips, brotli, zlib off. Dependents: reqwest, hyper-rustls; axum-server (dev only). Lock-only in the py/node bindings, absent from wasm.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance, TLS protocol or certificate-validation correctness.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/tokio-rustls-0.26.4.md (issue #339 Tier B batch B3 PR)."""
+
+[[audits.acdp-rs.audits.typenum]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "1.20.1"
+notes = """
+Scope: full audit of 1.20.1 (no prior audit of typenum; 19354 src lines). Not every line was read individually; what was read and how: (1) read in full: Cargo.toml, src/lib.rs, src/marker_traits.rs, src/gen.rs, src/tuple.rs, and all six #[macro_export] macros (assert_type_eq!, assert_type! in lib.rs; tarr! in array.rs; cmp! in type_operators.rs; op! and __op_internal__! in gen/op.rs, whose expansions are type expressions built only from 26 $crate:: operator type aliases); (2) the three generated files (gen/consts.rs 6567, gen/generic_const_mappings.rs 4758, gen/op.rs 1030 lines) were checked mechanically and exhaustively: consts.rs is 3440 pub type aliases over UInt/UTerm/B0/B1/PInt/NInt only, with all 1148 U-aliases' binary encodings value-checked against their names; generic_const_mappings.rs is 1148 impl ToUInt for Const<N> { type Output = UN; } blocks with N matching, plus 110 target_pointer_width cfgs; (3) the remaining hand-written modules (uint.rs, int.rs, bit.rs, private.rs, type_operators.rs, array.rs, operator_aliases.rs) are type-level trait impls; their runtime content was extracted mechanically (every fn body and const initialiser; approximately 420 bodies and 43 distinct initialisers by a line-based brace counter, 413 and 41 by an independent brace-aware extraction) and every distinct line reviewed; impl headers and where-clauses were sampled, not each read.
+Source: crates.io tarball sha256 b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20 == Cargo.lock checksum.
+unsafe: 0 sites, including all exported macros (full-source grep, comment lines excluded; the grep is the evidence). #![forbid(unsafe_code)] at src/lib.rs:43 is only a corroborating hint (capped by --cap-lints allow for registry deps).
+asm/SIMD: none. No extern, no_mangle, link attributes, static items, or raw pointers.
+build.rs / proc-macro: none (build = false; not a proc-macro). The gen/ files are pre-generated upstream by the workspace member "generate" (not shipped); the CHANGELOG records the removal of the old build script.
+Powerful imports: none. #![no_std]; no alloc; no include_*; no env!, std::{fs,net,process,env}. cfg use is limited to features i128, const-generics, scale_info, strict, docsrs, test and target_pointer_width.
+Behaviour: runtime code is zero-sized-type constructors, compile-time constant folding of bit values (overflow there is a compile error), Debug/Binary write! impls, Index/IndexMut for tuples (pattern-binding only), and Pow for primitive ints/floats (safe arithmetic; integer overflow panics only in debug).
+Discretion: tests/generated.rs (21247 lines) is a generated test file, not compiled into any non-test build.
+New deps: optional scale-info 1.0 (feature scale_info, off in ACDP). ACDP features: const-generics. Reached via hybrid-array.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance, or the arithmetic correctness of the type-level operators.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/typenum-1.20.1.md (issue #339 Tier B batch B4 PR)."""
+
+[[audits.acdp-rs.audits.untrusted]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.9.0"
+notes = """
+Scope: full audit of 0.9.0 (no prior audit; 402 src lines, all files read).
+Source: crates.io tarball sha256 8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1 == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep, src/ and tests/; no forbid(unsafe_code) attribute or Cargo.toml lint, so the grep is the evidence).
+asm/SIMD: none.
+build.rs / proc-macro: none (no build script; not a proc-macro).
+Powerful imports: none (#![no_std], no alloc; no include_* or env!).
+Discretion: upstream CI helper scripts mk/cargo.sh, mk/install-build-tools.sh, mk/runner and the apt.llvm.org key mk/llvm-snapshot.gpg.key ship in the tarball; Cargo.toml does not reference them and no build runs them.
+Behaviour: no_panic::Slice exposes only slice::get-based accessors; Reader keeps i <= len (read_byte, checked_add in read_bytes), so the unwraps in read_bytes_to_end and read_partial (src/reader.rs:105, 117) are unreachable; Debug impls print no input bytes.
+New deps: none. ACDP features: none. Reached via ring and rustls-webpki under rustls/reqwest; lock-only in the py/node bindings, absent from wasm.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/untrusted-0.9.0.md (issue #339 Tier B batch B3 PR)."""
+
+[[audits.acdp-rs.audits.wnaf]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.14.1"
+notes = """
+Scope: full audit of 0.14.1 (no prior audit, ours or imported; 718 src lines, every file read).
+Source: crates.io tarball sha256 795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep; forbid is capped by --cap-lints for registry deps, so the grep is the evidence); #![forbid(unsafe_code)] is at src/lib.rs:8.
+asm/SIMD: none.
+build.rs / proc-macro: none (build = false; not a proc-macro).
+Powerful imports: none (#![no_std]; alloc only behind `alloc`; include_str! README for docs only).
+Behaviour: generic variable-time wNAF tables and Straus multiscalar multiplication over group::Group; all digit/table accesses are bounds-checked slice indexing. Observation W-1 (not a vet concern): under debug_assertions digit() panics for window sizes 7 and 8 (src/lib.rs:71-80,120,126); ACDP only uses W = 5 via primeorder (projective.rs:39), and upstream master already fixes it.
+New deps: hybrid-array 0.4.13, ff 0.14, group 0.14, primefield 0.14 (all default-features = false). ACDP features: none (primeorder uses default-features = false; root and py/node/wasm bindings identical).
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/wnaf-0.14.1.md (https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/355, issue #339 batch B1)."""
+
+[[audits.acdp-rs.audits.zeroize_derive]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "1.5.0"
+notes = """
+Scope: full audit of 1.5.0 (no prior audit, ours or imported; src/lib.rs is the only source file, 870 lines incl. the cfg(test) module, read in full).
+Source: crates.io tarball sha256 3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328 == Cargo.lock checksum.
+unsafe: 0 sites (full-source grep; forbid is capped by --cap-lints for registry deps, so the grep is the evidence); #![forbid(unsafe_code)] is at src/lib.rs:4. The generated code contains no unsafe either (every quote! block read).
+asm/SIMD: none.
+build.rs / proc-macro: no build.rs. proc-macro = true: derives Zeroize and ZeroizeOnDrop. Pure token-to-token codegen with syn/quote: reads only the input item and its #[zeroize(drop|bound|skip)] attributes, emits Zeroize/Drop/ZeroizeOnDrop impls that call zeroize's public traits; no fs/net/process/env, no env!/include_*!, no tracked access, no static state; malformed input fails via panic!/assert! (compile errors).
+Powerful imports: none.
+ACDP use: zeroize `derive` feature (acdp-crypto); one #[derive(ZeroizeOnDrop)] on SigningKey(ed25519_dalek::SigningKey) (crates/acdp-crypto/src/sign.rs:26), whose generated Drop is a no-op because ed25519_dalek::SigningKey implements ZeroizeOnDrop but not Zeroize (ed25519-dalek-3.0.0/src/signing.rs:719-726); a field implementing Zeroize (with or without ZeroizeOnDrop) instead takes the AssertZeroize path and has zeroize() called. Erasure semantics belong to zeroize 1.9.0, still exempt under DECISIONS 322-zeroize; this audit does not cover zeroize.
+New deps: proc-macro2 1, quote 1, syn 2 (full, extra-traits, visit); host-only. ACDP features: default (none defined); root and py/node/wasm bindings identical.
+Advisories: cargo deny check advisories clean on 2026-10-04.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance, or that zeroization clears memory.
+Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/zeroize_derive-1.5.0.md (https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/355, issue #339 batch B1)."""
+
+[[audits.bytecode-alliance.wildcard-audits.bumpalo]]
+who = "Nick Fitzgerald <fitzgen@gmail.com>"
+criteria = "safe-to-deploy"
+user-id = 696 # Nick Fitzgerald (fitzgen)
+start = "2019-03-16"
+end = "2026-08-21"
+
+[[audits.bytecode-alliance.wildcard-audits.wasip2]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+user-id = 1 # Alex Crichton (alexcrichton)
+start = "2025-08-10"
+end = "2026-08-21"
+notes = """
+This is a Bytecode Alliance authored crate.
+"""
+
+[[audits.bytecode-alliance.wildcard-audits.wit-bindgen]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+trusted-publisher = "github:bytecodealliance/wit-bindgen"
+start = "2025-08-13"
+end = "2027-01-08"
+notes = "The Bytecode Alliance is the author of this crate"
+
+[[audits.bytecode-alliance.audits.allocator-api2]]
+who = "Chris Fallin <chris@cfallin.org>"
+criteria = "safe-to-deploy"
+delta = "0.2.18 -> 0.2.20"
+notes = """
+The changes appear to be reasonable updates from Rust's stdlib imported into
+`allocator-api2`'s copy of this code.
+"""
+
+[[audits.bytecode-alliance.audits.atomic-waker]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "1.1.2"
+notes = "Contains `unsafe` code but it's well-documented and scoped to what it's intended to be doing. Otherwise a well-focused and straightforward crate."
+
+[[audits.bytecode-alliance.audits.crypto-common]]
+who = "Benjamin Bouvier <public@benj.me>"
+criteria = "safe-to-deploy"
+version = "0.1.3"
+
+[[audits.bytecode-alliance.audits.der]]
+who = "Chris Fallin <chris@cfallin.org>"
+criteria = "safe-to-deploy"
+version = "0.7.10"
+notes = "No unsafe code aside from transmutes for transparent newtypes."
+
+[[audits.bytecode-alliance.audits.foldhash]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "0.1.3"
+notes = """
+Only a minor amount of `unsafe` code in this crate related to global per-process
+initialization which looks correct to me.
+"""
+
+[[audits.bytecode-alliance.audits.heck]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.4.1 -> 0.5.0"
+notes = "Minor changes for a `no_std` upgrade but otherwise everything looks as expected."
+
+[[audits.bytecode-alliance.audits.iana-time-zone-haiku]]
+who = "Dan Gohman <dev@sunfishcode.online>"
+criteria = "safe-to-deploy"
+version = "0.1.2"
+
+[[audits.bytecode-alliance.audits.matchers]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "0.1.0"
+
+[[audits.bytecode-alliance.audits.matchers]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.0 -> 0.2.0"
+notes = "Some unsafe code, but not more than before. Nothing awry."
+
+[[audits.bytecode-alliance.audits.nu-ansi-term]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "0.46.0"
+notes = "one use of unsafe to call windows specific api to get console handle."
+
+[[audits.bytecode-alliance.audits.nu-ansi-term]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.46.0 -> 0.50.1"
+notes = "Lots of stylistic/rust-related changes, plus new features, but nothing out of the ordrinary."
+
+[[audits.bytecode-alliance.audits.nu-ansi-term]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.50.1 -> 0.50.3"
+notes = "CI changes, Rust changes, nothing out of the ordinary."
+
+[[audits.bytecode-alliance.audits.num-traits]]
+who = "Andrew Brown <andrew.brown@intel.com>"
+criteria = "safe-to-deploy"
+version = "0.2.19"
+notes = "As advertised: a numeric library. The only `unsafe` is from some float-to-int conversions, which seems expected."
+
+[[audits.bytecode-alliance.audits.parking]]
+who = "Chris Fallin <chris@cfallin.org>"
+criteria = "safe-to-deploy"
+version = "2.2.1"
+notes = "forbid-unsafe crate with straightforward imports."
+
+[[audits.bytecode-alliance.audits.pem-rfc7468]]
+who = "Chris Fallin <chris@cfallin.org>"
+criteria = "safe-to-deploy"
+version = "0.7.0"
+notes = "Only `unsafe` around a `from_utf8_unchecked`, and no IO."
+
+[[audits.bytecode-alliance.audits.percent-encoding]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "2.2.0"
+notes = """
+This crate is a single-file crate that does what it says on the tin. There are
+a few `unsafe` blocks related to utf-8 validation which are locally verifiable
+as correct and otherwise this crate is good to go.
+"""
+
+[[audits.bytecode-alliance.audits.rustc_version]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.4.0 -> 0.4.1"
+notes = "Minor changes, nothing worrisome"
+
+[[audits.bytecode-alliance.audits.semver]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "1.0.17"
+notes = "plenty of unsafe pointer and vec tricks, but in well-structured and commented code that appears to be correct"
+
+[[audits.bytecode-alliance.audits.sha1]]
+who = "Andrew Brown <andrew.brown@intel.com>"
+criteria = "safe-to-deploy"
+delta = "0.10.5 -> 0.10.6"
+notes = "Only new code is some loongarch64 additions which include assembly code for that platform."
+
+[[audits.bytecode-alliance.audits.sharded-slab]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "0.1.4"
+notes = "I always really enjoy reading eliza's code, she left perfect comments at every use of unsafe."
+
+[[audits.bytecode-alliance.audits.shlex]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "1.1.0"
+notes = "Only minor `unsafe` code blocks which look valid and otherwise does what it says on the tin."
+
+[[audits.bytecode-alliance.audits.smallvec]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "1.13.2 -> 1.14.0"
+notes = "Minor new feature, nothing out of the ordinary."
+
+[[audits.bytecode-alliance.audits.tinyvec_macros]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "0.1.0"
+notes = """
+This is a trivial crate which only contains a singular macro definition which is
+intended to multiplex across the internal representation of a tinyvec,
+presumably. This trivially doesn't contain anything bad.
+"""
+
+[[audits.bytecode-alliance.audits.tracing-log]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "0.1.3"
+notes = """
+This is a standard adapter between the `log` ecosystem and the `tracing`
+ecosystem. There's one `unsafe` block in this crate and it's well-scoped.
+"""
+
+[[audits.bytecode-alliance.audits.tracing-log]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.3 -> 0.2.0"
+notes = "Nothing out of the ordinary, a typical major version update and nothing awry."
+
+[[audits.bytecode-alliance.audits.vcpkg]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "0.2.15"
+notes = "no build.rs, no macros, no unsafe. It reads the filesystem and makes copies of DLLs into OUT_DIR."
+
+[[audits.google.audits.android_system_properties]]
+who = "Manish Goregaokar <manishearth@google.com>"
+criteria = "safe-to-deploy"
+version = "0.1.5"
+notes = "Android system API FFI"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.base64]]
+who = "amarjotgill <amarjotgill@google.com>"
+criteria = "safe-to-deploy"
+version = "0.22.1"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.bit-set]]
+who = "George Burgess IV <gbiv@google.com>"
+criteria = "safe-to-run"
+version = "0.5.3"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
+[[audits.google.audits.bit-vec]]
+who = "George Burgess IV <gbiv@google.com>"
+criteria = "safe-to-run"
+version = "0.6.3"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
+[[audits.google.audits.byteorder]]
+who = "danakj <danakj@chromium.org>"
+criteria = "safe-to-deploy"
+version = "1.5.0"
+notes = "Unsafe review in https://crrev.com/c/5838022"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.core-foundation-sys]]
+who = "Manish Goregaokar <manishearth@google.com>"
+criteria = "safe-to-deploy"
+version = "0.8.7"
+notes = "OSX system APIs"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.either]]
+who = "Manish Goregaokar <manishearth@google.com>"
+criteria = "safe-to-deploy"
+version = "1.13.0"
+notes = "Unsafe code pertaining to wrapping Pin APIs. Mostly passes invariants down."
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.either]]
+who = "Daniel Cheng <dcheng@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.13.0 -> 1.14.0"
+notes = """
+Inheriting ub-risk-1 from the baseline review of 1.13.0. While the delta has some diffs in unsafe code, they are either:
+- migrating code to use helper macros
+- migrating match patterns to take advantage of default bindings mode from RFC 2005
+Either way, the result is code that does exactly the same thing and does not change the risk of UB.
+
+See https://crrev.com/c/6323164 for more audit details.
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.either]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.14.0 -> 1.15.0"
+notes = 'The delta in `lib.rs` only tweaks doc comments and `#[cfg(feature = "std")]`.'
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.equivalent]]
+who = "George Burgess IV <gbiv@google.com>"
+criteria = "safe-to-deploy"
+version = "1.0.1"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
+[[audits.google.audits.equivalent]]
+who = "Jonathan Hao <phao@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.1 -> 1.0.2"
+notes = "No changes to any .rs files or Rust code."
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.foldhash]]
+who = "Adrian Taylor <adetaylor@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "0.1.3 -> 0.1.4"
+notes = "No changes to safety-relevant code"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.foldhash]]
+who = "Chris Palmer <palmer@google.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.4 -> 0.1.5"
+notes = "No new `unsafe`."
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.heck]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+version = "0.4.1"
+notes = """
+Grepped for `-i cipher`, `-i crypto`, `'\bfs\b'``, `'\bnet\b'``, `'\bunsafe\b'``
+and there were no hits.
+
+`heck` (version `0.3.3`) has been added to Chromium in
+https://source.chromium.org/chromium/chromium/src/+/28841c33c77833cc30b286f9ae24c97e7a8f4057
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.httpdate]]
+who = "George Burgess IV <gbiv@google.com>"
+criteria = "safe-to-deploy"
+version = "1.0.3"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
+[[audits.google.audits.indexmap]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+version = "2.7.1"
+notes = '''
+Grepped for `-i cipher`, `-i crypto`, `'\bfs\b'`, `'\bnet\b'`
+and there were no hits.
+
+There is a little bit of `unsafe` Rust code - the audit can be found at
+https://chromium-review.googlesource.com/c/chromium/src/+/6187726/2
+'''
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.indexmap]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "2.7.1 -> 2.8.0"
+notes = """
+No `unsafe` introduced or affected in:
+* `indexmap_with_default!` and `indexset_with_default!` macros
+* New `PartialEq` implementations
+* `fn slice_eq` in `util.rs`
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.lazy_static]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+version = "1.4.0"
+notes = '''
+I grepped for \"crypt\", \"cipher\", \"fs\", \"net\" - there were no hits.
+
+There are two places where `unsafe` is used.  Unsafe review notes can be found
+in https://crrev.com/c/5347418.
+
+This crate has been added to Chromium in https://crrev.com/c/3321895.
+'''
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.lazy_static]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.4.0 -> 1.5.0"
+notes = "Unsafe review notes: https://crrev.com/c/5650836"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.nom]]
+who = "danakj@chromium.org"
+criteria = "safe-to-deploy"
+version = "7.1.3"
+notes = """
+Reviewed in https://chromium-review.googlesource.com/c/chromium/src/+/5046153
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.num-cmp]]
+who = "George Burgess IV <gbiv@google.com>"
+criteria = "safe-to-run"
+version = "0.1.0"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
+[[audits.google.audits.num-integer]]
+who = "Manish Goregaokar <manishearth@google.com>"
+criteria = "safe-to-deploy"
+version = "0.1.46"
+notes = "Contains no unsafe"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.num-rational]]
+who = "Manish Goregaokar <manishearth@google.com>"
+criteria = "safe-to-deploy"
+version = "0.4.2"
+notes = "Contains no unsafe"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+version = "1.0.78"
+notes = """
+Grepped for "crypt", "cipher", "fs", "net" - there were no hits
+(except for a benign "fs" hit in a doc comment)
+
+Notes from the `unsafe` review can be found in https://crrev.com/c/5385745.
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Adrian Taylor <adetaylor@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.78 -> 1.0.79"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Adrian Taylor <adetaylor@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.79 -> 1.0.80"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Dustin J. Mitchell <djmitche@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.80 -> 1.0.81"
+notes = "Comment changes only"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "danakj <danakj@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.81 -> 1.0.82"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Dustin J. Mitchell <djmitche@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.82 -> 1.0.83"
+notes = "Substantive change is replacing String with Box<str>, saving memory."
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.83 -> 1.0.84"
+notes = "Only doc comment changes in `src/lib.rs`."
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "danakj@chromium.org"
+criteria = "safe-to-deploy"
+delta = "1.0.84 -> 1.0.85"
+notes = "Test-only changes."
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.85 -> 1.0.86"
+notes = """
+Comment-only changes in `build.rs`.
+Reordering of `Cargo.toml` entries.
+Just bumping up the version number in `lib.rs`.
+Config-related changes in `test_size.rs`.
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "danakj <danakj@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.86 -> 1.0.87"
+notes = "No new unsafe interactions."
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Liza Burakova <liza@chromium.org"
+criteria = "safe-to-deploy"
+delta = "1.0.87 -> 1.0.89"
+notes = """
+Biggest change is adding error handling in build.rs.
+Some config related changes in wrapper.rs.
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.89 -> 1.0.92"
+notes = """
+I looked at the delta and the previous discussion at
+https://chromium-review.googlesource.com/c/chromium/src/+/5385745/3#message-a8e2813129fa3779dab15acede408ee26d67b7f3
+and the changes look okay to me (including the `unsafe fn from_str_unchecked`
+changes in `wrapper.rs`).
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.92 -> 1.0.93"
+notes = "No `unsafe`-related changes."
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.proc-macro2]]
+who = "Daniel Cheng <dcheng@chromium.org>"
+criteria = "safe-to-deploy"
+delta = "1.0.93 -> 1.0.94"
+notes = "Minor doc changes and clippy lint adjustments+fixes."
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.rand_chacha]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+version = "0.3.1"
+notes = """
+For more detailed unsafe review notes please see https://crrev.com/c/6362797
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.rand_core]]
+who = "Lukasz Anforowicz <lukasza@chromium.org>"
+criteria = "safe-to-deploy"
+version = "0.6.4"
+notes = """
+For more detailed unsafe review notes please see https://crrev.com/c/6362797
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.sha1]]
+who = "David Koloski <dkoloski@google.com>"
+criteria = "safe-to-deploy"
+version = "0.10.5"
+notes = "Reviewed on https://fxrev.dev/712371."
+aggregated-from = "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/third_party/rust_crates/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.smallvec]]
+who = "Manish Goregaokar <manishearth@google.com>"
+criteria = "safe-to-deploy"
+version = "1.13.2"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.synstructure]]
+who = "Manish Goregaokar <manishearth@google.com>"
+criteria = "safe-to-deploy"
+version = "0.13.1"
+notes = "Exposes unsafe codegen APIs but does not itself contain unsafe"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.tempfile]]
+who = "Ying Hsu <yinghsu@chromium.org>"
+criteria = "safe-to-run"
+version = "3.10.1"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
+[[audits.google.audits.unicode-bidi]]
+who = "Manish Goregaokar <manishearth@google.com>"
+criteria = "safe-to-deploy"
+version = "0.3.18"
+notes = "Contains one line of repr(transparent) unsafe"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.mozilla.wildcard-audits.unicode-normalization]]
+who = "Manish Goregaokar <manishsmail@gmail.com>"
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2019-11-06"
+end = "2027-04-23"
+notes = "All code written or reviewed by Manish"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.wildcard-audits.utf8_iter]]
+who = "Makoto Kato <m_kato@ga2.so-net.ne.jp>"
+criteria = "safe-to-deploy"
+user-id = 4484 # Henri Sivonen (hsivonen)
+start = "2022-04-19"
+end = "2024-06-16"
+notes = "Maintained by Henri Sivonen who works at Mozilla."
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.allocator-api2]]
+who = "Nicolas Silva <nical@fastmail.com>"
+criteria = "safe-to-deploy"
+version = "0.2.18"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.allocator-api2]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "0.2.20 -> 0.2.21"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.bit-set]]
+who = "Teodor Tanasoaia <ttanasoaia@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.5.3 -> 0.6.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.bit-set]]
+who = "Jim Blandy <jimb@red-bean.com>"
+criteria = "safe-to-deploy"
+delta = "0.6.0 -> 0.8.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.bit-vec]]
+who = "Teodor Tanasoaia <ttanasoaia@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.6.3 -> 0.7.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.bit-vec]]
+who = "Jim Blandy <jimb@red-bean.com>"
+criteria = "safe-to-deploy"
+delta = "0.7.0 -> 0.8.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.bit-vec]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.8.0 -> 0.9.1"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.crypto-common]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "0.1.3 -> 0.1.6"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.deranged]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.3.11"
+notes = """
+This crate contains a decent bit of `unsafe` code, however all internal
+unsafety is verified with copious assertions (many are compile-time), and
+otherwise the unsafety is documented and left to the caller to verify.
+"""
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.deranged]]
+who = "Lars Eggert <lars@eggert.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.11 -> 0.4.0"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.deranged]]
+who = "Lars Eggert <lars@eggert.org>"
+criteria = "safe-to-deploy"
+delta = "0.4.0 -> 0.5.8"
+notes = "New unsafe code is properly guarded"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.either]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.15.0 -> 1.16.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.fnv]]
+who = "Bobby Holley <bobbyholley@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.0.7"
+notes = "Simple hasher implementation with no unsafe code."
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.foldhash]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.5 -> 0.2.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.form_urlencoded]]
+who = "Valentin Gosu <valentin.gosu@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.2.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.form_urlencoded]]
+who = "Valentin Gosu <valentin.gosu@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.2.0 -> 1.2.1"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.form_urlencoded]]
+who = "edgul <ed.guloien@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.2.1 -> 1.2.2"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.hashbrown]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.15.5 -> 0.16.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.hashbrown]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.16.0 -> 0.16.1"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.hashbrown]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.16.1 -> 0.17.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.hashbrown]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.17.0 -> 0.17.1"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.hex]]
+who = "Simon Friedberger <simon@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.4.3"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.indexmap]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "2.8.0 -> 2.11.4"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.indexmap]]
+who = "Ben Dean-Kawamura <bdk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "2.11.4 -> 2.14.0"
+notes = "Mostly internal refactorings.  No new unsafe code."
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.percent-encoding]]
+who = "Valentin Gosu <valentin.gosu@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "2.2.0 -> 2.3.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.percent-encoding]]
+who = "Valentin Gosu <valentin.gosu@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "2.3.0 -> 2.3.1"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.percent-encoding]]
+who = "edgul <ed.guloien@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "2.3.1 -> 2.3.2"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.powerfmt]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.2.0"
+notes = """
+A tiny bit of unsafe code to implement functionality that isn't in stable rust
+yet, but it's all valid. Otherwise it's a pretty simple crate.
+"""
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.proc-macro2]]
+who = "Jan-Erik Rediger <jrediger@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.94 -> 1.0.106"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.rustc_version]]
+who = "Nika Layzell <nika@thelayzells.com>"
+criteria = "safe-to-deploy"
+version = "0.4.0"
+notes = """
+Use of powerful capabilities is limited to invoking `rustc -vV` to get version
+information for parsing version information.
+"""
+aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.semver]]
+who = "Ben Dean-Kawamura <bdk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.16 -> 1.0.28"
+notes = "Very few changes, mostly removes support for older Rust versions.  Some unsafe code refactored, but it seemed to be functionally equivalent to me."
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.semver]]
+who = "Bobby Holley <bobbyholley@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.17 -> 1.0.16"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.serde_spanned]]
+who = "Ben Dean-Kawamura <bdk@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "1.0.3"
+notes = "Relatively simple Serde trait implementations.  No IO or unsafe code."
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.serde_spanned]]
+who = "Ben Dean-Kawamura <bdk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.3 -> 1.1.1"
+notes = "No code changes, just dependency updates."
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.sharded-slab]]
+who = "Mark Hammond <mhammond@skippinet.com.au>"
+criteria = "safe-to-deploy"
+delta = "0.1.4 -> 0.1.7"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.shlex]]
+who = "Max Inden <mail@max-inden.de>"
+criteria = "safe-to-deploy"
+delta = "1.1.0 -> 1.3.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.shlex]]
+who = "Emilio Cobos Álvarez <emilio@crisal.io>"
+criteria = "safe-to-deploy"
+delta = "1.3.0 -> 2.0.1"
+notes = """
+Mostly removes some deprecated and unsound APIs.
+"""
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.smallvec]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.14.0 -> 1.15.1"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.smallvec]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "1.15.1 -> 1.15.2"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.synstructure]]
+who = "Nika Layzell <nika@thelayzells.com>"
+criteria = "safe-to-deploy"
+delta = "0.13.1 -> 0.13.2"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tempfile]]
+who = "Chris Martin <cmartin@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "3.10.1 -> 3.16.0"
+notes = "Big change, but nothing unsafe and lots of it is documentation and convenience APIs"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tempfile]]
+who = "Jim Blandy <jimb@red-bean.com>"
+criteria = "safe-to-deploy"
+delta = "3.16.0 -> 3.27.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tinyvec_macros]]
+who = "Drew Willcoxon <adw@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.0 -> 0.1.1"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.toml_datetime]]
+who = "Jan-Erik Rediger <jrediger@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.7.5+spec-1.1.0"
+notes = "Pure data type crate with some datetime parsing. No unsafe."
+aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.toml_datetime]]
+who = "Ben Dean-Kawamura <bdk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.7.3 -> 1.1.1+spec-1.1.0"
+notes = "Minimal changes, no new unsafe code."
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.toml_datetime]]
+who = "Jan-Erik Rediger <jrediger@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.7.5+spec-1.1.0 -> 0.7.3"
+notes = "Version downgrade to cover the full vetted version range"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"

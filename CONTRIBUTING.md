@@ -5,7 +5,8 @@ Thanks for your interest in `acdp-registry-rs`.
 ## Setup
 
 1. Install Rust 1.88 or newer (`rustup install stable`).
-2. (Optional) Install `cargo-deny` if you plan to touch dependencies.
+2. (Optional) Install `cargo-deny` and `cargo-vet` if you plan to touch
+   dependencies.
 
 The protocol library [`acdp`](https://crates.io/crates/acdp) is consumed from
 crates.io — no sibling checkout is required.
@@ -62,6 +63,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 # Dependency audit (runs unconditionally in CI, not optional).
 cargo deny check
+
+# Supply-chain review coverage (advisory in CI). A new or bumped dependency
+# needs an audit or an exemption; see docs/MAINTAINING.md
+# "Supply-chain audits (cargo vet)". Install the version CI pins:
+#   cargo install --locked cargo-vet --version 0.10.2
+cargo vet --locked
 
 # Spec conformance — replays HTTP-shaped fixtures from the ACDP spec
 # against a live server built from this crate. ACDP_SPEC_DIR must point
