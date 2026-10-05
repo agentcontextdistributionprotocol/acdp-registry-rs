@@ -1,0 +1,170 @@
+# PR-time drift check for the mutation ratchet's pins (#384).
+#
+# mutants.yml is a ~2 h scheduled run and stays off pull_request on purpose. But
+# three of its pins are statements about the mutant LISTING, not about verdicts,
+# and `cargo mutants --list` parses source without building anything (~0.2 s
+# locally). So a PR that edits a scoped file can learn, in seconds, that it has
+# moved a pin, instead of the following Monday's cron going red:
+#
+#   1. MUTANTS_EXPECTED_SCOPE      == `cargo mutants --list | wc -l`
+#   2. .cargo/mutants.toml's table == the listing's per-file split
+#   3. every MUTANTS_SURVIVORS line and the budgeted TIMEOUT (from
+#      MUTANTS_PRIOR_LEDGER) appears in the listing verbatim (line:col included)
+#
+# The logic is .github/scripts/check_mutants_pins.py; its unit tests run in the
+# required `tests` job (ci.yml) on every PR, whether or not this job skips.
+#
+# THE PATH FILTER IS INSIDE THE JOB, NOT ON THE TRIGGER, and that is what lets
+# this check be listed in .github/required-checks.json at all. A `paths:` filter
+# on `pull_request`, or a job-level `if:`, makes the check never report (or report
+# a skip as success) on unrelated PRs -- required_checks_guard.py rejects both
+# for `required` AND `advisory_pending`. Here the job always runs and always
+# reports; on a PR that touches nothing relevant its gate step says so and the
+# remaining steps are skipped at STEP level, so the job is green in seconds.
+# It is ADVISORY (`advisory_pending`); see docs/MAINTAINING.md#mutation-oracle.
+name: mutants-pins
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-pins-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pins:
+    name: mutants pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Depth 2: on pull_request the checkout is the merge commit, whose first
+      # parent is main's tip, so HEAD^1..HEAD is exactly what merging would change.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      # FAILS TOWARD RUNNING, at every layer: a push to main always runs; a diff
+      # that cannot be computed leaves no file, which the script answers `true`;
+      # `relevant` imports no PyYAML, so a missing module cannot crash it; and
+      # if the script crashes anyway, or prints ANYTHING but the literal `false`,
+      # `run` is forced to `true`. Only a clean, explicit `false` skips the check
+      # -- an empty `run` would otherwise skip every later step and go green.
+      - name: does this change touch the mutation scope or its pins?
+        id: gate
+        run: |
+          set -uo pipefail
+          changed="$RUNNER_TEMP/changed.txt"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            if ! git diff --name-only HEAD^1 HEAD > "$changed"; then
+              echo "::warning::could not diff the merge commit; running the check anyway"
+              rm -f "$changed"
+            fi
+          else
+            rm -f "$changed"
+          fi
+          if ! run="$(python3 .github/scripts/check_mutants_pins.py relevant --changed-files "$changed")"; then
+            echo "::warning::the relevance check crashed; running the pin check anyway"
+            run=true
+          fi
+          [ "$run" = "false" ] || run=true
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [ "$run" = "true" ]; then
+            echo "scoped files or ratchet pins may have changed: checking the pins"
+          else
+            echo "no scoped file or pin changed: nothing this check can see moved; skipping"
+            echo "mutants-pins: skipped (no scoped file or pin changed)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      # The version comes from mutants.yml's install line -- the single place
+      # it is written -- so the PR check and the cron cannot list with different
+      # tools. `check` then requires it to equal the ledger's version. A failure
+      # to read it fails the step (no silent fallback to "latest").
+      - name: read the cron's pinned cargo-mutants version
+        id: tool
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          v="$(python3 .github/scripts/check_mutants_pins.py tool-version)"
+          echo "cargo-mutants $v (from mutants.yml)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - if: steps.gate.outputs.run == 'true'
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-mutants@${{ steps.tool.outputs.version }}
+
+      # The cron's command, no scope flags: the scope comes from
+      # .cargo/mutants.toml. `--colors never` IS LOAD-BEARING: cargo-mutants
+      # honours CARGO_TERM_COLOR (set to `always` above), and coloured output
+      # wraps each description in ANSI escapes, so no committed survivor line
+      # would ever match verbatim (measured on this job's first run; the checker
+      # now rejects escapes as unsound). The listing is written to a file first
+      # so a crashed `cargo mutants` fails this step instead of reaching the
+      # checker as an empty pipe (the checker also rejects an empty listing).
+      - name: check the pins against `cargo mutants --list`
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          cargo mutants --version
+          cargo mutants --list --colors never > "$RUNNER_TEMP/listing.txt"
+          rc=0
+          python3 .github/scripts/check_mutants_pins.py check --listing "$RUNNER_TEMP/listing.txt" || rc=$?
+          case "$rc" in
+            0) ;;
+            10) echo "::error::the mutation ratchet's pins no longer match this tree; the" \
+                     "Monday mutants.yml run would fail. Fix them in this PR (see above)."
+                exit 1 ;;
+            11) echo "::error::the pin checker could not reach a conclusion from its inputs" \
+                     "(see above). Fix the inputs; do not treat this as a pass."
+                exit 1 ;;
+            *)  echo "::error::check_mutants_pins.py itself failed (exit $rc)."
+                exit 1 ;;
+          esac
+
+      # FALSIFICATION, against the real tree and the real tool: one blank line
+      # inserted at the top of a scoped file moves every cited line in it, and the
+      # check MUST then report drift (exit 10). If it passes, this check cannot
+      # see the failure it exists for and the green above means nothing.
+      #
+      # The file is CHOSEN FROM THE PINS (`falsify-target`: the first scoped file
+      # holding a cited survivor or timeout line), not hard-coded, so a re-pin
+      # that leaves some file with no cited line cannot turn this red. If no file
+      # holds one, there is nothing a shift could move: it says so and passes.
+      - name: falsification -- a one-line shift in a scoped file must fail
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -uo pipefail
+          if ! f="$(python3 .github/scripts/check_mutants_pins.py falsify-target)"; then
+            echo "::error::falsify-target failed; see above."
+            exit 1
+          fi
+          if [ -z "$f" ]; then
+            echo "::notice::no scoped file holds a cited survivor or timeout line, so a" \
+                 "one-line shift cannot move a pin; falsification skipped."
+            exit 0
+          fi
+          echo "shifting $f by one line"
+          cp "$f" "$RUNNER_TEMP/falsify.orig"
+          { echo; cat "$RUNNER_TEMP/falsify.orig"; } > "$f"
+          cargo mutants --list --colors never > "$RUNNER_TEMP/shifted.txt"
+          rc=0
+          python3 .github/scripts/check_mutants_pins.py check --listing "$RUNNER_TEMP/shifted.txt" > "$RUNNER_TEMP/shifted.out" || rc=$?
+          cp "$RUNNER_TEMP/falsify.orig" "$f"
+          if [ "$rc" -ne 10 ]; then
+            cat "$RUNNER_TEMP/shifted.out"
+            echo "::error::a one-line shift in $f did not fail the pin check (exit $rc, expected 10)."
+            exit 1
+          fi
+          echo "falsification OK: the shifted tree was rejected as drift"

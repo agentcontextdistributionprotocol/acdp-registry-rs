@@ -9,7 +9,7 @@
     {"context": "cargo-deny", "app_id": 15368},
     {"context": "lint", "app_id": 15368}
   ],
-  "advisory_pending": ["msrv", "rustdoc", "coverage", "docker (build + smoke)", "cargo-vet"],
+  "advisory_pending": ["msrv", "rustdoc", "coverage", "docker (build + smoke)", "cargo-vet", "mutants pins"],
   "enforce_admins": true,
   "pending_settings": true,
   "tag_ruleset": {
