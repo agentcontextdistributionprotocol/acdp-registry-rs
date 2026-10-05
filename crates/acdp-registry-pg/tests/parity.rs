@@ -148,6 +148,16 @@ async fn the_lifecycle_state_probe_sees_a_retraction() {
     parity::assert_lifecycle_state_probe_sees_retraction(&store, "pg").await;
 }
 
+/// RFC-ACDP-0013 §6: mirror of the SQLite call — a lifecycle retry differing
+/// only in `signature.value` is different content, a byte-identical retry
+/// replays. `store_contract.rs` only pins a difference in `reason`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_signature_only_lifecycle_retry_is_different_content() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    parity::assert_lifecycle_retry_requires_identical_signature(&store, "pg").await;
+}
+
 /// B7: pin that `contexts.version` is `bigint`.
 ///
 /// SQLite bound `version` `as i64` (lossless for a `u32`); Postgres bound it
