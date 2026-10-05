@@ -16920,6 +16920,65 @@ fn read_auth_method_ids_satisfy_the_pinned_schema() {
     }
 }
 
+/// Method ids registered in the pinned `registries/auth-methods.md`: the first
+/// backticked cell of each table row (`| \`id\` | ... |`).
+fn registered_read_auth_method_ids(auth_methods_md: &str) -> Vec<String> {
+    auth_methods_md
+        .lines()
+        .filter_map(|l| {
+            let cell = l.trim().strip_prefix('|')?.split('|').next()?.trim();
+            let id = cell.strip_prefix('`')?.strip_suffix('`')?;
+            Some(id.to_string())
+        })
+        .collect()
+}
+
+/// Spec 34f14ab (spec #72) registered `bearer_jwt` in the auth-methods
+/// registry and admitted registry-issued DID-bound JWTs in RFC-ACDP-0008 §6.2.
+/// Every id the binary advertises must therefore be a REGISTERED one at the
+/// pin, not merely schema-valid (the guard above): a bump that renames or
+/// drops the row turns this red instead of leaving the registry advertising an
+/// unregistered id.
+#[test]
+fn read_auth_method_ids_are_registered_at_the_pinned_spec() {
+    let Some(root) = spec_root() else {
+        eprintln!("ACDP_SPEC_DIR not set; skipping");
+        return;
+    };
+    let path = root.join("registries/auth-methods.md");
+    let md = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let registered = registered_read_auth_method_ids(&md);
+    // Anti-vacuity: the parser finds the rows that predate bearer_jwt, and does
+    // not pick up the prose that names `did_jwt` as deliberately unregistered.
+    for known in ["http_signatures", "mtls", "oauth"] {
+        assert!(
+            registered.iter().any(|r| r == known),
+            "parser did not find the long-registered `{known}` row in {}; found {registered:?}",
+            path.display()
+        );
+    }
+    assert!(
+        !registered.iter().any(|r| r == "did_jwt"),
+        "`did_jwt` parsed as registered: {registered:?}"
+    );
+
+    let main_rs_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    let main_rs = std::fs::read_to_string(&main_rs_path).expect("reading src/main.rs");
+    let consts = read_auth_method_consts(&main_rs);
+    assert!(
+        !consts.is_empty(),
+        "no READ_AUTH_METHOD_* consts in main.rs"
+    );
+    for (name, value) in &consts {
+        assert!(
+            registered.iter().any(|r| r == value),
+            "{name} = {value:?} is not registered in the pinned {}; registered: {registered:?}",
+            path.display()
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // #385: the documents the shipped binary SERVES, validated whole against the
 // pinned spec's JSON Schemas.

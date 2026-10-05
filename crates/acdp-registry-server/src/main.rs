@@ -1420,14 +1420,17 @@ fn acdp_version_claim(cfg: &RegistryConfig) -> &'static str {
 /// (`/auth/token`), presented as `Authorization: Bearer`.
 ///
 /// The pinned capabilities schema requires every item to match
-/// `^[a-z][a-z0-9_]*$` (2-64 chars). The id is not registered in the spec's
-/// `registries/auth-methods.md` (an open vocabulary). It is not `oauth`
-/// because the flow is not an RFC 6749 grant. Through 0.2.0 the value was the
-/// hyphenated form, which fails that pattern (#372).
+/// `^[a-z][a-z0-9_]*$` (2-64 chars). Since spec `34f14ab` the id is registered
+/// in the spec's `registries/auth-methods.md`, with its requirements in
+/// RFC-ACDP-0008 §6.2. It is not `oauth` because the flow is not an RFC 6749
+/// grant. Through 0.2.0 the value was the hyphenated form, which fails that
+/// pattern (#372).
 ///
 /// Every `READ_AUTH_METHOD_*` const here is checked against the pinned
-/// schema's item rules by `read_auth_method_ids_satisfy_the_pinned_schema`
-/// in `tests/conformance.rs`, which reads this file's source. The whole served
+/// schema's item rules by `read_auth_method_ids_satisfy_the_pinned_schema`,
+/// and against the pinned registry's rows by
+/// `read_auth_method_ids_are_registered_at_the_pinned_spec`, both in
+/// `tests/conformance.rs`, which read this file's source. The whole served
 /// `/.well-known/acdp.json` (auth on and off) is validated against the full
 /// pinned schema by `served_capabilities_documents_satisfy_the_pinned_schema`
 /// in the same file, which spawns this binary (#385).

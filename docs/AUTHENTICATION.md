@@ -154,6 +154,24 @@ On every bearer-authenticated request the registry checks the signature, `exp`
 `acdp.registry` binding, and the revocation store. A revoked or expired `jti` is
 rejected with `403 not_authorized`.
 
+### Spec conformance (`bearer_jwt`)
+
+This flow is the `bearer_jwt` read-authentication method, registered in the spec's
+[`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/registries/auth-methods.md)
+with its requirements in
+[RFC-ACDP-0008 §6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0008-security.md#62-read-authentication).
+Where this registry meets each one:
+
+| Requirement (RFC-ACDP-0008 §6.2) | Here |
+|---|---|
+| Registry signs the token with its own key | `auth.jwt_signing_alg` key; public half at `/.well-known/jwks.json` |
+| `sub` is the requester's DID, verified before minting | [Token issuance checks](#token-issuance-checks-authtoken) |
+| `exp` present, short lifetime | `auth.token_ttl_seconds` (default 3600 s); `exp`, `iss` and `aud` are required claims |
+| `aud` identifies the issuing registry; other audiences rejected | [Validation](#validation) |
+| Listed in `read_authentication_methods` | `["bearer_jwt"]` whenever `auth.enabled = true` ([HTTP-API.md](HTTP-API.md#get-well-knownacdpjson)) |
+| Reads only; never replaces a producer signature | Publish and lifecycle writes verify the producer's signature over the body or event whether or not a bearer is presented; a bearer never stands in for it |
+| Sent over TLS only | A deployment duty: terminate TLS upstream or set `[registry.tls]` ([CONFIGURATION.md](CONFIGURATION.md#registrytls)). The registry cannot see an upstream TLS hop, so it does not refuse plain-HTTP bearers. |
+
 ## Presenting a bearer
 
 **Three** bearer parsers coexist and no two of them agree. Each is deliberate,
