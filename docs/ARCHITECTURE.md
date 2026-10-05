@@ -185,12 +185,15 @@ The four-way charge split is pinned by
 
 The producer lifecycle routes (`/retract`, `/republish`) share that per-agent
 bucket, keyed by the event `actor`, and follow the same rule: a read-only peek
-before verification, a `PublishCharge` armed once the signer is proven. The SDK
-has no prove/commit split for lifecycle events (`retract_verified` and
-`republish_verified` bundle verify and commit), so `lifecycle_transition` proves
-the actor itself first with the SDK's public `verify_lifecycle_event*`, using the
-same resolver instance, then makes the bundled call unchanged; the bundled call
-alone decides the response.
+before verification, a `PublishCharge` armed once the signer is proven. They
+use the SDK's lifecycle prove/commit split (`acdp` 0.14.4): after the tenant
+gate and the bearer check, `prove_lifecycle_identity*` runs RFC-ACDP-0013 §6
+steps 1–3 (visibility, event validation and endpoint binding, actor ==
+producer) and the signature verification, persisting nothing; the charge arms;
+then `commit_lifecycle_proven` runs the store's locked strict-alternation check
+and append. The signature is verified once, and only a proven producer is
+charged; an event refused before its signature is checked (unknown or
+invisible context, actor ≠ producer, wrong `event_type`) costs nobody.
 
 DID verification reuses `acdp`'s `WebResolver` (LRU-cached, SSRF-policy-gated —
 see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md#ssrfpolicy)) for **both** publish and
