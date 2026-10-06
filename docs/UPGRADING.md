@@ -21,6 +21,11 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.4.2
+
+No operator-visible upgrade steps. Since 0.4.1 the only changes are the `acdp` dependency moving from 0.14.4 to 0.14.5
+(a patch bump; no registry config, wire or storage change) and repository docs. A 0.4.1 deployment can take 0.4.2 in place.
+
 ## 0.4.1
 
 No operator-visible upgrade steps. Since 0.4.0 the registry gained no runtime, config or wire change:
