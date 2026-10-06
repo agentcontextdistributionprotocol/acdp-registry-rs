@@ -1,5 +1,12 @@
 
 
+## [0.4.2](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.4.1...acdp-registry-store/v0.4.2) - 2026-10-06
+
+### Other
+
+- update Cargo.toml dependencies
+
+
 ## [0.4.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.4.0...acdp-registry-store/v0.4.1) - 2026-10-06
 
 No changes. This crate is released at 0.4.1 because the workspace shares a
