@@ -269,6 +269,11 @@ each block and runs `shellcheck` over it. Two consequences worth knowing:
   deliberate: an extractor that matches nothing reports success identically to one that
   finds nothing wrong.
 
+## When a change is warranted
+
+See [STATUS.md](STATUS.md): the repository is considered done while `main` is green and no issue is open, and it lists the four
+things that reopen it. Deferred assumptions live in [DEFERRED.md](DEFERRED.md); they do not become issues on their own.
+
 ## Maintainers
 
 Required vs advisory checks, branch and tag protection (and how to apply it),
