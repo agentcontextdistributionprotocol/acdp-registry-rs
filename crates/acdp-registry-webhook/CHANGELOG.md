@@ -1,5 +1,6 @@
 
 
+
 ## [0.4.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-webhook/v0.3.0...acdp-registry-webhook/v0.4.0) - 2026-10-05
 
 No changes. This crate is released at 0.4.0 because the workspace shares a
