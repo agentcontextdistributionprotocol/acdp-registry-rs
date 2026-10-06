@@ -1,5 +1,12 @@
 
 
+## [0.4.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.4.0...acdp-registry-server/v0.4.1) - 2026-10-06
+
+### Other
+
+- *(spec)* adopt ACDP spec @ 34f14ab (bearer_jwt registered) ([#415](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/415))
+
+
 ## [0.4.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.3.0...acdp-registry-server/v0.4.0) - 2026-10-05
 
 ### Added
