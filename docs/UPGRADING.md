@@ -21,6 +21,13 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.4.1
+
+No operator-visible upgrade steps. Since 0.4.0 the registry gained no runtime, config or wire change:
+the spec pin moved to 34f14ab (`bearer_jwt` is now registered upstream; the registry already advertised
+it), a CI guard now checks every advertised read-auth id against the pinned registry, and supply-chain
+and docs work landed. A 0.4.0 deployment can take 0.4.1 in place.
+
 ## 0.4.0
 
 **One breaking default and one new startup refusal. Lax and auth-off registries that let clients
