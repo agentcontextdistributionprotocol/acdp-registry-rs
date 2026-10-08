@@ -31,6 +31,18 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+### Docs refresh 2 (2026-10-08) — pins, process truth, link-first
+
+The first refresh (October 3) fixed what the code contradicted; five days and 43 commits later the same pages had drifted again,
+mostly in places no guard can see. Findings: 18 acdp-rs references pinned to a commit older than the tag the code depends on
+(`sibling_repo_links_are_pinned` accepts any 40-hex sha, so a valid but stale pin passes); three required CI checks still described
+as advisory; the branch-protection snapshot predating its own application; a handful of statements about tenancy, revocation feeds
+and the crate graph that the code contradicts. Decisions: the acdp-rs guides are pinned to the 2026-10-08 refresh commit
+(`424253b`), not the 0.14.5 tag; the spec pin stays (the newer spec commit is non-normative); publish's `200` with no `Location`
+against RFC-ACDP-0003 §4 is disclosed, not changed (U-526 stays the owner's call); no stale-pin guard was built (STATUS.md: no new
+guards without a trigger), MAINTAINING.md tells the maintainer to check the pin after an `acdp` bump instead. Rejected: bumping
+`.spec-pin` to read the spec's refreshed `docs/version-matrix.md`.
+
 ### FEAT-06 item 3 — a shared `/auth/*` limiter, built ahead of need (#344)
 
 `[rate_limit]` could only count per process. With more than one replica the per-IP budget and the
