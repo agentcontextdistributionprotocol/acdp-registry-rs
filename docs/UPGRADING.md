@@ -74,6 +74,10 @@ canonicalisation).
 
 Smaller changes, no action needed:
 
+- **Spec pin 9deb7e7 → 6d5cdb8 (#399).** Adds the strict-Ed25519 fixture `sig-004` and the RFC-ACDP-0013 §6
+  clarification that a byte-identical lifecycle retry includes `signature.value`: a retry whose signature
+  differs (for example the high-S twin of an ECDSA-P256 signature, which verifies) is refused with
+  `400 schema_violation`, not answered as an idempotent `200`. No config or storage change.
 - `GET /admin/status` gains a `tenancy` group: `require_tenant`, the effective
   `tenant_header_trust`, whether that key was set, and the number of `trusted_proxies` entries.
   Strict JSON consumers that reject unknown keys should allow it.
@@ -226,6 +230,10 @@ strip or overwrite any client-supplied value. See [MULTI-TENANCY.md](MULTI-TENAN
   uncorroborated is refused with 403, not ignored, in every mode including auth-off.
 - **Rollback:** 0.2.0 refuses unknown `[auth]` keys. Remove `tenant_header_trust` from the config
   file and `ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST` from the environment before rolling back.
+
+**`acdp` SDK 0.14.3 → 0.14.4 (#392).** No registry config or wire-code change. 0.14.4 verifies Ed25519
+signatures strictly (small-order public keys and nonce points are refused) on every path that verifies
+one: publish, lifecycle events and the auth challenge. No honest key is small-order. See [0.4.0](#040).
 
 ---
 
