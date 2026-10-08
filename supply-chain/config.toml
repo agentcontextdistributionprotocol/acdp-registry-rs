@@ -41,51 +41,51 @@ audit-as-crates-io = false
 audit-as-crates-io = false
 
 [[exemptions.acdp]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-client]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-crypto]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-did]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-jcs]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-primitives]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-producer]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-safe-http]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-server]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-types]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-validation]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-verify]]
-version = "0.14.4"
+version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.ahash]]
@@ -208,10 +208,6 @@ criteria = "safe-to-deploy"
 version = "0.1.58"
 criteria = "safe-to-deploy"
 
-[[exemptions.concurrent-queue]]
-version = "2.5.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.config]]
 version = "0.15.27"
 criteria = "safe-to-deploy"
@@ -289,7 +285,7 @@ version = "0.8.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.event-listener]]
-version = "5.4.1"
+version = "5.4.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.evmap]]
@@ -378,18 +374,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.generic-array]]
 version = "0.14.9"
-criteria = "safe-to-deploy"
-
-[[exemptions.getrandom]]
-version = "0.2.17"
-criteria = "safe-to-deploy"
-
-[[exemptions.getrandom]]
-version = "0.3.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.getrandom]]
-version = "0.4.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.group]]
@@ -828,10 +812,6 @@ criteria = "safe-to-run"
 version = "1.1.4"
 criteria = "safe-to-run"
 
-[[exemptions.rustls-webpki]]
-version = "0.103.15"
-criteria = "safe-to-deploy"
-
 [[exemptions.rustversion]]
 version = "1.0.22"
 criteria = "safe-to-deploy"
@@ -1058,10 +1038,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tracing-attributes]]
 version = "0.1.31"
-criteria = "safe-to-deploy"
-
-[[exemptions.tracing-core]]
-version = "0.1.36"
 criteria = "safe-to-deploy"
 
 [[exemptions.tracing-serde]]
