@@ -431,6 +431,15 @@ pinned key nothing is verified, so only a successful publish is charged.
 Because peek and charge are separated by the verify, concurrent publishes by
 one agent can overshoot the limit by the number in flight.
 
+**Deviation from the RFC.** A first successful publish answers `200` and this
+registry sets no `Location` header, whereas
+[RFC-ACDP-0003 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0003-publish.md#4-publish-response) requires `201 Created` with a
+percent-encoded `Location` (a replay is `200`,
+[§6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0003-publish.md#62-registry-behavior)). Changing it breaks clients that rely on the
+current shape, so it is an open owner decision (U-526, described in
+`crates/acdp-registry-server/tests/conformance.rs`); conformance fixture `pub-007`
+is the one left deliberately unexercised for this reason.
+
 did:key producers (ACDP 0.2.0) are verified **offline** — no DID-document
 fetch — when `"did:key"` is in `supported_did_methods`; otherwise the publish
 is rejected with `key_resolution_failed` (400, permanent).

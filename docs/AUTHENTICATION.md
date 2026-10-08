@@ -418,10 +418,14 @@ tokens). State lives in the revocation store
 Recording the `jti` at *issuance* (not at revoke time) is what lets the registry
 reject a revoked token that was never seen again — there's always a row to flip.
 
+A registry built without a revocation store answers `501 not_implemented` on this
+route. The shipped binary always wires one, so only a library embedder can see it.
+
 ## Cross-issuer revocation federation
 
 Revocation federation is **consume-only**. This registry does not expose a
-`/auth/revocations` feed; it *polls* peers' feeds and applies their revocations
+`/auth/revocations` feed (deliberately deferred until a control plane is deployed
+against it; see [STATUS.md](../STATUS.md#deferred-on-purpose)); it *polls* peers' feeds and applies their revocations
 locally. Configure peers with `[[auth.revocation_feeds]]`:
 
 ```toml

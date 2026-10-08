@@ -66,8 +66,7 @@ choice, this registry's docs state what it actually does: for example, it
 enforces its own per-agent publish budget rather than plugging a limiter into
 `RegistryServer` (see [ARCHITECTURE.md](ARCHITECTURE.md#publish-pipeline)),
 and it can advertise the seven profiles listed in
-[advertisable-profiles.json](advertisable-profiles.json), not only the three
-that guide names.
+[advertisable-profiles.json](advertisable-profiles.json).
 
 ### Link convention
 
