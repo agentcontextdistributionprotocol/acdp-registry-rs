@@ -107,7 +107,7 @@ with the `jsonschema` dev-dependency (#385), so the spec checkout must include
 CI also measures coverage with `cargo llvm-cov`: one number merged across the
 workspace, playground, Postgres-integration and memory-backend legs, with a floor
 of 88% lines (summary on the run page, lcov artifact attached). The `coverage`
-check is advisory, so the floor is a signal rather than a merge gate. The Docker
+check is required, so the floor blocks a merge. The Docker
 check builds the `storage-pg` image, boots it against Postgres, and then boots
 the documented compose quickstart through `docker/assert-quickstart-boots.sh`.
 
@@ -123,8 +123,9 @@ A few gates fire on things that do not look like your change:
   file cited by line number in an operator doc).
 - The mutation oracle (`.github/workflows/mutants.yml`) runs on a Monday cron
   and on manual dispatch, never on PRs. It gates on the exact mutant count and
-  the exact survivor set, so an edit to a scoped file can turn the next Monday
-  run red; re-measure with `cargo mutants --list`. See
+  the exact survivor set. The required `mutants pins` check (`mutants-pins.yml`)
+  runs on every PR and fails it when an edit to a scoped file moves the pinned
+  scope, per-file split or survivor lines; re-measure with `cargo mutants --list`. See
   [docs/MAINTAINING.md](docs/MAINTAINING.md#mutation-oracle).
 
 ### Declaring coverage for a new fixture family
@@ -182,7 +183,7 @@ Reference docs live in [`docs/`](docs/README.md) (HTTP API, authentication,
 configuration, multi-tenancy, webhooks, operations). When a change alters the
 HTTP surface, config, auth, or operational behavior, update the relevant page in
 the same PR. Document protocol-level concepts by linking to the
-[`acdp` library docs](https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/8a888edaa15c4475bbaeccff45567921e3153730/docs)
+[`acdp` library docs](https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs)
 rather than restating them.
 
 ## Migrations

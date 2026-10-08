@@ -197,7 +197,7 @@ configured feed count. Full behavior:
 With `registry.cross_registry_resolution = true`, a `GET /contexts/{ctx_id}` for
 a foreign authority is resolved against that registry **anonymously** (no
 caller-credential forwarding), so only remote `public` contexts are surfaced.
-The `acdp` `SsrfPolicy` (see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md#ssrfpolicy)) rejects
+The `acdp` `SsrfPolicy` (see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/security.md#ssrfpolicy)) rejects
 private/internal authorities with `502 cross_registry_resolution_failed`. Set
 the key to `false` to return `404` for foreign ids instead.
 

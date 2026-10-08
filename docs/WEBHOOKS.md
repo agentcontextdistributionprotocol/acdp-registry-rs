@@ -268,7 +268,7 @@ Queue depth is exposed operationally at `GET /admin/status`
 `webhook.url` is validated at startup against the same `SsrfPolicy` as DID and
 cross-registry resolution: HTTPS only, no private/internal authorities, no
 redirects to such (the policy is documented in
-[acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md#ssrfpolicy)).
+[acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/security.md#ssrfpolicy)).
 A webhook config that fails validation aborts startup rather than silently
 disabling delivery.
 

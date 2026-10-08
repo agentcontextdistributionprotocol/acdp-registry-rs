@@ -23,11 +23,11 @@ The committed baseline for `main`'s protection is
 - `strict` — a PR branch must be up to date with `main` before it merges.
 - `advisory_pending` — checks that run on every PR but do not block. A red advisory
   check leaves the merge button green, which is why some gates are run twice (see the
-  upgrade-notes gate under [Release flow](#release-flow)). Most of these are waiting to be
-  promoted by the [runbook](#runbook-enforce_admins-the-tag-ruleset-and-promoting-advisory-checks).
-  `cargo-vet` is the exception: it stays advisory until a maintainer deliberately promotes
-  it in a PR of its own, and the runbook excludes it (see
-  [Supply-chain audits](#supply-chain-audits-cargo-vet)).
+  upgrade-notes gate under [Release flow](#release-flow)). Today the only one is `cargo-vet`: it stays advisory until a
+  maintainer deliberately promotes it in a PR of its own, and the
+  [runbook](#runbook-enforce_admins-the-tag-ruleset-and-promoting-advisory-checks) excludes
+  it (see [Supply-chain audits](#supply-chain-audits-cargo-vet)). `msrv`, `rustdoc`,
+  `coverage`, `docker (build + smoke)` and `mutants pins` were promoted on 2026-10-05.
 - `enforce_admins`, `tag_ruleset`, `pending_settings` — the settings a maintainer
   applies by hand; see [Current protection settings](#current-protection-settings).
 
@@ -100,7 +100,8 @@ own `--self-test` runs in `lint` on every PR.
 
 ## Current protection settings
 
-Read with the GETs below when this page was written (October 2026). **Re-read them
+Read with the GETs below on 2026-10-04, *before* the settings were applied (see
+**Applied 2026-10-05** below for the current state). **Re-read them
 before acting on this section** — it is a snapshot, the GETs are the truth.
 
 ```sh
@@ -110,7 +111,7 @@ gh api $R/branches/main/protection \
 gh api "$R/rulesets?includes_parents=false"
 ```
 
-At that time:
+At that time (before 2026-10-05):
 
 - the live required checks matched `required` in the baseline exactly, every one pinned
   to 15368, with `strict` on — the daily drift runs were green;
@@ -129,9 +130,9 @@ rollback or in a fork.
 ## Runbook: enforce_admins, the tag ruleset, and promoting advisory checks
 
 Nothing automated applies these settings; a maintainer runs the commands below with an
-admin `gh` login. The read-only commands were run when this page was written; the
-mutating ones (every `--method POST`, `PATCH`, `PUT` or `DELETE`) have not yet been run
-against this repository.
+admin `gh` login. The mutating commands (every `--method POST`, `PATCH`, `PUT` or `DELETE`) were run
+against this repository on 2026-10-05 (see [Current protection settings](#current-protection-settings));
+they stay here for re-applying after a rollback or in a fork.
 
 **Order matters: settings first, then the baseline PR.** Prepare a PR that moves the
 `advisory_pending` names **except `cargo-vet`** into `required` (each with
@@ -301,15 +302,16 @@ ruleset.
    and pushes it to GHCR with the semver tags (full version and major.minor). Pushes to
    `main` publish `main`, `latest` and `sha-` tags; PRs build and smoke-test but never
    push.
+4. [STATUS.md](../STATUS.md) names the stable *minor* line ("0.4.x"); touch it only when
+   a release changes the minor, so it does not drift on every patch.
 
 Gates a release PR must pass:
 
 - **Upgrade notes.** `docker/assert-upgrade-notes.sh --check` requires a section in
   [UPGRADING.md](UPGRADING.md) for the version being built, even if it says nothing
   changed. It runs in two places: inside the `rustfmt` job, which is required and
-  therefore **blocks**, and in `docker.yml`, which **reports only** while
-  `docker (build + smoke)` is advisory (that copy also covers the tag push, which
-  `ci.yml` never sees).
+  therefore **blocks**, and in `docker.yml`, inside `docker (build + smoke)`, which is also required
+  and therefore **blocks** (that copy also covers the tag push, which `ci.yml` never sees).
 - **Railway image tags.** `conformance_gate` requires `docker/RAILWAY.md` to name the
   major.minor of the newest `## X.Y.Z` section of `docs/UPGRADING.md` (or the workspace
   version, if newer). For a breaking release, merge the UPGRADING section and the
@@ -318,20 +320,20 @@ Gates a release PR must pass:
 
 ## CI behaviour worth knowing
 
-- **Coverage** (`coverage` job, advisory). One `cargo llvm-cov` number merged across
+- **Coverage** (`coverage` job, required). One `cargo llvm-cov` number merged across
   four legs — the workspace, the server with `playground`, the server's Postgres
   integration suite, and the server on the memory backend — with
   `--fail-under-lines 88`. The floor is `floor(min) - 1` over at least three CI runs of
   the merged job; re-derive it the same way, recording the runs in the commit, whenever
-  the code or the set of legs changes materially. Because the job is advisory, the floor
-  is a signal, not a merge gate.
+  the code or the set of legs changes materially. The job is required, so the floor
+  blocks a merge.
 - **`ACDP_REQUIRE_PG`.** Postgres-backed tests skip (printing a line) when
   `ACDP_REGISTRY_TEST_PG_URL` is unset. With `ACDP_REQUIRE_PG` set a missing URL is a hard
   failure instead (most tests treat any value as set; the auth crate's `pg_revocation`
   test only fails on exactly `1`, and otherwise skips without printing). CI sets it in
   the `tests` and `coverage` jobs, but the required `tests` job does not pass the
   Postgres URL to the workspace run, so the auth Postgres test runs only in the
-  advisory `coverage` job.
+  required `coverage` job.
 - **Docker smoke.** `docker (build + smoke)` builds the image, boots it against
   Postgres and checks health, then boots the documented compose quickstart through
   `docker/assert-quickstart-boots.sh` (as shipped, and again with auth enabled), and runs
@@ -549,17 +551,15 @@ changed, the remaining steps are skipped and the job is green in seconds. It fai
 toward running: a push to `main`, a diff that cannot be computed, a relevance step that
 crashes, or any relevance answer other than an explicit `false` runs the check.
 
-**Advisory, not required — and why it can be promoted.** It is listed under
-`advisory_pending` in `.github/required-checks.json`. A trigger-level `paths:` filter or a
+**Required (promoted 2026-10-05) — and why that is safe.** It is listed under
+`required` in `.github/required-checks.json`. A trigger-level `paths:` filter or a
 job-level `if:` would make the check never report on unrelated PRs, which
 `required_checks_guard.py` rejects for both `required` and `advisory_pending` (a required
 context that never reports blocks every PR forever). Gating at step level keeps the context
-reporting on every PR, so the guard resolves it and it is *safe* to require. It stays
-advisory for now because requiring it changes live branch protection (a maintainer
-action, compared daily by the drift check), and because a red result is never wrong to
-merge past in an emergency: the cost of ignoring it is one red Monday run, not a broken
-`main`. The "promote the advisory checks" step of the runbook above promotes it together
-with the others.
+reporting on every PR, so the guard resolves it and it is safe to require. It was
+promoted together with the other advisory checks by the runbook above; a red result now
+blocks the merge, because a stale pin otherwise costs one red Monday run of the
+mutation oracle.
 
 **Status:** pinned at scope 354 from run 37248684286 (a `workflow_dispatch` on main
 09615e9, 101.2 min of the 180-minute cap). #401 removed the lifecycle charge pre-flight and
@@ -569,6 +569,23 @@ from run 37222567772 after #373-#376 added twelve; the 2026-09-28 run 3641758109
 after #341 shrank the scope from 351 to 346, and #371 re-pinned it the same way.) Edits to the four scoped files after a re-pin
 must be line-neutral until the next one (`mutants pins` checks this on the PR). Check
 `gh run list --workflow mutants.yml --limit 3` for the current state.
+
+## Dependency and `acdp` bumps
+
+Bot PRs are batched and merged on green, not hand-superseded (see
+[STATUS.md](../STATUS.md)). [`bump-acdp.yml`](../.github/workflows/bump-acdp.yml) opens
+the PR when the `acdp-rs` repository dispatches `acdp-released` (or on demand with a
+version); [`auto-merge.yml`](../.github/workflows/auto-merge.yml) merges Dependabot
+patch and minor PRs once the required checks pass; the `acdp` bump PR arms auto-merge
+itself unless the bump is breaking, which waits for a human. Both delegate to reusable workflows in `acdp-ci`, which owns
+their behaviour. After an `acdp` bump, also check the acdp-rs guide links: the
+`sibling_repo_links_are_pinned` guard accepts *any* tag or full SHA, so a valid but
+stale pin passes CI. Re-point them (and the `docs.rs` versions) by hand in a docs PR, per
+the [Link convention](README.md#link-convention). A `cargo vet` import refresh and the
+crypto-critical exemption guard are covered under
+[Supply-chain audits](#supply-chain-audits-cargo-vet). What this repository treats as
+done, and what is deliberately deferred, is in [STATUS.md](../STATUS.md) and
+[DEFERRED.md](../DEFERRED.md).
 
 ## Spec bumps
 

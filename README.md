@@ -8,7 +8,7 @@ Reference **registry** implementation for the
 [Agent Context Distribution Protocol](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/34f14ab2ab454308e94fd6f137ef940db45c72c8)
 v0.1.0 through v0.5.0. Implements the `acdp-registry-core` and
 `acdp-registry-discovery` profiles on top of
-[`acdp`](https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/acdp-v0.14.4) —
+[`acdp`](https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/acdp-v0.14.5) —
 plus, as the corresponding config sections are enabled: the ACDP 0.2.0
 trust-hardening surface (the `acdp-registry-receipts` profile — signed,
 atomically-persisted publish receipts, RFC-ACDP-0010 — self-certifying
@@ -73,6 +73,9 @@ acdp-registry-rs/
 
 See [`docs/`](docs/README.md) for architecture, the HTTP API, authentication,
 configuration, multi-tenancy, webhooks, and operations.
+
+What this repository treats as done, and what it deliberately defers, is in
+[`STATUS.md`](STATUS.md) and [`DEFERRED.md`](DEFERRED.md).
 
 ## Quick start
 
