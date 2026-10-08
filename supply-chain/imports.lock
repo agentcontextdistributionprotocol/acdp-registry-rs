@@ -224,7 +224,7 @@ delta = "4.1.3 -> 5.0.0"
 notes = """
 Scope: delta 4.1.3 -> 5.0.0 (73 files, +5045/-2187 per scripts/vet-facts.sh; 7232 changed / 34619 src lines = 0.21, so delta per the #322 method rule; ~1100 lines are mod.rs -> foo.rs moves, each pair diffed). Base 4.1.3 spot-check: its "unsafe confined to gated SIMD backends" wording was imprecise (3 non-SIMD sites: serial u32/u64 scalar.rs read_volatile black_box, constants.rs Ristretto table cast); all re-read and sound, and every 5.0.0 unsafe site was verdicted independently, so no unsafe reasoning is inherited from the base.
 Source: crates.io tarball sha256 b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23 == Cargo.lock checksum.
-unsafe: 33 code lines (was 35); reviewed each. packed_simd.rs (15), avx2/field.rs (8), ifma/field.rs (9, one test-only): register-to-register core::arch::x86_64 intrinsics only (no load/store/pointer intrinsics anywhere under backend/vector), plus two const transmutes [u64;4]/[u32;8] -> __m256i (same size, all bit patterns valid). They sit in #[unsafe_target_feature] safe wrappers (curve25519-dalek-derive); soundness rests on every entry into backend::vector being in src/backend.rs behind get_selected_backend() cpufeatures detection (avx512ifma+avx512vl, then avx2, else serial), with backend pub(crate). constants.rs:85 casts &EdwardsBasepointTable to the #[repr(transparent)] RistrettoBasepointTable ('static). The 4.1.3 serial read_volatile black_box (RUSTSEC-2024-0344 barrier) was removed in favour of subtle conditional_select (subtle 2.6.1 Choice::from keeps its read_volatile barrier).
+unsafe: 33 code lines carry an explicit unsafe token (was 35); reviewed each. That grep count undercounts the unsafe surface: the 69 #[unsafe_target_feature] attributes under backend/vector (packed_simd.rs 17, avx2/field.rs 8, avx2/edwards.rs 16, ifma/field.rs 13, ifma/edwards.rs 15; most sit on impl blocks, whose methods are each rewritten) and the 5 #[unsafe_target_feature_specialize] modules (scalar_mul/*.rs, emitted once per feature set) make curve25519-dalek-derive rewrite every safe fn or method they cover into a safe wrapper whose original body moves into a generated #[target_feature] unsafe fn (already-unsafe fns, e.g. ifma madd52lo/madd52hi, only gain #[target_feature]), so every such body is an unsafe context in which an unsafe operation needs no unsafe token (edition 2024's unsafe_op_in_unsafe_fn only warns, and --cap-lints silences it). The conclusion below does not rest on the token count: the token-independent grep for load|store|ptr|as *|get_unchecked|MaybeUninit under backend/vector is empty, and a 2026-10-05 brace-tracking re-scan (plus a read of the $..._intrinsic macro-parameter calls in packed_simd.rs) found every core::arch intrinsic call under backend/vector inside an explicit unsafe block or unsafe fn. The 33 lines are packed_simd.rs (15), avx2/field.rs (8), ifma/field.rs (9, one test-only): register-to-register core::arch::x86_64 intrinsics only (no load/store/pointer intrinsics anywhere under backend/vector), plus two const transmutes [u64;4]/[u32;8] -> __m256i (same size, all bit patterns valid). They sit in #[unsafe_target_feature] safe wrappers (curve25519-dalek-derive); soundness rests on every entry into backend::vector being in src/backend.rs behind get_selected_backend() cpufeatures detection (avx512ifma+avx512vl, then avx2, else serial), with backend pub(crate). constants.rs:85 casts &EdwardsBasepointTable to the #[repr(transparent)] RistrettoBasepointTable ('static). The 4.1.3 serial read_volatile black_box (RUSTSEC-2024-0344 barrier) was removed in favour of subtle conditional_select (subtle 2.6.1 Choice::from keeps its read_volatile barrier).
 asm/SIMD: no asm!. build.rs selects bits from pointer width and backend: serial, or simd (AVX2) on x86_64 64-bit; IFMA (avx512) now stable on rustc >= 1.89 but only when the target statically enables avx512ifma+avx512vl (formerly cfg(nightly)), still runtime-dispatched. ACDP builds: x86_64 = AVX2 runtime dispatch + serial u64 fallback (no target-feature/target-cpu flags anywhere, so IFMA is not compiled); aarch64 = serial u64 (no NEON backend exists; build output confirmed); wasm32 binding = serial u32; fiat only under a forced cfg.
 Discretion: under --cfg docsrs, src/lib.rs:89-92 makes backend pub, exposing the safe avx2 target-feature wrappers (packed_simd u64x4/u32x8) to external safe code, which would be UB on a CPU without AVX2. docsrs also enables #![feature(doc_cfg)] (lib.rs:13), rejected on stable (E0554), so it is nightly- and docs-only and unreachable in any stable build of any ACDP artifact (Policy 6 carve-out); the same pattern was present in 4.1.3.
 build.rs / proc-macro: build.rs reads only CARGO_CFG_TARGET_{ARCH,POINTER_WIDTH,FEATURE} and CARGO_CFG_CURVE25519_DALEK_{BITS,BACKEND}, runs $RUSTC -vV via rustc_version (as in 4.1.3), and emits only rustc-cfg lines plus one warning; no fs/network. Not a proc-macro; depends on the curve25519-dalek-derive proc-macro (Tier B, still exempted) on x86_64.
@@ -395,6 +395,65 @@ New deps: rand_core 0.10, subtle 2.2.1 (both default-features = false); optional
 Advisories: cargo deny check advisories clean on 2026-10-04.
 Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
 Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/ff-0.14.0.md (https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/355, issue #339 batch B1)."""
+
+[[audits.acdp-rs.audits.getrandom]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.2.17"
+notes = """
+Scope: full audit of 0.2.17 (no prior audit of any getrandom version; 1739 src lines in 24 files, all read line by line, plus Cargo.toml, tests/ and benches/; no build.rs; read in two partitions by Claude (Opus) sub-reviews, with every unsafe site and unsafe fn body read and verdicted by the main review; empirical tests natively, under Miri (darwin, linux, windows), on Linux and on wasm32/Node). Edition 2018, so all 11 unsafe fn bodies were read whole. Compiled sets per ACDP artifact taken from rustc dep-info: linux-gnu linux_android_with_fallback.rs + use_file.rs (getrandom(2) syscall, /dev/urandom after polling /dev/random); apple-darwin getentropy.rs; windows-msvc windows.rs (BCryptGenRandom, RtlGenRandom fallback); wasm32 js.rs (feature js).
+Source: crates.io tarball sha256 ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0 == Cargo.lock checksum (root and py/node/wasm binding locks).
+unsafe: 56 code lines, all reasoned about (worksheet table): slice casts MaybeUninit<->u8 (src/util.rs, src/lib.rs:374, :406), where every backend writes only OS/JS/hardware output and returns Ok only after filling the whole buffer; libc FFI (syscall SYS_getrandom, read/open/poll/close, getentropy, strerror_r, dlsym on NetBSD) with pointer/length from a live slice; a static pthread mutex with a drop guard and unsafe impl Sync (src/use_file.rs:96-112); Windows FFI matching the documented signatures, chunked to u32::MAX; wasm-bindgen Uint8Array view_mut_raw over each Node chunk (at most 2^31-1 bytes) and raw_copy_to_ptr bounded by the 256-byte Web chunk (src/js.rs:42-63); register_custom_getrandom! (src/custom.rs:67-87) builds a slice over a buffer the caller zero-filled first; RDRAND via core::arch intrinsics after CPUID checks. A copy built with unsafe_op_in_unsafe_fn, missing_unsafe_on_extern and unsafe_attr_outside_unsafe denied across the backend/feature matrix: every hit maps to a worksheet row.
+asm/SIMD: none (rdrand.rs uses core::arch intrinsics).
+build.rs / proc-macro: none.
+Powerful imports: #![no_std]; no fs/net/process/env. Expected OS RNG access only: /dev/urandom and /dev/random, getrandom(2), getentropy, CCRandomGenerateBytes, BCryptGenRandom/RtlGenRandom, JS crypto.getRandomValues or Node crypto.randomFillSync.
+New deps: cfg-if 1, libc 0.2 (unix), wasi 0.11 (wasi), wasm-bindgen + js-sys (feature js, wasm32-unknown only). ACDP enables no features natively and js in bindings/acdp-wasm. Reached via ring 0.17.14 (SystemRandom -> getrandom::getrandom on an initialized buffer, src/rand.rs:165; errors become Unspecified). Lock-only in the py/node wheels; in acdp-wasm it is a direct, uncalled dependency (observation GR2-O1; removal tracked in issue #363).
+Discretion: src/espidf.rs:5-7 declares esp_fill_random as returning u32 where the ESP-IDF C prototype returns void, which is undefined behaviour under Rust's FFI rules (the value is discarded). It is selected only for target_os = "espidf", tier-3 targets that need -Z build-std, so it is unreachable in any stable-toolchain build of an ACDP artifact (Policy 6 carve-out, 322-sha2 precedent).
+Observations (worksheet): failures fail closed (sys_fill_exact returns Err on any partial or unexpected result); solid.rs -ret overflow on i32::MIN (tier 3); use_file poll does not check revents.
+Advisories: cargo deny check advisories clean on 2026-10-05.
+Not claimed: RNG output quality or entropy, correctness of each OS RNG, soundness of the wasm-bindgen glue or user custom functions beyond their contract, cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/362 (supply-chain/worksheets/getrandom-0.2.17.md, issue #339 Tier B batch B7a)."""
+
+[[audits.acdp-rs.audits.getrandom]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.3.4"
+notes = """
+Scope: full audit of 0.3.4 (no prior audit of any getrandom version; 2445 src lines in 31 files, all read line by line, plus build.rs, tests/, benches/ and Cargo.toml; read in two partitions by Claude (Opus) sub-reviews, with every unsafe site, unsafe fn body and asm! block read and verdicted by the main review; empirical tests natively, under Miri (darwin, linux, windows) and on Linux including the forced file fallback). Edition 2021, so all 15 unsafe fn definitions (13 names) and netbsd's unsafe extern "C" fn were read whole. Certified at safe-to-deploy although the exemption was safe-to-run, because ACDP reaches 0.3.4 only as a dev-dependency (proptest -> rand 0.9 -> rand_core 0.9.5, feature std) and the review is a full one. Compiled sets from rustc dep-info: linux-gnu backends/linux_android_with_fallback.rs + use_file.rs; apple-darwin getentropy.rs; windows-msvc windows.rs (ProcessPrng).
+Source: crates.io tarball sha256 899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd == Cargo.lock checksum (root lock only; not in any binding lock).
+unsafe: 92 code lines, all reasoned about (worksheet table): the same MaybeUninit contract, libc FFI, dlsym/transmute, futex and per-OS FFI as 0.4.3, in edition-2021 form. A copy built with unsafe_op_in_unsafe_fn, missing_unsafe_on_extern and unsafe_attr_outside_unsafe denied across the backend matrix: every hit maps to a worksheet row.
+asm/SIMD: 9 asm! blocks in the opt-in linux_raw (7 syscall stubs) and rndr (2) backends, compiled in no ACDP build; arm, aarch64 LP64, riscv, s390x, x86, x86_64 and rndr are sound; loongarch64 and x32 see Discretion. RDRAND via core::arch intrinsics after CPUID checks.
+build.rs / proc-macro: build.rs (57 lines) emits cfg(getrandom_msan) from CARGO_CFG_SANITIZE and, on Windows targets only, spawns $RUSTC -vV (or $RUSTC_WRAPPER $RUSTC -vV) to emit getrandom_backend="windows_legacy" when rustc is older than 1.78. Judged cfg selection: fixed arguments, only the version line is read, no files or network. ACDP's MSRV (1.86) never takes that branch. No proc-macro.
+Powerful imports: #![no_std]; std::process only in build.rs; no fs/net/env in src. Expected OS RNG access only. Cargo.toml package.metadata.cross curl pre-build commands are read only by the cross tool.
+New deps: cfg-if 1, libc 0.2 (target-gated), wasip2 1 (wasm32-wasip2), wasm-bindgen 0.2.98 (wasm_js), js-sys (wasm atomics), r-efi 5 (uefi). ACDP features: std.
+Discretion: GR3-1. The same linux_raw loongarch64 bug as the getrandom 0.4.3 audit (GR4-1): the syscall asm! at src/backends/linux_raw.rs:50-60 declares no clobbers, although the Linux LoongArch syscall path clobbers $t0-$t8 (arch/loongarch/kernel/entry.S handle_syscall never runs SAVE_TEMP; glibc and musl clobber lists agree). This arm matches every loongarch64 ABI. Sampled release codegen keeps live values in a-registers only. Not attacker-controllable. Reachable only with the builder-set --cfg getrandom_backend="linux_raw" (src/backends.rs:18-21) on loongarch64-unknown-linux-{gnu,musl}, or by default for target_env="" (:50-53). 0.3.4 is a dev-only dependency of ACDP, so this is in no ACDP artifact (Policy 6 carve-out; DECISIONS.md 322-getrandom). Exit: delta-audit the release carrying the fix.
+Discretion: GR3-2. The same x32/ILP32 bug as the 0.4.3 audit (GR4-2). The x86_64 arm (src/backends/linux_raw.rs:95-111; x32 syscall bit at :97-99) and the aarch64 arm (:35-49) pass 32-bit buf/buflen in 64-bit registers, whose upper bits the asm! rules leave undefined. The kernel's common 64-bit sys_getrandom reads the full len, so it could write past the buffer before fill_inner's get_mut(len..) check (:131). Not attacker-controllable. Reachable only with the builder-set cfg on x86_64-unknown-linux-gnux32 (tier 2); aarch64 ILP32 is tier 3. Dev-only in ACDP, so in no ACDP artifact (DECISIONS.md 322-getrandom). Exit: delta-audit the release carrying the fix.
+Discretion: GR3-3. src/backends/esp_idf.rs:7-9 declares esp_fill_random as returning u32, but the ESP-IDF prototype returns void (FFI UB; the value is discarded). target_os = "espidf" only: tier 3, needs -Z build-std (Policy 6 carve-out).
+Observations (worksheet): a futex debug_assert can trip on EINTR in debug builds (src/backends/use_file.rs); Windows ProcessPrng's result is checked only by debug_assert! (src/backends/windows.rs:53-60), relying on Microsoft's documented always-TRUE contract on Windows 10+ (Windows 8 and Wine can fail; 0.4.3 checks it; ACDP uses 0.3.4 only in dev/test builds); dead __msan_unpoison declaration (src/lib.rs:102-105); wasi_p2 relies on std's runtime align_to returning a prefix and suffix shorter than 8.
+Advisories: cargo deny check advisories clean on 2026-10-05.
+Not claimed: soundness of the opt-in linux_raw backend on loongarch64 or on 32-bit-pointer x86_64/aarch64 ABIs (GR3-1/GR3-2), RNG output quality or entropy, correctness of each OS RNG, soundness of the wasm-bindgen glue, firmware, or user custom functions beyond their contract, cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/362 (supply-chain/worksheets/getrandom-0.3.4.md, issue #339 Tier B batch B7a); certification decision recorded in DECISIONS.md 322-getrandom."""
+
+[[audits.acdp-rs.audits.getrandom]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.4.3"
+notes = """
+Scope: full audit of 0.4.3 (no prior audit of any getrandom version; 2582 src lines in 35 files, all read line by line, plus build.rs, tests/, benches/, Cargo.toml and the README custom-backend contract; read in two partitions by Claude (Opus) sub-reviews, with every unsafe site, unsafe fn body and asm! block read and verdicted by the main review, and the linux_raw decision escalated to a Claude (Fable) decision review; empirical tests ran natively, under Miri (darwin, linux, windows), on Linux including the forced file fallback, and on wasm32/Node). Compiled sets per ACDP artifact taken from rustc dep-info: linux-gnu backends/linux_android_with_fallback.rs + use_file.rs (libc getrandom via dlsym, /dev/urandom after polling /dev/random); apple-darwin getentropy.rs; windows-msvc windows.rs (ProcessPrng, result checked); wasm32 wasm_js.rs (feature wasm_js, Web Crypto getRandomValues). ACDP calls it via rand_core::UnwrapErr(getrandom::SysRng) for Ed25519/P-256 keys (crates/acdp-crypto/src/sign.rs), plus crypto-bigint, crypto-common and uuid.
+Source: crates.io tarball sha256 300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099 == Cargo.lock checksum (root and py/node/wasm binding locks).
+unsafe: 109 code lines, all reasoned about (worksheet table): MaybeUninit slice casts where every backend writes only OS/JS/hardware output and returns Ok only after filling the whole buffer (src/lib.rs:91, :130; except the nightly extern_impl, GR4-3); libc FFI (read/open/poll/close, futex, getrandom via dlsym with a zero-length probe, getentropy) with pointer/length from a live slice and over-long returns rejected by split_at_mut_checked; raw-dylib ProcessPrng; wasm-bindgen getRandomValues import with catch; per-OS FFI for the other targets. Edition 2024; a copy built with unsafe_op_in_unsafe_fn denied is clean for every buildable target/backend combination.
+asm/SIMD: 9 asm! blocks, all in opt-in backends compiled for no ACDP artifact: linux_raw syscall stubs (src/backends/linux_raw.rs; arm, aarch64, riscv, s390x, x86, x86_64 sound; loongarch64 and x32 see Discretion) and rndr (mrs RNDR/NZCV, mrs ID_AA64ISAR0_EL1; sound). RDRAND via core::arch intrinsics after CPUID checks (default only on SGX; sound).
+build.rs / proc-macro: build.rs (11 lines) only reads CARGO_CFG_SANITIZE and emits cfg(getrandom_msan); no proc-macro.
+Powerful imports: #![no_std]; no fs/net/process/env. Expected OS RNG access only. Cargo.toml package.metadata.cross pre-build curl commands are read only by the cross tool, never by Cargo.
+New deps: cfg-if 1, rand_core 0.10 (sys_rng), libc 0.2 (target-gated), wasm-bindgen 0.2.98 (wasm_js, OS-less wasm), js-sys (wasm atomics only), r-efi (uefi, nightly). ACDP features: sys_rng natively; sys_rng + wasm_js in bindings/acdp-wasm.
+Discretion: GR4-1. The opt-in linux_raw backend's loongarch64 syscall asm! (src/backends/linux_raw.rs:61-75) declares no clobbers, but the Linux LoongArch syscall path clobbers $t0-$t8: handle_syscall (arch/loongarch/kernel/entry.S:22-81) overwrites t0-t2 before saving, never runs SAVE_TEMP, and RESTORE_ALL_AND_RET reloads t0-t8 from pt_regs slots this path never filled (asm/stackframe.h:216-226, 269-274); glibc and musl both list $t0-$t8 as syscall clobbers. This is UB whenever the compiler keeps a live value in a t-register across the block; sampled release codegen keeps every live value in a-registers (no miscompile observed; not a guarantee). Not attacker-controllable: the inputs are the program's own buf/len/flags. Reachable only when the final binary's builder sets --cfg getrandom_backend="linux_raw" (src/backends.rs:17-19; no Cargo feature selects it, and a library's cfg does not propagate) on loongarch64-unknown-linux-{gnu,musl} (tier 2, stable). No ACDP-built or ACDP-tested artifact compiles this file. Certified under the Policy 6 builder-only-opt-in limb proposed in DECISIONS.md 322-getrandom (maintainer acknowledgement at PR review). Upstream report drafted in the worksheet (fix: declare out("$t0") _ through out("$t8") _). Exit: delta-audit the release carrying the fix.
+Discretion: GR4-2. In the same backend the x86_64 arm (src/backends/linux_raw.rs:116-136) also compiles for target_abi="x32", and the aarch64 arm (:42-60) for target_abi="ilp32". There buf and buflen are 32-bit values passed in 64-bit registers (rdi/rsi, x0/x1), and the asm! rules leave the upper bits undefined. On x32, sys_getrandom is a common 64-bit entry that reads the full 64-bit len with no cap, so garbage upper bits in rsi could make the kernel write past the buffer before fill_inner's length check (:155). Sampled x32 codegen passes the caller's incoming rdi/rsi to the first syscall without zero-extension. Not attacker-controllable. Reachable only with the builder-set --cfg getrandom_backend="linux_raw" on x86_64-unknown-linux-gnux32 (tier 2, stable, needs CONFIG_X86_X32_ABI); aarch64 ILP32 targets are tier 3. Never compiled into an ACDP-built or ACDP-tested artifact. Certified under the Policy 6 builder-only-opt-in limb proposed in DECISIONS.md 322-getrandom (maintainer acknowledgement at PR review). Upstream report drafted in the worksheet (fix: widen to u64 or gate on target_pointer_width = "64"). Exit: delta-audit the release carrying the fix.
+Discretion: GR4-3. The extern_impl backend (src/backends/extern_impl.rs:6-7) takes a user-written safe fn as fill_uninit's implementation, and src/lib.rs:130 assumes the buffer is initialized on Ok, so a safe implementation that returns Ok without writing lets safe code read uninitialized memory. The backend requires #![feature(extern_item_impls)] (src/lib.rs:13), so it is unreachable in any stable-toolchain build of an ACDP artifact (Policy 6 carve-out, 322-sha2 precedent).
+Discretion: GR4-4. src/backends/esp_idf.rs:7-9 declares esp_fill_random as returning u32, but the ESP-IDF prototype returns void (FFI UB; the value is discarded). Selected only for target_os = "espidf", tier-3 targets that need -Z build-std (Policy 6 carve-out).
+Observations (worksheet): failures fail closed, and UnwrapErr(SysRng) panics on any error; dead __msan_unpoison declaration (src/lib.rs:123-126); a futex debug_assert can trip on EINTR in debug builds (src/backends/use_file.rs:152-158); wasi_p2_3 (the wasm32-wasip2 default) relies on std's runtime align_to returning a prefix and suffix shorter than 8 (sound with the shipped std).
+Advisories: cargo deny check advisories clean on 2026-10-05.
+Not claimed: soundness of the opt-in linux_raw backend on loongarch64 or on 32-bit-pointer x86_64/aarch64 ABIs (GR4-1/GR4-2), RNG output quality or entropy, correctness of each OS RNG, soundness of the wasm-bindgen glue, firmware, or user custom/extern_impl functions beyond their contract, cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; worksheet in https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/362 (supply-chain/worksheets/getrandom-0.4.3.md, issue #339 Tier B batch B7a); certification decision recorded in DECISIONS.md 322-getrandom."""
 
 [[audits.acdp-rs.audits.group]]
 who = "Ajit Koti <ajitkoti@zer07labs.com>"
@@ -642,6 +701,25 @@ Advisories: cargo deny check advisories clean on 2026-10-04.
 Not claimed: cryptographic correctness, constant-time behaviour (including of its base64 decoder for secret PEM sections), side-channel resistance, or DNS-name/IP/PEM parsing correctness.
 Method: Reviewed with Claude (Opus) assistance; worksheet in supply-chain/worksheets/rustls-pki-types-1.15.1.md (issue #339 Tier B batch B5 PR)."""
 
+[[audits.acdp-rs.audits.rustls-webpki]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.103.15"
+notes = """
+Scope: full audit of 0.103.15 (no prior audit of rustls-webpki). src/ is 10040 lines in 19 .rs files plus three 11-byte .der blobs. Every line was read, including the cfg(test) modules and the not-compiled aws_lc_rs_algs.rs. The reading was split into six partitions, each done by a Claude (Opus) sub-review, and the main review cross-checked every count with its own full-source greps. Cargo.toml and .orig were read. The compiled set (17 files, 5880 non-test lines, no aws_lc_rs_algs.rs or alg_tests.rs) was taken from rustc dep-info.
+Role: the certificate path validator behind rustls 0.23.45's WebPkiServerVerifier for every ACDP HTTPS client (RegistryClient, WebResolver and the data_ref fetcher, via reqwest rustls-tls). This is a trust boundary: it decides whether every ACDP HTTPS peer is who it claims to be. CRL parsing and revocation checking are compiled but unreached. None of ACDP's five Client::builder sites configures CRLs (crates/acdp-did/src/web.rs:341, crates/acdp-client/src/registry.rs:791 and :829, crates/acdp-client/src/data_ref.rs:155, crates/acdp-safe-http/src/lib.rs:486), so rustls passes revocation = None (rustls-0.23.45/src/webpki/server_verifier.rs:244). The crl/ code was still read in full and has no panic reachable from CRL bytes. Locked but not compiled in the py and node bindings; absent from the wasm lock.
+Source: crates.io tarball sha256 f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2 == Cargo.lock checksum, identical in the root and py/node binding locks. .cargo_vcs_info.json is commit c14836d8de33c0ad0ac7dcb28fe9aade20831a4d, the upstream tag v/0.103.15. That tag's src/ equals the tarball's apart from the upstream-only cfg(test) src/test_utils.rs.
+unsafe: 0 (grep -rnw unsafe src prints nothing; the grep is the evidence). No asm!, extern blocks, statics with interior mutability, transmute or raw pointers.
+asm/SIMD: none. Signature math is in ring (UnparsedPublicKey::verify, src/ring_algs.rs:41-43).
+build.rs / proc-macro: none (build = false); not a proc-macro; no #[macro_export].
+Powerful imports: #![no_std]. extern crate std is under feature std (src/lib.rs:49-50), used only for impl std::error::Error (src/error.rs:384-385). No fs/net/process/env and no clock reads (time is passed in). std::net and std::time appear only in tests. The compiled include_bytes! are the three src/data/alg-rsa-pkcs1-sha{256,384,512}-absent-params.der blobs (src/ring_algs.rs:114, :135, :156). Each is exactly the bare OID 1.2.840.113549.1.1.11/12/13, the body of an AlgorithmIdentifier with absent parameters, decoded with openssl asn1parse. Every other include_bytes! is test-only and points at fixtures that are not shipped.
+New deps: rustls-pki-types 1.12 (audited, B5), untrusted 0.9 (audited, B3), ring 0.17 (on). aws-lc-rs is optional and off. ACDP features: alloc, ring, std.
+Panics/DoS: 25 panic-macro sites in non-test code (12 unwrap, 6 unreachable!, 5 assert!, 2 debug_assert!). Each is guarded by an earlier check, and none is reachable from a server-presented chain, CRL bytes or a caller-supplied name (worksheet table). Recursion is only build_chain_inner, capped at 7 frames (MAX_SUB_CA_COUNT = 6, src/verify_cert.rs:847). The RUSTSEC-2023-0053 Budget (src/verify_cert.rs:292-345: 100 signatures, 200000 build-chain calls, 250000 name-constraint comparisons) is fatal on exhaustion (src/error.rs:357-375). Empirical: the upstream suite at the tag with ACDP's features passed (398 tests, 0 failures, plus both BetterTLS suites); a 10M-iteration random/semi-structured DER loop over EndEntityCert::try_from, verify_for_usage (with and without CRLs), verify_is_valid_for_subject_name, CRL from_der and anchor_from_trusted_cert produced 0 panics.
+Observations (not vet concerns): W-O8: path building re-parses every peer-supplied intermediate with Cert::from_der on each budgeted call (src/verify_cert.rs:108) before the subject comparison, and that parsing is outside the Budget (:292-345; build_chain_calls = 200_000 is the RUSTSEC-2023-0053 fix and the same limit as mozilla::pkix). The work is therefore bounded by about 200,000 x the bytes of intermediates, and rustls caps the whole Certificate message at 64 KiB (rustls-0.23.45/src/msgs/deframer/handshake.rs:376). Measured in a release build on aarch64-apple-darwin, a filler-padded chain inside that cap costs about 0.5-1 s of CPU per handshake (worst 758 ms), and plain degenerate chains stop within 66 ms. This is bounded and deliberate upstream design, still present on upstream main and not tracked upstream as of 2026-10-05. A malicious HTTPS peer can make an ACDP client spend that much CPU per connection attempt. W-O1: the OID display decoder shifts by 8 instead of 7 (:731). It affects display only, since EKU matching is a byte comparison (:570), and it is fixed on upstream main. W-O2: keyUsage is not enforced on issuers in this version (:359-363). Upstream main adds keyCertSign enforcement; this is validation behaviour, not claimed. All five rustls-webpki advisories (RUSTSEC-2023-0053, 2026-0049, -0098, -0099, -0104) are fixed in this version; the worksheet names the code that carries each fix.
+Advisories: cargo deny check advisories clean on 2026-10-05.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance; certificate path-validation, name-constraint and revocation correctness (upstream's responsibility, as for rustls and webpki-roots). This audit claims only that the crate's code is safe to deploy under the vet criterion.
+Method: Reviewed with Claude (Opus) assistance; worksheet in https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/364 (supply-chain/worksheets/rustls-webpki-0.103.15.md, issue #339 Tier B batch B7b); certification decision recorded in DECISIONS.md 322-rustls-webpki."""
+
 [[audits.acdp-rs.audits.sec1]]
 who = "Ajit Koti <ajitkoti@zer07labs.com>"
 criteria = "safe-to-deploy"
@@ -676,7 +754,7 @@ Source: crates.io tarball sha256 446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9
 unsafe: 50 non-comment unsafe code lines (53 raw grep hits, of which 3 are asm-template comments at src/sha256/riscv_zknh/utils.rs:51 and src/sha512/riscv_zknh/utils.rs:51,101); reviewed each. Calls into #[target_feature] backends are guarded by compile_error! static target_feature checks (forced --cfg backends) or cpufeatures runtime detection (default path). x86 SHA-NI / AVX2 SHA-512, aarch64 SHA2/SHA3 NEON and wasm32 simd128 loads/stores stay inside state/block arrays and the K constant tables (unaligned loadu/v128_load; index arithmetic checked); cast_ms/cast_rs reinterpret [__m128i;N] as [u64;2N] (same size, compatible alignment, all bit patterns valid); soft rk() reads in-bounds constants.
 asm/SIMD: asm! in loongarch64_asm (empty-input early return, stack scratch restored, all clobbers declared) and riscv_zknh/utils.rs; intrinsics elsewhere. Default path: soft + cpufeatures dispatch (x86 CPUID+xgetbv; aarch64 getauxval / Apple sysctlbyname), fallback to soft when undetected.
 Discretion: opt-in riscv-zknh backend does ptr::add on a wrapping_sub-derived pointer that may precede the allocation (src/sha256/riscv_zknh/utils.rs:44,61; src/sha512/riscv_zknh/utils.rs:44,61,94,110). Reachable only with --cfg sha2_backend="riscv-zknh" or --cfg sha2_256_backend="riscv-zknh" (the only keys that select it, in both src/sha256.rs:5 and src/sha512.rs:5; sha2_512_backend has no riscv-zknh arm) on nightly (or stable with RUSTC_BOOTSTRAP=1, which is not a supported configuration) (#![feature(riscv_ext_intrinsics)], lib.rs:9-16) on riscv; no Cargo feature; unreachable in any stable build. Fixed upstream in RustCrypto/hashes#879 (0.11.1, unreleased).
-Discretion: default aarch64 backend loads 16 bytes via vld1q_u32(&K32[t]) / vld1q_u64(&K64[t]) from a one-element reference (src/sha256/aarch64_sha2.rs:33-80, src/sha512/aarch64_sha3.rs:39-153); the read stays within the immutable K table; Stacked-Borrows-only concern; same pattern as audited 0.10.9; unfixed upstream.
+Discretion: default aarch64 backend loads 16 bytes via vld1q_u32(&K32[t]) / vld1q_u64(&K64[t]) from a one-element reference (src/sha256/aarch64_sha2.rs:33-80, src/sha512/aarch64_sha3.rs:39-153); the read stays within the immutable K table; Stacked-Borrows-only concern; same pattern as audited 0.10.9; unfixed upstream, reported as RustCrypto/hashes#920.
 build.rs / proc-macro: none.
 Powerful imports: none (#![no_std]; only include_str!("../README.md") for docs). tests/data/*.blb binary KAT blobs are test-only, not built into the library.
 New deps: digest 0.10 -> 0.11, cpufeatures 0.2 -> 0.3; sha2-asm removed (Tier B digest/block-buffer/cpufeatures/hybrid-array/crypto-common still exempted). ACDP features: alloc, default, oid.
@@ -1011,6 +1089,12 @@ This is a trivial crate which only contains a singular macro definition which is
 intended to multiplex across the internal representation of a tinyvec,
 presumably. This trivially doesn't contain anything bad.
 """
+
+[[audits.bytecode-alliance.audits.tracing-core]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.33 -> 0.1.34"
+notes = "Mostly just an update with Rust stylistic conventions changing. Nothing awry."
 
 [[audits.bytecode-alliance.audits.tracing-log]]
 who = "Alex Crichton <alex@alexcrichton.com>"
@@ -1392,7 +1476,7 @@ user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2019-11-06"
 end = "2027-04-23"
 notes = "All code written or reviewed by Manish"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.wildcard-audits.utf8_iter]]
 who = "Makoto Kato <m_kato@ga2.so-net.ne.jp>"
@@ -1401,55 +1485,55 @@ user-id = 4484 # Henri Sivonen (hsivonen)
 start = "2022-04-19"
 end = "2024-06-16"
 notes = "Maintained by Henri Sivonen who works at Mozilla."
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.allocator-api2]]
 who = "Nicolas Silva <nical@fastmail.com>"
 criteria = "safe-to-deploy"
 version = "0.2.18"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.allocator-api2]]
 who = "Mike Hommey <mh+mozilla@glandium.org>"
 criteria = "safe-to-deploy"
 delta = "0.2.20 -> 0.2.21"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.bit-set]]
 who = "Teodor Tanasoaia <ttanasoaia@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "0.5.3 -> 0.6.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.bit-set]]
 who = "Jim Blandy <jimb@red-bean.com>"
 criteria = "safe-to-deploy"
 delta = "0.6.0 -> 0.8.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.bit-vec]]
 who = "Teodor Tanasoaia <ttanasoaia@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "0.6.3 -> 0.7.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.bit-vec]]
 who = "Jim Blandy <jimb@red-bean.com>"
 criteria = "safe-to-deploy"
 delta = "0.7.0 -> 0.8.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.bit-vec]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "0.8.0 -> 0.9.1"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.crypto-common]]
 who = "Mike Hommey <mh+mozilla@glandium.org>"
 criteria = "safe-to-deploy"
 delta = "0.1.3 -> 0.1.6"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.deranged]]
 who = "Alex Franchuk <afranchuk@mozilla.com>"
@@ -1460,7 +1544,7 @@ This crate contains a decent bit of `unsafe` code, however all internal
 unsafety is verified with copious assertions (many are compile-time), and
 otherwise the unsafety is documented and left to the caller to verify.
 """
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.deranged]]
 who = "Lars Eggert <lars@eggert.org>"
@@ -1473,105 +1557,105 @@ who = "Lars Eggert <lars@eggert.org>"
 criteria = "safe-to-deploy"
 delta = "0.4.0 -> 0.5.8"
 notes = "New unsafe code is properly guarded"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.either]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "1.15.0 -> 1.16.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.fnv]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
 version = "1.0.7"
 notes = "Simple hasher implementation with no unsafe code."
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.foldhash]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "0.1.5 -> 0.2.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.form_urlencoded]]
 who = "Valentin Gosu <valentin.gosu@gmail.com>"
 criteria = "safe-to-deploy"
 version = "1.2.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.form_urlencoded]]
 who = "Valentin Gosu <valentin.gosu@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "1.2.0 -> 1.2.1"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.form_urlencoded]]
 who = "edgul <ed.guloien@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "1.2.1 -> 1.2.2"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.hashbrown]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "0.15.5 -> 0.16.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.hashbrown]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "0.16.0 -> 0.16.1"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.hashbrown]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "0.16.1 -> 0.17.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.hashbrown]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "0.17.0 -> 0.17.1"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.hex]]
 who = "Simon Friedberger <simon@mozilla.com>"
 criteria = "safe-to-deploy"
 version = "0.4.3"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.indexmap]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "2.8.0 -> 2.11.4"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.indexmap]]
 who = "Ben Dean-Kawamura <bdk@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "2.11.4 -> 2.14.0"
 notes = "Mostly internal refactorings.  No new unsafe code."
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.percent-encoding]]
 who = "Valentin Gosu <valentin.gosu@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "2.2.0 -> 2.3.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.percent-encoding]]
 who = "Valentin Gosu <valentin.gosu@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "2.3.0 -> 2.3.1"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.percent-encoding]]
 who = "edgul <ed.guloien@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "2.3.1 -> 2.3.2"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.powerfmt]]
 who = "Alex Franchuk <afranchuk@mozilla.com>"
@@ -1581,7 +1665,7 @@ notes = """
 A tiny bit of unsafe code to implement functionality that isn't in stable rust
 yet, but it's all valid. Otherwise it's a pretty simple crate.
 """
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.proc-macro2]]
 who = "Jan-Erik Rediger <jrediger@mozilla.com>"
@@ -1604,39 +1688,39 @@ who = "Ben Dean-Kawamura <bdk@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "1.0.16 -> 1.0.28"
 notes = "Very few changes, mostly removes support for older Rust versions.  Some unsafe code refactored, but it seemed to be functionally equivalent to me."
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.semver]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "1.0.17 -> 1.0.16"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.serde_spanned]]
 who = "Ben Dean-Kawamura <bdk@mozilla.com>"
 criteria = "safe-to-deploy"
 version = "1.0.3"
 notes = "Relatively simple Serde trait implementations.  No IO or unsafe code."
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.serde_spanned]]
 who = "Ben Dean-Kawamura <bdk@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "1.0.3 -> 1.1.1"
 notes = "No code changes, just dependency updates."
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.sharded-slab]]
 who = "Mark Hammond <mhammond@skippinet.com.au>"
 criteria = "safe-to-deploy"
 delta = "0.1.4 -> 0.1.7"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.shlex]]
 who = "Max Inden <mail@max-inden.de>"
 criteria = "safe-to-deploy"
 delta = "1.1.0 -> 1.3.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.shlex]]
 who = "Emilio Cobos Álvarez <emilio@crisal.io>"
@@ -1645,19 +1729,19 @@ delta = "1.3.0 -> 2.0.1"
 notes = """
 Mostly removes some deprecated and unsound APIs.
 """
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.smallvec]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "1.14.0 -> 1.15.1"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.smallvec]]
 who = "Mike Hommey <mh+mozilla@glandium.org>"
 criteria = "safe-to-deploy"
 delta = "1.15.1 -> 1.15.2"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.synstructure]]
 who = "Nika Layzell <nika@thelayzells.com>"
@@ -1670,19 +1754,19 @@ who = "Chris Martin <cmartin@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "3.10.1 -> 3.16.0"
 notes = "Big change, but nothing unsafe and lots of it is documentation and convenience APIs"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.tempfile]]
 who = "Jim Blandy <jimb@red-bean.com>"
 criteria = "safe-to-deploy"
 delta = "3.16.0 -> 3.27.0"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.tinyvec_macros]]
 who = "Drew Willcoxon <adw@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "0.1.0 -> 0.1.1"
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.toml_datetime]]
 who = "Jan-Erik Rediger <jrediger@mozilla.com>"
@@ -1696,7 +1780,7 @@ who = "Ben Dean-Kawamura <bdk@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "0.7.3 -> 1.1.1+spec-1.1.0"
 notes = "Minimal changes, no new unsafe code."
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.toml_datetime]]
 who = "Jan-Erik Rediger <jrediger@mozilla.com>"
@@ -1704,3 +1788,26 @@ criteria = "safe-to-deploy"
 delta = "0.7.5+spec-1.1.0 -> 0.7.3"
 notes = "Version downgrade to cover the full vetted version range"
 aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing-core]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.1.30"
+notes = """
+Most unsafe code is in implementing non-std sync primitives. Unsafe impls are
+logically correct and justified in comments, and unsafe code is sound and
+justified in comments.
+"""
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing-core]]
+who = "Mark Hammond <mhammond@skippinet.com.au>"
+criteria = "safe-to-deploy"
+delta = "0.1.30 -> 0.1.33"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing-core]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.34 -> 0.1.36"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
