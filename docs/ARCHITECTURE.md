@@ -19,13 +19,13 @@ acdp-registry-types ......... leaf. EVERY crate below depends on it.
   └──▶ acdp-registry-webhook .. HMAC POSTs
 
 acdp-registry-core ......... axum + handlers, generic over S
-  depends on: -types, -store, -sqlite, -auth, -webhook
+  depends on: -types, -store, -auth, -webhook   (-sqlite is dev-only: tests)
 
 acdp-registry-server ....... binary; picks S via Cargo features
   depends on: all seven
 ```
 
-Edges above are the real `[dependencies]` graph, not a sketch. Re-derive it
+Edges above are the real normal-`[dependencies]` graph, not a sketch (dev-dependencies are excluded). Re-derive it
 with:
 
 ```bash
@@ -33,7 +33,7 @@ cargo metadata --format-version 1 --no-deps | python3 -c "
 import json,sys
 for p in sorted(json.load(sys.stdin)['packages'], key=lambda x: x['name']):
     deps = sorted({d['name'] for d in p['dependencies']
-                   if d['name'].startswith('acdp-registry')})
+                   if d['name'].startswith('acdp-registry') and d['kind'] is None})
     print(f\"{p['name']:<24} -> {', '.join(deps) or '(leaf)'}\")
 "
 ```
@@ -63,6 +63,10 @@ top of the upstream sync trait:
   derives it. The only production caller, `admin_list`, passes `true` (an
   admin bearer is authenticated); `search` instead derives the term from the
   capabilities' `anonymous_public_reads`.
+- `has_lifecycle_state()` — whether the store holds any lifecycle event or
+  retracted context; the default is `Ok(false)`, so a durable backend must
+  override it. Startup uses it to refuse `[lifecycle] enabled = false` over
+  existing state.
 - `health()` — ping the backend (drives `/healthz`).
 - `migrate()` — apply pending migrations at startup.
 - Tenant binding — `set_tenant_of_ctx` / `tenant_of_ctx` / `tenants_of_ctxs`,
@@ -98,7 +102,11 @@ Every request passes through the middleware stack assembled in `build_router()`
 media-type layer → `x-request-id` assignment + propagation → a `413` envelope
 backstop → CORS → `RequestBodyLimitLayer` (capped at `limits.max_payload_bytes`)
 → 30 s `TimeoutLayer` → `TraceLayer` → request metrics (when `metrics.enabled`;
-FEAT-10). The `/auth/*` routes additionally carry the FEAT-06 per-IP/global
+FEAT-10). Innermost of all, applied directly to the merged router, is
+`tenant_trust::stamp_peer_ip`, which records the TCP peer for the `X-Tenant-Id`
+trust decision (`tenant_header_trusted` in the same module; see
+[MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id)).
+The `/auth/*` routes additionally carry the FEAT-06 per-IP/global
 rate-limit `route_layer` (`auth_rate_limit`), and ACDP data and auth routes carry an
 `application/acdp+json` response-header layer.
 
@@ -129,18 +137,15 @@ is `acdp`'s `RegistryServer`, which implements the ordered algorithm of
 The steps and their one invariant are specified there and explained in
 [acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/registry.md#the-publish-pipeline--the-one-rule);
 this page does not restate them. We reuse it unchanged and add storage
-adapters, **not** a parallel validator. One difference from that guide: we do
-not plug a limiter into `RegistryServer` (`with_rate_limiter`) — the per-agent
-publish budget is this registry's own, peeked and charged in steps 3 and 6
-below.
+adapters, **not** a parallel validator. The per-agent publish budget is this
+registry's own limiter, peeked and charged in steps 3 and 6 below rather than
+plugged into `RegistryServer` (the guide allows a host-enforced limiter:
+[acdp-rs · Rate limiting](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/registry.md#rate-limiting)).
 
-The registry calls it in **two halves** rather than as one bundled call
-(`acdp` 0.14's prove/commit split): a `prove_publish_identity*` call runs the
-§2.1 validation and signature steps and persists nothing, and `commit_proven`
-then runs the atomic store commit (idempotency lookup, predecessor checks,
-insert, supersession marking). The split exists so the per-agent publish
-budget can be charged at the exact point the signer becomes proven — between
-the two halves — and not before.
+The registry calls the SDK in two halves, `prove_publish_identity*` and then
+`commit_proven`, so the budget is charged at the point the signer becomes proven;
+the semantics are in
+[acdp-rs · Splitting prove from commit](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/registry.md#splitting-prove-from-commit).
 
 What `publish` (`crates/acdp-registry-core/src/handlers/context.rs`) wraps
 around those calls:
@@ -186,7 +191,7 @@ The four-way charge split is pinned by
 The producer lifecycle routes (`/retract`, `/republish`) share that per-agent
 bucket, keyed by the event `actor`, and follow the same rule: a read-only peek
 before verification, a `PublishCharge` armed once the signer is proven. They
-use the SDK's lifecycle prove/commit split (`acdp` 0.14.4): after the tenant
+use the SDK's lifecycle [prove/commit split](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/registry.md#splitting-prove-from-commit-for-lifecycle-events) (`acdp` 0.14.4): after the tenant
 gate and the bearer check, `prove_lifecycle_identity*` runs RFC-ACDP-0013 §6
 steps 1–3 (visibility, event validation and endpoint binding, actor ==
 producer) and the signature verification, persisting nothing; the charge arms;
@@ -225,7 +230,7 @@ visibility rule in those shared paths, not in the handler.
 | Crate | Role |
 |-------|------|
 | `acdp-registry-types`  | Leaf: config (TOML+env), errors with HTTP projection, webhook events. |
-| `acdp-registry-store`  | `ExtendedRegistryStore` trait — extends `acdp::registry::RegistryStore`; also the `SharedRateLimitBackend` trait for the `/auth/*` ceilings. |
+| `acdp-registry-store`  | `ExtendedRegistryStore` trait — extends `acdp::registry::RegistryStore`; also the `SharedRateLimitBackend` trait for the `/auth/*` ceilings. Behind the `test-support` feature, a `parity` kit the SQLite and Postgres backends both run. |
 | `acdp-registry-pg`     | Postgres backend (native `TIMESTAMPTZ` / `TEXT[]` / `JSONB` / `tsvector`); `PgRateLimitBackend`, the cluster-wide `/auth/*` counter. |
 | `acdp-registry-sqlite` | SQLite backend (FTS5 virtual table; arrays as JSON TEXT). |
 | `acdp-registry-auth`   | DID challenge → JWT (HS256/EdDSA), revocation store + cross-issuer pollers. |

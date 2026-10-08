@@ -4936,3 +4936,10 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** mechanical re-pin of 18 references, docs.rs/README versions to 0.14.5, STATUS.md to name the minor line (0.4.x) so it stops drifting per patch, MAINTAINING/CONTRIBUTING corrected to the 2026-10-05 required-check state.
 - **Alternatives:** tag-only pin; bumping `.spec-pin`; the new guard.
 - **Blast radius if wrong:** docs only; revert the PR. **Status:** UNCONFIRMED
+
+## Docs refresh 2 (2026-10-08) — PR-B behaviour docs and link-first dedup
+- **Plan:** plans/docs-refresh-2026-10-08.md
+- **Assumed:** documenting (not changing) the publish `200` with no `Location` header against RFC-ACDP-0003 §4's `201 Created` + `Location` is the right scope for a docs PR: the behaviour change is the open owner decision U-526 and breaks clients that rely on the current shape. The ARCHITECTURE/HTTP-API passages describing which publish and lifecycle branches are charged were kept (registry-specific, pinned by a test); only the SDK prove/commit and limiter restatements became links to acdp-rs at 424253b.
+- **Chose:** a deviation note in HTTP-API.md linking the RFC sections at the spec pin; optional trims (HTTP-API status-table "Raised when" cells, a strict-Ed25519 parenthetical) were not done.
+- **Alternatives:** changing the handler to 201 + `Location`; trimming the error-code table to links.
+- **Blast radius if wrong:** docs only. **Status:** UNCONFIRMED

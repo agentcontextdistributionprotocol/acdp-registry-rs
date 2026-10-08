@@ -29,7 +29,7 @@ signed JWT `tenant` claim  >  [[auth.tenant_agents]] binding (writes)  >  TRUSTE
   or binding applies. A trusted header never overrides a claim or a binding.
 - A header that agrees with the claim or binding is accepted in every mode
   (it corroborates; it decides nothing). A header that **disagrees** with them is
-  rejected (`403 not_authorized`, "tenant assertion mismatch").
+  rejected (`403 not_authorized`, "X-Tenant-Id does not match the tenant the token was issued under"; the server log line for the same event reads "tenant assertion mismatch").
 - `None` means "no tenant asserted" → the tenant filter is disabled (V0), or,
   in strict mode, the request is default-denied.
 
@@ -67,6 +67,9 @@ peer after an IPv4-mapped address (`::ffff:a.b.c.d`) is canonicalised to IPv4.
 List IPv4 gateways in IPv4 form (`10.0.0.0/8`): an `::ffff:10.0.0.0/104` entry
 never matches anything. A `/0` entry (`0.0.0.0/0`, `::/0`) would trust every
 peer, so startup refuses it; if that is really the intent, say `any_peer`.
+`tenant_header_trust = "trusted_proxies"` with an empty list is refused too, in
+every mode: no peer could ever be trusted to send `X-Tenant-Id`. (`any_peer` on a
+non-loopback bind only logs a warning; it is not refused.)
 
 A header that is present but **untrusted** is rejected, not ignored — unless it
 equals the claim or binding the request already carries:

@@ -12,6 +12,9 @@ is [`config/registry.example.toml`](../config/registry.example.toml).
 built-in defaults  <  TOML file  <  ACDP_REGISTRY_* env vars
 ```
 
+- An `ACDP_REGISTRY_<SECTION>__<FIELD>` variable that is set but **empty** counts as
+  absent (the TOML value stays) and is logged as a warning at startup, because
+  `docker compose` renders an unset `${VAR:-}` as empty.
 - The TOML file path comes from `ACDP_REGISTRY_CONFIG`; when unset the binary
   falls back to its defaults (dev runs use SQLite under `./data/registry.db`).
 - Env overrides use `ACDP_REGISTRY_<SECTION>__<FIELD>` — a **single** underscore
@@ -80,6 +83,9 @@ not appear in the Reference below:
 The binary validates config before serving and refuses to boot on a misconfig
 (`validate_config` in `crates/acdp-registry-server/src/main.rs`). It enforces:
 
+- **Lifecycle state** — separately from `validate_config`, the binary refuses to
+  start with `[lifecycle] enabled = false` over a store that already holds lifecycle
+  state; see [`[lifecycle]`](#lifecycle-acdp-030).
 - **Auth** — `jwt_signing_alg` ∈ {`HS256`, `EdDSA`}. EdDSA requires a non-empty
   `jwt_private_key_pem`. HS256 with an empty `jwt_secret` requires
   `allow_ephemeral_secret = true`, otherwise it fails. A non-empty
@@ -232,7 +238,8 @@ The binary validates config before serving and refuses to boot on a misconfig
   well-formed `log.instance` (`[a-z0-9-]{1,32}`). Listing
   `acdp-registry-head-receipts`, `acdp-registry-lifecycle`, or
   `acdp-registry-transparency-log` in `registry.profiles` without enabling
-  the matching feature is refused as a false capability advertisement.
+  the matching feature is refused as a false capability advertisement; so is
+  listing `acdp-registry-receipts` without a configured `[receipt]` signing key.
 - **Witnesses (0.4.0)** — `[[witnesses]]` requires `log.enabled = true`
   (RFC-ACDP-0015 §6.1: there are no checkpoints to witness without a log);
   each `did` must be a `did:web` DID and each `url` must pass the SSRF
@@ -325,12 +332,14 @@ Repeatable. Binds a producing/consuming agent to a tenant.
 
 #### `[[auth.revocation_feeds]]`
 
-Repeatable. A peer registry whose revocations this registry mirrors.
+Repeatable. A peer issuer (for example a control plane) whose revocations this
+registry mirrors. This registry only *consumes* feeds; it serves no
+`/auth/revocations` of its own (deferred, see [STATUS.md](../STATUS.md)).
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `issuer` | string | — | Peer DID; each fetched entry's `iss` must match. |
-| `feed_url` | string | — | Peer's `/auth/revocations` URL. |
+| `feed_url` | string | — | The peer issuer's `/auth/revocations` URL. |
 | `admin_token` | string | — | Bearer for the peer's feed. |
 | `poll_seconds` | u64 | `300` | Poll interval. |
 

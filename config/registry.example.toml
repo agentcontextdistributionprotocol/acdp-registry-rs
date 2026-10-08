@@ -87,9 +87,11 @@ anonymous_public_reads = true
 # Enforce tenant scoping on every authenticated request. Default false keeps
 # V0 behavior (a request that asserts no tenant runs with the tenant filter
 # disabled, gated only by visibility). Set true on a multi-tenant deployment:
-# a request that resolves to no tenant is rejected (403 not_authorized), and an
-# authenticated caller's tenant is taken ONLY from the JWT `tenant` claim, so
-# an unbound token can't assert a tenant via the X-Tenant-Id header.
+# a request that resolves to no tenant is rejected (403 not_authorized). A
+# caller's tenant comes from the signed JWT `tenant` claim or an
+# [[auth.tenant_agents]] binding; an unbound token may select one with the
+# X-Tenant-Id header only across the boundary declared by tenant_header_trust
+# below, otherwise the request is 403.
 require_tenant = false
 # Who may select a tenant with the X-Tenant-Id header when no signed token
 # claim or [[auth.tenant_agents]] binding applies (RFC-ACDP-0008 §6.4):
@@ -267,6 +269,8 @@ key_id_fragment = "receipt-key-1"
 # `acdp-registry-lifecycle` profile. (Advertised acdp_version is
 # unconditionally 0.5.0 — see the [receipt] note above.) Retraction is
 # mark-not-delete: bodies stay retrievable forever.
+# Setting this back to false on a store that already holds lifecycle events or
+# a retracted context makes the binary refuse to start (docs/CONFIGURATION.md).
 enabled = false
 
 [log]

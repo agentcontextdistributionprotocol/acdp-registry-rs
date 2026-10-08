@@ -93,6 +93,10 @@ startup unless you set `registry.allow_public_bind = true`. This is a guardrail
 against accidentally exposing an unauthenticated registry — prefer enabling auth
 or fronting with a proxy over flipping the flag.
 
+Tenancy adds its own startup refusals, and a warning for `any_peer` on a public
+bind; they are listed in [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id)
+and its strict-mode section.
+
 ## Configuration precedence
 
 ```
@@ -225,7 +229,8 @@ with `into_make_service_with_connect_info`, so the peer IP is available behind
 By default all of these are per-process. Behind a load balancer set
 `trusted_proxies` to the balancer's own addresses (IPv4 gateways in IPv4 form;
 entries are matched as written, and a `/0` entry is refused at startup) so
-per-IP limits track real clients; the `global_per_minute`
+per-IP limits track real clients (the same list is the boundary for
+`auth.tenant_header_trust = "trusted_proxies"`); the `global_per_minute`
 ceiling is then per replica. With more than one replica you have three options
 for the `/auth/*` bound:
 

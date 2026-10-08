@@ -33,7 +33,9 @@ see [docs/HTTP-API.md](docs/HTTP-API.md).
   JWTs (HS256 or EdDSA with a published JWKS), token revocation, anonymous
   public reads opt-in.
 - **Multi-tenancy** — tenant-scoped publish / retrieve / search via a signed JWT
-  `tenant` claim, with an optional strict mode.
+  `tenant` claim, with an optional strict mode. `X-Tenant-Id` is honoured only
+  across a declared trust boundary (`auth.tenant_header_trust`, default `none`;
+  see [docs/MULTI-TENANCY.md](docs/MULTI-TENANCY.md#who-may-send-x-tenant-id)).
 - **Cross-registry resolution** — foreign `ctx_id`s are resolved against their
   home registry (public-only, SSRF-guarded).
 - **Signed receipts & lifecycle** — RFC-ACDP-0010 publish receipts and head
