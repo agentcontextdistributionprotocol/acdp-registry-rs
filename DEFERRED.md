@@ -9,7 +9,7 @@ The authoritative, current list is the census tool's output, not this file:
 python3 docs/assumptions-status-census.py --open
 ```
 
-At `main` @ 6d48700 it reports 33 open status declarations (some are historical text the tool cannot tell from a live status). They fall
+At `main` @ a222e90 it reports 33 open status declarations (some are historical text the tool cannot tell from a live status). They fall
 into four groups:
 
 | Group | Meaning | Where (ASSUMPTIONS.md) |

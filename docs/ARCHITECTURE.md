@@ -127,7 +127,7 @@ The protocol-critical part of `POST /contexts` is **not** implemented here — i
 is `acdp`'s `RegistryServer`, which implements the ordered algorithm of
 [RFC-ACDP-0003 §2.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0003-publish.md#21-registry-processing).
 The steps and their one invariant are specified there and explained in
-[acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/registry.md#the-publish-pipeline--the-one-rule);
+[acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/registry.md#the-publish-pipeline--the-one-rule);
 this page does not restate them. We reuse it unchanged and add storage
 adapters, **not** a parallel validator. One difference from that guide: we do
 not plug a limiter into `RegistryServer` (`with_rate_limiter`) — the per-agent
@@ -196,7 +196,7 @@ charged; an event refused before its signature is checked (unknown or
 invisible context, actor ≠ producer, wrong `event_type`) costs nobody.
 
 DID verification reuses `acdp`'s `WebResolver` (LRU-cached, SSRF-policy-gated —
-see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/8a888edaa15c4475bbaeccff45567921e3153730/docs/security.md#ssrfpolicy)) for **both** publish and
+see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/security.md#ssrfpolicy)) for **both** publish and
 auth-challenge verification; there is intentionally only one resolver per server
 instance.
 
