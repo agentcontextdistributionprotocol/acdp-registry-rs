@@ -2448,9 +2448,9 @@ async fn replay_shape_d(name: &str, plan: &ShapeDPlan) -> ShapeDResult {
         // order" from "a1, a2 with the chain reversed"). `status` is never
         // a seed input (see `SeedLineageVersion::want_status`'s doc
         // comment); a mismatch here means either the publish order was
-        // wrong, or a genuine, licensed divergence needs the `anc-001`-style
-        // deviation note (see the module doc-block's "Coverage ratchet"
-        // precedent) rather than a silently-passed assertion.
+        // wrong, or a genuine, spec-licensed divergence needs a written
+        // deviation note naming the fixture and the reason, rather than a
+        // silently-passed assertion.
         if mismatch.is_none() && is_lineage_list && sc.method == "GET" {
             if let Some(arr) = body_json.as_array() {
                 for item in arr {
@@ -9989,47 +9989,28 @@ enum Unexercised {
 /// replayer's own per-family tally (pub 3 + ret 1 + vis 26 = 30, matching its
 /// `replayed 30`).
 const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
-    // `pub` claims `CoverageMechanism::Replayed` on 3 replayed fixtures
-    // (pub-004/005/008) while the profile requires 14. These are the other 11.
-    // U-527 removed `pub-002`, `pub-012`, `pub-013` and `pub-014`: Shape E
-    // parses their `input.endpoint` spelling, so the replayer now drives
-    // them for real. What is left here is left for a NAMED reason each.
+    // EMPTY. Every fixture once listed here is now requested by a named test
+    // registered in `EXERCISED_FIXTURES` (compile-bound to that test and checked
+    // at runtime by `exercised_fixtures_are_really_requested`), or is replayed.
+    // With the list empty, every loop over it passes vacuously; the counts in
+    // `fixture_accounting_totals_are_exact` (required 0, conditional 0) are what
+    // keep it honest, and a spec bump that adds a new unexercised obligation
+    // lands here as a graded row with a tracking issue.
     //
-    // `pub-001` and `pub-011` left in U-528: `replay_harness()` pins the
-    // producer key, so both now reach a REAL Ed25519 verification and fail
-    // it, and the publish arm pins the expected code so "some 400" is no
-    // longer enough to pass. What remains below is unreplayable for
-    // structural reasons, not for want of a harness.
-    //
-    // U-533 retired FIVE of the six required rows -- `pub-003`, `pub-006`,
-    // `pub-009`, `pub-010` and `ret-002`. Each is now requested by a named test
-    // registered in `EXERCISED_FIXTURES`, which is compile-bound to that test and
-    // checked at runtime by `exercised_fixtures_are_really_requested`. None of
-    // them became replayable: four are driven by direct tests because their own
-    // bodies cannot reach the rule they describe (`pub-006`/`pub-009` carry
-    // 96-char signatures where ed25519 needs 88 -- the `pub-008` defect;
-    // `pub-010` has no inline body at all), and `pub-003` needs a seeded
-    // predecessor that no seeding path matches. Widening Shape A to drive
-    // `pub-006`/`pub-009` was the obvious repair and would have manufactured two
-    // new wrong-reason passes.
-    //
-    // `pub-007` is the ONE that stays, and deliberately: it requires
-    // **201 + a percent-encoded `Location`** where this registry returns 200 and
-    // sets no `Location` anywhere. That is the first wire change in this wave that
-    // breaks clients behaving correctly, it is escalated to the human as U-526 and
-    // unanswered, and its entire subject IS the response shape -- so unlike
-    // `pub-010` (whose 201 is incidental to its contributors[] subject and is
-    // handled by the `anc-001`/`idem-001` corrected-status precedent), it cannot
-    // be exercised by asserting a corrected status without deleting the point of
-    // the fixture. Do not retire this row to close the gap.
-    ("pub-007", Unexercised::RequiredByProfile),
-    // Conditional: required because of what this registry advertises.
-    // `err-002` is the one that started U-519/U-520 — it arrived with the
-    // `16211e6` bump, is behavioural (so the generic replayer skips it), and
-    // no direct test asked for it. The gate it describes IS now enforced and
-    // asserted by `publish_enforces_the_err002_media_type_matrix` in
-    // `http_integration.rs`; it is listed here because nothing reads the
-    // FIXTURE, which is a different claim.
+    // History, so the retirements stay traceable. `pub` had 11 rows beside its 3
+    // replayed fixtures (pub-004/005/008). U-527 removed `pub-002`, `pub-012`,
+    // `pub-013` and `pub-014` (Shape E parses their `input.endpoint` spelling, so
+    // the replayer drives them). U-528 removed `pub-001` and `pub-011`
+    // (`replay_harness()` pins the producer key, so both reach a REAL Ed25519
+    // verification). U-533 retired `pub-003`, `pub-006`, `pub-009`, `pub-010`
+    // and `ret-002` to direct tests: `pub-006`/`pub-009` carry 96-char
+    // signatures where ed25519 needs 88 (the `pub-008` defect), `pub-010` has no
+    // inline body, and `pub-003` needs a seeded predecessor no seeding path
+    // matches. U-553 retired the three conditional rows, `dk-003`, `err-002` and
+    // `idem-007`. `pub-007` was the last: its subject IS the publish response
+    // shape (201 + a percent-encoded `Location`), so it could only be retired
+    // once a fresh publish answered that way; it is now driven by
+    // `pub007_publish_response_shape_and_location`.
 ];
 
 /// Total fixtures in the pinned spec's `schemas/conformance`, as an **equality**.
@@ -13613,6 +13594,377 @@ fn idem007_capabilities_at_0_3_0_must_advertise_idempotency() {
     }
 }
 
+/// `POST /contexts` with no `Idempotency-Key`, keeping the status, the
+/// `Content-Type` and `Location` headers, and the JSON body. `common::publish`
+/// drops every header, and `idem_publish_keeping_location` keeps only
+/// `Location`; `pub-007` pins both headers.
+async fn pub007_publish_keeping_headers(
+    app: &axum::Router,
+    req: &PublishRequest,
+) -> (StatusCode, Option<String>, Option<String>, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .body(Body::from(serde_json::to_vec(req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let header = |name: axum::http::header::HeaderName| {
+        resp.headers()
+            .get(name)
+            .map(|v| v.to_str().unwrap().to_string())
+    };
+    let content_type = header(axum::http::header::CONTENT_TYPE);
+    let location = header(axum::http::header::LOCATION);
+    (status, content_type, location, body_to_json(resp).await)
+}
+
+/// RFC 3986 §2.1 percent-decoding of one path segment, hand-rolled so the
+/// round-trip check does not share code with the encoder under test. `None` on a
+/// malformed escape or a non-UTF-8 result.
+fn pub007_pct_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = s.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Every way `location` breaks `pub-007`'s `Location_encoding_rules` or its
+/// round-trip scenario for `ctx_id`. Empty means conformant.
+fn pub007_location_violations(location: &str, ctx_id: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    // Rule 4: the `/contexts/` prefix is literal, not itself encoded.
+    let Some(rest) = location.strip_prefix("/contexts/") else {
+        v.push(format!(
+            "does not start with a literal `/contexts/`: {location}"
+        ));
+        return v;
+    };
+    // Rules 1 and 2: no raw `:` or `/` survives inside the ctx_id payload.
+    if rest.contains(':') {
+        v.push(format!("raw `:` in the ctx_id payload (rule 1): {rest}"));
+    }
+    if rest.contains('/') {
+        v.push(format!("raw `/` in the ctx_id payload (rule 2): {rest}"));
+    }
+    // Rule 3: every escape is `%` + two UPPERCASE hex digits.
+    for (i, _) in rest.match_indices('%') {
+        let ok = rest.get(i + 1..i + 3).is_some_and(|h| {
+            h.bytes()
+                .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+        });
+        if !ok {
+            v.push(format!(
+                "escape at byte {i} is not `%` + two uppercase hex (rule 3): {rest}"
+            ));
+        }
+    }
+    // Rule 5: exactly `acdp%3A%2F%2F<authority>%2F<uuid>`, with authority and
+    // uuid carried verbatim (not further encoded).
+    match ctx_id
+        .strip_prefix("acdp://")
+        .and_then(|r| r.split_once('/'))
+    {
+        Some((authority, uuid)) => {
+            let want = format!("acdp%3A%2F%2F{authority}%2F{uuid}");
+            if rest != want {
+                v.push(format!("payload is not `{want}` (rule 5): {rest}"));
+            }
+        }
+        None => v.push(format!(
+            "ctx_id is not `acdp://<authority>/<uuid>`: {ctx_id}"
+        )),
+    }
+    // Scenario round-trip: decoding the payload reproduces ctx_id byte-for-byte.
+    match pub007_pct_decode(rest) {
+        Some(decoded) if decoded == ctx_id => {}
+        Some(decoded) => v.push(format!(
+            "decodes to {decoded}, not body.ctx_id {ctx_id} (round-trip scenario)"
+        )),
+        None => v.push(format!("payload does not percent-decode: {rest}")),
+    }
+    v
+}
+
+/// **pub-007 — the publish response
+/// shape.** A fresh publish answers `201 Created`, `Content-Type:
+/// application/acdp+json`, a `Location` that is `/contexts/` plus the
+/// percent-encoded `ctx_id` (the fixture's five `Location_encoding_rules`, and
+/// its round-trip scenario), and a body of exactly the five registry-assigned
+/// fields — plus `registry_receipt` only when the receipts profile is
+/// advertised — with none of the fixture's `forbidden_fields`.
+///
+/// # Why a direct test and not a replay
+///
+/// The fixture has no inline body (`input.body_summary` only: "any pub-001-style
+/// well-formed body whose signature verifies"), so Shape A cannot drive it. A
+/// freshly signed body from a harness producer is exactly the input it allows.
+///
+/// # The checker is shown its negatives first
+///
+/// The `Location` checker is run against the fixture's OWN scenario before it is
+/// trusted on the registry: it must accept the fixture's `Location_example` for
+/// the scenario's `ctx_id`, and reject each of the three `negative_examples`
+/// (colon-only encoding, no encoding, a mismatching ctx_id). A checker that
+/// accepted everything would otherwise pass the registry for the wrong reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pub007_publish_response_shape_and_location() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping pub-007 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "pub-007") else {
+        return;
+    };
+
+    // ---- The fixture's own literals.
+    let expected = &fx["expected"];
+    assert_eq!(
+        expected["outcome"], "success",
+        "pub-007 fixture literal: {fx}"
+    );
+    assert_eq!(
+        expected["http_status"], 201,
+        "pub-007 fixture literal: expected.http_status, which the registry must match: {fx}"
+    );
+    let want_content_type = expected["headers"]["Content-Type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("pub-007: expected.headers.Content-Type missing: {fx}"));
+    assert_eq!(
+        want_content_type, "application/acdp+json",
+        "pub-007 fixture literal"
+    );
+    assert_eq!(
+        expected["headers"]["Location_encoding_rules"]
+            .as_array()
+            .map(Vec::len),
+        Some(5),
+        "pub-007 carries five Location_encoding_rules, which pub007_location_violations \
+         encodes one by one; if the count moved, re-read them: {fx}"
+    );
+    let str_list = |v: &Value, what: &str| -> Vec<String> {
+        v.as_array()
+            .unwrap_or_else(|| panic!("pub-007: {what} missing: {fx}"))
+            .iter()
+            .map(|s| {
+                s.as_str()
+                    .unwrap_or_else(|| panic!("pub-007: {what} entry"))
+                    .to_string()
+            })
+            .collect()
+    };
+    let required_fields = str_list(
+        &expected["response_body_shape"]["required_fields"],
+        "required_fields",
+    );
+    let forbidden_fields = str_list(
+        &expected["response_body_shape"]["forbidden_fields"],
+        "forbidden_fields",
+    );
+    assert_eq!(
+        required_fields,
+        ["ctx_id", "lineage_id", "version", "created_at", "status"],
+        "pub-007 fixture literal: response_body_shape.required_fields"
+    );
+
+    // ---- Prove the Location checker on the fixture's own scenario first.
+    let scenario = fx["scenarios"]
+        .as_array()
+        .and_then(|s| s.first())
+        .unwrap_or_else(|| panic!("pub-007: scenarios[0] missing: {fx}"));
+    let sc_resp = &scenario["input"]["publish_response"];
+    let sc_ctx = sc_resp["body"]["ctx_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("pub-007: scenario body.ctx_id missing: {fx}"));
+    let sc_loc = sc_resp["headers"]["Location"]
+        .as_str()
+        .unwrap_or_else(|| panic!("pub-007: scenario Location missing: {fx}"));
+    assert_eq!(
+        Some(sc_loc),
+        expected["headers"]["Location_example"].as_str(),
+        "pub-007: the scenario's Location and expected.headers.Location_example agree"
+    );
+    let no_violations = pub007_location_violations(sc_loc, sc_ctx);
+    assert!(
+        no_violations.is_empty(),
+        "the checker must ACCEPT the fixture's own conformant Location: {no_violations:?}"
+    );
+    let negatives = &scenario["negative_examples"];
+    let fixture_negatives: Vec<&str> = [
+        "underencoded_location_partial_colon_only",
+        "underencoded_location_no_encoding",
+        "wrong_ctx_id_in_location",
+    ]
+    .iter()
+    .map(|k| {
+        negatives[*k]
+            .as_str()
+            .unwrap_or_else(|| panic!("pub-007: negative_examples.{k} missing: {fx}"))
+    })
+    .collect();
+    for neg in &fixture_negatives {
+        assert!(
+            !pub007_location_violations(neg, sc_ctx).is_empty(),
+            "the checker must REJECT the fixture's negative example {neg} for {sc_ctx}"
+        );
+    }
+
+    // ---- Drive a real fresh publish.
+    let app = harness().await;
+    let req = common::producer("pub007", 7)
+        .publish_request()
+        .title("pub-007: publish response shape")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, content_type, location, body) = pub007_publish_keeping_headers(&app, &req).await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "pub-007: a fresh publish answers the fixture's 201; body = {body}"
+    );
+    assert_eq!(
+        u64::from(status.as_u16()),
+        expected["http_status"].as_u64().unwrap(),
+        "pub-007: the registry's status equals the fixture's expected.http_status"
+    );
+    assert_eq!(
+        content_type.as_deref(),
+        Some(want_content_type),
+        "pub-007: Content-Type must be the fixture's {want_content_type}"
+    );
+
+    // Body: exactly the required fields (+ registry_receipt only when the
+    // receipts profile is advertised), none of the forbidden ones.
+    let obj = body
+        .as_object()
+        .unwrap_or_else(|| panic!("pub-007: response body is not an object: {body}"));
+    let advertises_receipts = caps()
+        .profiles
+        .iter()
+        .any(|p| p == "acdp-registry-receipts");
+    let mut want_keys: Vec<&str> = required_fields.iter().map(String::as_str).collect();
+    if advertises_receipts {
+        want_keys.push("registry_receipt");
+    }
+    want_keys.sort_unstable();
+    let mut got_keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    got_keys.sort_unstable();
+    assert_eq!(
+        got_keys,
+        want_keys,
+        "pub-007: body keys must be exactly the five registry-assigned fields{}; body = {body}",
+        if advertises_receipts {
+            " plus registry_receipt"
+        } else {
+            " (no receipts profile advertised, so no registry_receipt)"
+        }
+    );
+    for f in &forbidden_fields {
+        assert!(
+            !obj.contains_key(f),
+            "pub-007: forbidden field `{f}` echoed in the publish response: {body}"
+        );
+    }
+    assert_eq!(
+        body["status"], "active",
+        "pub-007: status on a fresh publish; body = {body}"
+    );
+    assert_eq!(
+        body["version"], 1,
+        "pub-007: first-version publish; body = {body}"
+    );
+    let lineage = body["lineage_id"].as_str().unwrap_or_default();
+    assert!(
+        lineage.strip_prefix("lin:sha256:").is_some_and(|h| {
+            h.len() == 64
+                && h.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }),
+        "pub-007: lineage_id must be lin:sha256:<64-lowercase-hex>; body = {body}"
+    );
+    let created_at = body["created_at"].as_str().unwrap_or_default();
+    assert!(
+        created_at.len() == 24
+            && created_at.ends_with('Z')
+            && created_at.as_bytes()[19] == b'.'
+            && chrono::DateTime::parse_from_rfc3339(created_at).is_ok(),
+        "pub-007: created_at must be RFC 3339 UTC in canonical millisecond form; body = {body}"
+    );
+    let ctx_id = body["ctx_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("pub-007: no ctx_id in {body}"));
+    assert!(
+        ctx_id.starts_with(&format!("acdp://{AUTHORITY}/")),
+        "pub-007: ctx_id authority must be the registry's declared authority {AUTHORITY}; \
+         body = {body}"
+    );
+
+    // Location: the five rules and the round trip, against the real ctx_id.
+    let location = location.unwrap_or_else(|| panic!("pub-007: no Location header; body = {body}"));
+    let violations = pub007_location_violations(&location, ctx_id);
+    assert!(
+        violations.is_empty(),
+        "pub-007: Location {location} violates the fixture's encoding rules: {violations:?}"
+    );
+    assert_eq!(
+        pub007_pct_decode(location.strip_prefix("/contexts/").unwrap()).as_deref(),
+        Some(ctx_id),
+        "pub-007 scenario: percent-decoding the part after /contexts/ gives body.ctx_id exactly"
+    );
+
+    // The three negative forms, both as the fixture spells them and rebuilt for
+    // THIS ctx_id, are not what the registry produced.
+    let (authority, uuid) = ctx_id
+        .strip_prefix("acdp://")
+        .and_then(|r| r.split_once('/'))
+        .unwrap_or_else(|| panic!("pub-007: ctx_id is not acdp://<authority>/<uuid>: {ctx_id}"));
+    let other_uuid = if uuid == "00000000-0000-4000-8000-000000000000" {
+        "11111111-1111-4111-8111-111111111111"
+    } else {
+        "00000000-0000-4000-8000-000000000000"
+    };
+    let rebuilt_negatives = [
+        format!("/contexts/acdp%3A//{authority}/{uuid}"),
+        format!("/contexts/{ctx_id}"),
+        format!("/contexts/acdp%3A%2F%2F{authority}%2F{other_uuid}"),
+    ];
+    for neg in fixture_negatives
+        .iter()
+        .copied()
+        .chain(rebuilt_negatives.iter().map(String::as_str))
+    {
+        assert_ne!(
+            location, neg,
+            "pub-007: the registry produced a negative-example Location"
+        );
+        assert!(
+            !pub007_location_violations(neg, ctx_id).is_empty(),
+            "pub-007: the checker must reject the negative form {neg} for {ctx_id}"
+        );
+    }
+}
+
 /// **Fixtures this suite retired from [`UNEXERCISED_FIXTURES`], and the test that
 /// requests each (U-533).**
 ///
@@ -13674,8 +14026,10 @@ macro_rules! exercised_by {
 /// Size of [`EXERCISED_FIXTURES`], as an **equality** rather than a floor, so
 /// dropping a registration is loud. Five at U-533: `pub-003`, `pub-006`,
 /// `pub-009`, `pub-010`, `ret-002`. Eight at U-553, which added the three
-/// `ConditionalOnCapability` rows: `dk-003`, `err-002`, `idem-007`.
-const EXERCISED_FIXTURES_AT_PIN: usize = 8;
+/// `ConditionalOnCapability` rows: `dk-003`, `err-002`, `idem-007`. Nine once
+/// `pub-007` was retired, after a fresh publish began answering `201 Created`
+/// with a percent-encoded `Location`.
+const EXERCISED_FIXTURES_AT_PIN: usize = 9;
 
 #[rustfmt::skip]
 const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
@@ -13684,6 +14038,9 @@ const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
     exercised_by!("pub-009", pub006_pub009_key_id_did_must_equal_agent_id),
     exercised_by!("pub-010", pub010_non_did_web_contributor_is_accepted_and_persisted),
     exercised_by!("ret-002", ret002_lineage_current_returns_the_newest_non_superseded_version),
+    // The last RequiredByProfile row: the publish response shape (201, Content-Type,
+    // percent-encoded Location, exact body keys).
+    exercised_by!("pub-007", pub007_publish_response_shape_and_location),
     // U-553: the three ConditionalOnCapability rows. Each test asserts the
     // fixture's CONDITION from the harness's own capabilities before asserting
     // the behaviour, so none of them claims a rule this registry is not under.
@@ -16195,15 +16552,20 @@ async fn fixture_accounting_totals_are_exact() {
         .count();
     // 12 before U-527 (`pub-002`/`012`/`013`/`014` began replaying), 8 before
     // U-528 (`pub-001`/`pub-011` now reach a real signature check), 6 before
-    // U-533 retired `pub-003`, `pub-006`, `pub-009`, `pub-010` and `ret-002`.
+    // U-533 retired `pub-003`, `pub-006`, `pub-009`, `pub-010` and `ret-002`, and
+    // 1 before `pub-007` was retired once a fresh publish answered 201 with a
+    // percent-encoded `Location` (now `pub007_publish_response_shape_and_location`).
     //
-    // The ONE that remains is `pub-007`, blocked on the U-526 wire change
-    // (201 + percent-encoded `Location`) which is escalated to the human. So this
-    // number cannot reach 0 by writing another test -- it needs that decision.
+    // ZERO. `UNEXERCISED_FIXTURES` is now empty, so every loop over it elsewhere
+    // passes vacuously; this equality is what still bites. It can only go UP via a
+    // spec bump adding a required fixture nothing asks for -- which must stop the
+    // build and force a human to classify it.
     assert_eq!(
-        required, 1,
-        "expected exactly 1 required-but-unexercised (`pub-007`, blocked on U-526). An EXACT \
-         equality, not a floor: a floor would read a silently shrinking list as an improvement"
+        required, 0,
+        "expected 0 required-but-unexercised; `pub-007` was the last and is now exercised. \
+         A NEW required fixture arriving from a spec bump lands here: classify it and write \
+         the test. An EXACT equality, not a floor: a floor would read a silently shrinking \
+         list as an improvement"
     );
     // U-533 checked and did NOT move this; U-553 retired all three. `dk-003`,
     // `err-002` and `idem-007` are now each requested by a named test registered
