@@ -181,8 +181,12 @@ around those calls:
    once, and a publish that fails before its signer is proven is never
    charged.
 7. Receipt minting and the transparency-log leaf append, when `[receipt]` /
-   `[log]` are enabled (see [RECEIPTS.md](RECEIPTS.md)).
-8. A `context.published` webhook on success (see [WEBHOOKS.md](WEBHOOKS.md)).
+   `[log]` are enabled (see [RECEIPTS.md](RECEIPTS.md)). Insert only: an
+   idempotent replay mints and appends nothing.
+8. A `context.published` webhook on a fresh publish (see
+   [WEBHOOKS.md](WEBHOOKS.md)), and the reply: `201 Created` with `Location`, or
+   `200 OK` with the same `Location` for a replay (`publish_reply.rs`). The SDK's
+   commit outcome (`Inserted` or `IdempotentReplay`) decides which.
 
 The four-way charge split is pinned by
 `late_failures_are_charged_on_exactly_three_of_the_four_publish_branches`

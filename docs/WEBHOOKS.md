@@ -26,6 +26,10 @@ same event; the header is what you route on without parsing the body.
 
 ### `context.published`
 
+Emitted once per fresh publish. An idempotent replay of the same publish
+(`Idempotency-Key`) does not emit it again: the replay has no new `event_id`, and
+consumers that dedupe on the event id would otherwise see a second publication.
+
 ```json
 {
   "event_id": "e0f1...",

@@ -21,6 +21,39 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.5.0
+
+**One breaking wire change: `POST /contexts` now answers `201 Created` to a first successful publish
+(it answered `200`). A client that requires exactly `200` must accept `201`. Rolling back to 0.4.x is
+safe.**
+
+RFC-ACDP-0003 §4 requires `201 Created` with a percent-encoded `Location` for a fresh publish and §6.2
+requires `200 OK` for an idempotent replay. Earlier releases answered `200` with no `Location` to both
+(conformance fixture `pub-007`, the one deliberately unexercised fixture, is now exercised).
+
+- **Who is affected:** code that publishes to this registry and checks the status code for equality
+  with `200`. Clients that treat any 2xx as success (the `acdp-client` SDK, `curl --fail`,
+  `fetch().ok`) are unaffected. Nothing else about the response body changed.
+- **What to do before upgrading:** find any caller that compares the publish status to `200` and
+  accept `201` as well (and `200`, for a replay). There is no configuration switch.
+- **`Location`.** A fresh publish carries `Location: /contexts/<ctx_id>`, path-relative, with the
+  `ctx_id` percent-encoded as one segment: `acdp://registry.example.com/<uuid>` becomes
+  `/contexts/acdp%3A%2F%2Fregistry.example.com%2F<uuid>`. A replay answers `200` with the same body and
+  the same `Location`. Browser clients on a configured `registry.cors.allowed_origins` origin can read
+  it (the reply now lists `Location` in `Access-Control-Expose-Headers`).
+- **Replays are no longer re-announced.** An idempotent replay used to be counted as `inserted` in
+  `acdp_registry_publish_total`, fire a second `context.published` webhook with a fresh `event_id`, and
+  bump the receipt and log-leaf counters. Now it counts as `outcome="idempotent_replay"` on every
+  path (it was playground-only) and does none of the rest. Dashboards that expected replays under
+  `inserted` will see them move. A replay that carries a different `X-Run-Id` than the original no
+  longer produces a second run-linked `context.published` event.
+- **Unchanged:** `POST /contexts/{ctx_id}/retract` and `/republish` still answer `200`; error codes and
+  statuses; charging of the per-agent publish budget; storage and configuration.
+- **Rollback:** safe. No storage, configuration or schema change; 0.4.x answers `200` and any client
+  that accepts 2xx works against both.
+
+---
+
 ## 0.4.2
 
 No operator-visible upgrade steps. Since 0.4.1 the only changes are the `acdp` dependency moving from 0.14.4 to 0.14.5

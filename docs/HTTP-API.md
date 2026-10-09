@@ -368,7 +368,7 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 |--------|------|--------|---------|
 | `acdp_registry_request_total` | counter | `route`, `method`, `status_class` | HTTP requests by **matched** route pattern (never the resolved `ctx_id`). |
 | `acdp_registry_request_duration_seconds` | histogram | `route`, `method` | Request latency. |
-| `acdp_registry_publish_total` | counter | `outcome` | Publishes: `inserted`, `idempotent_replay` (playground path), or a wire code (`schema_violation`, `payload_too_large`, …). |
+| `acdp_registry_publish_total` | counter | `outcome` | Publishes: `inserted`, `idempotent_replay` (every path), or a wire code (`schema_violation`, `payload_too_large`, …). |
 | `acdp_registry_receipts_minted_total` | counter | — | RFC-ACDP-0010 receipts minted on accepted publishes. |
 | `acdp_registry_log_leaves_total` | counter | — | RFC-ACDP-0012 transparency-log leaves appended. |
 | `acdp_registry_lifecycle_event_total` | counter | `event`, `outcome` | Retract / republish outcomes. |
@@ -414,7 +414,7 @@ Request headers:
 | `X-Run-Id`        | optional | ≤256 chars; correlation id echoed into the `context.published` webhook. |
 | `X-Tenant-Id`     | optional | Selects the tenant only when no signed `tenant` claim (or, for writes, `[[auth.tenant_agents]]` binding) applies **and** `auth.tenant_header_trust` trusts the sender: `none` (the default in every mode since 0.4.0) never, `trusted_proxies` only from a listed gateway peer, `any_peer` always. A header that is present but untrusted, and does not simply repeat the claim/binding, is `403 not_authorized`; `default` is `400 schema_violation`. See [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id). |
 
-Body: an RFC-ACDP-0003 `PublishRequest` (JSON). Response: `200` with a
+Body: an RFC-ACDP-0003 `PublishRequest` (JSON). Response: `201 Created` with a
 `PublishResponse` (assigned `ctx_id`, `lineage_id`, `version`, `status`, and —
 on a receipts-advertising registry — the top-level `registry_receipt`, the
 signed RFC-ACDP-0010 attestation minted atomically with the row). A
@@ -431,14 +431,16 @@ pinned key nothing is verified, so only a successful publish is charged.
 Because peek and charge are separated by the verify, concurrent publishes by
 one agent can overshoot the limit by the number in flight.
 
-**Deviation from the RFC.** A first successful publish answers `200` and this
-registry sets no `Location` header, whereas
-[RFC-ACDP-0003 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0003-publish.md#4-publish-response) requires `201 Created` with a
-percent-encoded `Location` (a replay is `200`,
-[§6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0003-publish.md#62-registry-behavior)). Changing it breaks clients that rely on the
-current shape, so it is an open owner decision (U-526, described in
-`crates/acdp-registry-server/tests/conformance.rs`); conformance fixture `pub-007`
-is the one left deliberately unexercised for this reason.
+**Status and `Location`.** A first successful publish answers `201 Created`
+([RFC-ACDP-0003 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0003-publish.md#4-publish-response)); an idempotent replay (same agent,
+same `Idempotency-Key`, same `content_hash`) answers `200 OK` with the original
+response ([§6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0003-publish.md#62-registry-behavior)). Both carry
+`Location: /contexts/<ctx_id>`, a path-relative URL whose `ctx_id` is
+percent-encoded as one path segment (`acdp://host/uuid` becomes
+`/contexts/acdp%3A%2F%2Fhost%2Fuuid`, uppercase hex). A replay emits no second
+`context.published` webhook, mints no receipt and appends no log leaf. Before
+0.5.0 the response was `200` with no `Location` (see
+[UPGRADING.md](UPGRADING.md#050)).
 
 did:key producers (ACDP 0.2.0) are verified **offline** — no DID-document
 fetch — when `"did:key"` is in `supported_did_methods`; otherwise the publish

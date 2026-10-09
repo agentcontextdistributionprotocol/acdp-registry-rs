@@ -31,6 +31,17 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+### Publish answers 201 Created with a Location (U-526 resolved, 0.5.0)
+
+`POST /contexts` answered `200` with no `Location` for every success, a deviation from RFC-ACDP-0003 §4 that conformance fixture `pub-007`
+had been the single deliberately unexercised row for. The SDK already told the two cases apart (`PublishCommitOutcome::Inserted` /
+`IdempotentReplay`) and the handler discarded it, so the fix was to keep it: the reply is now `201` + `Location` for a fresh publish and
+`200` + the same `Location` for a replay. Rejected: a config flag (it would make `pub-007` unpinnable and be a permanent conformance-off
+switch), an absolute `Location` (the fixture and RFC example are path-relative), and detecting replays with a pre-commit lookup (races).
+The same outcome made three corrections free: replays are counted `idempotent_replay` on every path, and the webhook, receipt and log-leaf
+counters fire on insert only. The test change was ~115 assertions, flipped by hand-checked fresh-versus-replay decisions, never loosened
+to accept both codes. The mutation ratchet had to be re-measured because `context.rs` is a scoped file: the pins come from a run, not an edit.
+
 ### Docs refresh 2 (2026-10-08) — pins, process truth, link-first
 
 The first refresh (October 3) fixed what the code contradicted; five days and 43 commits later the same pages had drifted again,
