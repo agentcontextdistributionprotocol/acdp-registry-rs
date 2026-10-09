@@ -128,7 +128,7 @@ async fn publish_public(h: &Harness, seed: u8, title: &str) -> String {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish must succeed: {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish must succeed: {v}");
     v["ctx_id"]
         .as_str()
         .expect("publish response carries ctx_id")

@@ -235,13 +235,15 @@ async fn fresh_then_replay(
     after_replay: Counts,
 ) -> Value {
     let (s1, v1) = publish(app, req, Some(key)).await;
-    assert_eq!(s1, StatusCode::OK, "{branch}: fresh publish: {v1}");
+    assert_eq!(s1, StatusCode::CREATED, "{branch}: fresh publish: {v1}");
     assert_eq!(
         counts(app).await,
         after_fresh,
         "{branch}: after the fresh publish"
     );
     let (s2, v2) = publish(app, req, Some(key)).await;
+    // RFC-ACDP-0003 §6.2: a fresh publish is `201 Created`, a genuine replay
+    // `200 OK` (idem-002 forbids `201` there).
     assert_eq!(s2, StatusCode::OK, "{branch}: replay: {v2}");
     assert_eq!(v2, v1, "{branch}: control: this must really be a replay");
     assert_eq!(

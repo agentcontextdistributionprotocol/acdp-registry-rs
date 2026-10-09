@@ -38,10 +38,14 @@ pub fn location_for(ctx_id: &str) -> String {
     out
 }
 
-/// The status for a successful publish.
+/// The status for a successful publish: `201 Created` for a fresh one (RFC-ACDP-0003
+/// §4), `200 OK` for an idempotent replay (§6.2; idem-002 forbids `201` there).
 pub fn success_status(is_replay: bool) -> StatusCode {
-    let _ = is_replay;
-    StatusCode::OK
+    if is_replay {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    }
 }
 
 /// Build the reply for an accepted publish.
@@ -74,6 +78,12 @@ mod tests {
             }
         }
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_publish_is_created_and_a_replay_is_ok() {
+        assert_eq!(success_status(false), StatusCode::CREATED);
+        assert_eq!(success_status(true), StatusCode::OK);
     }
 
     #[test]

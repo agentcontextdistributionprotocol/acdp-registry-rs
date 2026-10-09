@@ -259,7 +259,7 @@ fn a_listed_loopback_peer_is_trusted_and_an_unlisted_one_is_refused() {
         Some("tenant-a"),
     )
     .expect("publish");
-    assert_eq!(status, 200, "publish: {v}\n{}", reg.output());
+    assert_eq!(status, 201, "publish: {v}\n{}", reg.output());
     let ctx_id = v["ctx_id"].as_str().expect("ctx_id").to_string();
     let path = format!("/contexts/{}", pct(&ctx_id));
     let (status, v) = http(port, "GET", &path, None, Some("tenant-a")).expect("get a");
@@ -301,7 +301,7 @@ fn a_listed_loopback_peer_is_trusted_and_an_unlisted_one_is_refused() {
         None,
     )
     .expect("publish");
-    assert_eq!(status, 200, "no header, no refusal: {v}");
+    assert_eq!(status, 201, "no header, no refusal: {v}");
     drop(reg);
 
     // ── 3. An empty list cannot trust anyone: refused at startup. ─────────

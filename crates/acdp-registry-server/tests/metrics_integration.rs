@@ -274,7 +274,7 @@ async fn metrics_endpoint_exposes_request_and_domain_series() {
             .visibility(Visibility::Public)
             .build()
             .unwrap();
-        assert_eq!(publish(&h.router, &req).await, StatusCode::OK);
+        assert_eq!(publish(&h.router, &req).await, StatusCode::CREATED);
     }
 
     // A malformed publish → schema_violation outcome.
