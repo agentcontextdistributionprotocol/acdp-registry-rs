@@ -12284,3 +12284,317 @@ async fn a_valid_event_refused_for_a_bad_bearer_is_not_charged() {
         StatusCode::TOO_MANY_REQUESTS
     );
 }
+
+// ---------------------------------------------------------------------------
+// publish-201-location Phase 1a (`plans/publish-201-location.md`): every
+// successful `POST /contexts` carries `Location` (RFC-ACDP-0003 §4), the
+// canonical retrieval path `/contexts/` + the `ctx_id` percent-encoded as ONE
+// path segment; an idempotent replay carries the SAME `Location` and the
+// identical body, and is not a second publication (no second
+// `context.published` webhook). The status is still 200 on both in this phase.
+//
+// The counter half (`publish_total{outcome}`, receipts minted, log leaves) is
+// in `publish_outcome_metrics.rs`: the recorder is process-global and this
+// binary runs its tests in parallel, so exact counts are only deterministic in
+// a binary of their own.
+// ---------------------------------------------------------------------------
+
+/// [`publish`] that keeps the response headers (`common::publish` drops them).
+async fn publish_keeping_headers(
+    app: &axum::Router,
+    req: &acdp::types::publish::PublishRequest,
+    idem: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let body = serde_json::to_vec(req).unwrap();
+    let mut builder = Request::builder().method("POST").uri("/contexts");
+    if let Some(k) = idem {
+        builder = builder.header("Idempotency-Key", k);
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let v = body_to_json(resp).await;
+    (status, headers, v)
+}
+
+/// Inverse of [`pct_encode_path_segment`]: `%XX` back to the byte.
+fn pct_decode_path_segment(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).expect("valid %XX"));
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("utf-8")
+}
+
+/// Assert a publish response's `Location` is exactly `/contexts/` +
+/// `pct_encode_path_segment(ctx_id)` and decodes back to the body's `ctx_id`.
+/// Returns the `Location`.
+fn assert_location_names_the_ctx(
+    branch: &str,
+    headers: &axum::http::HeaderMap,
+    body: &Value,
+) -> String {
+    let ctx_id = body["ctx_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{branch}: publish body carries no ctx_id: {body}"));
+    let location = headers
+        .get(axum::http::header::LOCATION)
+        .unwrap_or_else(|| panic!("{branch}: a successful publish must carry Location: {body}"))
+        .to_str()
+        .expect("Location is ASCII")
+        .to_string();
+    assert_eq!(
+        location,
+        format!("/contexts/{}", pct_encode_path_segment(ctx_id)),
+        "{branch}: Location must be the path-relative retrieval URL with the \
+         ctx_id encoded as one path segment"
+    );
+    let tail = location
+        .strip_prefix("/contexts/")
+        .expect("checked just above");
+    assert!(
+        !tail.contains('/'),
+        "{branch}: an unencoded '/' would split the ctx_id across path segments: {location}"
+    );
+    assert_eq!(
+        pct_decode_path_segment(tail),
+        ctx_id,
+        "{branch}: Location must decode back to the body's ctx_id"
+    );
+    location
+}
+
+/// Fresh publish under `key`, then the SAME key + SAME body again: both carry
+/// `Location`, the replay's is identical and so is its body. Returns the fresh
+/// body.
+async fn assert_location_on_fresh_and_replay(
+    branch: &str,
+    router: &axum::Router,
+    req: &acdp::types::publish::PublishRequest,
+    key: &str,
+) -> Value {
+    let (s1, h1, v1) = publish_keeping_headers(router, req, Some(key)).await;
+    assert_eq!(s1, StatusCode::OK, "{branch}: fresh publish: {v1}");
+    let loc1 = assert_location_names_the_ctx(branch, &h1, &v1);
+
+    let (s2, h2, v2) = publish_keeping_headers(router, req, Some(key)).await;
+    assert_eq!(s2, StatusCode::OK, "{branch}: replay: {v2}");
+    let loc2 = assert_location_names_the_ctx(branch, &h2, &v2);
+    assert_eq!(
+        loc2, loc1,
+        "{branch}: a replay must name the SAME context as the publish it replays"
+    );
+    assert_eq!(
+        v2, v1,
+        "{branch}: a replay must return the original response body unchanged"
+    );
+    v1
+}
+
+/// Production path, `did:web`: identity genuinely resolved through the
+/// in-process fixture server (see `a_did_web_retract_retracts_rather_than_republishing`).
+#[tokio::test(flavor = "multi_thread")]
+async fn publish_location_on_the_production_did_web_branch() {
+    let addr = didweb::spawn_didweb_server().await;
+    let resolver = Arc::new(
+        WebResolver::with_test_endpoint(
+            didweb::ca_pem().as_bytes(),
+            didweb::DIDWEB_AUTHORITY,
+            addr,
+        )
+        .expect("test-endpoint resolver"),
+    );
+    let h = didweb_lifecycle_harness(resolver).await;
+    let req = producer(241)
+        .publish_request()
+        .title("location-did-web")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    assert!(
+        req.agent_id.as_str().starts_with("did:web:"),
+        "control: this must exercise the did:web branch, not did:key"
+    );
+    assert_location_on_fresh_and_replay("production did:web", &h.router, &req, "loc-didweb-1")
+        .await;
+}
+
+/// `did:key` (production pipeline, offline verification), on a registry that
+/// mints receipts and keeps the transparency log: the replay carries the
+/// ORIGINAL receipt, byte-identical, not a freshly minted one.
+#[tokio::test]
+async fn publish_location_on_the_did_key_branch() {
+    let h = log_harness().await;
+    let req = did_key_producer(242)
+        .publish_request()
+        .title("location-did-key")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let v = assert_location_on_fresh_and_replay("did:key", &h.router, &req, "loc-didkey-1").await;
+    assert!(
+        v["registry_receipt"].is_object(),
+        "control: this registry mints receipts, so the replay-equality above \
+         covers the receipt too: {v}"
+    );
+}
+
+/// Playground, pinned key, signature verified against the pin.
+#[tokio::test]
+async fn publish_location_on_the_playground_pinned_branch() {
+    let did = "did:web:agents.test:smoke-pinned-location";
+    let p = Producer::new(
+        SigningKey::from_bytes(&[243u8; 32]),
+        AgentDid::new(did),
+        format!("{did}#key-1"),
+    );
+    let mut cfg = config(true);
+    cfg.playground.pinned_keys = vec![PinnedAgentKey {
+        agent_did: did.into(),
+        public_key_b64: B64.encode(SigningKey::from_bytes(&[243u8; 32]).verifying_key_bytes()),
+        algorithm: "ed25519".into(),
+        valid_from: None,
+        valid_until: None,
+    }];
+    let h = harness_from_config(cfg).await;
+    let req = p
+        .publish_request()
+        .title("location-pinned")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    assert_location_on_fresh_and_replay("playground pinned", &h.router, &req, "loc-pinned-1").await;
+}
+
+/// Playground, unpinned: the replay here is the handler's own idempotency
+/// lookup (not the SDK's), so it is its own early-return path.
+#[tokio::test]
+async fn publish_location_on_the_playground_unpinned_branch() {
+    let h = harness(true).await;
+    let req = producer(244)
+        .publish_request()
+        .title("location-unpinned")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    assert_location_on_fresh_and_replay("playground unpinned", &h.router, &req, "loc-unpinned-1")
+        .await;
+}
+
+/// A replay is not a new publication: the fresh publish delivers exactly one
+/// `context.published`, the replay delivers none.
+///
+/// Absence is proven by ORDER, not by waiting: the emitter drains one FIFO
+/// queue with a single worker, so after the replay a SENTINEL publish is made
+/// and the next delivery must be the sentinel's. A replay-triggered second
+/// delivery would be queued ahead of it and arrive first.
+#[tokio::test]
+async fn a_publish_replay_delivers_no_second_webhook() {
+    let (h, mut rx) = webhook_harness(false).await;
+    let req = did_key_producer(245)
+        .publish_request()
+        .title("location-webhook")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (s1, _, v1) = publish_keeping_headers(&h.router, &req, Some("loc-webhook-1")).await;
+    assert_eq!(s1, StatusCode::OK, "fresh publish: {v1}");
+    let (_head, first) = next_webhook(&mut rx).await;
+    assert_eq!(
+        first["ctx_id"], v1["ctx_id"],
+        "the fresh publish must deliver its context.published: {first}"
+    );
+
+    let (s2, _, v2) = publish_keeping_headers(&h.router, &req, Some("loc-webhook-1")).await;
+    assert_eq!(s2, StatusCode::OK, "replay: {v2}");
+    assert_eq!(v2, v1, "control: this must really be a replay");
+
+    let sentinel = did_key_producer(246)
+        .publish_request()
+        .title("location-webhook-sentinel")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (s3, _, v3) = publish_keeping_headers(&h.router, &sentinel, None).await;
+    assert_eq!(s3, StatusCode::OK, "sentinel publish: {v3}");
+    assert_ne!(v3["ctx_id"], v1["ctx_id"], "control: a distinct context");
+    let (_head, next) = next_webhook(&mut rx).await;
+    assert_eq!(
+        next["ctx_id"], v3["ctx_id"],
+        "the delivery after the replay must be the sentinel's; a delivery for \
+         the replayed {} means the replay was emitted as a second publication: {next}",
+        v1["ctx_id"]
+    );
+}
+
+/// `Location` is not CORS-safelisted, so a browser can only read it if the
+/// registry lists it in `Access-Control-Expose-Headers`. Asserted on a real
+/// cross-origin `POST /contexts`, NOT a preflight: tower-http's `CorsLayer`
+/// emits `expose-headers` on the actual response only.
+#[tokio::test]
+async fn a_cross_origin_publish_exposes_location() {
+    let mut cfg = config(true);
+    cfg.registry.cors.allowed_origins = vec!["https://ui.test".into()];
+    let h = harness_from_config(cfg).await;
+    let req = producer(247)
+        .publish_request()
+        .title("location-cors")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .header(axum::http::header::ORIGIN, "https://ui.test")
+                .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let v = body_to_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        headers
+            .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("https://ui.test"),
+        "control: the origin must be allowed, or expose-headers is moot"
+    );
+    assert_location_names_the_ctx("cors", &headers, &v);
+    let exposed: Vec<String> = headers
+        .get_all(axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .flat_map(|h| h.split(','))
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    assert!(
+        exposed.iter().any(|h| h == "location"),
+        "a browser client must be allowed to read Location; exposed = {exposed:?}"
+    );
+}

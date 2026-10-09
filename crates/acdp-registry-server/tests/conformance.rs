@@ -15948,7 +15948,7 @@ fn this_file_cites_constructs_and_never_line_numbers() {
             "crates/acdp-registry-pg/src/store.rs",
         ),
         (
-            "Ok(Json(response))",
+            "publish_reply(is_replay, response)",
             "crates/acdp-registry-core/src/handlers/context.rs",
         ),
         (
