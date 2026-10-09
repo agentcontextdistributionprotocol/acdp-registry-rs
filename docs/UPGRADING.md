@@ -44,7 +44,7 @@ requires `200 OK` for an idempotent replay. Earlier releases answered `200` with
 - **Replays are no longer re-announced.** An idempotent replay used to be counted as `inserted` in
   `acdp_registry_publish_total`, fire a second `context.published` webhook with a fresh `event_id`, and
   bump the receipt and log-leaf counters. Now it counts as `outcome="idempotent_replay"` on every
-  path (it was playground-only) and does none of the rest. Dashboards that expected replays under
+  path (before, only the unpinned playground path did) and does none of the rest. Dashboards that expected replays under
   `inserted` will see them move. A replay that carries a different `X-Run-Id` than the original no
   longer produces a second run-linked `context.published` event.
 - **Unchanged:** `POST /contexts/{ctx_id}/retract` and `/republish` still answer `200`; error codes and
