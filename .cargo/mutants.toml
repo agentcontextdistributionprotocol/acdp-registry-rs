@@ -106,9 +106,9 @@ copy_vcs = true
 #     total                                               353
 #
 # 354 -> 353 (publish 201 + Location): context.rs 140 -> 139. Splitting the commit outcome
-# (PublishReply) deleted eight CAUGHT `Json<PublishResponse>` return-replacement mutants
-# and added three `delete !`, two `&&` -> `||` and two return-replacement mutants, all
-# CAUGHT; the seven survivors are the same mutants on shifted lines (:84, :85, :614, :1234).
+# (PublishReply) deleted eight UNVIABLE `Json<PublishResponse>` return-replacement
+# mutants and added two UNVIABLE `Ok(Default::default())` ones plus five CAUGHT
+# (three `delete !`, two `&&` -> `||`); caught 221 -> 226, unviable 125 -> 119. The seven survivors are the same mutants on shifted lines (:84, :85, :614, :1234).
 #
 # 358 -> 354 (#401): context.rs 144 -> 140, PURELY SUBTRACTIVE. #401 replaced
 # #375's lifecycle charge pre-flight with the SDK's prove/commit split, which

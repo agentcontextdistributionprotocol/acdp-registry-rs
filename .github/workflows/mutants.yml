@@ -80,11 +80,13 @@ env:
   # lifecycle_transition, and one `delete match arm LifecycleEventType::Retracted`
   # (the separate did:key and did:web retract/republish dispatches became one
   # `LifecycleEndpoint` match). Purely subtractive: -4 caught, 0 survivor change.
-  # Measured by run 37972268890 (workflow_dispatch on feat/publish-201-location): 353 / 221
-  # caught / 7 missed / 125 unviable / 1 timeout, `end_time` present, 101.2 min.
+  # Measured by run 37972268890 (workflow_dispatch on feat/publish-201-location): 353 / 226
+  # caught / 7 missed / 119 unviable / 1 timeout, `end_time` present, 113.0 min.
   # Its outcomes.json is committed unchanged as the new MUTANTS_PRIOR_LEDGER, and
-  # this list is its `missed.txt` verbatim. The four scoped files are identical
-  # between 09615e9 and the re-pin's base (empty diff).
+  # this list is its `missed.txt` verbatim. The publish 201 change edited only
+  # context.rs among the scoped files: 354 -> 353 (-8 unviable return-replacement
+  # mutants on `publish`/`publish_inner`, +2 unviable, +5 caught); the seven
+  # survivors are the same mutants on shifted lines.
   #
   # SCOPE 346 -> 358 (#373, #375, #376, #374; final re-pin of plans/issues-371-376).
   # NOT a budget change: the floor stays 7 and the survivor SET is the same seven
@@ -206,7 +208,7 @@ env:
   # become real coverage gaps if search ever serves restricted rows, and at that
   # point those five drop to 3.
   #
-  # CURRENT FLOOR: 7, at the 354 scope (was 7 at 358, 346 and 351; #341 and #401
+  # CURRENT FLOOR: 7, at the 353 scope (was 7 at 358, 346 and 351; #341 and #401
   # removed only caught mutants, #373-#376 added only caught/unviable ones). See the 5 -> 7 entry above for why the
   # two store.rs additions are carried rather than killed.
   #
@@ -234,7 +236,7 @@ env:
   #
   # Granularity is site + REPLACEMENT, not site: one site can hold several
   # mutants with different verdicts, and this scope contains that case --
-  # `run_search_with_refill` has a `delete !` that is MISSED (:1222:16) and
+  # `run_search_with_refill` has a `delete !` that is MISSED (:1234:16) and
   # another that TIMES OUT (:1270:12). A site-level list cannot tell them apart.
   #
   # FORMAT: one `cargo mutants --list` line per survivor, verbatim. `#` lines and
@@ -242,13 +244,13 @@ env:
   # reason HERE rather than only in the prose above -- an identifier and its
   # justification that live in two places drift apart, and the drift is invisible.
   #
-  # MEASURED, not transcribed: the list below is run 37248684286's `missed.txt`
-  # verbatim -- a full single 354-mutant run of THIS workflow (so the
+  # MEASURED, not transcribed: the list below is run 37972268890's `missed.txt`
+  # verbatim -- a full single 353-mutant run of THIS workflow (so the
   # CI-equivalent environment: ACDP_SPEC_DIR at the pinned spec revision and
   # ACDP_REQUIRE_CONFORMANCE=1 -- without those, fixture-replay tests skip and
   # the survivor set comes out wider than CI's).
   #
-  # Result 354 / 221 caught / 7 missed / 125 unviable / 1 timeout, `end_time`
+  # Result 353 / 226 caught / 7 missed / 119 unviable / 1 timeout, `end_time`
   # present, and `missed.txt`'s line count cross-checked against outcomes.json's
   # `missed`. The run is committed at
   # docs/mutation-runs/run37972268890-scope-353-outcomes.json and is what
@@ -346,9 +348,9 @@ env:
   #     converted into a fast assertion failure by any test: the binary hangs and
   #     the verdict is TIMEOUT. Re-measured at 8768b07 in shard 4/8: still exactly
   #     one timeout, still this mutant, 300s. Runs 36417581090 (346 scope),
-  #     37222567772 (358 scope, now :1270:12) and 37248684286 (354 scope, still
-  #     :1270:12): still exactly one, this mutant. The
-  #     sibling `delete !` at :1222:16 (was :1206:16, then
+  #     37222567772 (358 scope) and 37248684286 (354 scope) record
+  #     it at :1258:12 in their committed ledgers; run 37972268890 (353 scope) records :1270:12: still exactly one, this mutant. The
+  #     sibling `delete !` at :1234:16 (was :1222:16, :1206:16, then
   #     :1223:16, then :1238:16) is the MISSED equivalent above -- two `delete !` mutants in
   #     one function with different verdicts, which is why both are cited by
   #     expression and not by line alone.
@@ -379,6 +381,7 @@ jobs:
     #   36417581090  346 mutants  completed 143.7 min   <- 36 min under 180
     #   37222567772  358 mutants  completed 108.7 min   <- 71 min under 180
     #   37248684286  354 mutants  completed 101.2 min   <- 79 min under 180
+    #   37972268890  353 mutants  completed 113.0 min   <- 67 min under 180
     #     (cargo-mutants' own start/end time in outcomes.json; the job failed
     #     only because the ratchet's pins were stale, see #371)
     #
