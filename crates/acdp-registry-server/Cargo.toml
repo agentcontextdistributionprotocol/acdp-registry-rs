@@ -16,13 +16,13 @@ path = "src/main.rs"
 
 [dependencies]
 acdp                  = { workspace = true }
-acdp-registry-auth    = { path = "../acdp-registry-auth", version = "0.4.2" }
-acdp-registry-core    = { path = "../acdp-registry-core", version = "0.4.2" }
-acdp-registry-pg      = { path = "../acdp-registry-pg", version = "0.4.2", optional = true }
-acdp-registry-sqlite  = { path = "../acdp-registry-sqlite", version = "0.4.2", optional = true }
-acdp-registry-store   = { path = "../acdp-registry-store", version = "0.4.2" }
-acdp-registry-types   = { path = "../acdp-registry-types", version = "0.4.2" }
-acdp-registry-webhook = { path = "../acdp-registry-webhook", version = "0.4.2" }
+acdp-registry-auth    = { path = "../acdp-registry-auth", version = "0.5.0" }
+acdp-registry-core    = { path = "../acdp-registry-core", version = "0.5.0" }
+acdp-registry-pg      = { path = "../acdp-registry-pg", version = "0.5.0", optional = true }
+acdp-registry-sqlite  = { path = "../acdp-registry-sqlite", version = "0.5.0", optional = true }
+acdp-registry-store   = { path = "../acdp-registry-store", version = "0.5.0" }
+acdp-registry-types   = { path = "../acdp-registry-types", version = "0.5.0" }
+acdp-registry-webhook = { path = "../acdp-registry-webhook", version = "0.5.0" }
 anyhow             = { workspace = true }
 async-trait        = { workspace = true }
 axum               = { workspace = true }
@@ -109,7 +109,7 @@ rcgen          = "0.14"
 # must live inside the binary, and this is the only route they have to
 # `parity`. Dev-only: under `resolver = "2"` the feature never reaches the
 # shipped binary (see the note on `rcgen` above).
-acdp-registry-store = { path = "../acdp-registry-store", version = "0.4.2", features = ["test-support"] }
+acdp-registry-store = { path = "../acdp-registry-store", version = "0.5.0", features = ["test-support"] }
 # #385: full JSON-Schema validation of the documents the spawned binary SERVES
 # (`/.well-known/acdp.json` and friends) against the pinned spec's
 # `schemas/json/*.schema.json`, in `tests/conformance.rs`. Default features OFF

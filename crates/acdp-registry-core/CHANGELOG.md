@@ -1,5 +1,12 @@
 
 
+## [0.5.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.4.2...acdp-registry-core/v0.5.0) - 2026-10-10
+
+### Added
+
+- *(publish)* [**breaking**] fresh publish answers 201 Created + Location; replay stays 200 ([#432](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/432))
+
+
 ## [0.4.2](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.4.1...acdp-registry-core/v0.4.2) - 2026-10-06
 
 ### Other
