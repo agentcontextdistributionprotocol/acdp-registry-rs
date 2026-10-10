@@ -1,6 +1,6 @@
 # Status and definition of done
 
-**As of 2026-10-06, the 0.4.x line is stable.** This repository is *done* while `main` is green and no issue is open.
+**As of 2026-10-09, the stable line is 0.5.x once the pending release PR merges (0.4.x until then).** This repository is *done* while `main` is green and no issue is open.
 That is the normal resting state, not a gap to fill.
 
 ## When to reopen it

@@ -283,7 +283,7 @@ fn lifecycle_state_with_the_flag_off_refuses_to_start_and_survives_re_enable() {
         Some(&serde_json::to_value(&req).unwrap()),
     )
     .expect("publish");
-    assert_eq!(status, 200, "publish: {v}\n{}", reg.output());
+    assert_eq!(status, 201, "publish: {v}\n{}", reg.output());
     let ctx_id = v["ctx_id"].as_str().expect("ctx_id").to_string();
     let lineage_id = v["lineage_id"].as_str().expect("lineage_id").to_string();
     let (status, v) = http(

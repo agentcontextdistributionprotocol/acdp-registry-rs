@@ -284,7 +284,7 @@ values for illustration. Env var = `ACDP_REGISTRY_` + the bracketed path.
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `allowed_origins` | string[] | `[]` | Empty disables CORS (no headers sent). List your UI origin(s) to opt in. |
+| `allowed_origins` | string[] | `[]` | Empty disables CORS (no headers sent). List your UI origin(s) to opt in. A configured origin may also read the `Location` header of a `POST /contexts` reply (`Access-Control-Expose-Headers: location`). |
 
 ### `[storage]`
 

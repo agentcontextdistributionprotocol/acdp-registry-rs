@@ -802,7 +802,7 @@ async fn tenancy_stamp_and_filter_roundtrip() {
         .build()
         .unwrap();
     let (status, v) = publish_with_tenant(&h.router, &req, Some("tenant-a")).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     // Right tenant → 200.
@@ -837,7 +837,7 @@ async fn tenancy_default_when_no_publish_header() {
         .build()
         .unwrap();
     let (status, v) = publish_with_tenant(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::CREATED);
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     // Asserting the reserved sentinel is rejected — it cannot be used to alias
@@ -897,7 +897,11 @@ async fn strict_publish_rejects_unbound_producer_tenant_spoof() {
         .build()
         .unwrap();
     let (status, v) = publish_with_tenant(&h.router, &ok, None).await;
-    assert_eq!(status, StatusCode::OK, "bound producer publish body = {v}");
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "bound producer publish body = {v}"
+    );
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
     // Read back with tenant-bound tokens: strict mode distrusts a bare
     // X-Tenant-Id by default (#374), so the header can no longer scope a read.
@@ -1048,7 +1052,7 @@ async fn publish_stamps_tenant_from_bound_token_claim() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
     let ctx_id = body_to_json(resp).await["ctx_id"]
         .as_str()
         .unwrap()
@@ -1100,7 +1104,7 @@ async fn strict_tenant_mode_rejects_unscoped_read() {
         // A bound producer's header matches its binding (corroboration) —
         // allowed in every mode.
         let (status, v) = publish_with_tenant(&h.router, &req, Some("tenant-a")).await;
-        assert_eq!(status, StatusCode::OK, "{mode:?} publish body = {v}");
+        assert_eq!(status, StatusCode::CREATED, "{mode:?} publish body = {v}");
         let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
         // No tenant signal at all → default-deny, NOT an unfiltered read. The
@@ -1184,7 +1188,7 @@ async fn trusted_proxies_mode_trusts_only_the_declared_gateway() {
         .build()
         .unwrap();
     let (status, v) = publish_with_tenant(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     // In CIDR → trusted → scoped to tenant-a → 200.
@@ -1273,7 +1277,7 @@ async fn untrusted_header_is_refused_on_lax_and_auth_off_writes() {
         assert_eq!(v["error"]["code"], "not_authorized", "{v}");
         // No header: the unbound write is untenanted, as before.
         let (status, v) = publish_with_tenant(&h.router, &unbound(), None).await;
-        assert_eq!(status, StatusCode::OK, "auth={auth_enabled}: {v}");
+        assert_eq!(status, StatusCode::CREATED, "auth={auth_enabled}: {v}");
         let untenanted = v["ctx_id"].as_str().unwrap().to_string();
         // ...and readable without a header, while a header-only read under
         // `none` is refused rather than silently ignored.
@@ -1293,7 +1297,7 @@ async fn untrusted_header_is_refused_on_lax_and_auth_off_writes() {
         cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::AnyPeer);
         let h = harness_from_config(cfg).await;
         let (status, v) = publish_with_tenant(&h.router, &unbound(), Some("tenant-a")).await;
-        assert_eq!(status, StatusCode::OK, "auth={auth_enabled}: {v}");
+        assert_eq!(status, StatusCode::CREATED, "auth={auth_enabled}: {v}");
         let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
         assert_eq!(
             retrieve_with_tenant(&h.router, &ctx_id, Some("tenant-a")).await,
@@ -1333,7 +1337,7 @@ async fn strict_tenant_mode_ignores_spoofed_header_on_unbound_token() {
         .build()
         .unwrap();
     let (status, v) = publish_with_tenant(&h.router, &req, Some("tenant-a")).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     // Unbound token + spoofed X-Tenant-Id=tenant-a → untrusted header →
@@ -1686,9 +1690,9 @@ async fn admin_list_filters_by_tenant() {
         .build()
         .unwrap();
     let (s, v) = publish_with_tenant(&h.router, &req_a, Some("tenant-a")).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(s, StatusCode::CREATED, "{v}");
     let (s, v) = publish_with_tenant(&h.router, &req_b, Some("tenant-b")).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(s, StatusCode::CREATED, "{v}");
 
     let resp = h
         .router
@@ -1781,7 +1785,7 @@ async fn admin_list_selects_a_tenant_by_header_under_strict_none() {
                 .unwrap();
             // The binding places the write; no header needed.
             let (s, v) = publish_with_tenant(&h.router, &req, None).await;
-            assert_eq!(s, StatusCode::OK, "{mode:?}: {v}");
+            assert_eq!(s, StatusCode::CREATED, "{mode:?}: {v}");
             ctx_ids.push(v["ctx_id"].as_str().unwrap().to_string());
         }
 
@@ -1855,7 +1859,7 @@ async fn admin_list_paginates_past_fully_hidden_pages() {
         .build()
         .unwrap();
     let (s, pub_v) = publish(app, &pubreq, None).await;
-    assert_eq!(s, StatusCode::OK);
+    assert_eq!(s, StatusCode::CREATED);
     let public_ctx = pub_v["ctx_id"].as_str().unwrap().to_string();
 
     tokio::time::sleep(std::time::Duration::from_millis(15)).await;
@@ -1869,7 +1873,7 @@ async fn admin_list_paginates_past_fully_hidden_pages() {
             .build()
             .unwrap();
         let (s, _) = publish(app, &r, None).await;
-        assert_eq!(s, StatusCode::OK);
+        assert_eq!(s, StatusCode::CREATED);
     }
 
     let mut seen: Vec<String> = Vec::new();
@@ -2036,7 +2040,7 @@ async fn admin_list_returns_public_rows_for_an_unnamed_admin_requester() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
 
     let resp = h
         .router
@@ -2087,7 +2091,7 @@ async fn admin_list_returns_rows_when_auth_enabled() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
 
     let resp = h
         .router
@@ -2133,7 +2137,7 @@ async fn admin_list_never_discloses_restricted_or_private_rows() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &restricted, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
 
     let private = producer(20)
         .publish_request()
@@ -2143,7 +2147,7 @@ async fn admin_list_never_discloses_restricted_or_private_rows() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &private, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
 
     let resp = h
         .router
@@ -2187,7 +2191,7 @@ async fn publish_unverified_then_retrieve() {
         .build()
         .unwrap();
     let (status, v) = publish(app, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     let resp = app
@@ -2218,7 +2222,7 @@ async fn search_returns_published_context() {
         .build()
         .unwrap();
     let (status, _v) = publish(app, &req, None).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::CREATED);
 
     let resp = app
         .clone()
@@ -2321,7 +2325,7 @@ async fn restricted_context_blocked_for_anonymous() {
         .build()
         .unwrap();
     let (status, v) = publish(app, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     let resp = app
@@ -2363,7 +2367,7 @@ async fn restricted_context_served_to_audience_member() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     // Audience member: full context served.
@@ -2442,8 +2446,8 @@ async fn idempotency_key_replays_same_response() {
         .unwrap();
     let (s1, v1) = publish(app, &req, Some("test-key-1")).await;
     let (s2, v2) = publish(app, &req, Some("test-key-1")).await;
-    assert_eq!(s1, StatusCode::OK);
-    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(s1, StatusCode::CREATED, "the first publish is fresh");
+    assert_eq!(s2, StatusCode::OK, "a genuine replay answers 200, not 201");
     assert_eq!(v1["ctx_id"], v2["ctx_id"]);
 }
 
@@ -2467,7 +2471,7 @@ async fn idempotency_key_collision_rejected() {
         .unwrap();
     let (s1, _) = publish(app, &req_a, Some("collision-key")).await;
     let (s2, _v2) = publish(app, &req_b, Some("collision-key")).await;
-    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s1, StatusCode::CREATED);
     assert_eq!(s2, StatusCode::CONFLICT, "expected 409 duplicate_publish");
 }
 
@@ -2490,9 +2494,9 @@ async fn idempotency_key_length_bounds() {
     // 256 chars → valid and honored (a retry replays the same ctx_id).
     let k256 = "x".repeat(256);
     let (s1, v1) = publish(app, &req, Some(&k256)).await;
-    assert_eq!(s1, StatusCode::OK, "256-char key must be accepted");
+    assert_eq!(s1, StatusCode::CREATED, "256-char key must be accepted");
     let (s2, v2) = publish(app, &req, Some(&k256)).await;
-    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK, "a honored 256-char key replays (200)");
     assert_eq!(
         v1["ctx_id"], v2["ctx_id"],
         "a valid 256-char key must be honored (idempotent replay)"
@@ -2503,8 +2507,8 @@ async fn idempotency_key_length_bounds() {
     let (s3, _) = publish(app, &req, Some(&k257)).await;
     assert_eq!(
         s3,
-        StatusCode::OK,
-        "an over-long key must be treated as absent, not rejected"
+        StatusCode::CREATED,
+        "an over-long key must be treated as absent (a fresh 201), not rejected"
     );
 }
 
@@ -2523,7 +2527,7 @@ async fn expired_idempotency_key_is_not_matched() {
         .build()
         .unwrap();
     let (s1, v1) = publish(app, &req, Some("expiry-key")).await;
-    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s1, StatusCode::CREATED);
 
     // Age the stored record so its TTL is in the past — cheaper and more
     // deterministic than sleeping out a real TTL.
@@ -2542,7 +2546,7 @@ async fn expired_idempotency_key_is_not_matched() {
     pool.close().await;
 
     let (s2, v2) = publish(app, &req, Some("expiry-key")).await;
-    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(s2, StatusCode::CREATED, "an expired key is a fresh publish");
     assert_ne!(
         v1["ctx_id"], v2["ctx_id"],
         "an expired idempotency key must yield a fresh publish, not a replay"
@@ -2577,10 +2581,14 @@ async fn idempotency_key_is_agent_scoped_not_tenant_scoped() {
     };
 
     let r1 = app.clone().oneshot(mk("tenant-a")).await.unwrap();
-    assert_eq!(r1.status(), StatusCode::OK);
+    assert_eq!(r1.status(), StatusCode::CREATED);
     let v1 = body_to_json(r1).await;
     let r2 = app.clone().oneshot(mk("tenant-b")).await.unwrap();
-    assert_eq!(r2.status(), StatusCode::OK);
+    assert_eq!(
+        r2.status(),
+        StatusCode::OK,
+        "same agent + key + content under another tenant is a replay (200)"
+    );
     let v2 = body_to_json(r2).await;
     assert_eq!(
         v1["ctx_id"], v2["ctx_id"],
@@ -2609,7 +2617,7 @@ async fn search_paginates_past_fully_hidden_pages() {
         .build()
         .unwrap();
     let (s, pub_v) = publish(app, &pubreq, None).await;
-    assert_eq!(s, StatusCode::OK);
+    assert_eq!(s, StatusCode::CREATED);
     let public_ctx = pub_v["ctx_id"].as_str().unwrap().to_string();
 
     tokio::time::sleep(std::time::Duration::from_millis(15)).await;
@@ -2623,7 +2631,7 @@ async fn search_paginates_past_fully_hidden_pages() {
             .build()
             .unwrap();
         let (s, _) = publish(app, &r, None).await;
-        assert_eq!(s, StatusCode::OK);
+        assert_eq!(s, StatusCode::CREATED);
     }
 
     // Anonymous search, small page size; follow the cursor to exhaustion.
@@ -2696,8 +2704,8 @@ async fn publish_rate_limited_per_agent_with_retry_after() {
     }
 
     // Agent 20: two publishes within budget, third over budget.
-    assert_eq!(send(app, 20, "a").await.status(), StatusCode::OK);
-    assert_eq!(send(app, 20, "b").await.status(), StatusCode::OK);
+    assert_eq!(send(app, 20, "a").await.status(), StatusCode::CREATED);
+    assert_eq!(send(app, 20, "b").await.status(), StatusCode::CREATED);
     let limited = send(app, 20, "c").await;
     assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
     let retry = limited
@@ -2714,7 +2722,7 @@ async fn publish_rate_limited_per_agent_with_retry_after() {
     assert_eq!(v["error"]["code"], "rate_limited");
 
     // A different agent is unaffected by agent 20's exhausted budget.
-    assert_eq!(send(app, 21, "a").await.status(), StatusCode::OK);
+    assert_eq!(send(app, 21, "a").await.status(), StatusCode::CREATED);
 }
 
 /// REG-P2-3: a foreign `ctx_id` pointing at a private/internal IP must be
@@ -3439,7 +3447,7 @@ async fn retrieve_body_returns_bare_body() {
         .build()
         .unwrap();
     let (status, v) = publish(app, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     let resp = app
@@ -3483,7 +3491,7 @@ async fn lineage_round_trip_lists_versions_and_returns_current() {
         .build()
         .unwrap();
     let (status, v) = publish(app, &v1_req, None).await;
-    assert_eq!(status, StatusCode::OK, "v1 publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "v1 publish body = {v}");
     let v1_ctx_id = v["ctx_id"].as_str().unwrap().to_string();
     let lineage_id = v["lineage_id"].as_str().unwrap().to_string();
 
@@ -3513,7 +3521,7 @@ async fn lineage_round_trip_lists_versions_and_returns_current() {
         .build()
         .unwrap();
     let (status, v) = publish(app, &v2_req, None).await;
-    assert_eq!(status, StatusCode::OK, "v2 publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "v2 publish body = {v}");
 
     let resp = app
         .clone()
@@ -3582,7 +3590,7 @@ async fn supersession_by_non_owner_is_rejected() {
         .build()
         .unwrap();
     let (status, v) = publish(app, &v1_req, None).await;
-    assert_eq!(status, StatusCode::OK, "v1 publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "v1 publish body = {v}");
     let v1_ctx_id = v["ctx_id"].as_str().unwrap().to_string();
     let lineage_id = v["lineage_id"].as_str().unwrap().to_string();
 
@@ -3647,7 +3655,7 @@ async fn supersession_by_non_owner_is_rejected() {
         .build()
         .unwrap();
     let (status, v) = publish(app, &v2, None).await;
-    assert_eq!(status, StatusCode::OK, "owner supersession body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "owner supersession body = {v}");
 }
 
 #[tokio::test]
@@ -3802,7 +3810,7 @@ async fn did_key_publish_bypasses_playground_pinned_only_entirely() {
     let (status, v) = publish(&h.router, &req, None).await;
     assert_eq!(
         status,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "did:key must publish regardless of playground.pinned_only, got {v}"
     );
 }
@@ -3843,7 +3851,7 @@ async fn playground_pinned_agent_with_receipts_mints_verifiable_receipt() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
 
     let receipt_json = v["registry_receipt"].clone();
     assert!(
@@ -3895,11 +3903,11 @@ async fn playground_pinned_agent_with_matching_key_publishes() {
         .build()
         .unwrap();
     let (status, v) = publish(app, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "pinned publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "pinned publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     // Retrieve to confirm the row actually persisted, not just that the
-    // response 200'd.
+    // response 201'd.
     let resp = app
         .clone()
         .oneshot(
@@ -3952,12 +3960,12 @@ async fn playground_pinned_ecdsa_p256_agent_publishes() {
     let (status, v) = publish(app, &req, None).await;
     assert_eq!(
         status,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "P-256 pinned publish must succeed once ecdsa-p256 is advertised; body = {v}"
     );
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
-    // Confirm the row persisted, not merely that the publish 200'd.
+    // Confirm the row persisted, not merely that the publish 201'd.
     let resp = app
         .clone()
         .oneshot(
@@ -4006,10 +4014,9 @@ async fn playground_pinned_agent_with_wrong_key_rejected() {
         .build()
         .unwrap();
     let (status, v) = publish(app, &req, None).await;
-    assert_ne!(
-        status,
-        StatusCode::OK,
-        "pinned agent signing with a non-pinned key must be rejected, got 200 with {v}"
+    assert!(
+        !status.is_success(),
+        "pinned agent signing with a non-pinned key must be rejected, got {status} with {v}"
     );
 }
 
@@ -4831,7 +4838,7 @@ async fn well_formed_but_absent_ctx_id() -> String {
         .build()
         .unwrap();
     let (status, v) = publish(&donor.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "seed publish failed: {v}");
+    assert_eq!(status, StatusCode::CREATED, "seed publish failed: {v}");
     v["ctx_id"].as_str().unwrap().to_string()
 }
 
@@ -5052,7 +5059,7 @@ async fn did_key_publish_mints_verifiable_receipt() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let receipt_json = v["registry_receipt"].clone();
     assert!(
         receipt_json.is_object(),
@@ -5140,7 +5147,7 @@ async fn idempotent_replay_returns_original_receipt() {
         .build()
         .unwrap();
     let (s1, v1) = publish(&h.router, &req, Some("rcpt-replay-key")).await;
-    assert_eq!(s1, StatusCode::OK, "body = {v1}");
+    assert_eq!(s1, StatusCode::CREATED, "body = {v1}");
     let (s2, v2) = publish(&h.router, &req, Some("rcpt-replay-key")).await;
     assert_eq!(s2, StatusCode::OK, "body = {v2}");
     assert_eq!(v1["ctx_id"], v2["ctx_id"]);
@@ -5167,10 +5174,10 @@ async fn idempotency_keys_scoped_per_agent() {
     };
     let (s1, v1) = publish(&h.router, &make(36, "agent-a-row"), Some("shared-key")).await;
     let (s2, v2) = publish(&h.router, &make(37, "agent-b-row"), Some("shared-key")).await;
-    assert_eq!(s1, StatusCode::OK, "body = {v1}");
+    assert_eq!(s1, StatusCode::CREATED, "body = {v1}");
     assert_eq!(
         s2,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "another agent's identical key must not interact: {v2}"
     );
     assert_ne!(v1["ctx_id"], v2["ctx_id"]);
@@ -5199,7 +5206,7 @@ async fn lineage_audit_walks_a_clean_chain() {
         .build()
         .unwrap();
     let (s, r1) = publish(&h.router, &v1, None).await;
-    assert_eq!(s, StatusCode::OK, "body = {r1}");
+    assert_eq!(s, StatusCode::CREATED, "body = {r1}");
     let v2 = p
         .supersede(acdp::types::primitives::CtxId(
             r1["ctx_id"].as_str().unwrap().to_string(),
@@ -5211,7 +5218,7 @@ async fn lineage_audit_walks_a_clean_chain() {
         .build()
         .unwrap();
     let (s, r2) = publish(&h.router, &v2, None).await;
-    assert_eq!(s, StatusCode::OK, "body = {r2}");
+    assert_eq!(s, StatusCode::CREATED, "body = {r2}");
 
     let lineage_id = r1["lineage_id"].as_str().unwrap();
     // Unauthenticated → 403.
@@ -5473,7 +5480,7 @@ async fn lc001_retraction_flow_end_to_end() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     // Retract.
@@ -5633,7 +5640,7 @@ async fn lc001b_p256_malleated_signature_retry_is_different_content() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     let did = acdp::did::key::did_key_from_p256_sec1(&key.verifying_key_sec1()).unwrap();
@@ -5705,7 +5712,7 @@ async fn lc002_immutable_field_and_authentication() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     // Scenario A: a `body` member → immutable_field (HTTP 400).
@@ -5798,7 +5805,7 @@ async fn lc003_retracted_head_takes_lineage_off_current() {
         .build()
         .unwrap();
     let (status, r1) = publish(&h.router, &v1, None).await;
-    assert_eq!(status, StatusCode::OK, "body = {r1}");
+    assert_eq!(status, StatusCode::CREATED, "body = {r1}");
     let v1_ctx = r1["ctx_id"].as_str().unwrap().to_string();
     let lineage_id = r1["lineage_id"].as_str().unwrap().to_string();
 
@@ -5811,7 +5818,7 @@ async fn lc003_retracted_head_takes_lineage_off_current() {
         .build()
         .unwrap();
     let (status, r2) = publish(&h.router, &v2, None).await;
-    assert_eq!(status, StatusCode::OK, "body = {r2}");
+    assert_eq!(status, StatusCode::CREATED, "body = {r2}");
     let v2_ctx = r2["ctx_id"].as_str().unwrap().to_string();
 
     // Sanity: current == v2.
@@ -5861,7 +5868,7 @@ async fn lc003_retracted_head_takes_lineage_off_current() {
         .build()
         .unwrap();
     let (status, r3) = publish(&h.router, &v3, None).await;
-    assert_eq!(status, StatusCode::OK, "v3 publish body = {r3}");
+    assert_eq!(status, StatusCode::CREATED, "v3 publish body = {r3}");
     let v3_ctx = r3["ctx_id"].as_str().unwrap().to_string();
 
     let (status, cur) = get_json(&h.router, &current_uri).await;
@@ -5918,7 +5925,7 @@ async fn head_receipt_minted_on_current_and_verifies() {
         .build()
         .unwrap();
     let (status, r1) = publish(&h.router, &v1, None).await;
-    assert_eq!(status, StatusCode::OK, "body = {r1}");
+    assert_eq!(status, StatusCode::CREATED, "body = {r1}");
     let v1_ctx = r1["ctx_id"].as_str().unwrap().to_string();
     let lineage_id = r1["lineage_id"].as_str().unwrap().to_string();
     let current_uri = format!("/lineages/{}/current", pct_encode_path_segment(&lineage_id));
@@ -5994,7 +6001,7 @@ async fn head_receipt_minted_on_current_and_verifies() {
         .build()
         .unwrap();
     let (status, r2) = publish(&h.router, &v2, None).await;
-    assert_eq!(status, StatusCode::OK, "body = {r2}");
+    assert_eq!(status, StatusCode::CREATED, "body = {r2}");
     let v2_ctx = r2["ctx_id"].as_str().unwrap().to_string();
     fetch_and_verify(v2_ctx.clone(), 2).await;
 
@@ -6094,7 +6101,7 @@ async fn publish_ctx(h: &Harness, seed: u8, title: &str) -> String {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     v["ctx_id"].as_str().unwrap().to_string()
 }
 
@@ -6320,7 +6327,7 @@ async fn log_publish(
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     (v["ctx_id"].as_str().unwrap().to_string(), v)
 }
 
@@ -7157,7 +7164,7 @@ async fn gate_accepts_when_both_registry_and_request_are_0_5_0() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "body = {v}");
     assert!(v["ctx_id"].as_str().is_some_and(|s| !s.is_empty()));
 }
 
@@ -7182,7 +7189,7 @@ async fn gate_accepts_higher_versions_not_just_exact_0_5_0() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "body = {v}");
 }
 
 /// Acceptance criterion 5 (the single most important negative test): a
@@ -7203,7 +7210,7 @@ async fn gate_leaves_anchors_absent_publishes_unaffected() {
         .unwrap();
     assert!(req01.anchors.is_none());
     let (status, v) = publish(&h01.router, &req01, None).await;
-    assert_eq!(status, StatusCode::OK, "body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "body = {v}");
 
     // 0.5.0 registry, explicit 0.5.0 declared version, no anchors.
     let h05 = harness_050(true).await;
@@ -7217,7 +7224,7 @@ async fn gate_leaves_anchors_absent_publishes_unaffected() {
         .unwrap();
     assert!(req05.anchors.is_none());
     let (status, v) = publish(&h05.router, &req05, None).await;
-    assert_eq!(status, StatusCode::OK, "body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "body = {v}");
 
     // 0.5.0 registry, request declares 0.1.0 (would fail the gate if
     // anchors were present, per criterion 2) — but with anchors absent
@@ -7234,7 +7241,7 @@ async fn gate_leaves_anchors_absent_publishes_unaffected() {
     let (status, v) = publish(&h05.router, &req_low, None).await;
     assert_eq!(
         status,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "anchors-absent publish must be unaffected by declared version: {v}"
     );
 }
@@ -7276,7 +7283,7 @@ async fn gate_applies_to_did_key_publish_path() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &accept_req, None).await;
-    assert_eq!(status, StatusCode::OK, "body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "body = {v}");
 }
 
 /// Edge case: `anchors: []` on a sub-0.5.0 registry. Two rules could fire —
@@ -7405,7 +7412,7 @@ async fn retrieve_path_is_not_gated_and_serves_anchors_byte_exact_after_downgrad
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     async fn body_bytes(app: &axum::Router, ctx_id: &str) -> Vec<u8> {
@@ -7503,7 +7510,7 @@ async fn config_reaching_0_5_0_composes_with_the_anchors_gate() {
         .build()
         .unwrap();
     let (accept_status, accept_body) = publish(&accept.router, &accept_req, None).await;
-    assert_eq!(accept_status, StatusCode::OK, "body = {accept_body}");
+    assert_eq!(accept_status, StatusCode::CREATED, "body = {accept_body}");
     assert!(
         accept_body["ctx_id"]
             .as_str()
@@ -7620,7 +7627,7 @@ async fn publish_anchored_round_trip(
         .build()
         .unwrap();
     let (status, v) = publish(app, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
     (ctx_id, req)
 }
@@ -7746,7 +7753,7 @@ async fn anchors_two_entries_preserve_order_sqlite() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     let (status, bare) = get_json(
@@ -7878,10 +7885,10 @@ async fn anchors_uri_never_dereferenced_publish_and_retrieve() {
         .build()
         .unwrap();
 
-    // Criterion 1: publish returns 200, and — after a bounded drain window,
+    // Criterion 1: publish returns 201, and — after a bounded drain window,
     // not an immediate check — the anchor listener saw nothing.
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -8668,7 +8675,7 @@ async fn a_publish_that_fails_before_the_signer_is_proven_does_not_consume_the_a
         let (status, v) = publish_with_tenant(&h.router, &make(&format!("legit-{i}")), None).await;
         assert_eq!(
             status,
-            StatusCode::OK,
+            StatusCode::CREATED,
             "publish {i} must succeed -- two FAILED attempts must not have spent \
              a budget of 2. Under the old charge-on-attempt behaviour this is 429: {v}"
         );
@@ -8705,7 +8712,11 @@ async fn publishing_works_when_the_rate_limiter_is_disabled() {
             .build()
             .unwrap();
         let (status, v) = publish_with_tenant(&h.router, &req, None).await;
-        assert_eq!(status, StatusCode::OK, "publish {i} with no limiter: {v}");
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "publish {i} with no limiter: {v}"
+        );
     }
 }
 
@@ -8734,7 +8745,7 @@ async fn an_idempotent_replay_is_charged_like_any_other_successful_publish() {
 
     // 1st: a real insert. Charges 1 of 2.
     let (s1, v1) = publish(app, &req, Some("replay-key")).await;
-    assert_eq!(s1, StatusCode::OK, "first publish: {v1}");
+    assert_eq!(s1, StatusCode::CREATED, "first publish: {v1}");
 
     // 2nd: the SAME key and content -> replay. Returns Ok, so it charges 2 of 2.
     let (s2, v2) = publish(app, &req, Some("replay-key")).await;
@@ -8744,7 +8755,7 @@ async fn an_idempotent_replay_is_charged_like_any_other_successful_publish() {
         "must be the same row, i.e. a replay"
     );
 
-    // 3rd: budget is now spent. If the replay were uncharged this is 200 and
+    // 3rd: budget is now spent. If the replay were uncharged this is 201 and
     // replays are free.
     let other = producer(61)
         .publish_request()
@@ -9068,7 +9079,7 @@ async fn search_reports_a_tenant_scoped_total_estimate() {
             .build()
             .unwrap();
         let (st, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
-        assert_eq!(st, StatusCode::OK, "setup publish: {v}");
+        assert_eq!(st, StatusCode::CREATED, "setup publish: {v}");
     }
 
     let resp = h
@@ -9125,7 +9136,7 @@ async fn search_still_reports_total_estimate_without_tenant() {
         .build()
         .unwrap();
     let (st, v) = publish_with_tenant(&h.router, &req, None).await;
-    assert_eq!(st, StatusCode::OK, "setup publish: {v}");
+    assert_eq!(st, StatusCode::CREATED, "setup publish: {v}");
 
     let resp = h
         .router
@@ -9900,7 +9911,7 @@ async fn naming_a_victim_does_not_spend_their_budget() {
         let (status, v) = publish(&h.router, &victim_req(&format!("victim-legit-{i}")), None).await;
         assert_eq!(
             status,
-            StatusCode::OK,
+            StatusCode::CREATED,
             "the victim's publish {i} must succeed -- five spoofed attempts \
              naming them must not have spent their budget: {v}"
         );
@@ -9968,7 +9979,7 @@ async fn a_replayed_envelope_over_a_different_body_does_not_spend_the_budget() {
         let (status, v) = publish(&h.router, &victim_req(&format!("victim-legit-{i}")), None).await;
         assert_eq!(
             status,
-            StatusCode::OK,
+            StatusCode::CREATED,
             "the victim's publish {i} must succeed -- five replayed envelopes \
              must not have spent their budget: {v}"
         );
@@ -10216,7 +10227,7 @@ async fn log_proof_ctx_in_tenant(h: &Harness, seed: u8, tenant: &str) -> String 
         .build()
         .unwrap();
     let (status, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().expect("ctx_id").to_string();
     format!("/log/proof?ctx_id={}", pct_encode_path_segment(&ctx_id))
 }
@@ -10321,7 +10332,7 @@ async fn tenant_lineage(h: &Harness, seed: u8, tenant: &str) -> (String, String)
         .build()
         .unwrap();
     let (status, v) = publish_with_tenant(app, &v1_req, Some(tenant)).await;
-    assert_eq!(status, StatusCode::OK, "v1 publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "v1 publish body = {v}");
     let v1_ctx_id = v["ctx_id"].as_str().unwrap().to_string();
     let lineage_id = v["lineage_id"].as_str().unwrap().to_string();
 
@@ -10342,7 +10353,7 @@ async fn tenant_lineage(h: &Harness, seed: u8, tenant: &str) -> (String, String)
         .build()
         .unwrap();
     let (status, v) = publish_with_tenant(app, &v2_req, Some(tenant)).await;
-    assert_eq!(status, StatusCode::OK, "v2 publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "v2 publish body = {v}");
 
     (lineage_id, v1_ctx_id)
 }
@@ -10580,7 +10591,7 @@ async fn lifecycle_ctx_in_tenant(h: &Harness, seed: u8, tenant: &str) -> String 
         .build()
         .unwrap();
     let (status, v) = publish_with_tenant(&h.router, &req, Some(tenant)).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     v["ctx_id"].as_str().expect("ctx_id").to_string()
 }
 
@@ -10831,7 +10842,7 @@ async fn webhook_publish_event_carries_the_mapped_context_type() {
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
 
     let (_head, event) = next_webhook(&mut rx).await;
     assert_eq!(
@@ -10865,7 +10876,7 @@ async fn webhook_publish_event_forwards_a_valid_run_id_and_drops_an_oversized_on
         .build()
         .unwrap();
     let (status, v) = publish_with_run_id(&h.router, &req, Some("run-u504-abc")).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let (_head, event) = next_webhook(&mut rx).await;
     assert_eq!(
         event["run_id"], "run-u504-abc",
@@ -10884,7 +10895,7 @@ async fn webhook_publish_event_forwards_a_valid_run_id_and_drops_an_oversized_on
     let (status, v) = publish_with_run_id(&h.router, &req2, Some(&long)).await;
     assert_eq!(
         status,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "an over-long run id is treated as absent, NOT rejected: {v}"
     );
     let (_head, event2) = next_webhook(&mut rx).await;
@@ -10961,7 +10972,7 @@ async fn webhook_retraction_carries_the_tenant_but_never_the_reserved_default() 
         .build()
         .unwrap();
     let (status, v) = publish(&h.router, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_b = v["ctx_id"].as_str().unwrap().to_string();
     let _ = next_webhook(&mut rx).await;
 
@@ -11071,7 +11082,7 @@ async fn search_refill_scans_exactly_the_page_cap_when_the_filter_empties_every_
             .build()
             .unwrap();
         let (s, v) = publish(app, &req, None).await;
-        assert_eq!(s, StatusCode::OK, "publish {i} = {v}");
+        assert_eq!(s, StatusCode::CREATED, "publish {i} = {v}");
     }
 
     // Control: all 70 rows are visible and searchable in one big page, so the
@@ -11147,10 +11158,12 @@ async fn publish_with_raw_idem_key(
 /// "ignored" has to be asserted as ignored.
 ///
 /// Kills both survivors on `context.rs:433`. `idempotency_key_length_bounds`
-/// (:2123) already sends a 257-char key, but only asserts the publish returns
-/// `200` — and an over-long key that was wrongly HONORED also returns 200. The
-/// status code cannot distinguish "treated as absent" from "treated as a key";
-/// only the `ctx_id` can, because a honored key replays the first one.
+/// (`idempotency_key_length_bounds`) already sends a 257-char key, but asserts only the status of that
+/// one publish. Before `201 Created` an over-long key that was wrongly HONORED
+/// also answered 200, so the status could not distinguish "treated as absent"
+/// from "treated as a key". Now a honored key answers the second call `200`
+/// (replay) and an ignored one `201` (fresh), and the `ctx_id` says the same
+/// thing independently: a honored key replays the first one.
 ///
 /// The tab case is the one worth explaining. `HeaderValue::to_str()` succeeds
 /// only for visible ASCII **and tab**, so almost every non-printable byte is
@@ -11175,7 +11188,7 @@ async fn an_out_of_range_or_non_printable_idempotency_key_is_ignored_not_honored
     let valid = b"u504-valid-key";
     let (s1, a1) = publish_with_raw_idem_key(app, &req, valid).await;
     let (s2, a2) = publish_with_raw_idem_key(app, &req, valid).await;
-    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_eq!((s1, s2), (StatusCode::CREATED, StatusCode::OK));
     assert_eq!(
         a1["ctx_id"], a2["ctx_id"],
         "a valid key must replay — without this the assertions below prove \
@@ -11186,7 +11199,7 @@ async fn an_out_of_range_or_non_printable_idempotency_key_is_ignored_not_honored
     let long = vec![b'x'; 257];
     let (s1, b1) = publish_with_raw_idem_key(app, &req, &long).await;
     let (s2, b2) = publish_with_raw_idem_key(app, &req, &long).await;
-    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_eq!((s1, s2), (StatusCode::CREATED, StatusCode::CREATED));
     assert_ne!(
         b1["ctx_id"], b2["ctx_id"],
         "a 257-char key is out of range and must be IGNORED; replaying the \
@@ -11198,7 +11211,7 @@ async fn an_out_of_range_or_non_printable_idempotency_key_is_ignored_not_honored
     let tabbed = b"u504\tkey";
     let (s1, c1) = publish_with_raw_idem_key(app, &req, tabbed).await;
     let (s2, c2) = publish_with_raw_idem_key(app, &req, tabbed).await;
-    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+    assert_eq!((s1, s2), (StatusCode::CREATED, StatusCode::CREATED));
     assert_ne!(
         c1["ctx_id"], c2["ctx_id"],
         "a key containing a control character must be IGNORED: {c1} vs {c2}"
@@ -11848,7 +11861,7 @@ async fn a_did_web_retract_retracts_rather_than_republishing() {
     let (status, v) = publish(&h.router, &req, None).await;
     assert_eq!(
         status,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "did:web publish must resolve through the fixture server: {v}"
     );
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
@@ -11921,7 +11934,7 @@ async fn lifecycle_harness_with_rate(publish_rate_per_minute: u32) -> Harness {
     build_harness_with_caps(cfg, caps_030(), None).await
 }
 
-/// Publish one public context as `p`; returns the status and, on 200, the
+/// Publish one public context as `p`; returns the status and, on 201, the
 /// ctx_id.
 async fn publish_as(h: &Harness, p: &Producer, title: &str) -> (StatusCode, Option<String>) {
     let req = p
@@ -11972,7 +11985,7 @@ async fn unverified_lifecycle_events_do_not_spend_the_named_actors_budget() {
     let h = lifecycle_harness_with_rate(2).await;
     let a = did_key_producer(80);
     let (status, ctx) = publish_as(&h, &a, "lc375 a1").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::CREATED);
     let ctx_id = ctx.unwrap();
     let a_did = signed_event(80, &ctx_id, "retracted", None)["actor"].clone();
 
@@ -12000,7 +12013,7 @@ async fn unverified_lifecycle_events_do_not_spend_the_named_actors_budget() {
 
     // A still has exactly one unit left: the second publish lands, the third
     // is over budget (proving the limit is live, not absent).
-    assert_eq!(publish_as(&h, &a, "lc375 a2").await.0, StatusCode::OK);
+    assert_eq!(publish_as(&h, &a, "lc375 a2").await.0, StatusCode::CREATED);
     assert_eq!(
         publish_as(&h, &a, "lc375 a3").await.0,
         StatusCode::TOO_MANY_REQUESTS
@@ -12090,7 +12103,10 @@ async fn a_valid_event_by_a_non_producer_is_charged_to_nobody() {
     let b = did_key_producer(85);
     let (_, ctx) = publish_as(&h, &a, "lc375 owner").await;
     let ctx_id = ctx.unwrap();
-    assert_eq!(publish_as(&h, &b, "lc375 other").await.0, StatusCode::OK);
+    assert_eq!(
+        publish_as(&h, &b, "lc375 other").await.0,
+        StatusCode::CREATED
+    );
 
     let env = signed_event_envelope(85, &ctx_id, "retracted", None);
     let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &env).await;
@@ -12099,7 +12115,7 @@ async fn a_valid_event_by_a_non_producer_is_charged_to_nobody() {
 
     assert_eq!(
         publish_as(&h, &b, "lc375 other 2").await.0,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "B's event never proved (actor ≠ producer is refused before the \
          signature is verified), so it must not have spent B's second unit"
     );
@@ -12110,7 +12126,7 @@ async fn a_valid_event_by_a_non_producer_is_charged_to_nobody() {
     );
     assert_eq!(
         publish_as(&h, &a, "lc375 owner 2").await.0,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "the targeted producer A must not pay for B's event"
     );
 }
@@ -12173,7 +12189,7 @@ async fn did_web_lifecycle_charges_only_verified_events() {
     let h = didweb_lifecycle_harness_with_rate(resolver, Some(2)).await;
     let p = producer(87);
     let (status, ctx) = publish_as(&h, &p, "lc375 didweb").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::CREATED);
     let ctx_id = ctx.unwrap();
 
     for _ in 0..3 {
@@ -12216,7 +12232,7 @@ async fn a_valid_event_refused_by_the_tenant_gate_is_not_charged() {
         .build()
         .unwrap();
     let (status, v) = publish_with_tenant(&h.router, &req, Some("tenant-375-a")).await;
-    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(status, StatusCode::CREATED, "{v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     for _ in 0..3 {
@@ -12228,7 +12244,7 @@ async fn a_valid_event_refused_by_the_tenant_gate_is_not_charged() {
     }
     assert_eq!(
         publish_as(&h, &a, "lc375 tenant 2").await.0,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "three tenant-gated retracts must not have spent A's second unit"
     );
     assert_eq!(
@@ -12250,7 +12266,7 @@ async fn a_valid_event_refused_for_a_bad_bearer_is_not_charged() {
     let h = build_harness_with_caps(cfg, caps_030(), None).await;
     let a = did_key_producer(89);
     let (status, ctx) = publish_as(&h, &a, "lc375 bearer").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::CREATED);
     let ctx_id = ctx.unwrap();
 
     for _ in 0..3 {
@@ -12276,11 +12292,327 @@ async fn a_valid_event_refused_for_a_bad_bearer_is_not_charged() {
     }
     assert_eq!(
         publish_as(&h, &a, "lc375 bearer 2").await.0,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "three bearer-refused retracts must not have spent A's second unit"
     );
     assert_eq!(
         publish_as(&h, &a, "lc375 bearer 3").await.0,
         StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+// ---------------------------------------------------------------------------
+// publish-201-location Phase 1a (`plans/publish-201-location.md`): every
+// successful `POST /contexts` carries `Location` (RFC-ACDP-0003 §4), the
+// canonical retrieval path `/contexts/` + the `ctx_id` percent-encoded as ONE
+// path segment; an idempotent replay carries the SAME `Location` and the
+// identical body, and is not a second publication (no second
+// `context.published` webhook). The fresh publish answers `201 Created`, the
+// genuine replay `200 OK` (RFC-ACDP-0003 §6.2).
+//
+// The counter half (`publish_total{outcome}`, receipts minted, log leaves) is
+// in `publish_outcome_metrics.rs`: the recorder is process-global and this
+// binary runs its tests in parallel, so exact counts are only deterministic in
+// a binary of their own.
+// ---------------------------------------------------------------------------
+
+/// [`publish`] that keeps the response headers (`common::publish` drops them).
+async fn publish_keeping_headers(
+    app: &axum::Router,
+    req: &acdp::types::publish::PublishRequest,
+    idem: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let body = serde_json::to_vec(req).unwrap();
+    let mut builder = Request::builder().method("POST").uri("/contexts");
+    if let Some(k) = idem {
+        builder = builder.header("Idempotency-Key", k);
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let v = body_to_json(resp).await;
+    (status, headers, v)
+}
+
+/// Inverse of [`pct_encode_path_segment`]: `%XX` back to the byte.
+fn pct_decode_path_segment(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).expect("valid %XX"));
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("utf-8")
+}
+
+/// Assert a publish response's `Location` is exactly `/contexts/` +
+/// `pct_encode_path_segment(ctx_id)` and decodes back to the body's `ctx_id`.
+/// Returns the `Location`.
+fn assert_location_names_the_ctx(
+    branch: &str,
+    headers: &axum::http::HeaderMap,
+    body: &Value,
+) -> String {
+    let ctx_id = body["ctx_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{branch}: publish body carries no ctx_id: {body}"));
+    let location = headers
+        .get(axum::http::header::LOCATION)
+        .unwrap_or_else(|| panic!("{branch}: a successful publish must carry Location: {body}"))
+        .to_str()
+        .expect("Location is ASCII")
+        .to_string();
+    assert_eq!(
+        location,
+        format!("/contexts/{}", pct_encode_path_segment(ctx_id)),
+        "{branch}: Location must be the path-relative retrieval URL with the \
+         ctx_id encoded as one path segment"
+    );
+    let tail = location
+        .strip_prefix("/contexts/")
+        .expect("checked just above");
+    assert!(
+        !tail.contains('/'),
+        "{branch}: an unencoded '/' would split the ctx_id across path segments: {location}"
+    );
+    assert_eq!(
+        pct_decode_path_segment(tail),
+        ctx_id,
+        "{branch}: Location must decode back to the body's ctx_id"
+    );
+    location
+}
+
+/// Fresh publish under `key` (`201`), then the SAME key + SAME body again (a
+/// genuine replay, `200`): both carry `Location`, the replay's is identical and
+/// so is its body. Returns the fresh
+/// body.
+async fn assert_location_on_fresh_and_replay(
+    branch: &str,
+    router: &axum::Router,
+    req: &acdp::types::publish::PublishRequest,
+    key: &str,
+) -> Value {
+    let (s1, h1, v1) = publish_keeping_headers(router, req, Some(key)).await;
+    assert_eq!(s1, StatusCode::CREATED, "{branch}: fresh publish: {v1}");
+    let loc1 = assert_location_names_the_ctx(branch, &h1, &v1);
+
+    let (s2, h2, v2) = publish_keeping_headers(router, req, Some(key)).await;
+    assert_eq!(s2, StatusCode::OK, "{branch}: replay: {v2}");
+    let loc2 = assert_location_names_the_ctx(branch, &h2, &v2);
+    assert_eq!(
+        loc2, loc1,
+        "{branch}: a replay must name the SAME context as the publish it replays"
+    );
+    assert_eq!(
+        v2, v1,
+        "{branch}: a replay must return the original response body unchanged"
+    );
+    v1
+}
+
+/// Production path, `did:web`: identity genuinely resolved through the
+/// in-process fixture server (see `a_did_web_retract_retracts_rather_than_republishing`).
+#[tokio::test(flavor = "multi_thread")]
+async fn publish_location_on_the_production_did_web_branch() {
+    let addr = didweb::spawn_didweb_server().await;
+    let resolver = Arc::new(
+        WebResolver::with_test_endpoint(
+            didweb::ca_pem().as_bytes(),
+            didweb::DIDWEB_AUTHORITY,
+            addr,
+        )
+        .expect("test-endpoint resolver"),
+    );
+    let h = didweb_lifecycle_harness(resolver).await;
+    let req = producer(241)
+        .publish_request()
+        .title("location-did-web")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    assert!(
+        req.agent_id.as_str().starts_with("did:web:"),
+        "control: this must exercise the did:web branch, not did:key"
+    );
+    assert_location_on_fresh_and_replay("production did:web", &h.router, &req, "loc-didweb-1")
+        .await;
+}
+
+/// `did:key` (production pipeline, offline verification), on a registry that
+/// mints receipts and keeps the transparency log: the replay carries the
+/// ORIGINAL receipt, byte-identical, not a freshly minted one.
+#[tokio::test]
+async fn publish_location_on_the_did_key_branch() {
+    let h = log_harness().await;
+    let req = did_key_producer(242)
+        .publish_request()
+        .title("location-did-key")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let v = assert_location_on_fresh_and_replay("did:key", &h.router, &req, "loc-didkey-1").await;
+    assert!(
+        v["registry_receipt"].is_object(),
+        "control: this registry mints receipts, so the replay-equality above \
+         covers the receipt too: {v}"
+    );
+}
+
+/// Playground, pinned key, signature verified against the pin.
+#[tokio::test]
+async fn publish_location_on_the_playground_pinned_branch() {
+    let did = "did:web:agents.test:smoke-pinned-location";
+    let p = Producer::new(
+        SigningKey::from_bytes(&[243u8; 32]),
+        AgentDid::new(did),
+        format!("{did}#key-1"),
+    );
+    let mut cfg = config(true);
+    cfg.playground.pinned_keys = vec![PinnedAgentKey {
+        agent_did: did.into(),
+        public_key_b64: B64.encode(SigningKey::from_bytes(&[243u8; 32]).verifying_key_bytes()),
+        algorithm: "ed25519".into(),
+        valid_from: None,
+        valid_until: None,
+    }];
+    let h = harness_from_config(cfg).await;
+    let req = p
+        .publish_request()
+        .title("location-pinned")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    assert_location_on_fresh_and_replay("playground pinned", &h.router, &req, "loc-pinned-1").await;
+}
+
+/// Playground, unpinned: the replay here is the handler's own idempotency
+/// lookup (not the SDK's), so it is its own early-return path.
+#[tokio::test]
+async fn publish_location_on_the_playground_unpinned_branch() {
+    let h = harness(true).await;
+    let req = producer(244)
+        .publish_request()
+        .title("location-unpinned")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    assert_location_on_fresh_and_replay("playground unpinned", &h.router, &req, "loc-unpinned-1")
+        .await;
+}
+
+/// A replay is not a new publication: the fresh publish delivers exactly one
+/// `context.published`, the replay delivers none.
+///
+/// Absence is proven by ORDER, not by waiting: the emitter drains one FIFO
+/// queue with a single worker, so after the replay a SENTINEL publish is made
+/// and the next delivery must be the sentinel's. A replay-triggered second
+/// delivery would be queued ahead of it and arrive first.
+#[tokio::test]
+async fn a_publish_replay_delivers_no_second_webhook() {
+    let (h, mut rx) = webhook_harness(false).await;
+    let req = did_key_producer(245)
+        .publish_request()
+        .title("location-webhook")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (s1, _, v1) = publish_keeping_headers(&h.router, &req, Some("loc-webhook-1")).await;
+    assert_eq!(s1, StatusCode::CREATED, "fresh publish: {v1}");
+    let (_head, first) = next_webhook(&mut rx).await;
+    assert_eq!(
+        first["ctx_id"], v1["ctx_id"],
+        "the fresh publish must deliver its context.published: {first}"
+    );
+
+    let (s2, _, v2) = publish_keeping_headers(&h.router, &req, Some("loc-webhook-1")).await;
+    assert_eq!(s2, StatusCode::OK, "replay: {v2}");
+    assert_eq!(v2, v1, "control: this must really be a replay");
+
+    let sentinel = did_key_producer(246)
+        .publish_request()
+        .title("location-webhook-sentinel")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (s3, _, v3) = publish_keeping_headers(&h.router, &sentinel, None).await;
+    assert_eq!(s3, StatusCode::CREATED, "sentinel publish: {v3}");
+    assert_ne!(v3["ctx_id"], v1["ctx_id"], "control: a distinct context");
+    let (_head, next) = next_webhook(&mut rx).await;
+    assert_eq!(
+        next["ctx_id"], v3["ctx_id"],
+        "the delivery after the replay must be the sentinel's; a delivery for \
+         the replayed {} means the replay was emitted as a second publication: {next}",
+        v1["ctx_id"]
+    );
+}
+
+/// `Location` is not CORS-safelisted, so a browser can only read it if the
+/// registry lists it in `Access-Control-Expose-Headers`. Asserted on a real
+/// cross-origin `POST /contexts`, NOT a preflight: tower-http's `CorsLayer`
+/// emits `expose-headers` on the actual response only.
+#[tokio::test]
+async fn a_cross_origin_publish_exposes_location() {
+    let mut cfg = config(true);
+    cfg.registry.cors.allowed_origins = vec!["https://ui.test".into()];
+    let h = harness_from_config(cfg).await;
+    let req = producer(247)
+        .publish_request()
+        .title("location-cors")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let resp = h
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/contexts")
+                .header(axum::http::header::ORIGIN, "https://ui.test")
+                .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let v = body_to_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    assert_eq!(
+        headers
+            .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("https://ui.test"),
+        "control: the origin must be allowed, or expose-headers is moot"
+    );
+    assert_location_names_the_ctx("cors", &headers, &v);
+    let exposed: Vec<String> = headers
+        .get_all(axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .flat_map(|h| h.split(','))
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    assert!(
+        exposed.iter().any(|h| h == "location"),
+        "a browser client must be allowed to read Location; exposed = {exposed:?}"
     );
 }

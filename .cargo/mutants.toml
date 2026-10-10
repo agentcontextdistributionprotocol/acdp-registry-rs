@@ -89,21 +89,26 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 354 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 353 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
-# MEASURED by mutants.yml run 37248684286 (workflow_dispatch on main 09615e9;
-# the final re-pin of plans/final-closeout), whose outcomes.json is committed as
-# docs/mutation-runs/run37248684286-scope-354-outcomes.json.
+# MEASURED by mutants.yml run 37972268890 (workflow_dispatch on feat/publish-201-location;
+# re-pin for the publish 201 + Location change), whose outcomes.json is committed as
+# docs/mutation-runs/run37972268890-scope-353-outcomes.json.
 # The command that reproduces the split:
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
-#     crates/acdp-registry-core/src/handlers/context.rs   140
+#     crates/acdp-registry-core/src/handlers/context.rs   139
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs              9
 #     crates/acdp-registry-sqlite/src/store.rs            140
 #     ----------------------------------------------------------
-#     total                                               354
+#     total                                               353
+#
+# 354 -> 353 (publish 201 + Location): context.rs 140 -> 139. Splitting the commit outcome
+# (PublishReply) deleted eight UNVIABLE `Json<PublishResponse>` return-replacement
+# mutants and added two UNVIABLE `Ok(Default::default())` ones plus five CAUGHT
+# (three `delete !`, two `&&` -> `||`); caught 221 -> 226, unviable 125 -> 119. The seven survivors are the same mutants on shifted lines (:84, :85, :614, :1234).
 #
 # 358 -> 354 (#401): context.rs 144 -> 140, PURELY SUBTRACTIVE. #401 replaced
 # #375's lifecycle charge pre-flight with the SDK's prove/commit split, which

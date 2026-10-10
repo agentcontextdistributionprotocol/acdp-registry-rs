@@ -9,6 +9,7 @@ pub mod handlers;
 pub mod log;
 pub mod metrics;
 pub mod playground;
+pub mod publish_reply;
 pub mod rate_limit;
 pub mod rate_limit_shared;
 pub mod receipt;
@@ -593,6 +594,9 @@ fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
             HeaderName::from_static("idempotency-key"),
             HeaderName::from_static("x-run-id"),
         ])
+        // `Location` (RFC-ACDP-0003 §4: the canonical retrieval URL of a publish)
+        // is not CORS-safelisted, so a browser client cannot read it otherwise.
+        .expose_headers([axum::http::header::LOCATION])
 }
 
 #[cfg(feature = "playground")]

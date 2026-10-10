@@ -17,6 +17,7 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use crate::extract::{AcdpBytes, AcdpQuery};
+use crate::publish_reply::{publish_reply, PublishReply};
 use crate::rate_limit::PublishCharge;
 use crate::state::AppState;
 use crate::tenant_trust::PeerIp;
@@ -324,7 +325,7 @@ pub async fn publish<S: ExtendedRegistryStore + 'static>(
     // recomputed from the re-serialized struct
     // (`publish_identity_proven_offline`), never from the received bytes.
     AcdpBytes(body): AcdpBytes,
-) -> Result<Json<PublishResponse>, RegistryError> {
+) -> Result<PublishReply, RegistryError> {
     // FEAT-10: record the failure outcome centrally so every `?` early return
     // is captured by its wire code. Success outcomes (`inserted` /
     // `idempotent_replay`) plus the receipt / log-leaf counters are recorded
@@ -341,7 +342,7 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
     headers: HeaderMap,
     peer: Option<IpAddr>,
     body: Bytes,
-) -> Result<Json<PublishResponse>, RegistryError> {
+) -> Result<PublishReply, RegistryError> {
     // SEC-06: the body length cap is now enforced by
     // `tower_http::limit::RequestBodyLimitLayer` so the same bound applies
     // uniformly to `/auth/*` and any future endpoint, not just publish.
@@ -474,7 +475,11 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         .read()
         .expect("playground RwLock poisoned")
         .clone();
-    let response: PublishResponse = if req.agent_id.as_str().starts_with("did:key:") {
+    let (is_replay, response): (bool, PublishResponse) = if req
+        .agent_id
+        .as_str()
+        .starts_with("did:key:")
+    {
         // did:key producers (ACDP 0.2.0 workstream C): steps 7–8 run
         // through acdp's pure offline verifier — the DID *is* the key, so
         // no DID document fetch and no SSRF surface. The capabilities gate
@@ -525,7 +530,7 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         .await
         .map_err(|e| RegistryError::Internal(format!("join: {e}")))?;
         charge = charge_back;
-        outcome.map(|o| o.into_response())?
+        outcome.map(|o| (o.is_replay(), o.into_response()))?
     } else if playground_snapshot.enabled {
         // Playground: skip DID verification — stop after schema + size + hash.
         // `publish_unverified_for_tests` doesn't accept an idempotency key,
@@ -580,7 +585,7 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
             .await
             .map_err(|e| RegistryError::Internal(format!("join: {e}")))?;
             charge = charge_back;
-            outcome.map(|o| o.into_response())?
+            outcome.map(|o| (o.is_replay(), o.into_response()))?
         } else {
             // #128: `publish_unverified_for_tests` (unlike the SDK's
             // `commit_via_store`, which the other three branches ride) does
@@ -617,7 +622,7 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
                             // branches charge replays identically.
                             charge.arm();
                             crate::metrics::record_publish("idempotent_replay");
-                            return Ok(Json(rec.response));
+                            return publish_reply(true, rec.response);
                         } else {
                             return Err(RegistryError::Acdp(
                                 acdp::error::AcdpError::DuplicatePublish(format!(
@@ -657,7 +662,7 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
                 .await
                 .map_err(|e| RegistryError::Internal(format!("join: {e}")))??;
             }
-            resp
+            (false, resp)
         }
     } else {
         // Production path: full RFC-ACDP-0003 §2.1 pipeline. The resolved
@@ -687,7 +692,7 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
                 idempotency_key.as_deref(),
                 publish_tenant.as_deref(),
             )
-            .map(|o| o.into_response())?
+            .map(|o| (o.is_replay(), o.into_response()))?
     };
 
     // Playground path only: `publish_unverified_for_tests` does not carry
@@ -705,7 +710,9 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         }
     }
 
-    if let Some(emitter) = &state.webhook {
+    // A replay is not a new publication: no second `context.published` (the
+    // control plane dedupes on the event id, and a replay would mint a fresh one).
+    if let Some(emitter) = state.webhook.as_ref().filter(|_| !is_replay) {
         // REG-P2-4: forward the publishing agent's tenant as `X-Tenant-Id`
         // so a multi-tenant control plane attributes the event correctly.
         emitter.emit_with_tenant(
@@ -749,14 +756,17 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         );
     }
 
-    // FEAT-10: accepted publish. `record_publish("inserted")` labels the
+    // FEAT-10: accepted publish. `record_publish` labels the (`inserted` or `idempotent_replay`)
     // outcome; a minted receipt (RFC-ACDP-0010) and an appended transparency
     // -log leaf (RFC-ACDP-0012, one per accepted publish when the log is
     // enabled) get their own counters. Note: a production-path idempotent
-    // replay also lands here and is counted as `inserted` — the store dedupes
-    // internally and does not surface the replay flag to the handler; only the
-    // playground path (above) distinguishes replays.
-    crate::metrics::record_publish("inserted");
+    // replay is counted as `idempotent_replay` too: the SDK's commit outcome
+    // carries the distinction (`is_replay`).
+    crate::metrics::record_publish(if is_replay {
+        "idempotent_replay"
+    } else {
+        "inserted"
+    });
     // A1: charge the per-agent budget HERE, adjacent to the canonical "this
     // publish actually happened" marker, rather than anywhere earlier. Earlier
     // sites are all reachable by a publish that later fails —
@@ -790,14 +800,16 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
     // in tests/http_integration.rs pins this four-way split by count, so a
     // silently dropped or silently added arm fails the suite.
     charge.arm();
-    if response.registry_receipt.is_some() {
+    // A replay minted no receipt and appended no log leaf: the stored response
+    // merely carries the original receipt.
+    if !is_replay && response.registry_receipt.is_some() {
         crate::metrics::record_receipt_minted();
     }
-    if state.log.is_some() {
+    if !is_replay && state.log.is_some() {
         crate::metrics::record_log_leaf();
     }
 
-    Ok(Json(response))
+    publish_reply(is_replay, response)
 }
 
 /// `RFC-ACDP-0016` §10/§14 version-gate predicate: is `v` >= `major.minor`?

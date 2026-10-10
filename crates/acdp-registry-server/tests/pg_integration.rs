@@ -285,7 +285,7 @@ async fn pg_publish_then_retrieve() {
         .build()
         .unwrap();
     let (status, v) = publish(&app, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     let resp = app
@@ -345,7 +345,7 @@ async fn pg_restricted_context_blocked_for_anonymous() {
         .build()
         .unwrap();
     let (status, v) = publish(&app, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     let resp = app
@@ -378,7 +378,9 @@ async fn pg_idempotency_replays_same_response() {
         .unwrap();
     let (s1, v1) = publish(&app, &req, Some("pg-key-1")).await;
     let (s2, v2) = publish(&app, &req, Some("pg-key-1")).await;
-    assert_eq!(s1, StatusCode::OK);
+    // RFC-ACDP-0003 §6.2: the fresh publish is `201 Created`; the genuine
+    // replay (same agent, key and content hash) is `200 OK`.
+    assert_eq!(s1, StatusCode::CREATED);
     assert_eq!(s2, StatusCode::OK);
     assert_eq!(v1["ctx_id"], v2["ctx_id"]);
 }
@@ -404,7 +406,7 @@ async fn pg_idempotency_collision_rejected() {
         .unwrap();
     let (s1, _) = publish(&app, &req_a, Some("pg-collision-key")).await;
     let (s2, _) = publish(&app, &req_b, Some("pg-collision-key")).await;
-    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s1, StatusCode::CREATED);
     assert_eq!(s2, StatusCode::CONFLICT);
 }
 
@@ -796,7 +798,7 @@ async fn pg_anchors_round_trip_byte_exact() {
         .build()
         .unwrap();
     let (status, v) = publish(&app, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     let (status, full) = get_json(
@@ -872,7 +874,7 @@ async fn pg_anchors_two_entries_preserve_order() {
         .build()
         .unwrap();
     let (status, v) = publish(&app, &req, None).await;
-    assert_eq!(status, StatusCode::OK, "publish body = {v}");
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
     let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
 
     let (status, bare) = get_json(
