@@ -6,12 +6,13 @@ per-mutant verdicts for 95 of this file's 138 mutants were lost exactly that way
 
 ## Index — which ledgers are CURRENT
 
-**One ledger is CURRENT for the whole CI scope: `run37972268890-scope-353-outcomes.json`.**
-It is the unmodified `outcomes.json` of `mutants.yml` run 37972268890 (a `workflow_dispatch`
-on `feat/publish-201-location`), committed by the publish 201 + Location re-pin. The scope
-shrank 354 -> 353 when the publish handler's reply was split into `PublishReply`: eight
-unviable mutants left context.rs, two unviable and five caught were added. The seven survivors
-are the same mutants on shifted lines.
+**One ledger is CURRENT for the whole CI scope: `run39071836771-scope-350-outcomes.json`.**
+It is the unmodified `outcomes.json` of `mutants.yml` run 39071836771 (a `workflow_dispatch`
+on `feat/acdp-0.15.0` 9cffe36), committed by the acdp 0.15.0 re-pin (#435). The scope
+shrank 353 -> 350 when the federation proxy started serving the origin's raw body:
+`retrieve` now returns `Result<Response, _>`, so its four unviable `Json<FullContext>`
+return-replacement mutants became one `Ok(Default::default())`, which is caught. The seven
+survivors and the one timeout are the same mutants on shifted lines.
 Everything below it is history, kept for the reasons each section gives. A reader summing
 the `u549-*` set gets 19 survivors; a reader summing `u549` + `u550` gets 8; the tranche has
 been at **2** since U-552 paid six of them off with tests. Sum nothing — read the current
@@ -19,11 +20,12 @@ ledger.
 
 | ledger | scope | result | status |
 |---|---|---|---|
-| `run37972268890-scope-353-outcomes.json` | **353** — context.rs 139 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 226 caught / **7 missed** / 119 unviable / 1 timeout (113.0 min) | **CURRENT** |
-| `run37248684286-scope-354-outcomes.json` | 354 — context.rs 140 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 221 caught / 7 missed / 125 unviable / 1 timeout (101.2 min) | SUPERSEDED by `run37972268890` |
-| `run37222567772-scope-358-outcomes.json` | 358 — context.rs 144 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 225 caught / 7 missed / 125 unviable / 1 timeout (108.7 min) | SUPERSEDED by `run37972268890` |
-| `run36417581090-scope-346-outcomes.json` | 346 — context.rs 134 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 138 | 214 caught / 7 missed / 124 unviable / 1 timeout | SUPERSEDED by `run37972268890` (via `run37222567772`) |
-| `u552-union-scope-351-outcomes.json` | 351 — core 213 + `sqlite/src/store.rs` 138 | 219 caught / 7 missed / 124 unviable / 1 timeout | SUPERSEDED by `run37972268890` (via `run36417581090`) |
+| `run39071836771-scope-350-outcomes.json` | **350** — context.rs 136 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 227 caught / **7 missed** / 115 unviable / 1 timeout (117.3 min) | **CURRENT** |
+| `run37972268890-scope-353-outcomes.json` | 353 — context.rs 139 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 226 caught / 7 missed / 119 unviable / 1 timeout (113.0 min) | SUPERSEDED by `run39071836771` |
+| `run37248684286-scope-354-outcomes.json` | 354 — context.rs 140 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 221 caught / 7 missed / 125 unviable / 1 timeout (101.2 min) | SUPERSEDED by `run39071836771` |
+| `run37222567772-scope-358-outcomes.json` | 358 — context.rs 144 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 225 caught / 7 missed / 125 unviable / 1 timeout (108.7 min) | SUPERSEDED by `run39071836771` |
+| `run36417581090-scope-346-outcomes.json` | 346 — context.rs 134 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 138 | 214 caught / 7 missed / 124 unviable / 1 timeout | SUPERSEDED by `run39071836771` (via `run37222567772`) |
+| `u552-union-scope-351-outcomes.json` | 351 — core 213 + `sqlite/src/store.rs` 138 | 219 caught / 7 missed / 124 unviable / 1 timeout | SUPERSEDED by `run39071836771` (via `run36417581090`) |
 | `u551-core-scope-213-outcomes.json` | 213 | 134 caught / 5 missed / 73 unviable / 1 timeout | SUPERSEDED by `u552` |
 | `u549`/`u550` store.rs shards (11 files) | 138, in 8 shards | 8 missed across the set | SUPERSEDED by `u552` |
 

@@ -193,7 +193,7 @@ carry no directive.
 
 Capabilities document. `Cache-Control: public, max-age=300`. The fields, their
 meaning, an example, and the consumer validation rules are normative in
-[RFC-ACDP-0007 §3](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0007-capabilities.md#3-capabilities-document);
+[RFC-ACDP-0007 §3](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0007-capabilities.md#3-capabilities-document);
 this section records only what **this registry** emits in each one
 (`build_capabilities` in `crates/acdp-registry-server/src/main.rs`):
 
@@ -219,21 +219,21 @@ response bodies instead.
 **How signatures are verified.** Every ACDP signature check (publish, `/auth/token`,
 lifecycle events, witness cosignatures) goes through the `acdp` crate. `ed25519`
 is verified strictly, as
-[RFC-ACDP-0001 §5.10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0001-core.md#510-signature-algorithms)
+[RFC-ACDP-0001 §5.10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0001-core.md#510-signature-algorithms)
 requires: small-order keys and nonce points are rejected with `invalid_signature`
 (conformance `sig-004`). `ecdsa-p256` high-S signatures are accepted, and
 signature bytes are never used as an identity, as
-[`registries/signature-algorithms.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/registries/signature-algorithms.md#ecdsa-p256-signature-non-uniqueness-normative)
+[`registries/signature-algorithms.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/registries/signature-algorithms.md#ecdsa-p256-signature-non-uniqueness-normative)
 requires. A lifecycle retry counts as idempotent only if it matches the stored event
 byte for byte, including `signature.value`, so a re-sent event whose P-256 signature
 was flipped to its high-S twin is rejected with `schema_violation`
-([RFC-ACDP-0013 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints)).
+([RFC-ACDP-0013 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints)).
 
 `bearer_jwt` (the `/auth/*` DID challenge answered with a registry-minted JWT) is the
 id registered for this flow in the spec's
-[`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/registries/auth-methods.md),
+[`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/registries/auth-methods.md),
 whose requirements are in
-[RFC-ACDP-0008 §6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0008-security.md#62-read-authentication);
+[RFC-ACDP-0008 §6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0008-security.md#62-read-authentication);
 [AUTHENTICATION.md](AUTHENTICATION.md#spec-conformance-bearer_jwt) maps them to this
 registry. Before 0.3.0 the value was `bearer-jwt`, which the capabilities schema's
 `^[a-z][a-z0-9_]*$` rejects.
@@ -432,9 +432,9 @@ Because peek and charge are separated by the verify, concurrent publishes by
 one agent can overshoot the limit by the number in flight.
 
 **Status and `Location`.** A first successful publish answers `201 Created`
-([RFC-ACDP-0003 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0003-publish.md#4-publish-response)); an idempotent replay (same agent,
+([RFC-ACDP-0003 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0003-publish.md#4-publish-response)); an idempotent replay (same agent,
 same `Idempotency-Key`, same `content_hash`) answers `200 OK` with the original
-response ([§6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0003-publish.md#62-registry-behavior)). Both carry
+response ([§6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0003-publish.md#62-registry-behavior)). Both carry
 `Location: /contexts/<ctx_id>`, a path-relative URL whose `ctx_id` is
 percent-encoded as one path segment (`acdp://host/uuid` becomes
 `/contexts/acdp%3A%2F%2Fhost%2Fuuid`, uppercase hex). A replay emits no second
@@ -449,8 +449,8 @@ is rejected with `key_resolution_failed` (400, permanent).
 `anchors` (RFC-ACDP-0016, still **Draft**) is an optional array of typed,
 content-addressed references to external artifacts. Its shape, the
 content-hash binding, and the version rules are normative in
-[RFC-ACDP-0016 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0016-external-anchors.md#4-the-anchors-field-normative) and
-[§10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0016-external-anchors.md#10-capabilities-profile-and-errors); the request-side version rule (a declared `acdp_version` of 0.5.0 or above) is RFC-ACDP-0016 §14. What this registry adds:
+[RFC-ACDP-0016 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0016-external-anchors.md#4-the-anchors-field-normative) and
+[§10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0016-external-anchors.md#10-capabilities-profile-and-errors); the request-side version rule (a declared `acdp_version` of 0.5.0 or above) is RFC-ACDP-0016 §14. What this registry adds:
 since it always advertises `acdp_version` `"0.5.0"`, only the request half of
 the gate can fail — a publish carrying `anchors` whose declared
 `acdp_version` is absent or below `0.5.0` is rejected with
@@ -475,7 +475,10 @@ On a receipts-advertising registry the response carries the top-level
 `registry_receipt` member (outside `body` and `registry_state`); contexts
 published before receipts were enabled omit it (no backfill — see
 [RECEIPTS.md](RECEIPTS.md)). Foreign retrievals pass the upstream's verified
-receipt through verbatim.
+receipt through verbatim, along with the upstream's `registry_state` and its
+`body` exactly as the origin sent it (never re-serialized), so a consumer
+recomputing `content_hash` over the raw `body` (RFC-ACDP-0001 §5.7) gets the
+producer's bytes whatever timestamp spelling the producer used.
 
 On a lifecycle-advertising registry (`lifecycle.enabled`, ACDP 0.3.0) a
 context that has been retracted/republished carries its append-only
@@ -589,9 +592,9 @@ signing, the ordered processing steps (visibility-first resolution, closed
 shape with `immutable_field` for body content, actor authentication,
 the `invalid_lifecycle_transition` alternation check, atomic append), retry
 idempotency and the response shape are normative in
-[RFC-ACDP-0013 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0013-lifecycle-events.md#4-lifecycle-event-object),
-[§5](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0013-lifecycle-events.md#5-event-signing-construction) and
-[§6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints); the handler follows
+[RFC-ACDP-0013 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0013-lifecycle-events.md#4-lifecycle-event-object),
+[§5](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0013-lifecycle-events.md#5-event-signing-construction) and
+[§6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints); the handler follows
 §6 in order. A registry with the flag off never serves lifecycle state: it
 refuses to start over a store that holds any (see
 [CONFIGURATION.md](CONFIGURATION.md#lifecycle-acdp-030)).
@@ -625,11 +628,11 @@ which attribute the event to the registry's own DID.
 Registry transparency log. The checkpoint object, the two `/log/proof` modes
 and their parameters, the `/log/entries` shape, and the verification
 procedures are normative in
-[RFC-ACDP-0012 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0012-transparency-log.md#6-checkpoints-signed-tree-heads-normative),
-[§8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0012-transparency-log.md#8-endpoints-normative) and
-[§9](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0012-transparency-log.md#9-verification-procedures-normative); the `witness_signatures`
+[RFC-ACDP-0012 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0012-transparency-log.md#6-checkpoints-signed-tree-heads-normative),
+[§8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0012-transparency-log.md#8-endpoints-normative) and
+[§9](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0012-transparency-log.md#9-verification-procedures-normative); the `witness_signatures`
 aggregation envelope is
-[RFC-ACDP-0015 §6.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0015-witness-cosigning.md#61-registry-aggregation). This section records what
+[RFC-ACDP-0015 §6.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0015-witness-cosigning.md#61-registry-aggregation). This section records what
 this registry does with them:
 
 - **Gate.** Mounted always; a registry without `log.enabled = true` answers
@@ -740,6 +743,12 @@ on the resolved verification method (downgrade defense). Response:
 ```json
 { "token": "<jwt>", "token_type": "Bearer", "expires_at": 1748003600 }
 ```
+
+A challenge failure is `403 not_authorized`. A `did:web` document the
+registry could not reach (non-2xx, timeout, TLS failure, or a key absent from
+a stale cached copy whose forced re-fetch was rate-limited) is
+`502 key_resolution_unreachable`: retry with a new challenge. See
+[AUTHENTICATION.md](AUTHENTICATION.md#token-issuance-checks-authtoken), step 6.
 
 ### `POST /auth/token/revoke`
 
@@ -976,7 +985,7 @@ half-apply: the swap is not reached at all.
 ## Error envelope
 
 Errors use the envelope of
-[RFC-ACDP-0007 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0007-capabilities.md#4-error-envelope),
+[RFC-ACDP-0007 §4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0007-capabilities.md#4-error-envelope),
 emitted as `application/acdp+json`; its fields and when `details` is present
 are specified there. What this registry adds: `internal_error` responses never
 leak detail — the message is always `"internal error"`, with the real cause in
@@ -984,7 +993,7 @@ the server log only. The `/admin/*` routes and `/metrics` do **not** use the
 envelope; see the note under the table.
 
 Each code's meaning and canonical HTTP status are in the spec's
-[error-code registry](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/registries/error-codes.md), and how an `acdp` client
+[error-code registry](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/registries/error-codes.md), and how an `acdp` client
 maps each one back to a typed `AcdpError` (with retry guidance) is in
 [acdp-rs · Errors & Retries](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/errors.md#wire-errors-round-trip-into-typed-variants).
 This page documents only what **this registry** answers and when.
@@ -1015,7 +1024,7 @@ This page documents only what **this registry** answers and when.
 | 429 | `rate_limited` | A rate-limit bucket drained (`/auth/*`, challenge, publish or lifecycle; see [Rate limits](#rate-limits-429)), or the shared `/auth/*` backend unavailable under `backend_unavailable = "deny"`; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
 | 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*` and lifecycle endpoints when their profiles are not enabled). |
-| 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable. A foreign registry refused by the SSRF policy is also `cross_registry_resolution_failed`; a refused DID host is not (it is 400 `key_resolution_failed`). |
+| 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (on publish, and on `POST /auth/token` since 0.5.1). A foreign registry refused by the SSRF policy is also `cross_registry_resolution_failed`; a refused DID host is not (it is 400 `key_resolution_failed`). |
 | 502 | `invalid_witness_cosignature` | A witness cosignature failed verification (RFC-ACDP-0015 §6.1). Like `invalid_log_proof`, a 502 because it is normally another party's artifact that failed. |
 | 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Normally raised when validating an *upstream's* proofs (federation), which is why it is a 502. **It is also reachable from this registry's own `/log/proof`**: for a retrieval-authorized requester the handler echoes the leaf via `record.leaf()` (`log_proof` in `crates/acdp-registry-core/src/handlers/log.rs`), and a stored leaf that no longer parses under the closed schema surfaces as `invalid_log_proof` from here, not from a peer (`LogEntryRecord::leaf` in `crates/acdp-registry-store/src/log.rs`, with the reject cases pinned by that module's own tests). If you see it and you are not federating, suspect your own `log_leaves` table. The other `/log/*` failures are `schema_violation`, `not_found`, or `not_implemented`; there is no `log_unavailable`. |
 

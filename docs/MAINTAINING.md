@@ -561,10 +561,15 @@ promoted together with the other advisory checks by the runbook above; a red res
 blocks the merge, because a stale pin otherwise costs one red Monday run of the
 mutation oracle.
 
-**Status:** pinned at scope 354 from run 37248684286 (a `workflow_dispatch` on main
-09615e9, 101.2 min of the 180-minute cap). #401 removed the lifecycle charge pre-flight and
-with it four caught mutants; the seven survivors are the same mutants on the same lines, and
-the run's report is committed unchanged as the prior ledger. (History: #395 pinned scope 358
+**Status:** pinned at scope 350 from run 39071836771 (a `workflow_dispatch` on
+`feat/acdp-0.15.0` 9cffe36, 117.3 min of the 180-minute cap). #435's federation proxy change
+turned `retrieve`'s four unviable `Json` return mutants into one caught
+`Ok(Default::default())`; the seven survivors are the same mutants on shifted lines, and the
+run's report is committed unchanged as the prior ledger. An earlier #435 run hit the cap
+because two new tests waited out a real 5 s connect timeout per mutant; a test that waits on
+the network is the first thing to check when a run overruns. (History: #432 pinned scope 353
+from run 37972268890; #401 pinned scope 354 from run 37248684286 after removing the
+lifecycle charge pre-flight and four caught mutants; #395 pinned scope 358
 from run 37222567772 after #373-#376 added twelve; the 2026-09-28 run 36417581090 failed
 after #341 shrank the scope from 351 to 346, and #371 re-pinned it the same way.) Edits to the four scoped files after a re-pin
 must be line-neutral until the next one (`mutants pins` checks this on the PR). Check

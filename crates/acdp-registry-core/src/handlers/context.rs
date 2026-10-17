@@ -12,6 +12,7 @@ use acdp_registry_types::{event::WebhookEvent, RegistryError};
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
 use serde::Deserialize;
@@ -915,7 +916,7 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
     headers: HeaderMap,
     PeerIp(peer): PeerIp,
     Path(ctx_id): Path<String>,
-) -> Result<Json<acdp::types::body::FullContext>, RegistryError> {
+) -> Result<Response, RegistryError> {
     let requester = caller_from_headers(&state, &headers)?;
 
     let parsed = CtxId::parse(ctx_id.clone()).map_err(RegistryError::Acdp)?;
@@ -929,13 +930,13 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
             .resolve(&parsed)
             .await
             .map_err(RegistryError::Acdp)?;
+        let upstream = verified.full_context();
         let ctx = acdp::types::body::FullContext {
             body: verified.body().clone(),
-            registry_state: acdp::types::body::RegistryState {
-                status: acdp::types::primitives::Status::Active,
-                lifecycle_events: None,
-                extensions: Default::default(),
-            },
+            // The origin's lifecycle view (retracted, superseded, …), not a
+            // hard-coded `active` — this proxy has no state of its own for a
+            // foreign context.
+            registry_state: upstream.registry_state.clone(),
             // Pass the upstream registry's receipt through verbatim (the
             // resolver has already verified it — and *required* it when the
             // upstream advertises `acdp-registry-receipts`, fed-009). The
@@ -946,6 +947,7 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
             lineage_head_receipt: None,
             log_inclusion: None,
             extensions: Default::default(),
+            raw_body: None,
         };
         if let Some(emitter) = &state.webhook {
             emitter.emit(WebhookEvent::ContextRetrieved {
@@ -955,7 +957,19 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
                 at: Utc::now(),
             });
         }
-        return Ok(Json(ctx));
+        // RFC-ACDP-0001 §5.7 (can-013): consumers recompute `content_hash`
+        // over the `body` bytes they receive. Re-serializing the typed body
+        // respells any timestamp the origin's producer did not write as
+        // `.mmmZ` (`+00:00`, legacy `…:00Z`), which breaks that hash
+        // downstream even though the signature is good. Serve the body
+        // exactly as the origin sent it; the resolver has already verified
+        // it against those very bytes.
+        let mut wire = serde_json::to_value(&ctx)
+            .map_err(|e| RegistryError::Internal(format!("serialize proxied context: {e}")))?;
+        if let Some(raw) = &upstream.raw_body {
+            wire["body"] = raw.clone();
+        }
+        return Ok(Json(wire).into_response());
     }
 
     // Resolve the tenant scope up front (before the DB read) so a strict-mode
@@ -1000,7 +1014,7 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
             at: Utc::now(),
         });
     }
-    Ok(Json(ctx))
+    Ok(Json(ctx).into_response())
 }
 
 /// `GET /contexts/{ctx_id}/body`.

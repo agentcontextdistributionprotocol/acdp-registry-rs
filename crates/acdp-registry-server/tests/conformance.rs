@@ -642,17 +642,19 @@
 #![cfg(feature = "storage-sqlite")]
 
 mod common;
+// Only the TLS fixture server is used here (did-001); the module's other
+// helpers serve `http_integration.rs`.
+#[allow(dead_code)]
+mod didweb;
 mod spawned_registry;
 
 use std::path::{Path, PathBuf};
-#[cfg(feature = "playground")]
 use std::sync::Arc;
 
 use common::{body_to_json, body_to_json_lenient, pct_encode_path_segment};
 
 use acdp::crypto::SigningKey;
 use acdp::producer::Producer;
-#[cfg(feature = "playground")]
 use acdp::registry::RegistryServer;
 use acdp::registry::RegistryStore;
 use acdp::types::capabilities::{CapabilitiesDocument, Limits};
@@ -661,15 +663,11 @@ use acdp::types::publish::{PublishRequest, PublishResponse};
 use acdp::types::Body as AcdpBody;
 use acdp::types::{DataRef, DataRefType, EmbeddedContent, EmbeddedEncoding};
 use acdp::AnchorEntry;
-#[cfg(feature = "playground")]
 use acdp_registry_auth::{
     AuthService, ChallengeStore, InMemoryChallengeStore, JwtSecret, JwtSigner,
 };
-#[cfg(feature = "playground")]
 use acdp_registry_core::{build_router, AppStateInner};
-#[cfg(feature = "playground")]
 use acdp_registry_sqlite::SqliteStore;
-#[cfg(feature = "playground")]
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::{
     config::PinnedAgentKey, AuthConfig, LimitsConfig, PlaygroundConfig, RegistryConfig,
@@ -7337,19 +7335,19 @@ async fn anc003_empty_anchors_array_is_rejected_with_established_ordering() {
 // argument, not a coverage argument, and the ratchet is deliberately deaf
 // to cost/duplication arguments.
 
-/// can-* vector count measured against the CI-pinned spec (REG-10 Phase 7): **35**
-/// total across all 12 can-* fixtures. Split into two constants because
+/// can-* vector count measured against the CI-pinned spec (REG-10 Phase 7): **37**
+/// total across all 13 can-* fixtures (can-013's 2 arrived with the 85088a6 pin). Split into two constants because
 /// can-007 alone carries no `input`/hash at all (see
 /// `can007_registry_created_at_millisecond_truncation`'s doc comment) and
 /// is therefore asserted by a separate test:
-/// `EXPECTED_CAN_HASH_VECTOR_COUNT` is the other 11 fixtures' 30
+/// `EXPECTED_CAN_HASH_VECTOR_COUNT` is the other 12 fixtures' 32
 /// canonical-form/hash vectors, and can-007's own 5 are asserted as
 /// `EXPECTED_CAN_VECTOR_COUNT - EXPECTED_CAN_HASH_VECTOR_COUNT` rather than
 /// a third bare literal, so the two constants can't silently drift apart.
 /// Either test's vector count shrinking without this constant moving is
 /// the vacuous-pass failure mode this pair exists to catch.
-const EXPECTED_CAN_VECTOR_COUNT: usize = 35;
-const EXPECTED_CAN_HASH_VECTOR_COUNT: usize = 30;
+const EXPECTED_CAN_VECTOR_COUNT: usize = 37;
+const EXPECTED_CAN_HASH_VECTOR_COUNT: usize = 32;
 
 /// Parse an RFC 3339 timestamp string as `DateTime<Utc>`, panicking
 /// (naming `ctx`) on failure. can-007's fixture-supplied timestamps are
@@ -7465,8 +7463,8 @@ fn assert_raw_jcs_hash_vector(input: &Value, expected: &Value, ctx: &str) {
     assert_canonical_bytes_and_hash(raw_bytes, hash, expected, ctx);
 }
 
-/// can-001..006/008..012's 30 canonicalization/hashing vectors (of the
-/// family's 35 total -- can-007 is covered separately below). can-001
+/// can-001..006/008..013's 32 canonicalization/hashing vectors (of the
+/// family's 37 total -- can-007 is covered separately below). can-001
 /// alone packs THREE distinct `expected` shapes into its 7 vectors: 1 Body
 /// `{canonical_form, sha256_hex}`, 3 `{lineage_id}`-only, and 3
 /// `{canonical_form}`-only with no hash at all -- a single hash-equality
@@ -7594,7 +7592,7 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
         }
     }
 
-    // The remaining 8 fixtures each carry only the single Body
+    // The remaining 9 fixtures each carry only the single Body
     // {canonical_form, sha256_hex, content_hash_field_value} shape.
     for (id, expected_len) in [
         ("can-002", 1),
@@ -7605,6 +7603,7 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
         ("can-009", 1),
         ("can-010", 1),
         ("can-012", 7),
+        ("can-013", 2),
     ] {
         let Some(fx) = find_fixture_by_id(&fixtures, id) else {
             continue;
@@ -7627,10 +7626,106 @@ fn can_vectors_reproduce_canonical_form_and_hash() {
     assert_eq!(
         asserted, EXPECTED_CAN_HASH_VECTOR_COUNT,
         "expected exactly {EXPECTED_CAN_HASH_VECTOR_COUNT} can-* canonical-form/hash vectors at \
-         the CI-pinned spec across 11 of the 12 can-* fixtures (can-007 has no input/hash at all \
+         the CI-pinned spec across 12 of the 13 can-* fixtures (can-007 has no input/hash at all \
          and is covered separately by can007_registry_created_at_millisecond_truncation) -- a \
          silently-shrinking count here is exactly the vacuous-pass failure mode this ratchet \
          exists to prevent"
+    );
+}
+
+/// can-013 (RFC-ACDP-0001 §5.3/§5.7, `acdp-registry-core`'s own
+/// `required_fixtures` at spec pin 85088a6), the registry half. The vector
+/// half -- both of the fixture's hashes reproduced from its own inputs -- is
+/// in `can_vectors_reproduce_canonical_form_and_hash`. The fixture's
+/// deployment note names the registry defect: a build that recomputes
+/// `content_hash` from a typed round-trip drops the `.000` fraction and
+/// rejects a conformant body with a false `hash_mismatch`.
+///
+/// So: a did:key producer signs a publish whose timestamps are spelled
+/// exactly as the fixture's conformant vector spells them (`.000Z`), the
+/// registry must accept it, and the served body must still carry those
+/// spellings and hash to the signed `content_hash`. The divergent vector's
+/// spellings, substituted into the same request, must hash differently --
+/// otherwise this request would not distinguish the defect at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn can013_registry_accepts_and_serves_canonical_zero_millisecond_timestamps() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping can-013 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let fx = find_fixture_by_id(&fixtures, "can-013")
+        .unwrap_or_else(|| panic!("can-013 missing from {}", fixtures.display()));
+    let vectors = fx["vectors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("can-013: vectors missing or not an array: {fx}"));
+    let compliances: Vec<&str> = vectors
+        .iter()
+        .map(|v| v["producer_compliance"].as_str().unwrap_or("?"))
+        .collect();
+    assert_eq!(
+        compliances,
+        vec!["conformant", "non-conformant"],
+        "can-013: vector 0 must be the conformant .000Z body and vector 1 the divergent one"
+    );
+    let conformant = &vectors[0]["input"];
+    let divergent = &vectors[1]["input"];
+
+    const SEED: u8 = 97;
+    let req = Producer::new_did_key(SigningKey::from_bytes(&[SEED; 32]))
+        .publish_request()
+        .title(conformant["title"].as_str().expect("can-013: input.title"))
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let mut raw = serde_json::to_value(&req).unwrap();
+    raw["expires_at"] = conformant["expires_at"].clone();
+    raw["data_period"] = conformant["data_period"].clone();
+    let hash = acdp::crypto::compute_content_hash(&raw).unwrap();
+    raw["content_hash"] = json!(hash.as_str());
+    raw["signature"]["value"] = json!(SigningKey::from_bytes(&[SEED; 32]).sign_content_hash(&hash));
+
+    let mut dropped = raw.clone();
+    dropped["expires_at"] = divergent["expires_at"].clone();
+    dropped["data_period"] = divergent["data_period"].clone();
+    assert_ne!(
+        acdp::crypto::compute_content_hash(&dropped).unwrap(),
+        hash,
+        "can-013 self-check: dropping the .000 fractions must change the hash"
+    );
+
+    let app = did_key_harness(did_key_caps()).await;
+    let (status, v) = post_publish_json(&app, raw.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "can-013: a body signed over canonical .000Z timestamps must be accepted; body = {v}"
+    );
+    let ctx_id = v["ctx_id"].as_str().expect("can-013: ctx_id").to_string();
+
+    let (status, served) = anc_get(
+        &app,
+        &format!("/contexts/{}", pct_encode_path_segment(&ctx_id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "can-013: retrieve; body = {served}");
+    let body = &served["body"];
+    assert_eq!(
+        body["expires_at"], conformant["expires_at"],
+        "can-013: served expires_at"
+    );
+    assert_eq!(
+        body["data_period"], conformant["data_period"],
+        "can-013: served data_period"
+    );
+    assert_eq!(body["content_hash"].as_str(), Some(hash.as_str()));
+    assert_eq!(
+        acdp::crypto::compute_content_hash(body).unwrap(),
+        hash,
+        "can-013: the served body must hash to its own content_hash"
     );
 }
 
@@ -9375,6 +9470,7 @@ const KNOWN_FAMILIES: &[&str] = &[
     "cur",
     "data-ref",
     "data-ref-ssrf",
+    "did",
     "did-ssrf",
     "dk",
     "err",
@@ -9438,8 +9534,8 @@ const KNOWN_FAMILIES: &[&str] = &[
 /// `required_fixtures`/`conditional_fixtures` bucket into -- both are then
 /// compiler- and CI-forced, not discretionary.
 const CORE_INEXCUSABLE_FAMILIES: &[&str] = &[
-    "body", "can", "caps", "data-ref", "did-ssrf", "dk", "err", "idem", "lin", "meta", "pub",
-    "rate", "ret", "rev", "schema", "sig", "status", "vis",
+    "body", "can", "caps", "data-ref", "did", "did-ssrf", "dk", "err", "idem", "lin", "meta",
+    "pub", "rate", "ret", "rev", "schema", "sig", "status", "vis",
 ];
 
 /// Families excused from needing HTTP-replay coverage, each with a prose
@@ -9703,6 +9799,7 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
         &[CoverageMechanism::Direct(&[
             "can_vectors_reproduce_canonical_form_and_hash",
             "can007_registry_created_at_millisecond_truncation",
+            "can013_registry_accepts_and_serves_canonical_zero_millisecond_timestamps",
         ])],
     ),
     (
@@ -9785,6 +9882,12 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
         &[CoverageMechanism::Direct(&[
             "dk001_002_004_did_key_resolution_negatives_hit_the_resolver",
             "did_key_golden_vector_accepted_and_gated",
+        ])],
+    ),
+    (
+        "did",
+        &[CoverageMechanism::Direct(&[
+            "did001_did_document_fetch_failures_are_classified_end_to_end",
         ])],
     ),
     (
@@ -10022,7 +10125,7 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// added). A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 147;
+const TOTAL_FIXTURES_AT_PIN: usize = 158;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
@@ -10120,6 +10223,7 @@ const DIRECT_FNS: &[(&str, fn())] = &[
     direct_fn!(anc003_empty_anchors_array_is_rejected_with_established_ordering),
     direct_fn!(can_vectors_reproduce_canonical_form_and_hash),
     direct_fn!(can007_registry_created_at_millisecond_truncation),
+    direct_fn!(can013_registry_accepts_and_serves_canonical_zero_millisecond_timestamps),
     direct_fn!(lin_vectors_reproduce_lineage_derivation),
     direct_fn!(caps_vectors_validate_capabilities_document),
     direct_fn!(idem001_004_publish_idempotency_key_lifecycle_and_restart_durability),
@@ -10141,6 +10245,7 @@ const DIRECT_FNS: &[(&str, fn())] = &[
     direct_fn!(rev003_publish_time_rejection_matrix),
     direct_fn!(rev004_interim_form_bodies_remain_served_unfiltered),
     direct_fn!(dk001_002_004_did_key_resolution_negatives_hit_the_resolver),
+    direct_fn!(did001_did_document_fetch_failures_are_classified_end_to_end),
     direct_fn!(did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets),
     direct_fn!(err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing),
     direct_fn!(rate001_publish_rate_limit_trips_429_with_retry_after),
@@ -14670,6 +14775,342 @@ async fn did_ssrf001_005_producer_did_resolution_refuses_forbidden_targets() {
         "expected exactly {EXPECTED_DID_SSRF_ASSERTION_COUNT} did-ssrf-* outcome assertions at \
          spec pin d1f06d0 -- a silently-shrinking count here is exactly the vacuous-pass \
          failure mode this ratchet exists to prevent"
+    );
+}
+
+const EXPECTED_DID_FIXTURE_COUNT: usize = 1;
+const EXPECTED_DID001_SCENARIO_COUNT: usize = 5;
+
+/// A production-mode harness (`playground.enabled = false`) whose
+/// `AuthService` resolves producer DIDs through `resolver`. The shared
+/// `harness()` cannot exercise did-001: playground mode skips did:web
+/// resolution on publish, so no DID host is ever contacted. Mirrors
+/// `common::build_harness_with_webhook`'s wiring, minus everything did-001
+/// does not touch (log, receipts, lifecycle, webhook, federation).
+async fn did001_production_harness(resolver: acdp::did::WebResolver) -> axum::Router {
+    let mut cfg = config();
+    cfg.playground.enabled = false;
+    let store = SqliteStore::connect_in_memory().await.unwrap();
+    store.migrate().await.unwrap();
+    let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
+    let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+    let signer = JwtSigner::new(
+        JwtSecret::from_bytes(&[42u8; 32]),
+        format!("did:web:{AUTHORITY}"),
+        AUTHORITY.into(),
+        30,
+    );
+    let auth = Arc::new(AuthService::new(
+        AuthConfig::default(),
+        challenges,
+        signer,
+        Arc::new(resolver),
+        AUTHORITY.into(),
+    ));
+    build_router(AppStateInner::new(server, auth, None, cfg, None))
+}
+
+/// Publish as `did` signing with `key_id` (Ed25519, `seed`) through the
+/// verified did:web pipeline.
+async fn did001_publish(
+    app: &axum::Router,
+    did: &str,
+    key_id: &str,
+    seed: u8,
+    title: &str,
+) -> (StatusCode, Value) {
+    let req = Producer::new(
+        SigningKey::from_bytes(&[seed; 32]),
+        AgentDid::new(did.to_string()),
+        key_id.to_string(),
+    )
+    .publish_request()
+    .title(title)
+    .context_type(ContextType::DataSnapshot)
+    .visibility(Visibility::Public)
+    .build()
+    .unwrap_or_else(|e| panic!("did-001: publish request for {key_id} failed to build: {e}"));
+    anc_publish(app, &req).await
+}
+
+/// did-001's pinned `(error_code, http_status)` for the scenario whose name
+/// starts with `letter`, read from the fixture rather than restated here.
+fn did001_expected(fx: &Value, letter: &str) -> (String, u16) {
+    let scenario = fx["scenarios"]
+        .as_array()
+        .unwrap_or_else(|| panic!("did-001: scenarios missing or not an array: {fx}"))
+        .iter()
+        .find(|s| {
+            s["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with(&format!("{letter} ")))
+        })
+        .unwrap_or_else(|| panic!("did-001: no scenario {letter} in {fx}"));
+    let expected = &scenario["expected"];
+    assert_eq!(
+        expected["outcome"].as_str(),
+        Some("failure"),
+        "did-001 {letter}: expected.outcome missing/changed: {scenario}"
+    );
+    let code = expected["error_code"]
+        .as_str()
+        .unwrap_or_else(|| panic!("did-001 {letter}: expected.error_code missing: {scenario}"))
+        .to_string();
+    let status = expected["http_status"]
+        .as_u64()
+        .and_then(|s| u16::try_from(s).ok())
+        .unwrap_or_else(|| panic!("did-001 {letter}: expected.http_status missing: {scenario}"));
+    (code, status)
+}
+
+/// did-001 (RFC-ACDP-0001 §5.11 step 3 and "Caching", `acdp-registry-core`'s
+/// own `required_fixtures` at spec pin 85088a6): a DID-document fetch failure
+/// that says nothing about the key -- a non-2xx response, a timeout, a TLS
+/// failure, or an absence seen only in a stale cached copy -- is transient
+/// (`key_resolution_unreachable`, 502); a document that does not parse, or
+/// that still lacks the fragment after a fresh fetch, is permanent
+/// (`key_resolution_failed`, 400).
+///
+/// Every scenario is MEASURED end to end: a real `POST /contexts` against a
+/// production-mode registry (`did001_production_harness`) whose resolver is
+/// pointed, via `WebResolver::with_test_endpoint`, at a loopback HTTPS host
+/// serving `agents.test` (`didweb::spawn_tls_server`). The fixture's own
+/// `scenarios[].expected` supplies every asserted code and status.
+///
+///   * A: the host answers each status the scenario name lists (404, 410,
+///     500, 503 at this pin -- parsed from the name, so a spec edit that adds
+///     one is picked up).
+///   * B ("timeout or TLS failure"): "TLS failure" is a plain TCP listener
+///     that answers the ClientHello with HTTP bytes, which satisfies the
+///     scenario on its own. A refused connection is checked alongside it in
+///     place of a literal timeout: the resolver maps both through the same
+///     `is_timeout() || is_connect()` arm to `KeyResolutionUnreachable`, and a
+///     real timeout costs the SDK's fixed 5s `CONNECT_TIMEOUT`
+///     (`acdp_primitives::limits`), which no resolver option shortens, on every
+///     mutant of the mutation oracle.
+///   * C: 200 with an HTML body.
+///   * D, E: one resolver, three publishes as the same DID, whose document
+///     carries only `#key-1`. Publish 1 signs with `#key-1` and must succeed
+///     -- the positive control that the harness really verifies did:web
+///     against this host. Publish 2 signs with `#key-2`: the cached copy
+///     lacks it, the forced re-fetch is allowed, the fresh copy still lacks
+///     it, so the verdict is final (D). Publish 3 signs with `#key-3`: the
+///     forced re-fetch is now refused by the per-DID rate limit (one per
+///     hour by default), so absence is unproven (E). A second resolver with
+///     the rate limit disabled re-runs publish 3 and must get D's permanent
+///     verdict instead, which pins E's 502 on the rate limit rather than on
+///     anything else about the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn did001_did_document_fetch_failures_are_classified_end_to_end() {
+    use axum::extract::Path as AxPath;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!(
+            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping did-001 \
+             (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+        );
+        return;
+    };
+    let did_ids: Vec<String> = std::fs::read_dir(&fixtures)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| {
+            n.strip_prefix("did-")
+                .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+                && n.ends_with(".json")
+        })
+        .collect();
+    assert_eq!(
+        did_ids.len(),
+        EXPECTED_DID_FIXTURE_COUNT,
+        "expected exactly {EXPECTED_DID_FIXTURE_COUNT} did-NNN fixture(s) at spec pin 85088a6: \
+         found {did_ids:?}"
+    );
+    let fx = find_fixture_by_id(&fixtures, "did-001")
+        .unwrap_or_else(|| panic!("did-001 missing from {}", fixtures.display()));
+    let scenario_count = fx["scenarios"].as_array().map_or(0, Vec::len);
+    assert_eq!(
+        scenario_count, EXPECTED_DID001_SCENARIO_COUNT,
+        "did-001 must carry exactly {EXPECTED_DID001_SCENARIO_COUNT} scenarios at spec pin \
+         85088a6: {fx}"
+    );
+
+    // The DID host. `/d1-status-<code>/did.json` answers <code>;
+    // `/d1-notjson/did.json` answers 200 with HTML; anything else is a
+    // document carrying only `#key-1` for the seed-96 key.
+    const SEED: u8 = 96;
+    let multibase = acdp::did::key::did_key_from_ed25519(
+        &SigningKey::from_bytes(&[SEED; 32]).verifying_key_bytes(),
+    )
+    .strip_prefix("did:key:")
+    .expect("did_key_from_ed25519 always returns a did:key: prefix")
+    .to_string();
+    let host = axum::Router::new().route(
+        "/{name}/did.json",
+        axum::routing::get(move |AxPath(name): AxPath<String>| {
+            let multibase = multibase.clone();
+            async move {
+                if let Some(code) = name.strip_prefix("d1-status-") {
+                    let code = StatusCode::from_u16(code.parse().unwrap()).unwrap();
+                    return (code, "DID host unavailable").into_response();
+                }
+                if name == "d1-notjson" {
+                    return (
+                        StatusCode::OK,
+                        [("content-type", "application/did+json")],
+                        "<html><body>maintenance</body></html>",
+                    )
+                        .into_response();
+                }
+                let did = format!("did:web:{}:{name}", didweb::DIDWEB_AUTHORITY);
+                let key_id = format!("{did}#key-1");
+                axum::Json(json!({
+                    "@context": [
+                        "https://www.w3.org/ns/did/v1",
+                        "https://w3id.org/security/suites/ed25519-2020/v1"
+                    ],
+                    "id": did,
+                    "verificationMethod": [{
+                        "id": key_id,
+                        "type": "Ed25519VerificationKey2020",
+                        "controller": did,
+                        "publicKeyMultibase": multibase,
+                    }],
+                    "assertionMethod": [key_id],
+                }))
+                .into_response()
+            }
+        }),
+    );
+    let host_addr = didweb::spawn_tls_server(host).await;
+    let ca = didweb::ca_pem().as_bytes();
+    let authority = didweb::DIDWEB_AUTHORITY;
+    let resolver_for = |addr| {
+        acdp::did::WebResolver::with_test_endpoint(ca, authority, addr)
+            .expect("test-endpoint resolver")
+    };
+    let did_for = |name: &str| format!("did:web:{authority}:{name}");
+
+    let mut asserted = 0usize;
+    let assert_outcome = |letter: &str, case: &str, got: (StatusCode, Value)| {
+        let (code, status) = did001_expected(&fx, letter);
+        let (got_status, body) = got;
+        assert_eq!(
+            got_status.as_u16(),
+            status,
+            "did-001 {letter} ({case}): HTTP status; body = {body}"
+        );
+        assert_eq!(
+            body["error"]["code"].as_str(),
+            Some(code.as_str()),
+            "did-001 {letter} ({case}): error code; body = {body}"
+        );
+    };
+
+    // A — every status the scenario name lists.
+    let a_name = fx["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .find(|n| n.starts_with("A "))
+        .expect("did-001: scenario A")
+        .to_string();
+    let statuses: Vec<u16> = a_name
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|t| t.parse::<u16>().ok())
+        .filter(|c| (100..600).contains(c))
+        .collect();
+    assert!(
+        statuses.len() >= 4,
+        "did-001 A self-check: expected the scenario name to list the HTTP statuses it pins, \
+         parsed {statuses:?} from {a_name:?}"
+    );
+    let app = did001_production_harness(resolver_for(host_addr)).await;
+    for code in &statuses {
+        let did = did_for(&format!("d1-status-{code}"));
+        let got = did001_publish(&app, &did, &format!("{did}#key-1"), SEED, "did-001 A").await;
+        assert_outcome("A", &format!("HTTP {code}"), got);
+    }
+    asserted += 1;
+
+    // B — TLS failure: the listener answers the ClientHello with plain HTTP.
+    let tls_garbage = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tls_garbage_addr = tls_garbage.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = tls_garbage.accept().await {
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
+                .await;
+        }
+    });
+    // B — a refused connection: bind for a free port, then close it.
+    let refused_addr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    for (case, addr) in [
+        ("TLS failure", tls_garbage_addr),
+        ("connection refused", refused_addr),
+    ] {
+        let app = did001_production_harness(resolver_for(addr)).await;
+        let did = did_for("d1-b");
+        let started = std::time::Instant::now();
+        let got = did001_publish(&app, &did, &format!("{did}#key-1"), SEED, "did-001 B").await;
+        assert!(
+            started.elapsed() < Duration::from_secs(40),
+            "did-001 B ({case}): the resolver's own timeouts must bound the publish"
+        );
+        assert_outcome("B", case, got);
+    }
+    asserted += 1;
+
+    // C — 200 with a body that is not JSON.
+    let did = did_for("d1-notjson");
+    let got = did001_publish(&app, &did, &format!("{did}#key-1"), SEED, "did-001 C").await;
+    assert_outcome("C", "HTML body", got);
+    asserted += 1;
+
+    // D, E — fragment absent after a fresh fetch, then from a stale copy
+    // whose forced re-fetch the rate limit refuses.
+    let did = did_for("d1-rot");
+    let rot = did001_production_harness(resolver_for(host_addr)).await;
+    let (status, body) =
+        did001_publish(&rot, &did, &format!("{did}#key-1"), SEED, "did-001 control").await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "did-001 positive control: a key the document carries must verify; body = {body}"
+    );
+    let got = did001_publish(&rot, &did, &format!("{did}#key-2"), SEED, "did-001 D").await;
+    assert_outcome("D", "fresh document lacks #key-2", got);
+    asserted += 1;
+    let got = did001_publish(&rot, &did, &format!("{did}#key-3"), SEED, "did-001 E").await;
+    assert_outcome("E", "re-fetch refused by the rate limit", got);
+    asserted += 1;
+
+    // Contrast for E: with the rate limit off, the same third publish gets a
+    // fresh document and D's permanent verdict.
+    let unlimited = did001_production_harness(
+        resolver_for(host_addr).with_forced_refresh_interval(Duration::ZERO),
+    )
+    .await;
+    for (key, want_created) in [("key-1", true), ("key-2", false), ("key-3", false)] {
+        let got = did001_publish(&unlimited, &did, &format!("{did}#{key}"), SEED, "contrast").await;
+        if want_created {
+            assert_eq!(got.0, StatusCode::CREATED, "did-001 E contrast: {}", got.1);
+        } else {
+            assert_outcome("D", &format!("rate limit off, #{key}"), got);
+        }
+    }
+
+    assert_eq!(
+        asserted, EXPECTED_DID001_SCENARIO_COUNT,
+        "expected exactly {EXPECTED_DID001_SCENARIO_COUNT} did-001 scenario assertions -- a \
+         silently-shrinking count here is the vacuous-pass failure mode this ratchet exists to \
+         prevent"
     );
 }
 

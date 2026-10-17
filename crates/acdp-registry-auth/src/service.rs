@@ -198,11 +198,24 @@ impl AuthService {
             .ok_or_else(|| AuthError::KeyIdMalformed(req.key_id.clone()))?;
 
         let pub_bytes: Vec<u8> = if did_portion.starts_with("did:web:") {
+            // RFC-ACDP-0001 §5.11 step 3, applied to the handshake the same
+            // way the publish path applies it (did-001): a transient failure
+            // (DID host non-2xx, timeout, TLS failure, or the key absent
+            // from a stale copy whose forced re-fetch the rate limit
+            // refused) is `key_resolution_unreachable` / 502, so the client
+            // retries. A permanent one (a document that isn't JSON, the key
+            // still absent after a fresh fetch, an SSRF refusal) stays an
+            // auth_challenge rejection.
             let doc = self
                 .resolver
-                .resolve(did_portion)
+                .resolve_with_fragment(did_portion, fragment, std::time::Instant::now())
                 .await
-                .map_err(|e| AuthError::Resolution(e.to_string()))?;
+                .map_err(|e| match e {
+                    acdp::error::AcdpError::KeyResolutionUnreachable(m) => {
+                        AuthError::ResolutionUnreachable(m)
+                    }
+                    other => AuthError::Resolution(other.to_string()),
+                })?;
             let vm = doc.find_by_fragment(fragment).ok_or_else(|| {
                 AuthError::KeyIdMalformed(format!("fragment '{fragment}' not in DID doc"))
             })?;

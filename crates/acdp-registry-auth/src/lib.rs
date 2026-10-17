@@ -42,6 +42,14 @@ pub enum AuthError {
     #[error("DID resolution failed: {0}")]
     Resolution(String),
 
+    /// Transient DID resolution failure (RFC-ACDP-0001 §5.11 step 3): the
+    /// DID host was unreachable (non-2xx, timeout, TLS failure), or the key
+    /// was absent from a stale cached copy whose forced re-fetch the
+    /// per-DID rate limit refused. Surfaces as `key_resolution_unreachable`
+    /// (502) so clients retry instead of treating their credentials as bad.
+    #[error("DID resolution unreachable: {0}")]
+    ResolutionUnreachable(String),
+
     #[error("key_id malformed: {0}")]
     KeyIdMalformed(String),
 
@@ -76,6 +84,9 @@ impl From<AuthError> for RegistryError {
             AuthError::ChallengeReplay(m) => RegistryError::AuthChallenge(m),
             AuthError::ChallengeExpired => RegistryError::AuthChallenge("expired".into()),
             AuthError::Resolution(m) => RegistryError::AuthChallenge(m),
+            AuthError::ResolutionUnreachable(m) => {
+                RegistryError::Acdp(acdp::error::AcdpError::KeyResolutionUnreachable(m))
+            }
             AuthError::KeyIdMalformed(m) => RegistryError::AuthChallenge(format!("key_id: {m}")),
             AuthError::KeyIdMismatch => {
                 RegistryError::AuthChallenge("key_id does not bind to agent_id".into())
@@ -95,5 +106,20 @@ impl From<AuthError> for RegistryError {
             AuthError::TokenInvalid(m) => RegistryError::AuthToken(m),
             AuthError::Internal(m) => RegistryError::Internal(m),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolution_errors_split_transient_from_permanent() {
+        let transient = RegistryError::from(AuthError::ResolutionUnreachable("x".into()));
+        assert_eq!(transient.wire_code(), "key_resolution_unreachable");
+        assert_eq!(transient.http_status(), 502);
+        let permanent = RegistryError::from(AuthError::Resolution("x".into()));
+        assert_eq!(permanent.wire_code(), "not_authorized");
+        assert_eq!(permanent.http_status(), 403);
     }
 }

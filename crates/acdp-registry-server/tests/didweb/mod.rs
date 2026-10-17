@@ -156,8 +156,6 @@ fn did_document_for_seed(seed: u8) -> serde_json::Value {
 /// `https://agents.test/smoke-63/did.json`. That is not a guess — it is the URL
 /// the failure this module exists to fix printed.
 pub async fn spawn_didweb_server() -> SocketAddr {
-    install_crypto_provider();
-
     let app = Router::new().route(
         "/{name}/did.json",
         get(
@@ -170,6 +168,13 @@ pub async fn spawn_didweb_server() -> SocketAddr {
             },
         ),
     );
+    spawn_tls_server(app).await
+}
+
+/// Serve `app` over HTTPS as `agents.test` (the fixture leaf) on a loopback
+/// port and return the socket to point a test-endpoint client at.
+pub async fn spawn_tls_server(app: Router) -> SocketAddr {
+    install_crypto_provider();
 
     let f = fixture();
     let config = RustlsConfig::from_pem(

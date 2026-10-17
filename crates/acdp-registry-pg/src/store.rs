@@ -1707,6 +1707,7 @@ fn full_context(body: Body, status: Status, receipt: Option<serde_json::Value>) 
         lineage_head_receipt: None,
         log_inclusion: None,
         extensions: Default::default(),
+        raw_body: None,
     }
 }
 
