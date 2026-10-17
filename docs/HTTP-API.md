@@ -744,6 +744,12 @@ on the resolved verification method (downgrade defense). Response:
 { "token": "<jwt>", "token_type": "Bearer", "expires_at": 1748003600 }
 ```
 
+A challenge failure is `403 not_authorized`. A `did:web` document the
+registry could not reach (non-2xx, timeout, TLS failure, or a key absent from
+a stale cached copy whose forced re-fetch was rate-limited) is
+`502 key_resolution_unreachable`: retry with a new challenge. See
+[AUTHENTICATION.md](AUTHENTICATION.md#token-issuance-checks-authtoken), step 6.
+
 ### `POST /auth/token/revoke`
 
 Body `{ "jti": "<token id>" }`. Requires `Authorization: Bearer <jwt>`; the
@@ -1018,7 +1024,7 @@ This page documents only what **this registry** answers and when.
 | 429 | `rate_limited` | A rate-limit bucket drained (`/auth/*`, challenge, publish or lifecycle; see [Rate limits](#rate-limits-429)), or the shared `/auth/*` backend unavailable under `backend_unavailable = "deny"`; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
 | 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*` and lifecycle endpoints when their profiles are not enabled). |
-| 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable. A foreign registry refused by the SSRF policy is also `cross_registry_resolution_failed`; a refused DID host is not (it is 400 `key_resolution_failed`). |
+| 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (on publish, and on `POST /auth/token` since 0.5.1). A foreign registry refused by the SSRF policy is also `cross_registry_resolution_failed`; a refused DID host is not (it is 400 `key_resolution_failed`). |
 | 502 | `invalid_witness_cosignature` | A witness cosignature failed verification (RFC-ACDP-0015 §6.1). Like `invalid_log_proof`, a 502 because it is normally another party's artifact that failed. |
 | 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Normally raised when validating an *upstream's* proofs (federation), which is why it is a 502. **It is also reachable from this registry's own `/log/proof`**: for a retrieval-authorized requester the handler echoes the leaf via `record.leaf()` (`log_proof` in `crates/acdp-registry-core/src/handlers/log.rs`), and a stored leaf that no longer parses under the closed schema surfaces as `invalid_log_proof` from here, not from a peer (`LogEntryRecord::leaf` in `crates/acdp-registry-store/src/log.rs`, with the reject cases pinned by that module's own tests). If you see it and you are not federating, suspect your own `log_leaves` table. The other `/log/*` failures are `schema_violation`, `not_found`, or `not_implemented`; there is no `log_unavailable`. |
 

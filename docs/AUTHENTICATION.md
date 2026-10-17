@@ -79,6 +79,21 @@ In order (`service.rs`):
    publish. Its defenses (IP-literal rejection, DNS-time SSRF filtering,
    size/redirect caps) are documented in
    [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/security.md#defenses-applied-by-default).
+   If the cached document lacks the fragment, one re-fetch is forced (at most
+   one per DID per hour, the resolver's default). Failures split the way the
+   publish path splits them (RFC-ACDP-0001 §5.11 step 3, conformance fixture
+   `did-001`):
+   - **transient → `502 key_resolution_unreachable`**: the DID host answered
+     non-2xx, timed out or failed TLS, or the key is absent from a stale copy
+     whose forced re-fetch the rate limit refused. Nothing is wrong with the
+     agent's key; retry with a new challenge (step 1 already consumed the
+     nonce).
+   - **permanent → `403 not_authorized`**: the document is not JSON, the key
+     is still absent after a fresh fetch, or the SSRF policy refused the host.
+
+   RFC-ACDP-0008 §6.2 leaves the challenge exchange deployment-defined, so
+   these codes are this registry's choice rather than a spec requirement.
+   Registry 0.5.0 and earlier answered `403` to all of them.
 7. (`did:web` only) The verification method named by the fragment must appear
    in the document's `assertionMethod` set.
 8. If the verification method declares an algorithm, it must match the request's

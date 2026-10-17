@@ -24,7 +24,8 @@ belongs in the per-crate changelogs.
 ## 0.5.1
 
 **Upgrade the registry before, or together with, producers on `acdp` 0.15. Rolling back to 0.5.0
-is safe only while no 0.15 producer publishes to it.**
+is safe only while no 0.15 producer publishes to it. `POST /auth/token` now answers `502` (was
+`403`) when an agent's DID document is unreachable.**
 
 This release moves the `acdp` dependency from 0.14.5 to 0.15.0. `acdp` 0.15 producers emit canonical
 `.mmmZ` timestamps (`2026-12-01T00:00:00.000Z`) in `expires_at` and `data_period`, and hash and sign
@@ -41,8 +42,17 @@ rejects the publish with `hash_mismatch`.
   timestamp any other way (`+00:00`, legacy `…:00Z`) failed `hash_mismatch` downstream. The proxied
   `registry_state` is now the origin's (so a retracted or superseded foreign context reports that)
   instead of an always-`active` placeholder.
-- **Unchanged:** configuration, storage and schema, error codes, and every endpoint other than the
-  federation proxy.
+- **`POST /auth/token` answers `502` to transient DID failures.** When the agent's `did:web`
+  document cannot be fetched (the DID host answers non-2xx, times out or fails TLS), or the key is
+  absent from a stale cached copy whose forced re-fetch the per-DID rate limit refused, the token
+  endpoint now returns `502 key_resolution_unreachable` instead of `403 not_authorized`. This is
+  the same transient/permanent split the publish path applies (RFC-ACDP-0001 §5.11 step 3,
+  conformance fixture `did-001`). A permanent failure (a document that is not JSON, a key still
+  absent after a fresh fetch, an SSRF refusal) is still `403 not_authorized`. A client that treats
+  every non-200 from `/auth/token` as "credentials rejected" should instead retry a `502` with a
+  new challenge. Monitoring that alerts on `/auth/token` 5xx will now see DID-host outages.
+- **Unchanged:** configuration, storage and schema, and every endpoint other than the federation
+  proxy and `POST /auth/token`.
 - **Rollback:** safe while no `acdp` 0.15 producer is publishing here. Once one is, 0.5.0 rejects its
   publishes with `hash_mismatch`; stored contexts are unaffected either way.
 

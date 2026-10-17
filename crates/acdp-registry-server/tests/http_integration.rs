@@ -12727,3 +12727,238 @@ async fn a_cross_origin_publish_exposes_location() {
         "a browser client must be allowed to read Location; exposed = {exposed:?}"
     );
 }
+
+/// A production-mode router whose auth service resolves `did:web` through
+/// `resolver`, with the `/auth/*` IP limiter off so a test can run many
+/// handshakes back to back.
+async fn handshake_harness(resolver: WebResolver) -> axum::Router {
+    let mut cfg = config(false);
+    cfg.auth.enabled = true;
+    cfg.rate_limit.enabled = false;
+    let store = SqliteStore::connect_in_memory().await.unwrap();
+    store.migrate().await.unwrap();
+    let server = Arc::new(RegistryServer::try_new(store, caps(), AUTHORITY).unwrap());
+    let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+    let signer = JwtSigner::new(
+        JwtSecret::from_bytes(&[42u8; 32]),
+        format!("did:web:{AUTHORITY}"),
+        AUTHORITY.into(),
+        30,
+    );
+    let auth = Arc::new(AuthService::new(
+        cfg.auth.clone(),
+        challenges,
+        signer,
+        Arc::new(resolver),
+        AUTHORITY.into(),
+    ));
+    build_router(AppStateInner::new(server, auth, None, cfg, None))
+}
+
+/// Run `/auth/challenge` → sign `signing_input` with the Ed25519 `seed` key →
+/// `/auth/token` as `did`, claiming `key_id`. Returns the token response.
+async fn handshake(app: &axum::Router, did: &str, key_id: &str, seed: u8) -> (StatusCode, Value) {
+    let post = |uri: &str, body: Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let resp = app
+        .clone()
+        .oneshot(post("/auth/challenge", json!({ "agent_id": did })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "challenge for {did}");
+    let challenge = body_to_json(resp).await;
+    let signature = SigningKey::from_bytes(&[seed; 32])
+        .sign_string(challenge["signing_input"].as_str().expect("signing_input"));
+    let resp = app
+        .clone()
+        .oneshot(post(
+            "/auth/token",
+            json!({
+                "nonce": challenge["nonce"],
+                "agent_id": did,
+                "expires_at": challenge["expires_at"],
+                "algorithm": "ed25519",
+                "key_id": key_id,
+                "signature": signature,
+            }),
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_to_json_lenient(resp).await)
+}
+
+/// The did-001 classification (RFC-ACDP-0001 §5.11 step 3 and "Caching") on
+/// the `/auth/token` handshake. RFC-ACDP-0008 §6.2 leaves the challenge
+/// exchange deployment-defined, so the codes are this registry's choice; it
+/// follows the publish path's transient/permanent split:
+///
+///   * transient — `502 key_resolution_unreachable`, so the client retries
+///     with a new challenge instead of treating its key as bad:
+///     A (DID host 404/410/500/503), B (TLS failure, connect timeout),
+///     E (key absent from a stale copy whose forced re-fetch the per-DID
+///     rate limit refused);
+///   * permanent — `403 not_authorized`, as before: C (a document that is
+///     not JSON), D (key still absent after a fresh fetch). An SSRF refusal
+///     also stays here (`token_endpoint_accepts_signed_challenge_through_offline_gates`).
+///
+/// Same host shapes and D/E sequence as conformance.rs's
+/// `did001_did_document_fetch_failures_are_classified_end_to_end`, including
+/// the contrast run with the rate limit off that turns E into D.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn token_handshake_classifies_did_resolution_failures_like_did001() {
+    use axum::extract::Path as AxPath;
+    use axum::response::IntoResponse;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    const SEED: u8 = 95;
+    let multibase = acdp::did::key::did_key_from_ed25519(
+        &SigningKey::from_bytes(&[SEED; 32]).verifying_key_bytes(),
+    )
+    .strip_prefix("did:key:")
+    .expect("did_key_from_ed25519 always returns a did:key: prefix")
+    .to_string();
+    let host = axum::Router::new().route(
+        "/{name}/did.json",
+        axum::routing::get(move |AxPath(name): AxPath<String>| {
+            let multibase = multibase.clone();
+            async move {
+                if let Some(code) = name.strip_prefix("h-status-") {
+                    let code = StatusCode::from_u16(code.parse().unwrap()).unwrap();
+                    return (code, "DID host unavailable").into_response();
+                }
+                if name == "h-notjson" {
+                    return (
+                        StatusCode::OK,
+                        [("content-type", "application/did+json")],
+                        "<html><body>maintenance</body></html>",
+                    )
+                        .into_response();
+                }
+                let did = format!("did:web:{}:{name}", didweb::DIDWEB_AUTHORITY);
+                let key_id = format!("{did}#key-1");
+                axum::Json(json!({
+                    "@context": [
+                        "https://www.w3.org/ns/did/v1",
+                        "https://w3id.org/security/suites/ed25519-2020/v1"
+                    ],
+                    "id": did,
+                    "verificationMethod": [{
+                        "id": key_id,
+                        "type": "Ed25519VerificationKey2020",
+                        "controller": did,
+                        "publicKeyMultibase": multibase,
+                    }],
+                    "assertionMethod": [key_id],
+                }))
+                .into_response()
+            }
+        }),
+    );
+    let host_addr = didweb::spawn_tls_server(host).await;
+    let resolver_for = |addr| {
+        WebResolver::with_test_endpoint(didweb::ca_pem().as_bytes(), didweb::DIDWEB_AUTHORITY, addr)
+            .expect("test-endpoint resolver")
+    };
+    let did_for = |name: &str| format!("did:web:{}:{name}", didweb::DIDWEB_AUTHORITY);
+    let transient = |case: &str, (status, body): (StatusCode, Value)| {
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{case}: body = {body}");
+        assert_eq!(
+            body["error"]["code"], "key_resolution_unreachable",
+            "{case}: body = {body}"
+        );
+    };
+    let permanent = |case: &str, (status, body): (StatusCode, Value)| {
+        assert_eq!(status, StatusCode::FORBIDDEN, "{case}: body = {body}");
+        assert_eq!(
+            body["error"]["code"], "not_authorized",
+            "{case}: body = {body}"
+        );
+    };
+
+    // A — DID host answers non-2xx.
+    let app = handshake_harness(resolver_for(host_addr)).await;
+    for code in [404u16, 410, 500, 503] {
+        let did = did_for(&format!("h-status-{code}"));
+        let got = handshake(&app, &did, &format!("{did}#key-1"), SEED).await;
+        transient(&format!("A: HTTP {code}"), got);
+    }
+
+    // B — TLS failure (HTTP bytes answer the ClientHello) and connect
+    // timeout (a listener that accepts and never speaks).
+    let tls_garbage = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tls_garbage_addr = tls_garbage.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = tls_garbage.accept().await {
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
+                .await;
+        }
+    });
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_addr = silent.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = silent.accept().await {
+            held.push(sock);
+        }
+    });
+    for (case, addr) in [("TLS failure", tls_garbage_addr), ("timeout", silent_addr)] {
+        let b_app = handshake_harness(resolver_for(addr)).await;
+        let did = did_for("h-b");
+        let started = std::time::Instant::now();
+        let got = handshake(&b_app, &did, &format!("{did}#key-1"), SEED).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(40),
+            "B ({case}): the resolver's own timeouts must bound the handshake"
+        );
+        transient(&format!("B: {case}"), got);
+    }
+
+    // C — 200 with a body that is not JSON.
+    let did = did_for("h-notjson");
+    permanent(
+        "C: HTML body",
+        handshake(&app, &did, &format!("{did}#key-1"), SEED).await,
+    );
+
+    // D, E — the document carries only #key-1.
+    let did = did_for("h-rot");
+    let rot = handshake_harness(resolver_for(host_addr)).await;
+    let (status, body) = handshake(&rot, &did, &format!("{did}#key-1"), SEED).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "positive control: a key the document carries must mint a token; body = {body}"
+    );
+    assert!(body["token"].is_string(), "body = {body}");
+    permanent(
+        "D: fresh document lacks #key-2",
+        handshake(&rot, &did, &format!("{did}#key-2"), SEED).await,
+    );
+    transient(
+        "E: re-fetch refused by the rate limit",
+        handshake(&rot, &did, &format!("{did}#key-3"), SEED).await,
+    );
+
+    // Contrast for E: with the rate limit off, the third handshake gets a
+    // fresh document and D's permanent verdict.
+    let unlimited =
+        handshake_harness(resolver_for(host_addr).with_forced_refresh_interval(Duration::ZERO))
+            .await;
+    let (status, body) = handshake(&unlimited, &did, &format!("{did}#key-1"), SEED).await;
+    assert_eq!(status, StatusCode::OK, "contrast control: body = {body}");
+    for key in ["key-2", "key-3"] {
+        permanent(
+            &format!("contrast: rate limit off, #{key}"),
+            handshake(&unlimited, &did, &format!("{did}#{key}"), SEED).await,
+        );
+    }
+}
