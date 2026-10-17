@@ -14880,11 +14880,14 @@ fn did001_expected(fx: &Value, letter: &str) -> (String, u16) {
 ///   * A: the host answers each status the scenario name lists (404, 410,
 ///     500, 503 at this pin -- parsed from the name, so a spec edit that adds
 ///     one is picked up).
-///   * B: two hosts, one per half of the scenario. "TLS failure" is a plain
-///     TCP listener that answers the ClientHello with HTTP bytes; "timeout"
-///     is a listener that accepts and never speaks, which trips the
-///     resolver's 5s connect timeout (`acdp_primitives::limits::
-///     CONNECT_TIMEOUT`).
+///   * B ("timeout or TLS failure"): "TLS failure" is a plain TCP listener
+///     that answers the ClientHello with HTTP bytes, which satisfies the
+///     scenario on its own. A refused connection is checked alongside it in
+///     place of a literal timeout: the resolver maps both through the same
+///     `is_timeout() || is_connect()` arm to `KeyResolutionUnreachable`, and a
+///     real timeout costs the SDK's fixed 5s `CONNECT_TIMEOUT`
+///     (`acdp_primitives::limits`), which no resolver option shortens, on every
+///     mutant of the mutation oracle.
 ///   * C: 200 with an HTML body.
 ///   * D, E: one resolver, three publishes as the same DID, whose document
 ///     carries only `#key-1`. Publish 1 signs with `#key-1` and must succeed
@@ -15043,16 +15046,15 @@ async fn did001_did_document_fetch_failures_are_classified_end_to_end() {
                 .await;
         }
     });
-    // B — timeout: the listener accepts and never speaks.
-    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let silent_addr = silent.local_addr().unwrap();
-    tokio::spawn(async move {
-        let mut held = Vec::new();
-        while let Ok((sock, _)) = silent.accept().await {
-            held.push(sock);
-        }
-    });
-    for (case, addr) in [("TLS failure", tls_garbage_addr), ("timeout", silent_addr)] {
+    // B — a refused connection: bind for a free port, then close it.
+    let refused_addr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    for (case, addr) in [
+        ("TLS failure", tls_garbage_addr),
+        ("connection refused", refused_addr),
+    ] {
         let app = did001_production_harness(resolver_for(addr)).await;
         let did = did_for("d1-b");
         let started = std::time::Instant::now();

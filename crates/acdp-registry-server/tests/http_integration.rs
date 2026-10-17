@@ -12801,7 +12801,7 @@ async fn handshake(app: &axum::Router, did: &str, key_id: &str, seed: u8) -> (St
 ///
 ///   * transient — `502 key_resolution_unreachable`, so the client retries
 ///     with a new challenge instead of treating its key as bad:
-///     A (DID host 404/410/500/503), B (TLS failure, connect timeout),
+///     A (DID host 404/410/500/503), B (TLS failure, connection refused),
 ///     E (key absent from a stale copy whose forced re-fetch the per-DID
 ///     rate limit refused);
 ///   * permanent — `403 not_authorized`, as before: C (a document that is
@@ -12891,8 +12891,11 @@ async fn token_handshake_classifies_did_resolution_failures_like_did001() {
         transient(&format!("A: HTTP {code}"), got);
     }
 
-    // B — TLS failure (HTTP bytes answer the ClientHello) and connect
-    // timeout (a listener that accepts and never speaks).
+    // B — TLS failure (HTTP bytes answer the ClientHello) and a refused
+    // connection. The refused half stands in for a connect timeout: the
+    // resolver maps both through the same `is_timeout() || is_connect()` arm to
+    // `KeyResolutionUnreachable`, and a real timeout costs the SDK's fixed 5s
+    // CONNECT_TIMEOUT on every mutant of the mutation oracle.
     let tls_garbage = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let tls_garbage_addr = tls_garbage.local_addr().unwrap();
     tokio::spawn(async move {
@@ -12902,15 +12905,14 @@ async fn token_handshake_classifies_did_resolution_failures_like_did001() {
                 .await;
         }
     });
-    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let silent_addr = silent.local_addr().unwrap();
-    tokio::spawn(async move {
-        let mut held = Vec::new();
-        while let Ok((sock, _)) = silent.accept().await {
-            held.push(sock);
-        }
-    });
-    for (case, addr) in [("TLS failure", tls_garbage_addr), ("timeout", silent_addr)] {
+    let refused_addr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    for (case, addr) in [
+        ("TLS failure", tls_garbage_addr),
+        ("connection refused", refused_addr),
+    ] {
         let b_app = handshake_harness(resolver_for(addr)).await;
         let did = did_for("h-b");
         let started = std::time::Instant::now();
