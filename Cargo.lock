@@ -5,8 +5,7 @@ version = 4
 [[package]]
 name = "acdp"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a44d715a3cca11a47e22dbc38abf2797c8d5bc9add87bcfab01a877ffe06fc44"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-client",
  "acdp-crypto",
@@ -24,8 +23,7 @@ dependencies = [
 [[package]]
 name = "acdp-client"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec925c1625436f2c8d6f47c60935ce03a0d685778f5cefd2f2f729f11c000ec7"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -50,8 +48,7 @@ dependencies = [
 [[package]]
 name = "acdp-crypto"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a39d43d2e0fb893315565514eea945fe247eb6cf146355eef563837ad4b2827"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-did",
  "acdp-jcs",
@@ -73,8 +70,7 @@ dependencies = [
 [[package]]
 name = "acdp-did"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b631d363dba96ceb70d2a0e054319affe9c6d491890eb5f90163eed39fe17345"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-primitives",
  "acdp-safe-http",
@@ -92,8 +88,7 @@ dependencies = [
 [[package]]
 name = "acdp-jcs"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc89cccd6e585af5fe8aee0dc4bcf097af43d5991a07e0b25ce4e08ba732ba16"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-primitives",
  "serde",
@@ -103,8 +98,7 @@ dependencies = [
 [[package]]
 name = "acdp-primitives"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9ca0dca3d13882b7a9157e0ec1f6949c4533ee93d8677e5f291a18218c1bbee"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "chrono",
  "reqwest",
@@ -117,8 +111,7 @@ dependencies = [
 [[package]]
 name = "acdp-producer"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c6ed84bdb691f669b306bc8376410da819ff280d1cc18863a4212f09e26ebc8"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -313,8 +306,7 @@ dependencies = [
 [[package]]
 name = "acdp-safe-http"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f256b3a5c876921b00a1ff19aa3ebc8b3094249c3ee2b174cc709ef7daec731b"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-primitives",
  "reqwest",
@@ -325,8 +317,7 @@ dependencies = [
 [[package]]
 name = "acdp-server"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "947995a0126090170759712b0b3cd08862f819f1e54ec083d17af4456d918472"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -346,8 +337,7 @@ dependencies = [
 [[package]]
 name = "acdp-types"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc3659639da5f09cffc684fa0c747375cbda6ae7bfb40ab72a7ac4b8496d0e61"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -364,8 +354,7 @@ dependencies = [
 [[package]]
 name = "acdp-validation"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e04182446f9d69bc14655c6f73e741376ccc75f40de403fc4d15a043e3cccd4b"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -382,14 +371,14 @@ dependencies = [
 [[package]]
 name = "acdp-verify"
 version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59b3e3a9bf6d6971927516d5e68bc99f8b83b040147dd0c90e2f59f207407dde"
+source = "git+https://github.com/agentcontextdistributionprotocol/acdp-rs?rev=e8361ce95e76d331ee1b2930a36c7847316dce36#e8361ce95e76d331ee1b2930a36c7847316dce36"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
  "acdp-primitives",
  "acdp-types",
  "acdp-validation",
+ "serde",
  "serde_json",
 ]
 
@@ -3079,9 +3068,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -3725,7 +3714,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

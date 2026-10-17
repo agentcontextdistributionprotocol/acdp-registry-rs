@@ -28,7 +28,15 @@ readme        = "README.md"
 # in lockstep at the same version. The "server" and "client" features pull in
 # the RFC-ACDP-0015 §6.1 aggregation surface the registry needs (cosignature
 # types, witness verification).
-acdp = { version = "0.15.0", features = ["server", "client"] }
+#
+# PRE-RELEASE PIN (#435): acdp 0.15.0 is not on crates.io yet, so this tracks
+# the head of acdp-rs PR #386 (branch feat/seam-upstream-0.15.0) by rev. When
+# 0.15.0 is published, replace it with `version = "0.15.0"`, drop the
+# `allow-git` entry in deny.toml, and refresh Cargo.lock. The open-ended
+# `version` only satisfies cargo-deny's `wildcards = "deny"` (a bare git dep
+# counts as a wildcard); it matches the rev whether its workspace still reads
+# 0.14.5 or has been cut to 0.15.0.
+acdp = { version = ">=0.14.5", git = "https://github.com/agentcontextdistributionprotocol/acdp-rs", rev = "e8361ce95e76d331ee1b2930a36c7847316dce36", features = ["server", "client"] }
 
 # HTTP
 axum       = { version = "0.8", features = ["macros"] }
