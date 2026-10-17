@@ -89,21 +89,27 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 353 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 350 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
-# MEASURED by mutants.yml run 37972268890 (workflow_dispatch on feat/publish-201-location;
-# re-pin for the publish 201 + Location change), whose outcomes.json is committed as
-# docs/mutation-runs/run37972268890-scope-353-outcomes.json.
+# MEASURED by mutants.yml run 39071836771 (workflow_dispatch on feat/acdp-0.15.0 9cffe36;
+# re-pin for the acdp 0.15.0 federation-proxy change), whose outcomes.json is committed as
+# docs/mutation-runs/run39071836771-scope-350-outcomes.json.
 # The command that reproduces the split:
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
-#     crates/acdp-registry-core/src/handlers/context.rs   139
+#     crates/acdp-registry-core/src/handlers/context.rs   136
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs              9
 #     crates/acdp-registry-sqlite/src/store.rs            140
 #     ----------------------------------------------------------
-#     total                                               353
+#     total                                               350
+#
+# 353 -> 350 (#435, acdp 0.15.0): context.rs 139 -> 136. The federation proxy serves the
+# origin's raw body, so `retrieve` returns `Result<Response, _>`: its four UNVIABLE
+# `Json<FullContext>` return-replacement mutants became one `Ok(Default::default())`,
+# which is CAUGHT; caught 226 -> 227, unviable 119 -> 115. The seven survivors are the
+# same mutants on shifted lines (:85, :86, :615, :1248; timeout :1284).
 #
 # 354 -> 353 (publish 201 + Location): context.rs 140 -> 139. Splitting the commit outcome
 # (PublishReply) deleted eight UNVIABLE `Json<PublishResponse>` return-replacement
