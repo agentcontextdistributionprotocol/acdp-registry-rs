@@ -107,6 +107,3 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# PRE-RELEASE ONLY (#435): acdp is pinned to an acdp-rs git rev until 0.15.0
-# is published. Remove this line with that pin; the ratchet above stays.
-allow-git = ["https://github.com/agentcontextdistributionprotocol/acdp-rs"]
