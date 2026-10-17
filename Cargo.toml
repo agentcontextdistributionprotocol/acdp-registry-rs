@@ -36,7 +36,7 @@ readme        = "README.md"
 # `version` only satisfies cargo-deny's `wildcards = "deny"` (a bare git dep
 # counts as a wildcard); it matches the rev whether its workspace still reads
 # 0.14.5 or has been cut to 0.15.0.
-acdp = { version = ">=0.14.5", git = "https://github.com/agentcontextdistributionprotocol/acdp-rs", rev = "e8361ce95e76d331ee1b2930a36c7847316dce36", features = ["server", "client"] }
+acdp = { version = ">=0.14.5", git = "https://github.com/agentcontextdistributionprotocol/acdp-rs", rev = "a73dbeb2c74b342a6c6255690a13d9c70ab1dd57", features = ["server", "client"] }
 
 # HTTP
 axum       = { version = "0.8", features = ["macros"] }
