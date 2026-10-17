@@ -2773,6 +2773,117 @@ async fn cross_registry_disabled_does_not_proxy_foreign_ctx() {
     assert_eq!(v["error"]["code"], "not_found", "body = {v}");
 }
 
+/// RFC-ACDP-0001 §5.7 (can-013): the federation proxy serves the origin's
+/// `body` byte-for-byte. Consumers since acdp 0.15 recompute `content_hash`
+/// over the raw `body` they receive, so a proxy that re-serialized the typed
+/// body would respell a non-canonical timestamp (`+00:00`, legacy `…:00Z`) as
+/// `.000Z` and break that hash downstream despite a good signature. Also
+/// asserts the origin's `registry_state` passes through instead of a
+/// hard-coded `active`.
+#[tokio::test]
+async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
+    use acdp::client::{CrossRegistryResolver, RegistryClient};
+    use acdp::crypto::{compute_content_hash, derive_lineage_id};
+    use acdp::types::body::FullContext;
+    use acdp::types::primitives::CtxId;
+    use acdp::types::DataPeriod;
+    use axum::routing::get;
+
+    let upstream = didweb::DIDWEB_AUTHORITY;
+    let ctx_id = format!("acdp://{upstream}/9f1e2d3c-5a6b-4c7d-8e9f-0a1b2c3d4e5f");
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+
+    // A did:key body as a third-party producer that never round-trips through
+    // chrono would hash and sign it: timestamps spelled `+00:00` and `…:00Z`.
+    let seed = 94u8;
+    let req = Producer::new_did_key(SigningKey::from_bytes(&[seed; 32]))
+        .publish_request()
+        .title("respelled upstream")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .expires_at(at("2026-12-31T23:59:59Z"))
+        .data_period(DataPeriod {
+            start: at("2026-01-01T00:00:00Z"),
+            end: at("2026-12-31T23:59:59Z"),
+        })
+        .build()
+        .unwrap();
+    let typed = acdp::types::body::Body::from_publish_request(
+        &req,
+        CtxId(ctx_id.clone()),
+        derive_lineage_id(&CtxId(ctx_id.clone())),
+        upstream,
+        at("2026-05-02T08:00:00.000Z"),
+    );
+    let mut raw = serde_json::to_value(&typed).unwrap();
+    raw["expires_at"] = json!("2026-12-31T23:59:59+00:00");
+    raw["data_period"] = json!({
+        "start": "2026-01-01T00:00:00Z",
+        "end": "2026-12-31T23:59:59.000+00:00",
+    });
+    raw["content_hash"] = json!("sha256:00");
+    let hash = compute_content_hash(&raw).unwrap();
+    raw["content_hash"] = json!(hash.as_str());
+    raw["signature"]["value"] = json!(SigningKey::from_bytes(&[seed; 32]).sign_content_hash(&hash));
+
+    // The origin registry: capabilities, its did:web document, the context.
+    let mut upstream_caps = caps();
+    upstream_caps.registry_did = format!("did:web:{upstream}");
+    let upstream_caps = serde_json::to_value(&upstream_caps).unwrap();
+    let registry_did_doc = json!({
+        "@context": ["https://www.w3.org/ns/did/v1"],
+        "id": format!("did:web:{upstream}"),
+    });
+    let wire = json!({
+        "body": raw,
+        "registry_state": { "status": "superseded" },
+    });
+    let app = axum::Router::new()
+        .route(
+            "/.well-known/acdp.json",
+            get(move || async move { axum::Json(upstream_caps) }),
+        )
+        .route(
+            "/.well-known/did.json",
+            get(move || async move { axum::Json(registry_did_doc) }),
+        )
+        .route(
+            "/contexts/{id}",
+            get(move || async move { axum::Json(wire) }),
+        );
+    let addr = didweb::spawn_tls_server(app).await;
+
+    let ca = didweb::ca_pem().as_bytes();
+    let resolver = CrossRegistryResolver::new()
+        .with_did_resolver(WebResolver::with_test_endpoint(ca, upstream, addr).unwrap());
+    resolver.seed_client(
+        upstream,
+        RegistryClient::with_test_endpoint(&format!("https://{upstream}"), addr, ca).unwrap(),
+    );
+    let h = build_harness(config(true), Some(Arc::new(resolver))).await;
+
+    let uri = format!("/contexts/{}", pct_encode_path_segment(&ctx_id));
+    let resp = h
+        .router
+        .clone()
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let v = body_to_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body = {v}");
+    assert_eq!(v["body"], raw, "proxied body must be the origin's bytes");
+    assert_eq!(v["registry_state"]["status"], "superseded");
+
+    // What a 0.15 consumer does with the proxied response: hash the raw body.
+    let ctx: FullContext = serde_json::from_value(v).unwrap();
+    acdp::verify::verify_context_hash(&ctx).expect("proxied body must verify over raw JSON");
+}
+
 /// REG-P2-7: `/admin/status` is auth-gated by `auth.admin_tokens` and reports
 /// storage health, idempotency size, webhook queue, and backend.
 #[tokio::test]

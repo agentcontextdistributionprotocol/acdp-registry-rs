@@ -237,7 +237,7 @@ fn rustls_is_a_normal_dependency() {
          \n\
          Payload `None` (nothing panicked) means either:\n\
          (a) something in THIS test binary now installs a process-level default. \
-         Adding `mod didweb;` is how that happens — `tests/didweb/mod.rs:228-235` \
+         Adding `mod didweb;` is how that happens — `tests/didweb/mod.rs:233-240` \
          installs one under a `Once`. Check this file's `mod` declarations FIRST; \
          it is the one cause that says nothing about the dependency graph.\n\
          (b) the graph now resolves exactly one provider, so rustls can choose. \

@@ -888,6 +888,7 @@ mod default_visible_ctx_ids_tests {
             lineage_head_receipt: None,
             log_inclusion: None,
             extensions: serde_json::Map::new(),
+            raw_body: None,
         }
     }
 

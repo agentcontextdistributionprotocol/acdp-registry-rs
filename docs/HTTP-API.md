@@ -475,7 +475,10 @@ On a receipts-advertising registry the response carries the top-level
 `registry_receipt` member (outside `body` and `registry_state`); contexts
 published before receipts were enabled omit it (no backfill — see
 [RECEIPTS.md](RECEIPTS.md)). Foreign retrievals pass the upstream's verified
-receipt through verbatim.
+receipt through verbatim, along with the upstream's `registry_state` and its
+`body` exactly as the origin sent it (never re-serialized), so a consumer
+recomputing `content_hash` over the raw `body` (RFC-ACDP-0001 §5.7) gets the
+producer's bytes whatever timestamp spelling the producer used.
 
 On a lifecycle-advertising registry (`lifecycle.enabled`, ACDP 0.3.0) a
 context that has been retracted/republished carries its append-only

@@ -21,6 +21,33 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.5.1
+
+**Upgrade the registry before, or together with, producers on `acdp` 0.15. Rolling back to 0.5.0
+is safe only while no 0.15 producer publishes to it.**
+
+This release moves the `acdp` dependency from 0.14.5 to 0.15.0. `acdp` 0.15 producers emit canonical
+`.mmmZ` timestamps (`2026-12-01T00:00:00.000Z`) in `expires_at` and `data_period`, and hash and sign
+those exact bytes. A registry still on `acdp` 0.14.5 (registry 0.5.0 and earlier) re-renders them and
+rejects the publish with `hash_mismatch`.
+
+- **Who is affected:** any deployment that receives publishes from producers built on `acdp` 0.15 or
+  later, including the `acdp-client` SDK and the CLI at that version.
+- **What to do:** upgrade this registry first, or in the same rollout as the producers. Producers on
+  `acdp` ≤ 0.14.5 keep working against 0.5.1; their bodies still verify.
+- **Federation proxy.** `GET /contexts/{foreign ctx_id}` now serves the origin's `body` byte-for-byte
+  rather than re-serializing it. A consumer on `acdp` 0.15 recomputes `content_hash` over the raw
+  `body` (RFC-ACDP-0001 §5.7), so before this release a foreign body whose producer spelled a
+  timestamp any other way (`+00:00`, legacy `…:00Z`) failed `hash_mismatch` downstream. The proxied
+  `registry_state` is now the origin's (so a retracted or superseded foreign context reports that)
+  instead of an always-`active` placeholder.
+- **Unchanged:** configuration, storage and schema, error codes, and every endpoint other than the
+  federation proxy.
+- **Rollback:** safe while no `acdp` 0.15 producer is publishing here. Once one is, 0.5.0 rejects its
+  publishes with `hash_mismatch`; stored contexts are unaffected either way.
+
+---
+
 ## 0.5.0
 
 **One breaking wire change: `POST /contexts` now answers `201 Created` to a first successful publish
