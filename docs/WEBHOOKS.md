@@ -9,7 +9,7 @@ delivery. Implementation: `crates/acdp-registry-webhook/src/lib.rs`; event types
 
 This is a **private operational feature** of this registry, not an
 implementation of the reserved `acdp-registry-events` profile sketched in
-[RFC-ACDP-0009 §2.10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/34f14ab2ab454308e94fd6f137ef940db45c72c8/rfcs/RFC-ACDP-0009-extensions.md#210-registry-webhook-event-profile)
+[RFC-ACDP-0009 §2.10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/rfcs/RFC-ACDP-0009-extensions.md#210-registry-webhook-event-profile)
 (which is not advertisable and has no interoperable shape yet). The two differ
 on the wire: the envelope here carries `schema_version` and `type`, not the
 sketch's `event_version` and `event_type`, and the HMAC covers the raw posted bytes (the timestamped
