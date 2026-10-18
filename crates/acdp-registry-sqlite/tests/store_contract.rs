@@ -2446,19 +2446,16 @@ async fn registry_store_idempotency_evict_expired_actually_deletes_through_the_t
     );
 }
 
-/// A publish, and a superseding publish in the same lineage, leave the
-/// `lineages` table untouched.
+/// After migration 015 the `lineages` table is gone, and a publish plus a
+/// superseding publish in the same lineage still resolve every lineage read.
 ///
-/// Nothing reads `lineages`: `lineage`, `current` and `first_version_ctx_id`
-/// all derive from `contexts`. The per-publish upsert into it was removed so
-/// the table can be dropped by a later migration (two-release retirement,
-/// DECISIONS.md "B8: stop writing `lineages`"). This pins both halves: the v1
-/// publish (the old INSERT arm) and the v2 supersession (the old
-/// `ON CONFLICT ... DO UPDATE` arm) write no row, while the table itself still
-/// exists — a rolled-back N-1 binary that still writes it keeps working — and
-/// the lineage reads still resolve.
+/// `lineage`, `current` and `first_version_ctx_id` all derive from `contexts`;
+/// nothing ever read `lineages` and nothing has written it since 0.3.0. The
+/// two-release retirement ended with `015_drop_lineages.sql` (DECISIONS.md
+/// "B8 Phase 5b"). The v1 publish and the v2 supersession prove no write path
+/// still names the table: one that did would fail here with "no such table".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publishing_and_superseding_leave_the_dormant_lineages_table_untouched() {
+async fn lineages_table_is_dropped_and_lineage_reads_still_resolve() {
     let (store, _dir) = store().await;
     let p = producer(85);
 
@@ -2469,12 +2466,11 @@ async fn publishing_and_superseding_leave_the_dormant_lineages_table_untouched()
     .await
     .expect("sqlite_master query");
     assert_eq!(
-        exists, 1,
-        "precondition: the table stays until its drop migration, so an N-1 \
-         binary that still writes it keeps working after a rollback"
+        exists, 0,
+        "migration 015 drops `lineages`; every lineage read derives from `contexts`"
     );
 
-    let v1 = commit(Arc::clone(&store), request(&p, "dormant lineages v1"), None)
+    let v1 = commit(Arc::clone(&store), request(&p, "dropped lineages v1"), None)
         .await
         .expect("join")
         .expect("v1 publish");
@@ -2485,7 +2481,7 @@ async fn publishing_and_superseding_leave_the_dormant_lineages_table_untouched()
         .body;
     let v2_req = p
         .supersede_body(&v1_body)
-        .title("dormant lineages v2")
+        .title("dropped lineages v2")
         .context_type(ContextType::DataSnapshot)
         .visibility(Visibility::Public)
         .build()
@@ -2499,16 +2495,6 @@ async fn publishing_and_superseding_leave_the_dormant_lineages_table_untouched()
         response(&v2).lineage_id,
         lineage_id,
         "v2 continues v1's lineage"
-    );
-
-    let (rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM lineages")
-        .fetch_one(store.pool())
-        .await
-        .expect("count lineages");
-    assert_eq!(
-        rows, 0,
-        "a publish must not write `lineages` any more: neither the first \
-         version (INSERT) nor its successor (ON CONFLICT DO UPDATE)"
     );
 
     // The reads never depended on the table.

@@ -155,10 +155,8 @@ fn config(playground: bool) -> RegistryConfig {
 /// the database to avoid needing CREATEDB privileges.
 async fn truncate(pool: &sqlx::PgPool) {
     // `IF EXISTS` guards against the very first run on a fresh DB,
-    // where the migrator might race with the truncate. `lineages` is
-    // deliberately NOT named: nothing writes it any more, its FK onto
-    // `contexts` means `CASCADE` still empties it while the table exists,
-    // and naming it would fail once the follow-up migration drops it.
+    // where the migrator might race with the truncate. `lineages` is not
+    // named: migration 015 dropped it.
     sqlx::query(
         "DO $$
          BEGIN

@@ -21,6 +21,30 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.5.2
+
+**This release drops the `lineages` table (migration 015, both backends). On Postgres, roll back
+only to 0.3.0 or later; a 0.2.x binary's publishes fail against the dropped table.**
+
+`lineages` has been stale since 0.3.0, which stopped writing it (see that section). Nothing in the
+registry ever read it: `GET /lineages/{id}`, `/current` and the admin audit are served from
+`contexts`. No response changes.
+
+- **Who is affected:** only anyone who queries `lineages` directly (a report, dashboard or ad-hoc
+  SQL). Query `contexts` grouped by `lineage_id` instead; that has been the advice since 0.3.0.
+- **Rollback, Postgres:** safe to 0.3.0 or later. The migrator tolerates the newer applied version,
+  and those binaries never touch `lineages`. Rolling back straight to 0.2.x is not safe: its publish
+  still writes the table and fails. To go that far back, restore a pre-upgrade backup.
+- **Rollback, SQLite:** unchanged. A database migrated by a newer binary already refuses an older
+  one; restore the pre-upgrade file, as for any release that adds a migration.
+- **Boot refuses a bad EdDSA key earlier.** With `auth.jwt_signing_alg = "EdDSA"`, a missing or
+  malformed `auth.jwt_private_key_pem` already stopped the server from starting, but only after
+  migrations had run. It is now refused during config validation, before the database is touched,
+  whatever `auth.enabled` says. The error names `auth.jwt_private_key_pem`.
+- **Unchanged:** configuration keys and defaults, and every endpoint.
+
+---
+
 ## 0.5.1
 
 **Upgrade the registry before, or together with, producers on `acdp` 0.15. Rolling back to 0.5.0

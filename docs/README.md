@@ -81,7 +81,7 @@ starting with `/` is served from the website's root, where it 404s.
 
 - **Spec (RFCs, `registries/`, schemas, `VERSIONING.md`):**
   `https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/<ref>/rfcs/RFC-ACDP-00NN-<slug>.md#<anchor>`, where `<ref>` is
-  the `ref:` value in `.spec-pin` (today `34f14ab2ab454308e94fd6f137ef940db45c72c8`). Non-normative
+  the `ref:` value in `.spec-pin` (today `85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d`). Non-normative
   pages under the spec's `docs/` may instead use
   `fb76f6d54ba25f583ce526b2bdee30503a5d8e59`, a docs refresh that once ran
   ahead of the pin (the pin now includes it, so prefer the pin). No other spec

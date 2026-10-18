@@ -9,15 +9,13 @@ The authoritative, current list is the census tool's output, not this file:
 python3 docs/assumptions-status-census.py --open
 ```
 
-At `main` @ a222e90 it reports 33 open status declarations (some are historical text the tool cannot tell from a live status). They fall
-into four groups:
+After the 2026-10-18 reconcile it reports 0 open status declarations. What stays deferred is listed here, one line each, with
+the trigger that reopens it:
 
-| Group | Meaning | Where (ASSUMPTIONS.md) |
-|---|---|---|
-| Waiting on a human ruling | A decision only the project owner can make; the code ships a safe default. Includes the RFC §5 `code` for a 415 and the `playground.refuse_on_no_live_pin` question. | around lines 746, 950, 1439, 1593, 2000–2021 |
-| Unfalsifiable from this repo | Depends on how a client, proxy or sibling repo behaves; cannot be tested here. | around lines 1162–1170, 1633, 2397, 2489 |
-| Logged on 2026-10-04/05 rounds | Per-PR assumptions recorded when W1–W8, #372–#376 and the supply-chain/spec bumps shipped; no action pending. | around lines 4710–4751, 4898–4931 |
-| Historical text | Entries whose status line was later settled but still match the census pattern. | e.g. line 578 |
+- H-A/P1: add a 408 `x-request-id` assertion when `TimeoutLayer`'s duration becomes configurable or the layer moves; the 413 test
+  currently guards the same boundary.
+- #415: a registry-side TLS check for bearers, only if RFC-ACDP-0008 adds a MUST aimed at registries or a forwarded-proto convention.
+- W7(f): `#[non_exhaustive]` on `AuthConfig`, at the next deliberate breaking config release.
 
 When one of these is settled, edit its status in `ASSUMPTIONS.md` in the same PR as the change that settled it, and note the decision in
 `DECISIONS.md`. Do not open a PR only to tidy a status line.

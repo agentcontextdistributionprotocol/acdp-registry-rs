@@ -1318,6 +1318,11 @@ authentication OFF", and the `ALLOW_PUBLIC_BIND` argument. The `ALLOW_PUBLIC_BIN
 **kept and re-documented, not dropped** — removing it would change the recipe a second time
 beyond what was authorized.
 
+**Correction (2026-10-18, reconcile):** this ruling was never implemented. The phase-6 patch that
+would have enabled auth in `docker/RAILWAY.md` was held, and the recipe has shipped auth-off ever
+since. The maintainer has now confirmed auth-off as the ruling (U-005; see "Reconcile 2026-10-18").
+Read this section as history, not as the current recipe.
+
 ## W3-U1 — #192/#193: refusing bad playground config at both doors (2026-09-10)
 
 **Decided by:** Opus, under the lane assignment. Recorded because three of the four calls
@@ -4588,3 +4593,76 @@ Merged this round: #364 (release v0.3.0, tags and images published), #394, #395,
 ## Publish 201 + Location — 2026-10-09 (owner decision, U-526)
 - **U-526 — RESOLVED: conform to RFC-ACDP-0003 §4/§6.2.** The owner chose to answer a first successful publish `201 Created` with a percent-encoded `Location` and keep `200` for an idempotent replay. To be released as 0.5.0 (`feat(publish)!`). No flag. Conformance fixture `pub-007` is exercised; `UNEXERCISED_FIXTURES` is empty. Analysis: sibling consumers audited read-only (none require exactly `200`); Fable reviewed the wire-contract aspects and found no need for human input. Replay detection comes from the SDK's `PublishCommitOutcome`, which both stores report correctly including the concurrent same-key race.
 - **The three extras beyond the literal ask — CONFIRMED by the owner (2026-10-10).** (1) The `context.published` webhook and the receipt-minted and log-leaf counters fire on insert only: the control plane dedupes on `X-ACDP-Event-Id` and a replay minted a fresh one, so a replay used to land as a second publication. (2) `Location` is exposed to configured CORS origins, so browser clients can read it. (3) `publish_total{outcome}` counts a replay as `idempotent_replay` on every path; production replays were miscounted as `inserted`. Each fixes a defect the SDK outcome made visible; none adds a flag. Closes the ASSUMPTIONS.md "Publish 201 + Location (2026-10-09)" entry.
+
+## Reconcile 2026-10-18 — every open ASSUMPTIONS entry (reversible tier decided by Opus; one-way doors analysed by Fable and decided by the maintainer)
+
+**Scope.** Every open status declaration in `ASSUMPTIONS.md` (`python3 docs/assumptions-status-census.py --open` went from 33 to 0),
+plus the PARTIAL/DEFERRED entries an inventory found still open. Ranked one-way doors first: a schema drop, the auth posture
+of a deployment recipe, a trust-boundary reading of the spec, a public config contract, a shipped table's durability, then a
+public search contract. Each entry now has a `Reconciled 2026-10-18` line beside it.
+
+### One-way doors — decided by the maintainer, each individually, on Fable's analysis
+
+- **B8 5b / Q2, drop `lineages` — CONFIRMED, done in this change.** Nothing has read the table since its creation, and nothing
+  has written it since 0.3.0 (#359). Every lineage read derives from `contexts`. All four gate conditions above ("B8 Phase 5a")
+  hold: 0.3.0 to 0.5.1 shipped with 5a; `## 0.5.2` in `docs/UPGRADING.md` covers Postgres N-1 (back to 0.3.0 or later only) and
+  SQLite; both contract tests now assert the table is gone and that lineage reads still resolve; Q2 is confirmed. Migration
+  `015_drop_lineages.sql` on both backends. Verified on SQLite and on a throwaway `postgres:16` (`acdp-registry-pg` suite,
+  `pg_integration`).
+- **U-005, Railway recipe stays auth-off — CONFIRMED.** Writes are signature-verified either way, so turning auth on adds no write
+  protection. With auth off and `anonymous_public_reads` unset, nothing is readable, and `/admin/*` needs `admin_tokens` either
+  way. Off is the conservative start; turning auth on later is one env var and only widens access. W2-U3 §6 above carries the
+  correction.
+- **#415, RFC-ACDP-0008 §6.2 TLS — CONFIRMED as the deployment's duty; bearers authenticate reads only.** The sender half is
+  enforced in acdp-rs (bearers go only over https, only on reads). Every registry-side check was rejected: TLS usually ends at a
+  proxy the registry cannot see, Railway cannot enumerate `trusted_proxies`, and refusing a request protects nothing once the token
+  is already on the wire. Reopen if RFC-0008 adds a MUST aimed at registries or a forwarded-proto convention.
+- **FEAT-06 P5, `[rate_limit]` config surface — CONFIRMED as the public contract.** `backend`, `backend_unavailable`,
+  `backend_timeout_ms` (250), `backend_prune_seconds` (300). Released since 0.2.0 under `deny_unknown_fields`, so a rename costs a
+  breaking config change for cosmetic benefit. `_ms` is the one justified exception, because 250 ms cannot be written in whole
+  seconds. The entry's "pre-GA" wording is stale.
+- **FEAT-06 P3, `rate_limit_windows` UNLOGGED with a single global row — CONFIRMED.** A crash or promotion truncation costs one
+  fresh 60s window; L1 always applies, so it never fails open (the same exposure as `backend = "memory"`). `SET LOGGED` remains an
+  additive migration. Revisit sharding if `acdp_registry_rate_limit_shared_seconds{scope="auth_global"}` p99 nears
+  `backend_timeout_ms` under normal load.
+- **`q=` semantics, Postgres-style stemming and stopwords on both backends — CONFIRMED.** RFC-ACDP-0005 §2.5.2 leaves
+  normalization registry-defined, Postgres has stemmed since `002_fts.sql`, and `docs/HTTP-API.md` documents it. Switching to
+  `simple` would rewrite every deployment's search vectors. Reopen if the spec adds a `q` term-matching vector or makes "present"
+  literal.
+
+### Reversible tier — decided by Opus
+
+- **EdDSA PEM validated before migrate (W3, a bug) — CHANGED, fixed.** `validate_config` caught only an empty PEM, so a malformed one
+  refused boot after `store.migrate()`, and a migrated SQLite file then refuses the older binary a rollback needs. It now parses the
+  PEM with the serve path's own `JwtSigner::new_eddsa`, ungated from `auth.enabled` (precedent W3-U5). New test
+  `bad_eddsa_key_is_refused_before_migrate_regardless_of_auth`; it fails with the parse call removed.
+- **H-A/P1, 408 `x-request-id` untested — DEFERRED.** Trigger: `TimeoutLayer`'s duration becomes configurable or the layer moves.
+  The 413 test already guards the same layer boundary. One line in `DEFERRED.md`.
+- **CONFIRMED (13):**
+  - #205: a "cache everything" CDN defeats `private`/`Vary`. This is a permanent operator note.
+  - #205: `private` carries no validators. Accepted; with no Last-Modified or max-age there is no heuristic freshness. If it is
+    ever fixed: ETags plus explicit freshness, never `no-store`.
+  - #205: `/log/checkpoint` inherits `private`, which keeps monitors off stale CDN tree heads.
+  - W3-U1: an all-expired pin list only warns. AC3's literal reading is declined.
+  - FEAT-06 P4: fail-open to L1, configurable via `backend_unavailable`.
+  - H-A/P4: the `challenge_global` label split, shipped in 0.1.3 and documented.
+  - H-A2-w: the redundant tenant `retain` stays as a backstop.
+  - U-510: `cargo check` is the accepted MSRV scope.
+  - U-521 #4: the masked assertions are an accepted limitation.
+  - U-533: the third ret-002 scenario is still unreachable over HTTP at spec pin 85088a6.
+  - W1 (a)(c)(d).
+  - W2: schema documents are trusted from the pinned tree.
+  - W8 parity twin signature, and the #405/#412 crypto vet guard.
+
+### Settled without a decision (superseded, with evidence)
+
+W2-U3 release path (tags v0.1.0–v0.1.3 minted, U-507); the 415 code (owner ruling, `unsupported_media_type`); H-H-w
+(`total_estimate`, closed by H-A2-w); hardening Phases 1-2 (a)-by-id and (b) (drift run 39116347734 logged "holds as assumed");
+FEAT-06 P6 (`pg_advisory_lock`); the 0.3.0 relabel (four release cuts since); the mutants re-pins at 358/354 (`1450b34`, scope
+350); W1 (b) (by W8); W3–W7 (#397, the required `mutants pins` check, KEEP_ADVISORY, #393, v0.4.0; W7(f) stays deferred);
+#410/#414 (#411 closed); #415 (c) and the pin facts (pin now 85088a6).
+
+**Resulting status:** 0 open declarations. 6 one-way doors confirmed by the maintainer (one of them, the `lineages` drop, carried
+out in this change); 13 reversible entries confirmed and 1 changed (fixed) and 1 deferred by Opus; the rest superseded with
+evidence. No follow-up blocks the next `/ship`.
+

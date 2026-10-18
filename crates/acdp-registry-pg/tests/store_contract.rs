@@ -1866,8 +1866,8 @@ mod predecessor_admission {
         // Undo the corruption. The suite shares a database and this row is
         // otherwise permanently undecodable — leaving it behind would break any
         // future untenanted list/search test in this file, which would then fail
-        // far from its cause. Restoring (rather than deleting) is what the schema
-        // allows: `lineages.first_version_ctx` has a FK onto this row.
+        // far from its cause. Restoring (rather than deleting) leaves every row
+        // that references this ctx_id untouched.
         sqlx::query("UPDATE contexts SET body_json = $1 WHERE ctx_id = $2")
             .bind(&original_body_json)
             .bind(v1_ctx.as_str())
@@ -2080,17 +2080,16 @@ mod predecessor_admission {
     }
 }
 
-/// A publish, and a superseding publish in the same lineage, leave the
-/// `lineages` table untouched — the Postgres twin of the SQLite contract test
-/// of the same name.
+/// After migration 015 the `lineages` table is gone, and a publish plus a
+/// superseding publish in the same lineage still resolve every lineage read —
+/// the Postgres twin of the SQLite contract test of the same name.
 ///
-/// Nothing reads `lineages`; the per-publish upsert was removed so a later
-/// migration can drop the table (two-release retirement, DECISIONS.md "B8:
-/// stop writing `lineages`"). The database is shared and may hold rows an
-/// older binary wrote, so the assertion is scoped to this run's lineage (a
-/// UUID-unique title makes its ids fresh) rather than to the whole table.
+/// Nothing ever read `lineages` and nothing has written it since 0.3.0; the
+/// two-release retirement ended with `015_drop_lineages.sql` (DECISIONS.md
+/// "B8 Phase 5b"). The publishes prove no write path still names the table:
+/// one that did would fail here with "relation does not exist".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publishing_and_superseding_leave_the_dormant_lineages_table_untouched() {
+async fn lineages_table_is_dropped_and_lineage_reads_still_resolve() {
     let Some(url) = pg_url_or_skip() else { return };
     let store = store(&url).await;
     let p = producer(100);
@@ -2101,14 +2100,13 @@ async fn publishing_and_superseding_leave_the_dormant_lineages_table_untouched()
         .await
         .expect("to_regclass query");
     assert!(
-        exists,
-        "precondition: the table stays until its drop migration, so an N-1 \
-         binary that still writes it keeps working after a rollback"
+        !exists,
+        "migration 015 drops `lineages`; every lineage read derives from `contexts`"
     );
 
     let v1 = commit(
         Arc::clone(&store),
-        request(&p, &format!("dormant lineages v1 {run}")),
+        request(&p, &format!("dropped lineages v1 {run}")),
         None,
     )
     .await
@@ -2120,7 +2118,7 @@ async fn publishing_and_superseding_leave_the_dormant_lineages_table_untouched()
         .body;
     let v2_req = p
         .supersede_body(&v1_body)
-        .title(format!("dormant lineages v2 {run}"))
+        .title(format!("dropped lineages v2 {run}"))
         .context_type(ContextType::DataSnapshot)
         .visibility(Visibility::Public)
         .build()
@@ -2134,24 +2132,6 @@ async fn publishing_and_superseding_leave_the_dormant_lineages_table_untouched()
         response(&v2).lineage_id,
         lineage_id,
         "v2 continues v1's lineage"
-    );
-
-    let (rows,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM lineages \
-         WHERE lineage_id = $1 OR first_version_ctx = ANY($2) OR latest_ctx = ANY($2)",
-    )
-    .bind(lineage_id.as_str())
-    .bind(vec![
-        response(&v1).ctx_id.as_str().to_string(),
-        response(&v2).ctx_id.as_str().to_string(),
-    ])
-    .fetch_one(store.pool())
-    .await
-    .expect("count lineages");
-    assert_eq!(
-        rows, 0,
-        "a publish must not write `lineages` any more: neither the first \
-         version (INSERT) nor its successor (ON CONFLICT DO UPDATE)"
     );
 
     // The reads never depended on the table.
