@@ -1,5 +1,6 @@
 
 
+
 ## [0.5.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.5.0...acdp-registry-store/v0.5.1) - 2026-10-18
 
 ### Added
