@@ -21,6 +21,20 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.5.3
+
+**The federation proxy answers 502 again when a foreign registry serves a malformed context.**
+
+Built against acdp 0.15.1, `GET /contexts/{ctx_id}` for a foreign `ctx_id` answered a document the
+origin registry got wrong (not JSON, an unknown field, a missing field) with 400 `schema_violation`,
+which blames the caller for the origin's bytes. It is 502 `cross_registry_resolution_failed` again,
+the same as an unreachable origin. Only deployments with `registry.cross_registry_resolution`
+enabled are affected.
+
+- **Unchanged:** configuration keys and defaults, the schema, and every other endpoint.
+
+---
+
 ## 0.5.2
 
 **This release drops the `lineages` table (migration 015, both backends). On Postgres, roll back

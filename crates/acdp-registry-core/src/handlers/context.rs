@@ -929,7 +929,7 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
         let verified = resolver
             .resolve(&parsed)
             .await
-            .map_err(RegistryError::Acdp)?;
+            .map_err(RegistryError::from_cross_registry)?;
         let upstream = verified.full_context();
         let ctx = acdp::types::body::FullContext {
             body: verified.body().clone(),
