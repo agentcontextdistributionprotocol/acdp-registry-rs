@@ -80,6 +80,27 @@ impl RegistryError {
     }
 }
 
+impl RegistryError {
+    /// Wrap an error from the federation proxy's `CrossRegistryResolver`.
+    ///
+    /// A document the origin registry served that this proxy cannot use is
+    /// the origin's fault, not our caller's, so it reports as
+    /// `cross_registry_resolution_failed` (502), like an unreachable origin.
+    /// Since acdp 0.15.1 `RegistryClient` reports a malformed or
+    /// closed-schema-violating response as `SchemaViolation` (RFC-ACDP-0007
+    /// §3.3.1), and earlier releases as `Serialization`; passed through,
+    /// either would answer 400 or 500. Every other resolver error already
+    /// carries the status it should.
+    pub fn from_cross_registry(err: AcdpError) -> Self {
+        match err {
+            AcdpError::SchemaViolation(m) | AcdpError::Serialization(m) => {
+                Self::Acdp(AcdpError::CrossRegistryResolutionFailed(m))
+            }
+            other => Self::Acdp(other),
+        }
+    }
+}
+
 /// RFC-ACDP-0007 §5 error envelope.
 #[derive(Debug, Serialize)]
 pub struct WireError {

@@ -2884,6 +2884,78 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
     acdp::verify::verify_context_hash(&ctx).expect("proxied body must verify over raw JSON");
 }
 
+/// A foreign registry that answers the context fetch with a document this
+/// proxy cannot use is an upstream fault: 502 `cross_registry_resolution_failed`,
+/// like an unreachable upstream (see `http_status_for_acdp`). Since acdp 0.15.1
+/// `RegistryClient` reports such a response as `SchemaViolation("malformed
+/// registry response: …")` (RFC-ACDP-0007 §3.3.1), which on its own maps to a
+/// 400 that would blame our caller for the origin's bytes.
+#[tokio::test]
+async fn cross_registry_proxy_answers_502_to_a_malformed_upstream_document() {
+    use acdp::client::{CrossRegistryResolver, RegistryClient};
+    use axum::routing::get;
+
+    let upstream = didweb::DIDWEB_AUTHORITY;
+    let ctx_id = format!("acdp://{upstream}/1b2c3d4e-5f60-4718-8a9b-0c1d2e3f4a5b");
+    // Each origin body is served as `application/json`, whatever it holds.
+    let cases = [
+        ("non-JSON", "<html>not json</html>"),
+        (
+            "extra top-level field",
+            r#"{"body":{},"registry_state":{"status":"active"},"unexpected":true}"#,
+        ),
+        ("missing body", r#"{"registry_state":{"status":"active"}}"#),
+    ];
+
+    for (label, served) in cases {
+        let mut upstream_caps = caps();
+        upstream_caps.registry_did = format!("did:web:{upstream}");
+        let upstream_caps = serde_json::to_value(&upstream_caps).unwrap();
+        let registry_did_doc = json!({
+            "@context": ["https://www.w3.org/ns/did/v1"],
+            "id": format!("did:web:{upstream}"),
+        });
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/acdp.json",
+                get(move || async move { axum::Json(upstream_caps) }),
+            )
+            .route(
+                "/.well-known/did.json",
+                get(move || async move { axum::Json(registry_did_doc) }),
+            )
+            .route(
+                "/contexts/{id}",
+                get(move || async move { ([("content-type", "application/json")], served) }),
+            );
+        let addr = didweb::spawn_tls_server(app).await;
+
+        let ca = didweb::ca_pem().as_bytes();
+        let resolver = CrossRegistryResolver::new()
+            .with_did_resolver(WebResolver::with_test_endpoint(ca, upstream, addr).unwrap());
+        resolver.seed_client(
+            upstream,
+            RegistryClient::with_test_endpoint(&format!("https://{upstream}"), addr, ca).unwrap(),
+        );
+        let h = build_harness(config(true), Some(Arc::new(resolver))).await;
+
+        let uri = format!("/contexts/{}", pct_encode_path_segment(&ctx_id));
+        let resp = h
+            .router
+            .clone()
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let v = body_to_json(resp).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{label}: body = {v}");
+        assert_eq!(
+            v["error"]["code"], "cross_registry_resolution_failed",
+            "{label}: body = {v}"
+        );
+    }
+}
+
 /// REG-P2-7: `/admin/status` is auth-gated by `auth.admin_tokens` and reports
 /// storage health, idempotency size, webhook queue, and backend.
 #[tokio::test]
