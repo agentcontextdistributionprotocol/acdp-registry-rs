@@ -1,5 +1,12 @@
 
 
+## [0.5.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.5.0...acdp-registry-core/v0.5.1) - 2026-10-18
+
+### Added
+
+- *(deps)* move to acdp 0.15.0; federation proxy serves the origin body verbatim
+
+
 ## [0.5.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.4.2...acdp-registry-core/v0.5.0) - 2026-10-10
 
 ### Added

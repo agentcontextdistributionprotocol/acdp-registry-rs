@@ -1,5 +1,21 @@
 
 
+## [0.5.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.0...acdp-registry-server/v0.5.1) - 2026-10-18
+
+### Added
+
+- *(deps)* move to acdp 0.15.0; federation proxy serves the origin body verbatim
+
+### Fixed
+
+- *(auth)* /auth/token answers 502 key_resolution_unreachable to transient DID failures
+
+### Other
+
+- *(did-001)* check a refused connection instead of a 5s connect timeout
+- *(spec)* adopt ACDP spec @ 85088a6; bind did-001 and can-013
+
+
 ## [0.5.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.4.2...acdp-registry-server/v0.5.0) - 2026-10-10
 
 ### Added
