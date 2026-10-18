@@ -1,5 +1,12 @@
 
 
+## [0.5.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.2...acdp-registry-server/v0.5.3) - 2026-10-18
+
+### Fixed
+
+- *(proxy)* answer 502 to a malformed upstream context document
+
+
 ## [0.5.2](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.1...acdp-registry-server/v0.5.2) - 2026-10-18
 
 ### Other
