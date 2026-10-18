@@ -1,5 +1,12 @@
 
 
+## [0.5.2](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.5.1...acdp-registry-sqlite/v0.5.2) - 2026-10-18
+
+### Other
+
+- *(store)* drop the dormant lineages table; validate the EdDSA PEM before migrate
+
+
 ## [0.5.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.5.0...acdp-registry-sqlite/v0.5.1) - 2026-10-18
 
 ### Added
