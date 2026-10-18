@@ -164,13 +164,8 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
     if cfg.auth.enabled {
         match cfg.auth.jwt_signing_alg.as_str() {
             "HS256" | "" => {}
-            "EdDSA" => {
-                if cfg.auth.jwt_private_key_pem.trim().is_empty() {
-                    anyhow::bail!(
-                        "auth.jwt_signing_alg=EdDSA but auth.jwt_private_key_pem is empty"
-                    );
-                }
-            }
+            // The key itself is checked below, ungated.
+            "EdDSA" => {}
             other => anyhow::bail!(
                 "auth.jwt_signing_alg must be 'HS256' or 'EdDSA' (got '{}')",
                 other
@@ -227,6 +222,26 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
         // startup rather than triggering 500s mid-flight.
         let _ = JwtSecret::from_base64(&cfg.auth.jwt_secret)
             .map_err(|e| anyhow::anyhow!("auth.jwt_secret: {e}"))?;
+    }
+    // The EdDSA counterpart of W3-U5, NOT gated on `auth.enabled` for the same
+    // reason: the serve path builds the EdDSA signer with no such gate and
+    // parses the PEM there, after `store.migrate()`. A malformed or empty key
+    // therefore already refused boot, just after the schema had moved, and on
+    // SQLite a migrated file then refuses the older binary a rollback needs.
+    // Parsing with the serve path's own constructor keeps the outcome
+    // identical and moves it before the store is touched.
+    if cfg.auth.jwt_signing_alg.as_str() == "EdDSA" {
+        if cfg.auth.jwt_private_key_pem.trim().is_empty() {
+            anyhow::bail!("auth.jwt_signing_alg=EdDSA but auth.jwt_private_key_pem is empty");
+        }
+        JwtSigner::new_eddsa(
+            &cfg.auth.jwt_private_key_pem,
+            String::new(),
+            String::new(),
+            0,
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("jwt_private_key_pem: {e}"))?;
     }
     // #161: an EMPTY `admin_tokens` list means "admin routes disabled" and is
     // the shipped default in both `config/registry.example.toml` and
@@ -1762,16 +1777,52 @@ mod tests {
             let mut cfg = RegistryConfig::defaults();
             cfg.auth.enabled = enabled;
             cfg.auth.jwt_signing_alg = "EdDSA".into();
-            // `validate_config` only checks this is NON-EMPTY (main.rs, the
-            // EdDSA arm); the PEM is parsed later, in the serve path. A
-            // placeholder is therefore the honest fixture here — using a real
-            // key would imply this test exercises parsing, which it does not.
-            cfg.auth.jwt_private_key_pem = "-- not parsed by validate_config --".into();
+            // `validate_config` parses the PEM, so the fixture is a real key.
+            cfg.auth.jwt_private_key_pem = ed25519_pkcs8_pem();
             cfg.auth.jwt_secret = "changeme".into();
             assert!(
                 validate_config(&cfg).is_ok(),
                 "EdDSA must ignore jwt_secret (auth.enabled={enabled})"
             );
+        }
+    }
+
+    /// A fresh Ed25519 key as unencrypted PKCS#8 PEM, the form
+    /// `JwtSigner::new_eddsa` accepts.
+    fn ed25519_pkcs8_pem() -> String {
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rng());
+        // PKCS#8 v1: SEQUENCE { INTEGER 0, AlgorithmIdentifier {Ed25519},
+        // OCTET STRING { OCTET STRING (32) } }.
+        let mut der = vec![
+            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
+            0x04, 0x20,
+        ];
+        der.extend_from_slice(&sk.to_bytes());
+        format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            base64::engine::general_purpose::STANDARD.encode(&der)
+        )
+    }
+
+    #[test]
+    fn bad_eddsa_key_is_refused_before_migrate_regardless_of_auth() {
+        // The serve path builds the EdDSA signer whether or not auth is on, and
+        // only after `store.migrate()`; `validate_config` must refuse first.
+        for enabled in [true, false] {
+            let mut cfg = RegistryConfig::defaults();
+            cfg.auth.enabled = enabled;
+            cfg.auth.jwt_signing_alg = "EdDSA".into();
+            cfg.auth.jwt_private_key_pem =
+                "-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----\n".into();
+            let err = validate_config(&cfg).expect_err("a malformed PEM must fail startup");
+            assert!(
+                err.to_string().contains("jwt_private_key_pem"),
+                "got: {err}"
+            );
+
+            cfg.auth.jwt_private_key_pem = "  ".into();
+            let err = validate_config(&cfg).expect_err("an empty PEM must fail startup");
+            assert!(err.to_string().contains("is empty"), "got: {err}");
         }
     }
 

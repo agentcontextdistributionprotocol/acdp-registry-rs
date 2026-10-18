@@ -575,7 +575,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   silently never be asked to enforce, and nothing in this repo would notice. Low likelihood
   (upstream has its own tests), but the residual is real and is recorded here rather than
   left implicit.
-- **Status:** UNCONFIRMED -> CONFIRMED (2026-09-22). Settled exactly as this entry's own
+- **Status:** CONFIRMED (2026-09-22; previously unconfirmed). Settled exactly as this entry's own
   "what would settle it" note (`:3433-3437`) specified: upstream spec issue **#57** closed,
   landing conformance fixture `rev-003-revocation-publish-rejects.json` at spec commit
   `9deb7e7` (acdp-registry-rs#335), and `crates/acdp-registry-server/tests/conformance.rs`'s
@@ -743,9 +743,10 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   publishes remain bound to DID-signature verification. This unit therefore does **not**
   claim unauthenticated publish is possible. Overstating it would have made the finding
   easier to dismiss. **Status: CONFIRMED.**
-- **UNCONFIRMED — awaiting human ruling; re-checked 2026-09-13 (U-507) and still open. **Settled by:** the R3 ruling on whether the Railway recipe enables auth. **Owner:** the human — not the leader, which holds no authority over a product recipe decision.** The question is whether `docker/RAILWAY.md` should require
+- **CONFIRMED (2026-10-18; previously unconfirmed) — awaiting human ruling; re-checked 2026-09-13 (U-507) and still open. **Settled by:** the R3 ruling on whether the Railway recipe enables auth. **Owner:** the human — not the leader, which holds no authority over a product recipe decision.** The question is whether `docker/RAILWAY.md` should require
   `ACDP_REGISTRY_AUTH__ENABLED = true`. Raised as `blocked`, forwarded by the leader, not
   acted on. The documentation of the gap ships regardless; only the recipe change waits.
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by the maintainer at `/reconcile` (one-way door; Fable analysed): the recipe stays auth-off with its warning and explicit read-posture choice. Writes are signature-verified either way. The W2-U3 §6 'auth on' ruling in DECISIONS.md was never implemented; the correction is recorded there. See DECISIONS.md "Reconcile 2026-10-18".
 - **Not re-litigated:** `auth.enabled = false` in the compose stack stays (leader-confirmed;
   the demo must boot). Renaming the `changeme` placeholder was rejected — the guard already
   matches case-insensitively after trimming, so the literal was never the fragile part.
@@ -859,6 +860,7 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   is cross the dry-run boundary and actually push a tag. So the half that remains unproven is
   narrower than before — the code path is demonstrated, the remote write is not — but criterion
   2a is still only dischargeable by observing the real post-merge run.
+- **Reconciled 2026-10-18:** SUPERSEDED (2026-10-18), settled without a decision at `/reconcile`: the remote write was observed. U-507 (`:3336-3341`) records tags `acdp-registry-server/v0.1.0`–`v0.1.3` minted by the real post-merge runs. See DECISIONS.md "Reconcile 2026-10-18".
 
 ### Disabling GitHub Releases for the bootstrap merge does not disable git tags
 - **Assumed:** `git_release_enable = false` suppresses only GitHub Release objects, leaving tag
@@ -947,7 +949,8 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   report rather than taken silently. **If the leader wants AC3's literal reading, the change
   is small and localized** — the warning branch becomes an `Err` — but it should arrive as a
   config key (`playground.refuse_on_no_live_pin`) rather than a default, because refusing is
-  plainly wrong for the lax case. **Status: UNCONFIRMED (re-checked U-507 2026-09-13 — and deliberately NOT closed by silence). The flag was raised in the done report as the entry says, and no `playground.refuse_on_no_live_pin` key exists anywhere in the tree, so the shipped behaviour is unchanged. Settled by: the leader either requesting AC3's literal reading or declining it. Owner: the leader.**
+  plainly wrong for the lax case. **Status: CONFIRMED (2026-10-18; previously unconfirmed) (re-checked U-507 2026-09-13 — and deliberately NOT closed by silence). The flag was raised in the done report as the entry says, and no `playground.refuse_on_no_live_pin` key exists anywhere in the tree, so the shipped behaviour is unchanged. Settled by: the leader either requesting AC3's literal reading or declining it. Owner: the leader.**
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by Opus at `/reconcile` (reversible tier): all-expired pins warn and do not refuse. AC3's literal reading is declined; no `playground.refuse_on_no_live_pin` key. See DECISIONS.md "Reconcile 2026-10-18".
 - **Resolved from this file's own W2-U1 entry above:** that entry left placement of the
   shared validator (`acdp-registry-types` vs `acdp-registry-core`) deliberately undecided for
   whoever took #192/#193. Taken here: **`acdp-registry-core`**, because the rules being
@@ -1079,8 +1082,9 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
   REFUTED, HS256 scoping restored and the EdDSA carve-out given its own bullet.**
 - **Deliberately bounded, not assumed away:** this unit narrows `validate_config`'s
   validate-before-migrate contract to `jwt_secret` and does **not** restore it. The EdDSA PEM
-  case still fails late. Every document it touches is scoped to say so. **Status: OPEN (re-verified U-507 2026-09-13 — `validate_config` catches only an EMPTY EdDSA PEM; a MALFORMED one still fails late). **Settled by:** parsing the PEM there. Still owned
+  case still fails late. Every document it touches is scoped to say so. **Status: RESOLVED (2026-10-18; previously open) (re-verified U-507 2026-09-13 — `validate_config` catches only an EMPTY EdDSA PEM; a MALFORMED one still fails late). **Settled by:** parsing the PEM there. Still owned
   by nobody, reported in this lane's `done`.**
+- **Reconciled 2026-10-18:** CHANGED, FIXED (2026-10-18), decided by Opus at `/reconcile` (reversible tier), a bug: `validate_config` now parses the EdDSA PEM with the serve path's own `JwtSigner::new_eddsa`, ungated from `auth.enabled` like W3-U5, so a malformed key is refused before `store.migrate()`. Test `bad_eddsa_key_is_refused_before_migrate_regardless_of_auth`. See DECISIONS.md "Reconcile 2026-10-18".
 - **SUPERSEDED by #270 (U-507, 2026-09-13) — no longer true; CI now boots the shipped stack, with and without auth:** that `.github/workflows/docker.yml` sets no
   `jwt_secret`, so CI never exercised the stack the repo ships and green CI was never evidence
   about the compose file. `.github/**` is not this lane's to change; the leader ruled it a
@@ -1159,18 +1163,21 @@ public-API-contract changes, mirroring how the prior wave routed OQ2 (the witnes
 - **CONFIRMED by falsification, not by reading:** removing the data-plane layer reddens
   `cache_posture_covers_every_data_plane_route`; restoring it greens. Removing/moving the auth
   layer inside the limiter reddens `credential_endpoints_are_never_stored`.
-- **UNCONFIRMED and unfalsifiable from this repo (re-checked U-507 2026-09-13). **Settled by:** an operator observing a real CDN. **Owner:** operators. A CDN in "cache everything / ignore origin headers" mode defeats both
+- **CONFIRMED (2026-10-18; previously unconfirmed) and unfalsifiable from this repo (re-checked U-507 2026-09-13). **Settled by:** an operator observing a real CDN. **Owner:** operators. A CDN in "cache everything / ignore origin headers" mode defeats both
   `private` and `Vary`.** No origin header can fix this. It stays an operator note in
   `RECEIPTS.md`, downgraded to defense-in-depth rather than deleted. Not testable from here.
-- **UNCONFIRMED — `private` carries no validators. Re-checked U-507 2026-09-13: the fix has NOT landed — there is no `ETag` anywhere in `acdp-registry-core`. **Settled by:** ETags plus explicit freshness. **Owner:** unassigned.** No `ETag`, no `Last-Modified`, no
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by Opus at `/reconcile` (reversible tier): a permanent operator note, not a code item. See DECISIONS.md "Reconcile 2026-10-18".
+- **CONFIRMED (2026-10-18; previously unconfirmed) — `private` carries no validators. Re-checked U-507 2026-09-13: the fix has NOT landed — there is no `ETag` anywhere in `acdp-registry-core`. **Settled by:** ETags plus explicit freshness. **Owner:** unassigned.** No `ETag`, no `Last-Modified`, no
   `max-age`, so a requester's *own* cache may briefly reuse a context retracted since. Accepted
   deliberately: they already held those bytes. **The future fix is ETags plus explicit
   freshness, NOT `no-store`** — reaching for `no-store` would trade a real client-caching
   capability for protection against caches that ignore directives anyway.
-- **UNCONFIRMED — `/log/checkpoint` inherits `private` it does not need; still true (`if_not_present` at `lib.rs:121`; `handlers/log.rs` sets no cache header of its own). **Settled by:** an explicit short public TTL on that route. **Owner:** unassigned.** It is hash-only and
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18) as an accepted limitation, decided by Opus at `/reconcile` (reversible tier). No Last-Modified or max-age means no heuristic freshness. If it is ever fixed: ETags plus explicit freshness, never `no-store`. See DECISIONS.md "Reconcile 2026-10-18".
+- **CONFIRMED (2026-10-18; previously unconfirmed) — `/log/checkpoint` inherits `private` it does not need; still true (`if_not_present` at `lib.rs:121`; `handlers/log.rs` sets no cache header of its own). **Settled by:** an explicit short public TTL on that route. **Owner:** unassigned.** It is hash-only and
   requester-invariant (`handlers/log.rs`, `State` only). It gives up shared cacheability it has
   never used. `if_not_present` was chosen precisely so an explicit short public TTL can be added
   later without touching the layer.
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by Opus at `/reconcile` (reversible tier): `private` keeps monitors off stale CDN tree heads; overriding it is a one-line change. See DECISIONS.md "Reconcile 2026-10-18".
 - **RESOLVED (U-507, 2026-09-13) — #218 is CLOSED/COMPLETED, and this entry's own announcement mechanism fired: the `EXEMPT` row is gone, replaced by `no-store`, overriding, on both the 200 and 401 arms.** It
   is a direct Prometheus scrape target that sets no cache header, but it is also bearer-gated
   (`metrics.rs`), so its 200-vs-401 outcome is authorization-relative — the same gap #205 closed
@@ -1436,7 +1443,8 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
   that porter and snowball disagree on some words, so parity is pinned per-mechanism rather
   than proven across the language — stated on `fulltext::PG_ENGLISH_STOPWORDS` and in the
   parity suite's docs rather than left implicit.
-- **Status:** UNCONFIRMED — **escalated to the human**, re-checked 2026-09-13 (U-507) and still open. Reversible, but a product judgement on a public API taken against a defensible alternative. Recommendation unchanged: confirm as taken. **Settled by:** the owner accepting or rejecting the taken behaviour. **Owner:** the human. See DECISIONS.md H-B #10.
+- **Status:** CONFIRMED (2026-10-18; previously unconfirmed) — **escalated to the human**, re-checked 2026-09-13 (U-507) and still open. Reversible, but a product judgement on a public API taken against a defensible alternative. Recommendation unchanged: confirm as taken. **Settled by:** the owner accepting or rejecting the taken behaviour. **Owner:** the human. See DECISIONS.md H-B #10.
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by the maintainer at `/reconcile` (one-way door; Fable analysed): Postgres semantics (stemming plus PG stopwords) on both backends. RFC-ACDP-0005 §2.5.2 leaves normalization registry-defined. Reopen trigger: the spec adds a `q` term-matching vector or makes 'present' literal. See DECISIONS.md "Reconcile 2026-10-18".
 
 ## The stopword table is verified against Postgres rather than trusted
 
@@ -1590,8 +1598,9 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** a future refactor could move the timeout layer outside the
   request-id pair and lose the id on 408s with no test failing. Bounded: the 413 guard covers the
   same layer boundary, so the regression would have to be specific to the timeout layer alone.
-- **Status:** UNCONFIRMED — handed to the coordinator as a standalone decision with this evidence
+- **Status:** DEFERRED (2026-10-18; previously unconfirmed) — handed to the coordinator as a standalone decision with this evidence
   rather than actioned here. Re-checked 2026-09-13 (U-507): still undecided. **Settled by:** the coordinator ruling on the taxonomy. **Owner:** the leader — this one is genuinely the leader's, not the human's.
+- **Reconciled 2026-10-18:** DEFERRED (2026-10-18), decided by Opus at `/reconcile` (reversible tier). Trigger: `TimeoutLayer`'s duration becomes configurable or the layer moves. Until then the 413 test guards the same layer boundary. One line in DEFERRED.md. See DECISIONS.md "Reconcile 2026-10-18".
 
 
 ## H-A / P4 — A9: rate-limit scope taxonomy generated from one list
@@ -1630,8 +1639,9 @@ the identical defect this block was rewritten to fix, recurring inside the rewri
 - **Blast radius if wrong:** an operator's `challenge_per_agent` alert loses volume to
   `challenge_global`. Disclosed in the CHANGELOG under `### Changed` and in an operator note in
   `docs/HTTP-API.md` next to the metric table, both stating the direction of the shift.
-- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13; unfalsifiable from this repo). **Settled by:** an operator confirming nothing alerts on the old series. **Owner:** operators. The label rename is a deliberate, documented break of an existing
+- **Status:** CONFIRMED (2026-10-18; previously unconfirmed) (re-checked U-507 2026-09-13; unfalsifiable from this repo). **Settled by:** an operator confirming nothing alerts on the old series. **Owner:** operators. The label rename is a deliberate, documented break of an existing
   series; whether any deployment actually alerts on `challenge_per_agent` is not knowable here.
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by Opus at `/reconcile` (reversible tier): shipped in 0.1.3 and documented at `docs/HTTP-API.md` (rate-limit metrics). See DECISIONS.md "Reconcile 2026-10-18".
 
 
 ## H-A / P5 — A1a: the publish bucket is charged on success, not on attempt
@@ -1997,7 +2007,7 @@ own and stable. Beyond AC2 there is an independent reason: axum's and serde's wo
 to change, so echoing it onto the wire grows an accidental contract that breaks on a dependency
 bump.
 
-### OPEN — escalated, NOT decided here: the §5 `code` for a 415 *(re-verified U-507 2026-09-13: still open; `acdp_wire_code` emits 24 codes and none is a media-type failure, so minting one remains unavoidable. **Owner:** the spec/canon holder, not this repo.)*
+### SUPERSEDED (2026-10-18; previously open) — escalated, NOT decided here: the §5 `code` for a 415 *(re-verified U-507 2026-09-13: still open; `acdp_wire_code` emits 24 codes and none is a media-type failure, so minting one remains unavoidable. **Owner:** the spec/canon holder, not this repo.)*
 
 - **The question:** enveloping a 415 requires a `code`, because `WireErrorBody::code` is a
   required `String` -- there is no "envelope without a code".
@@ -2018,8 +2028,9 @@ bump.
   `marker_the_415_rejection_is_not_yet_enveloped_pending_a_ruling` pins the current behaviour and
   fails the moment the ruling is applied, with a failure message instructing its own deletion --
   so the hold cannot outlive the question by being forgotten.
-- **Status:** UNCONFIRMED — the 415 code is with the project owner. Everything else in this
+- **Status:** SUPERSEDED (2026-10-18; previously unconfirmed) — the 415 code is with the project owner. Everything else in this
   phase is settled and shipped.
+- **Reconciled 2026-10-18:** SUPERSEDED (2026-10-18), settled without a decision at `/reconcile`: the owner's ruling is recorded in the follow-up entry below (`unsupported_media_type` at 415, `core/src/extract.rs`). See DECISIONS.md "Reconcile 2026-10-18".
 
 
 ## H-A / P7 follow-up — the 415 ruling applied: `unsupported_media_type` minted
@@ -2394,8 +2405,9 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   another lane documented this same wave, so it is a decision for the leader and not a side effect
   of a wiring unit. Documenting (b) without implementing it would have left the docs describing code
   that does not exist — the failure this unit's second half exists to remove.
-- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13 — deliberately NOT closed by inertia, which this entry explicitly forbids). **Settled by:** an explicit ruling. **Owner:** the leader. The behaviour is deliberate and the docs match the code as shipped, but
+- **Status:** SUPERSEDED (2026-10-18; previously unconfirmed) (re-checked U-507 2026-09-13 — deliberately NOT closed by inertia, which this entry explicitly forbids). **Settled by:** an explicit ruling. **Owner:** the leader. The behaviour is deliberate and the docs match the code as shipped, but
   the *decision* is open and should be closed explicitly rather than by inertia.
+- **Reconciled 2026-10-18:** SUPERSEDED (2026-10-18), settled without a decision at `/reconcile`: closed explicitly by H-A2-w's CONFIRMED entry below (`total_estimate` withheld; `docs/HTTP-API.md`). See DECISIONS.md "Reconcile 2026-10-18".
 ## H-A P10 (A10) — the route-classification guard names what it cannot parse
 
 - **Assumption:** `NON_DATA_ROUTES` reverse containment is not redundant with the equality
@@ -2486,7 +2498,8 @@ conclude the leak does not exist. The marker test pins `limit=2`.
   not part of this change. lane-3 left them deliberately for the same reason and said so at
   handover. Deleting them here would ship an unfalsified behaviour change inside a diff whose
   stated purpose is a one-field wire addition.
-- **Status:** UNCONFIRMED (re-checked U-507 2026-09-13) — a separate unit if anyone wants it, with its own evidence. **Settled by:** scheduling that unit. **Owner:** the leader.
+- **Status:** CONFIRMED (2026-10-18; previously unconfirmed) (re-checked U-507 2026-09-13) — a separate unit if anyone wants it, with its own evidence. **Settled by:** scheduling that unit. **Owner:** the leader.
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by Opus at `/reconcile` (reversible tier): kept as a backstop. No unit is scheduled. See DECISIONS.md "Reconcile 2026-10-18".
 
 ## H-U — the store parameter is renamed for what the predicate consumes
 
@@ -3010,6 +3023,7 @@ falsifies each one.
 - **Blast radius if wrong:** a codegen defect that only 1.88 exhibits would still pass CI. Narrow,
   and it would be caught by the stable build for any source-level cause.
 - **Status:** PARTIAL (U-507, 2026-09-13) — verified unchanged: both msrv steps are still `cargo check --locked` (`ci.yml`, job `msrv`). The scope choice is defensible and the residual is real and unclosed — U-510 established that `cargo check` neither codegens nor links, so this job does **not** prove the workspace *builds* on 1.88, only that 1.88 accepts the surface. **Settled by:** converting both steps to `cargo build` if MSRV buildability is wanted. **Owner:** the leader. Not claimed as complete.
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by Opus at `/reconcile` (reversible tier): `cargo check` is the accepted MSRV scope. See DECISIONS.md "Reconcile 2026-10-18".
 
 ## U-510 — build steps inside the required `clippy` job rather than a new, honestly-named job
 
@@ -3277,6 +3291,7 @@ Plan: plans/u-521-didweb-fixture-and-metrics.md
      was not is the failure this discipline exists to prevent.
    - **Status:** DEFERRED (2026-09-13) — evidence that would settle it: a mutation that makes a
      transition both recorded and misrecorded.
+   - **Reconciled 2026-10-18:** CONFIRMED (2026-10-18) as an accepted limitation, decided by Opus at `/reconcile` (reversible tier). See DECISIONS.md "Reconcile 2026-10-18".
 
 5. **Assumed:** the production `bind_rustls` provider gap should be fixed in this unit, since the
    fix is one line and I am already touching TLS setup.
@@ -3751,6 +3766,7 @@ Plan: plans/u-533-unexercised-fixtures.md
      fabricating the state through a store insert that no client could reach.
    - **Status:** DEFERRED (2026-09-13) — evidence that would settle it: an admin path that can produce
      the state, or a spec bump dropping the note. Either reddens the assertion.
+   - **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by Opus at `/reconcile` (reversible tier): still true at spec pin 85088a6. See DECISIONS.md "Reconcile 2026-10-18".
 
 4. **Assumed:** retiring a fixture from `UNEXERCISED_FIXTURES` and updating the count is sufficient,
    since that is what the accounting test's doc comment describes.
@@ -4707,7 +4723,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** (Q9) `CREATE UNLOGGED TABLE rate_limit_windows` (renamed from `auth_rate_limit_windows`, since other scopes may share it), following the plan's Fable round-3 recommendation. No sharding of the global counter; no index beyond the primary key.
 - **Alternatives:** a LOGGED table (adds a WAL fsync to every row-lock hold); sharding the global row into N summed rows (breaks single-statement exactness); an index on `window_start` (defeats HOT updates).
 - **Blast radius if wrong:** UNLOGGED contents are lost on crash recovery or standby promotion — one window's budget resets once. A wrong hot-row estimate shows up as latency on `acdp_registry_rate_limit_shared_seconds{scope="auth_global"}` (added in Phase 4) and is fixable without a schema change; undoing UNLOGGED itself needs migration 015 (the migration is checksummed and uneditable).
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-10-18; previously unconfirmed)
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by the maintainer at `/reconcile` (one-way door; Fable analysed): UNLOGGED and a single global row. A truncation costs one fresh window, and L1 always applies. Revisit sharding if `acdp_registry_rate_limit_shared_seconds{scope="auth_global"}` p99 nears `backend_timeout_ms`. See DECISIONS.md "Reconcile 2026-10-18".
 
 ## FEAT-06 item 3, Phase 4 — layered limiter: fail-open posture and the DB-amplification bound
 - **Plan:** plans/rate-limit-shared-backend.md (Phase 4, Q2 and Q3)
@@ -4715,7 +4732,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** `LayeredRateLimiter` (L1 first, short-circuit on Deny; `Unavailable` resolved by a posture, default Allow, `Deny` returns `Retry-After: 5`); metrics as two new names (`acdp_registry_rate_limit_shared_{total,seconds}`), not new `RateLimitScope` variants.
 - **Alternatives:** L2-only (DB write rate becomes attacker-controlled); a separate larger L1 budget; fail-closed default.
 - **Blast radius if wrong:** the posture is flipped by config (Phase 5) with a restart and no code change; the 5s unavailable `Retry-After` is a constant to retune. The 2x bound is derived, not load-tested.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-10-18; previously unconfirmed)
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by Opus at `/reconcile` (reversible tier): fail-open to L1, configurable via `rate_limit.backend_unavailable = allow|deny`. See DECISIONS.md "Reconcile 2026-10-18".
 
 ## FEAT-06 item 3, Phase 5 — config surface, startup validation and wiring
 - **Plan:** plans/rate-limit-shared-backend.md (Phase 5, Q5)
@@ -4723,7 +4741,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** `backend` / `backend_unavailable` / `backend_timeout_ms` (250) / `backend_prune_seconds` (300), all defaulted; validation refuses postgres backend with non-Postgres storage, a disabled limiter, `global_per_minute == 0` (broader than the plan's "both zero", because Phase 4's database-load bound needs the global budget), zero timeout, zero prune interval — the last two only when the shared backend is selected, so a dormant key cannot block a boot. The pruner deletes windows older than 120s by the database clock. Documented in docs/CONFIGURATION.md and a new `## 0.2.0` section of docs/UPGRADING.md (the next release; 0.1.5 is already released).
 - **Alternatives:** a new `[rate_limit.shared]` section; silent fallback to memory; client-clock pruning.
 - **Blast radius if wrong:** pre-GA config surface — key names/defaults can still change, but once operators adopt them a rename is a breaking config change (and `deny_unknown_fields` makes a new config unparseable on an old binary, noted in UPGRADING).
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-10-18; previously unconfirmed)
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), decided by the maintainer at `/reconcile` (one-way door; Fable analysed): names and defaults are the public config contract. They have been released since 0.2.0, so the 'pre-GA' blast-radius wording above is stale. See DECISIONS.md "Reconcile 2026-10-18".
 
 ## FEAT-06 item 3, Phase 6 — multi-replica proof test hygiene
 - **Plan:** plans/rate-limit-shared-backend.md (Phase 6)
@@ -4731,7 +4750,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** `DELETE` the `auth_global` row and skip near a window boundary at the start of each proof, rather than a UUID key (the global scope has exactly one row by design, so no per-test key exists).
 - **Alternatives:** a shared `pg_advisory_lock` across both test binaries; a per-test throwaway database.
 - **Blast radius if wrong:** test flakiness only; no production effect.
-- **Status:** UNCONFIRMED
+- **Status:** SUPERSEDED (2026-10-18; previously unconfirmed)
+- **Reconciled 2026-10-18:** SUPERSEDED (2026-10-18), settled without a decision at `/reconcile`: the shared `pg_advisory_lock` (`pg/tests/rate_limit_backend.rs`, `pg_integration.rs`) replaced the assumption. See DECISIONS.md "Reconcile 2026-10-18".
 
 ## B8 / hardening-remaining Phase 5a — retire `lineages` (stop writing now) and file the note under 0.2.1
 - **Plan:** plans/hardening-remaining.md (Phase 5a, Q2)
@@ -4740,6 +4760,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** keep-and-close with "hard-delete feature" as re-open trigger; single-release drop (breaks N-1 publishes on Postgres).
 - **Blast radius if wrong:** none on the wire — nothing reads the table. If keep-and-close is preferred, revert this commit; rows written while it was in force are simply missing from an unread table. If the next version is not 0.2.1, rename the `UPGRADING.md` heading and the "0.2.1 or later" wording in its body (the upgrade-notes gate would not catch a wrong *future* heading, only a missing current one).
 - **Status:** CONFIRMED (5a) — decided by Opus at `/reconcile` (reversible tier); 5b stays GATED.
+- **Reconciled 2026-10-18:** 5b DONE (2026-10-18), decided by the maintainer at `/reconcile` (one-way door; Fable analysed): Q2 confirmed; migration `015_drop_lineages.sql` on both backends drops the table, both contract tests flipped, `## 0.5.2` UPGRADING note. All four DECISIONS gate conditions met. See DECISIONS.md "Reconcile 2026-10-18".
 - **Reconciled 2026-10-04:** 5a (stop writing, keep the table, `## 0.2.1` note) CONFIRMED as shipped. Q2 (retire vs keep-and-close) is not settled by this pass — it remains the maintainer's to reopen, and reverting 5a is still the whole cost of doing so. 5b (`015_drop_lineages.sql`) stays GATED until ALL of: a release containing 5a is tagged AND deployments have been running it; 5b's `UPGRADING.md` note covers Postgres N-1 and states that SQLite rollback past any migration already fails; the two `publishing_and_superseding_leave_the_dormant_lineages_table_untouched` tests are dropped/flipped and the pg `store_contract.rs` (~:1790) comment updated in the same change; the maintainer explicitly confirms Q2. See DECISIONS.md "Reconcile 2026-10-04 — B8 Phase 5a". *(Superseded 2026-10-04: release-plz bumped the minor for `AuthConfig.tenant_header_trust`; this note ships under `## 0.3.0`.)*
 
 ## hardening-remaining Phases 1-2 — required-checks guard and protection drift
@@ -4748,7 +4769,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** compare what is visible, fail closed on read errors, warn (not fail) while `pending_settings` is true. Branch-filter matching in the required-checks guard uses `fnmatch` with last-match-wins for `!` entries; GitHub's `?`/`+` pattern semantics differ, so `['*','!mai+n']` falsely passes (known, low risk — optional fix: reject entries containing `?`, `+`, `[`, `\`).
 - **Alternatives:** failing on unverifiable bypass (daily red risk); rejecting all negated patterns.
 - **Blast radius if wrong:** the daily drift job goes red or silently under-checks; no effect on merges or releases. Confirm from the first post-merge `workflow_dispatch` run's log.
-- **Status:** UNCONFIRMED (partial) — (a)-list, (c), (d) CONFIRMED; (a)-by-id and (b) DEFERRED to Phase 6; fnmatch gap CHANGED (fixed).
+- **Status:** CONFIRMED (2026-10-18; previously unconfirmed) (partial) — (a)-list, (c), (d) CONFIRMED; (a)-by-id and (b) DEFERRED to Phase 6; fnmatch gap CHANGED (fixed).
+- **Reconciled 2026-10-18:** CONFIRMED (2026-10-18), settled without a decision at `/reconcile`: the Phase-6 trigger fired. Drift run 39116347734 logged the tag rulesets read and the 'bypass unverifiable' notice, which the outcome table defines as 'holds as assumed'. See DECISIONS.md "Reconcile 2026-10-18".
 - **Reconciled 2026-10-04:** decided by Opus at `/reconcile` (reversible tier). (a)-list and (c) CONFIRMED by workflow run 37167253908 on `main`: the narrowed App token read `/branches/main/protection` and listed rulesets. (d) CONFIRMED: the org is on the Free plan, so no org-level rulesets exist to miss — re-open trigger: the org moves to Team or above. (a)-by-id (`/rulesets/{id}`) and (b) (bypass visibility) DEFERRED to the first `branch-protection-drift` dispatch after the Phase 6 settings window, read against its outcome table: "tag rulesets read" = ok, "bypass unverifiable" notice = (b) holds as assumed. fnmatch gap CHANGED: the required-checks guard now fails closed with an "unsupported pattern" problem on any `on.pull_request.branches` entry containing `?`, `+`, `[` or `\`, with self-test cases `['*','!mai+n']` and `['ma?n']`. Overall stays UNCONFIRMED (partial) until Phase 6. See DECISIONS.md "Reconcile 2026-10-04 — hardening-remaining Phases 1-2".
 
 ## Hardening C7 — memory backend keeps substring `q=` search; parity exclusions; provisional coverage floor
@@ -4895,7 +4917,8 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** a pure `expected_mm(workspace, upgrading_text)` in conformance_gate.rs with numeric comparison, `##`-only headings, a vacuity check on the real file, and negative controls; RAILWAY.md moved to 0.3 on main; the `tenant_header_trust` default-flip promise moved to 0.4.0; "0.2.x default" wording in comments/docs changed to 0.3.x (same width). Falsified: with RAILWAY.md reverted to main's 0.2 text the guard fails naming the stale tags; with the release branch's Cargo versions checked out (CHANGELOGs excluded) it passes.
 - **Alternatives:** a human commit on the release branch (rejected: release-plz closes the PR); skipping the guard until release (rejected: reopens the D3 defect); shipping the `none` default in 0.3.0 (rejected: a behaviour change, belongs to #386).
 - **Blast radius if wrong:** a release PR red on the Railway guard or upgrade-notes check; the page naming a not-yet-pullable tag for the days between merge and tag. Docs and a test only; revert restores the old guard.
-- **Status:** UNCONFIRMED
+- **Status:** SUPERSEDED (2026-10-18; previously unconfirmed)
+- **Reconciled 2026-10-18:** SUPERSEDED (2026-10-18), settled without a decision at `/reconcile`: `90bc908` plus four green release cuts (0.3.0 to 0.5.1). Item (d) is docs-only (`docker/RAILWAY.md`). See DECISIONS.md "Reconcile 2026-10-18".
 
 ## Final mutants re-pin at scope 358 from run 37222567772
 - **Plan:** plans/release-0.3.0-relabel-and-repin.md (Phase 3; BINDING REVISIONS R7, R11, R12)
@@ -4903,18 +4926,19 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** option B (re-pin from the finished run, merged last) over a fresh dispatch (~1 h 50 m) and over mapping lines through a diff (a ledger must stay as measured). The ratchet itself was exercised offline with `classify_removed_survivors.py` against the new ledger (exit 0).
 - **Alternatives:** a fresh `workflow_dispatch` on final main (the fallback if the name/diff checks had failed); asserting set equality with the old ledger.
 - **Blast radius if wrong:** the Monday 2026-10-05 05:17 UTC cron (not PR-blocking) fails on scope or survivor-name drift, and the next re-pin is another single PR. Workflow config, docs, a committed ledger.
-- **Status:** UNCONFIRMED
+- **Status:** SUPERSEDED (2026-10-18; previously unconfirmed)
+- **Reconciled 2026-10-18:** SUPERSEDED (2026-10-18), settled without a decision at `/reconcile`: re-pinned by `1450b34` (scope 350, run 39071836771). See DECISIONS.md "Reconcile 2026-10-18".
 
 ## Final close-out round (2026-10-04/05) — executor assumptions
 - **Plan:** plans/final-closeout.md (W1-W7)
-- **W1 spec 6d5cdb8 (#399):** (a) `SPEC_DOCS_REF` (fb76f6d) is kept as the slot for the next docs refresh that runs ahead of a pin; it is now older than the pin and no link uses it. (b) The signature-bytes lifecycle-retry rule is tested over HTTP on sqlite only; Postgres uses the same `*prior == event` comparison (`pg/src/store.rs`) but a Postgres-only regression would not be caught (follow-up: a signature-only case in the shared parity kit). (c) No UPGRADING entry for strict Ed25519: no operator action, shipped with acdp 0.14.4 in 0.3.0. (d) The registry's own EdDSA access-token JWTs (verified by `jsonwebtoken`) are outside RFC-ACDP-0001 §5.10. Blast radius: tests/docs. **Status:** UNCONFIRMED
-- **W2 schema validation (#400):** (a) the served document is reached by spawning the real binary, not by exposing `build_capabilities`. (b) `jsonschema` 0.58, default features off, `.offline()`, every spec schema registered by `$id`. (c) `schemas/json/` is trusted from the pinned tree without its own digest (the pin digest covers fixtures only), so a hand-edited local spec could pass locally; CI checks out the pinned ref. (d) the older field-level test is kept. (e) five extra documents are covered (publish response, stored context, search, checkpoint, error body); four others are not. Lockfile side effects reach the shipped build: regex-automata 0.4.14 -> 0.4.18 and zmij 1.0.21 -> 1.0.23 (benign, forced). The extra conformance tests add ~1 s per mutant to the mutants run (worst-case cap headroom ~13%). **Status:** UNCONFIRMED
-- **W3 parity kit (#397):** the kit's `DefaultOnly` wrapper is the falsification double; seed 250 is private to the new assertion. **Status:** UNCONFIRMED
-- **W4 PR-time pin check (#398):** advisory (`advisory_pending`) so branch protection is unchanged; the path filter is a step (not a trigger `paths:`) so the job always reports and can be required later; the budgeted timeout comes from the prior ledger; cargo-mutants is pinned to 27.1.0 in BOTH `mutants.yml` and the pins job and must equal the ledger's `cargo_mutants_version` (bumping it requires a re-pin); `Cargo.toml`/`Cargo.lock` changes do not trigger the check. **Status:** UNCONFIRMED
-- **W5 cargo vet (#396):** the job is advisory and the Phase-6 runbook deliberately does NOT promote it (`KEEP_ADVISORY`); the imports (acdp-rs, Mozilla, Google, Bytecode Alliance) track `main` with `imports.lock` as the trust anchor, so its diff is reviewed like an audit; the `acdp-*` crates are exempted not trusted, so any dependency change turns vet red until `supply-chain/` is refreshed in the same PR; cargo-vet 0.10.2 is installed with `cargo install --locked` (install-action lacks it); a registry-side crypto-critical-crate guard (acdp-rs's `check-crypto-vet.sh`) is not added (nine exempted crypto-adjacent versions would fail it). **Status:** UNCONFIRMED
-- **W6 lifecycle prove/commit (#401):** SUPERSEDES #375 (a), (e), (g) and BINDING REVISION 5. Chose prove -> arm the actor's `PublishCharge` -> commit; events the SDK rejects before proving a signature (missing or invisible context, non-producer actor, wrong event type, future skew) are charged to nobody; a proven event is charged on every outcome including replays. Cost of an uncharged rejection: two store reads (no cryptography, no DID resolution) — the same as an unauthenticated read, and read routes have no registry-side limiter; missing and invisible contexts stay indistinguishable (404). Alternatives rejected: keeping a fallback signature check (keeps the extra DID resolution this removes); charging the unverified actor (reopens the budget drain). Blast radius: rate-limit accounting on `/retract` and `/republish` only. **Status:** UNCONFIRMED
-- **W7 tenant default (#402, #386/#391):** (a) the next release is 0.4.0 (the `feat(tenancy)!:` marker); `## 0.4.0` in UPGRADING.md and `:0.4` tags in RAILWAY.md are merged on `main` before the release PR per MAINTAINING.md, so RAILWAY.md names unpublished `:0.4` images until the tag. (b) `tenant_header_trust` stays `Option` and resolves with `unwrap_or(None)` (no API break). (c) An admin bearer's `X-Tenant-Id` is honoured on playground `GET /admin/contexts` in every mode (the admin credential is cross-tenant, so the header can only narrow; strict mode with no header still refuses; `default` is 400). (d) the `/0` refusal lives in binary startup validation only and checks a zero-length prefix (not complementary halves; `::ffff:` entries are inert); embedders skipping validation are not protected. (e) `/admin/status` reports a trusted-proxy count, not addresses. (f) `#[non_exhaustive]` on `AuthConfig` is NOT added (about 41 struct-literal construction sites; itself a breaking change); a builder in a later minor is proposed. **Status:** UNCONFIRMED
-- **W8 parity signature-only retry (#406):** (1) the twin event carries a real Ed25519 signature by a different key over the same event, with `algorithm` and `key_id` unchanged, rather than a hand-mangled `signature.value`: the stores do not verify signatures, so any well-formed different value exercises the same comparison, and a real one keeps the fixture valid if a store ever starts checking. (2) The falsification double is an `ignore_signatures` flag on the existing in-crate `Recording` store (it strips signatures before the inner store sees them) rather than a new wrapper type. Blast radius: test-only. **Status:** UNCONFIRMED
+- **W1 spec 6d5cdb8 (#399):** (a) `SPEC_DOCS_REF` (fb76f6d) is kept as the slot for the next docs refresh that runs ahead of a pin; it is now older than the pin and no link uses it. (b) The signature-bytes lifecycle-retry rule is tested over HTTP on sqlite only; Postgres uses the same `*prior == event` comparison (`pg/src/store.rs`) but a Postgres-only regression would not be caught (follow-up: a signature-only case in the shared parity kit). (c) No UPGRADING entry for strict Ed25519: no operator action, shipped with acdp 0.14.4 in 0.3.0. (d) The registry's own EdDSA access-token JWTs (verified by `jsonwebtoken`) are outside RFC-ACDP-0001 §5.10. Blast radius: tests/docs. **Status:** CONFIRMED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** (a)(c)(d) CONFIRMED, decided by Opus at `/reconcile` (reversible tier); (b) superseded by W8 (#406). See DECISIONS.md "Reconcile 2026-10-18".
+- **W2 schema validation (#400):** (a) the served document is reached by spawning the real binary, not by exposing `build_capabilities`. (b) `jsonschema` 0.58, default features off, `.offline()`, every spec schema registered by `$id`. (c) `schemas/json/` is trusted from the pinned tree without its own digest (the pin digest covers fixtures only), so a hand-edited local spec could pass locally; CI checks out the pinned ref. (d) the older field-level test is kept. (e) five extra documents are covered (publish response, stored context, search, checkpoint, error body); four others are not. Lockfile side effects reach the shipped build: regex-automata 0.4.14 -> 0.4.18 and zmij 1.0.21 -> 1.0.23 (benign, forced). The extra conformance tests add ~1 s per mutant to the mutants run (worst-case cap headroom ~13%). **Status:** CONFIRMED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** CONFIRMED, decided by Opus at `/reconcile` (reversible tier). See DECISIONS.md "Reconcile 2026-10-18".
+- **W3 parity kit (#397):** the kit's `DefaultOnly` wrapper is the falsification double; seed 250 is private to the new assertion. **Status:** SUPERSEDED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** SUPERSEDED (#397, #390 closed). See DECISIONS.md "Reconcile 2026-10-18".
+- **W4 PR-time pin check (#398):** advisory (`advisory_pending`) so branch protection is unchanged; the path filter is a step (not a trigger `paths:`) so the job always reports and can be required later; the budgeted timeout comes from the prior ledger; cargo-mutants is pinned to 27.1.0 in BOTH `mutants.yml` and the pins job and must equal the ledger's `cargo_mutants_version` (bumping it requires a re-pin); `Cargo.toml`/`Cargo.lock` changes do not trigger the check. **Status:** SUPERSEDED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** SUPERSEDED: `mutants pins` is now a required check; only `cargo-vet` stays advisory. See DECISIONS.md "Reconcile 2026-10-18".
+- **W5 cargo vet (#396):** the job is advisory and the Phase-6 runbook deliberately does NOT promote it (`KEEP_ADVISORY`); the imports (acdp-rs, Mozilla, Google, Bytecode Alliance) track `main` with `imports.lock` as the trust anchor, so its diff is reviewed like an audit; the `acdp-*` crates are exempted not trusted, so any dependency change turns vet red until `supply-chain/` is refreshed in the same PR; cargo-vet 0.10.2 is installed with `cargo install --locked` (install-action lacks it); a registry-side crypto-critical-crate guard (acdp-rs's `check-crypto-vet.sh`) is not added (nine exempted crypto-adjacent versions would fail it). **Status:** SUPERSEDED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** SUPERSEDED: KEEP_ADVISORY confirmed; the crypto-guard gap was closed by #405/#412. See DECISIONS.md "Reconcile 2026-10-18".
+- **W6 lifecycle prove/commit (#401):** SUPERSEDES #375 (a), (e), (g) and BINDING REVISION 5. Chose prove -> arm the actor's `PublishCharge` -> commit; events the SDK rejects before proving a signature (missing or invisible context, non-producer actor, wrong event type, future skew) are charged to nobody; a proven event is charged on every outcome including replays. Cost of an uncharged rejection: two store reads (no cryptography, no DID resolution) — the same as an unauthenticated read, and read routes have no registry-side limiter; missing and invisible contexts stay indistinguishable (404). Alternatives rejected: keeping a fallback signature check (keeps the extra DID resolution this removes); charging the unverified actor (reopens the budget drain). Blast radius: rate-limit accounting on `/retract` and `/republish` only. **Status:** SUPERSEDED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** SUPERSEDED: ACCEPTED in DECISIONS.md; #393 closed. See DECISIONS.md "Reconcile 2026-10-18".
+- **W7 tenant default (#402, #386/#391):** (a) the next release is 0.4.0 (the `feat(tenancy)!:` marker); `## 0.4.0` in UPGRADING.md and `:0.4` tags in RAILWAY.md are merged on `main` before the release PR per MAINTAINING.md, so RAILWAY.md names unpublished `:0.4` images until the tag. (b) `tenant_header_trust` stays `Option` and resolves with `unwrap_or(None)` (no API break). (c) An admin bearer's `X-Tenant-Id` is honoured on playground `GET /admin/contexts` in every mode (the admin credential is cross-tenant, so the header can only narrow; strict mode with no header still refuses; `default` is 400). (d) the `/0` refusal lives in binary startup validation only and checks a zero-length prefix (not complementary halves; `::ffff:` entries are inert); embedders skipping validation are not protected. (e) `/admin/status` reports a trusted-proxy count, not addresses. (f) `#[non_exhaustive]` on `AuthConfig` is NOT added (about 41 struct-literal construction sites; itself a breaking change); a builder in a later minor is proposed. **Status:** SUPERSEDED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** SUPERSEDED: CONFIRMED in DECISIONS.md, v0.4.0 released; (f) stays deferred by that decision. See DECISIONS.md "Reconcile 2026-10-18".
+- **W8 parity signature-only retry (#406):** (1) the twin event carries a real Ed25519 signature by a different key over the same event, with `algorithm` and `key_id` unchanged, rather than a hand-mangled `signature.value`: the stores do not verify signatures, so any well-formed different value exercises the same comparison, and a real one keeps the fixture valid if a store ever starts checking. (2) The falsification double is an `ignore_signatures` flag on the existing in-crate `Recording` store (it strips signatures before the inner store sees them) rather than a new wrapper type. Blast radius: test-only. **Status:** CONFIRMED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** CONFIRMED, decided by Opus at `/reconcile` (reversible tier). See DECISIONS.md "Reconcile 2026-10-18".
 
 ## Final mutants re-pin from run 37248684286
 - **Plan:** final-closeout
@@ -4922,13 +4946,14 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** commit the run's `outcomes.json` unchanged as the prior ledger, set the scope to 354, keep `MUTANTS_SURVIVORS` (it already equals the run's `missed.txt`), update only comments and docs. No scoped file is touched.
 - **Alternatives:** waiting for the Monday cron (it would fail on the stale scope); re-running locally (not the CI-equivalent environment).
 - **Blast radius if wrong:** the next scheduled mutants run fails on scope or survivor drift and needs another single re-pin PR. Workflow config, docs, a committed ledger.
-- **Status:** UNCONFIRMED
+- **Status:** SUPERSEDED (2026-10-18; previously unconfirmed)
+- **Reconciled 2026-10-18:** SUPERSEDED (2026-10-18), settled without a decision at `/reconcile`: re-pinned by `1450b34` (scope 350, run 39071836771). See DECISIONS.md "Reconcile 2026-10-18".
 
 ## Final close-out, last round (2026-10-05) — executor assumptions
 - **Plan:** plans/final-closeout.md
-- **#405/#412 crypto vet guard:** the guard reads `supply-chain/config.toml` (tomllib when available, a strict line reader as the Python 3.9 fallback that refuses unfamiliar spellings of `exemptions`) rather than cargo-vet JSON, so it cannot see delta-audit chains; the crypto-critical list is a copy of acdp-rs's `scripts/crypto-critical.txt` and must be kept in step by hand; the guard stays advisory because `cargo-vet` does. **Status:** UNCONFIRMED
-- **#410/#414 imports refresh:** a single-crate patch bump onto the acdp-rs-audited version is safe and minimal (cpufeatures 0.3.1, rustls-pki-types 1.15.1, webpki-roots 1.0.9, each a one-package `Cargo.lock` change; webpki-roots also refreshes the CA bundle, one root removed, four added); strict "only acdp-rs audits count" parity was NOT built (see DECISIONS.md). **Status:** UNCONFIRMED
-- **#415 spec 34f14ab:** `.spec-pin` changes only `ref:` because fixtures are byte-identical (digest unchanged, 147 fixtures); the registry already meets RFC-ACDP-0008 §6.2 for `bearer_jwt` (code cited in docs/AUTHENTICATION.md); "tokens MUST only be sent over TLS" is a deployment duty, the registry does not refuse plain-HTTP bearers (it cannot see TLS ended upstream); "reads only" means a bearer never replaces a producer signature on a write (`/auth/token/revoke` and `/admin/*` fall outside); the default `token_ttl_seconds = 3600` satisfies "short lifetimes". **Status:** UNCONFIRMED
+- **#405/#412 crypto vet guard:** the guard reads `supply-chain/config.toml` (tomllib when available, a strict line reader as the Python 3.9 fallback that refuses unfamiliar spellings of `exemptions`) rather than cargo-vet JSON, so it cannot see delta-audit chains; the crypto-critical list is a copy of acdp-rs's `scripts/crypto-critical.txt` and must be kept in step by hand; the guard stays advisory because `cargo-vet` does. **Status:** CONFIRMED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** CONFIRMED, decided by Opus at `/reconcile` (reversible tier). See DECISIONS.md "Reconcile 2026-10-18".
+- **#410/#414 imports refresh:** a single-crate patch bump onto the acdp-rs-audited version is safe and minimal (cpufeatures 0.3.1, rustls-pki-types 1.15.1, webpki-roots 1.0.9, each a one-package `Cargo.lock` change; webpki-roots also refreshes the CA bundle, one root removed, four added); strict "only acdp-rs audits count" parity was NOT built (see DECISIONS.md). **Status:** SUPERSEDED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** SUPERSEDED: confirmed in DECISIONS.md; #411 closed. See DECISIONS.md "Reconcile 2026-10-18".
+- **#415 spec 34f14ab:** `.spec-pin` changes only `ref:` because fixtures are byte-identical (digest unchanged, 147 fixtures); the registry already meets RFC-ACDP-0008 §6.2 for `bearer_jwt` (code cited in docs/AUTHENTICATION.md); "tokens MUST only be sent over TLS" is a deployment duty, the registry does not refuse plain-HTTP bearers (it cannot see TLS ended upstream); "reads only" means a bearer never replaces a producer signature on a write (`/auth/token/revoke` and `/admin/*` fall outside); the default `token_ttl_seconds = 3600` satisfies "short lifetimes". **Status:** CONFIRMED (2026-10-18; previously unconfirmed) **Reconciled 2026-10-18:** the §6.2 policy CONFIRMED, decided by the maintainer at `/reconcile` (one-way door; Fable analysed): TLS is the deployment's duty and bearers authenticate reads only. Any registry-side check stays deferred until RFC-0008 adds a MUST aimed at registries or a forwarded-proto convention. (c) and the pin facts are superseded (pin now 85088a6). See DECISIONS.md "Reconcile 2026-10-18".
 
 ## Docs refresh 2 (2026-10-08) — PR-A pins and process
 - **Plan:** plans/docs-refresh-2026-10-08.md
