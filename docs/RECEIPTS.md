@@ -268,7 +268,7 @@ Consumer-side verification is the SDK's job, not this registry's: set
 `ReceiptPolicy::Require` on the `VerificationPolicy` of the `acdp-client`
 [`verified` module](https://docs.rs/acdp-client/0.15.0/acdp_client/verified/index.html)
 (re-exported by `acdp`), as described in
-[acdp-rs · Consuming & Verifying](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/consuming.md#verifiedcontext--the-verification-pipeline).
+[acdp-rs · Consuming & Verifying](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.0/docs/consuming.md#verifiedcontext--the-verification-pipeline).
 It checks the receipt against this registry's `/.well-known/did.json` — so run
 it from a machine that reaches the registry over TLS at its bare authority —
 and applies the

@@ -995,7 +995,7 @@ envelope; see the note under the table.
 Each code's meaning and canonical HTTP status are in the spec's
 [error-code registry](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/85088a615e9c8c7b9c2c6fc57c3684a0f32bcb1d/registries/error-codes.md), and how an `acdp` client
 maps each one back to a typed `AcdpError` (with retry guidance) is in
-[acdp-rs · Errors & Retries](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/424253b32d23bb7d0041f1c6aa5513d5d3c329fc/docs/errors.md#wire-errors-round-trip-into-typed-variants).
+[acdp-rs · Errors & Retries](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.0/docs/errors.md#wire-errors-round-trip-into-typed-variants).
 This page documents only what **this registry** answers and when.
 
 ### Status / code table

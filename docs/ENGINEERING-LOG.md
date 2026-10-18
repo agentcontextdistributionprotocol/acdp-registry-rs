@@ -31,6 +31,13 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+### acdp-rs guide links re-pinned to `acdp-v0.15.0`
+
+The move to `acdp` 0.15.0 (#435) left 20 acdp-rs guide links pinned to `424253b`, a commit older than the tag the code now depends on:
+the drift the 2026-10-08 refresh chose to handle by a maintainer re-check rather than a guard. The re-check is this change. The links
+now name the tag `acdp-v0.15.0` rather than a SHA, so the pin reads as the dependency version; every linked page and anchor was checked
+present at the tag first. The same change records the owner's 2026-10-10 confirmation of the three publish-201 extras.
+
 ### Publish answers 201 Created with a Location (U-526 resolved, 0.5.0)
 
 `POST /contexts` answered `200` with no `Location` for every success, a deviation from RFC-ACDP-0003 §4 that conformance fixture `pub-007`
