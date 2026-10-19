@@ -183,7 +183,7 @@ Reference docs live in [`docs/`](docs/README.md) (HTTP API, authentication,
 configuration, multi-tenancy, webhooks, operations). When a change alters the
 HTTP surface, config, auth, or operational behavior, update the relevant page in
 the same PR. Document protocol-level concepts by linking to the
-[`acdp` library docs](https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/acdp-v0.15.0/docs)
+[`acdp` library docs](https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/acdp-v0.15.1/docs)
 rather than restating them.
 
 ## Migrations

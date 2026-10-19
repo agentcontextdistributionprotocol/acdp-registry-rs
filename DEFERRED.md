@@ -16,6 +16,8 @@ the trigger that reopens it:
   currently guards the same boundary.
 - #415: a registry-side TLS check for bearers, only if RFC-ACDP-0008 adds a MUST aimed at registries or a forwarded-proto convention.
 - W7(f): `#[non_exhaustive]` on `AuthConfig`, at the next deliberate breaking config release.
+- Federation proxy: a foreign context failing hash, signature or key checks answers 400; revisit if RFC-ACDP-0006/0007 assigns proxies
+  a code for upstream-integrity failures (0.15.1 adoption, (b)).
 
 When one of these is settled, edit its status in `ASSUMPTIONS.md` in the same PR as the change that settled it, and note the decision in
 `DECISIONS.md`. Do not open a PR only to tidy a status line.
