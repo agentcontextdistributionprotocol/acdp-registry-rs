@@ -23,14 +23,20 @@ belongs in the per-crate changelogs.
 
 ## 0.5.3
 
-**The federation proxy answers 502 again when a foreign registry serves a malformed context.**
+**The federation proxy answers 502 when a foreign registry serves a malformed context, and the `acdp`
+dependency moves to 0.15.1.**
 
-Built against acdp 0.15.1, `GET /contexts/{ctx_id}` for a foreign `ctx_id` answered a document the
-origin registry got wrong (not JSON, an unknown field, a missing field) with 400 `schema_violation`,
-which blames the caller for the origin's bytes. It is 502 `cross_registry_resolution_failed` again,
-the same as an unreachable origin. Only deployments with `registry.cross_registry_resolution`
-enabled are affected.
+For a foreign `ctx_id`, `GET /contexts/{ctx_id}` answers a document the origin registry got wrong (not
+JSON, an unknown field, a missing field) with 502 `cross_registry_resolution_failed`, the same as an
+unreachable origin. 0.5.2 answered 500 `internal_error`, because acdp 0.15.0 reported these documents as
+a serialization failure. acdp 0.15.1 reports them as `schema_violation`, which on its own would have
+answered 400 and blamed the caller for the origin's bytes; 0.5.3 is the first release on 0.15.1 and
+maps it to 502 instead.
 
+- **Who is affected:** only deployments with `registry.cross_registry_resolution` enabled, and only
+  clients that branch on the status of a failed foreign retrieval. A 5xx is still a 5xx; a client that
+  matched `internal_error` should match `cross_registry_resolution_failed`.
+- **Rollback:** safe. No migration, configuration or storage change.
 - **Unchanged:** configuration keys and defaults, the schema, and every other endpoint.
 
 ---

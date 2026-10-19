@@ -4666,3 +4666,12 @@ FEAT-06 P6 (`pg_advisory_lock`); the 0.3.0 relabel (four release cuts since); th
 out in this change); 13 reversible entries confirmed and 1 changed (fixed) and 1 deferred by Opus; the rest superseded with
 evidence. No follow-up blocks the next `/ship`.
 
+## acdp-rs 0.15.1 adoption — 2026-10-18
+
+- **Proxy remap — CONFIRMED by the maintainer** (approved merging #445 and cutting 0.5.3). A malformed upstream document is 502
+  `cross_registry_resolution_failed`; acdp's `SchemaViolation` variant stays. Shipped in 0.5.3 (#445, 9fcded8; release #444).
+- **Not widened** to hash/signature/key failures on a foreign context (still 400, pre-existing). One line in `DEFERRED.md`.
+- **Mutation pins:** no re-pin; the mapping lives outside the mutation scope and `context.rs` changed by one line (`mutants pins`
+  green on #445 and #444).
+- **Docs:** acdp-rs links re-pinned to `acdp-v0.15.1`; the 0.5.3 upgrade note corrected (0.5.2 answered 500, not 400).
+
