@@ -4622,7 +4622,7 @@ was not, and nothing failed loudly.
   that entry was correct when written (PR
   #132, before Phases 2-3 shipped the fix) and is now the opposite of current
   behavior. Read it as history, not as the current contract.
-  This is the sentence [SECURITY.md](SECURITY.md)'s "Keep
+  This is the sentence [SECURITY.md](../SECURITY.md)'s "Keep
   `auth.anonymous_public_reads = false` unless the registry is meant to serve
   world-readable public contexts" was really about: it needed no edit here,
   but it only became fully true with this fix — before Phase 3,
