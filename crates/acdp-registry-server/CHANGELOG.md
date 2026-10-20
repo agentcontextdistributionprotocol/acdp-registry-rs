@@ -1,5 +1,12 @@
 
 
+## [0.5.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.3...acdp-registry-server/v0.5.4) - 2026-10-20
+
+### Other
+
+- *(spec)* finish adopting ACDP spec @ 1ed9bec (anc-006, consumer-only)
+
+
 ## [0.5.3](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.2...acdp-registry-server/v0.5.3) - 2026-10-18
 
 ### Fixed
