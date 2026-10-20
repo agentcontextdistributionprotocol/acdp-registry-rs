@@ -10125,7 +10125,7 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// added). A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 158;
+const TOTAL_FIXTURES_AT_PIN: usize = 159;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
