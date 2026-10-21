@@ -56,7 +56,7 @@ verification, SSRF defenses, or the canonical error-code registry lives in the
 | The `AcdpError` ↔ RFC-ACDP-0007 §5 wire-code registry, retry guidance | [acdp-rs · Errors & Retries](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/errors.md) |
 | SSRF defenses, HTTPS/size/redirect caps, algorithm-downgrade rejection (`WebResolver`) | [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/security.md) |
 | The three-layer model (what is hashed/signed/mutable) | [acdp-rs · Architecture](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/architecture.md) |
-| API reference for the `acdp` crate | [docs.rs/acdp 0.15.0](https://docs.rs/acdp/0.15.1/acdp/) |
+| API reference for the `acdp` crate | [docs.rs/acdp 0.15.1](https://docs.rs/acdp/0.15.1/acdp/) |
 | The IANA-style registries (profiles, error codes, lifecycle event types, signature algorithms) | [spec · registries](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/1ed9bec84d2fea77927f421e0167b4bc8b405ccf/registries) |
 | Normative protocol rules | [RFC set](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/1ed9bec84d2fea77927f421e0167b4bc8b405ccf/rfcs) |
 
