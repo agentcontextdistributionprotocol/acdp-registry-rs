@@ -21,6 +21,20 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.5.4
+
+**No runtime change. The conformance suite now runs against ACDP spec revision 1ed9bec.**
+
+1ed9bec adds one conformance fixture (anc-006, the `seam.decision` scheme-aware hook). It binds only
+consumers that resolve `seam.decision` anchors; this registry does not, so nothing it serves or
+accepts changed. Links into the spec from these docs now point at 1ed9bec.
+
+- **Who is affected:** no one. The binary behaves exactly as 0.5.3.
+- **Rollback:** safe. No migration, configuration or storage change.
+- **Unchanged:** configuration keys and defaults, the schema, and every endpoint.
+
+---
+
 ## 0.5.3
 
 **The federation proxy answers 502 when a foreign registry serves a malformed context, and the `acdp`
