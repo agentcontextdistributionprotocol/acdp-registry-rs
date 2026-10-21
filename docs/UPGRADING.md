@@ -21,6 +21,29 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.5.4
+
+**Outbound TLS no longer trusts the distrusted emSign G3 certificates, and the conformance suite runs
+against ACDP spec revision 1ed9bec. No configuration, schema or API change.**
+
+`rustls-webpki` moves to 0.103.16 and `webpki-roots` to 1.0.10 (RUSTSEC-2026-0382, RUSTSEC-2026-0381).
+Every outbound HTTPS connection the registry makes (webhook deliveries, `did:web` and foreign-registry
+resolution, and a Postgres connection over rustls with bundled roots) now rejects a chain through the
+emSign ECC Root CA - G3 or its eight G3 intermediates, instead of accepting it.
+
+Spec revision 1ed9bec adds one conformance fixture (anc-006, the `seam.decision` scheme-aware hook).
+It applies only to consumers that resolve `seam.decision` anchors. This registry does not, so nothing
+it serves or accepts changed.
+
+- **Who is affected:** only deployments whose webhook receivers, `did:web` hosts, federated registries
+  or database present a certificate issued under emSign G3. Those connections now fail TLS
+  verification. Move that endpoint to another CA.
+- **Rollback:** safe. No migration, configuration or storage change. Rolling back restores trust in
+  the distrusted certificates.
+- **Unchanged:** configuration keys and defaults, the schema, and every endpoint.
+
+---
+
 ## 0.5.3
 
 **The federation proxy answers 502 when a foreign registry serves a malformed context, and the `acdp`
