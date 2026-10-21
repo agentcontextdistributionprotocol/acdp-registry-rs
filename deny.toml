@@ -62,6 +62,15 @@ ignore = [
     #   - jsonwebtoken major bump: re-confirm the `alg` allowlist check still
     #     precedes provider/verifier construction in `decode()`.
     { id = "RUSTSEC-2023-0071", reason = "rsa crate unreachable (alg pinned pre-dispatch, decoding.rs:278) and no RSA private key exists to recover; see comment" },
+    # RUSTSEC-2026-0381 (distrusted emSign intermediates in bundled roots) on
+    # webpki-roots 0.26.11 only. Fixed in 1.0.10, which Cargo.lock pins. 0.26.11
+    # is a no_std shim whose entire API is `pub use parent::TLS_SERVER_ROOTS`
+    # (parent = webpki-roots 1.x), so with 1.0.10 locked it serves the fixed root
+    # set; no 0.26.x release exists that would clear the advisory. It enters only
+    # via sqlx-core 0.8.6. Remove when sqlx depends on webpki-roots 1.x directly.
+    # RE-CHECK if `webpki-roots 1.x` in Cargo.lock ever drops below 1.0.10: this
+    # ignore is by ID and would then also hide the real thing.
+    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 is a re-export shim of 1.x; 1.0.10 (fixed) is locked; see comment" },
 ]
 
 [licenses]

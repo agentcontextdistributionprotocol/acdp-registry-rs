@@ -1,4 +1,14 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.rustls-webpki]]
+who = "Ajit Koti <ajitkoti@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.103.15 -> 0.103.16"
+notes = "RUSTSEC-2026-0382 fix. Adds DISTRUSTED_SPKIS (8 include_bytes! emSign G3 intermediate SPKIs under src/data/distrusted/) checked against every path node and the trust anchor in ChainOptions::build_chain, returning the new Error::CertDistrusted (rank 270, with revocation). No unsafe, no new imports, dependencies, build script or I/O; the rest is a unit test."
+
+[[audits.webpki-roots]]
+who = "Ajit Koti <ajitkoti@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.9 -> 1.0.10"
+notes = "RUSTSEC-2026-0381 fix. Data-only: removes the 'emSign ECC Root CA - G3' TrustAnchor from TLS_SERVER_ROOTS and adds none; rust-version 1.70 -> 1.71. No code change."
