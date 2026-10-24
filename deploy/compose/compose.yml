@@ -73,6 +73,8 @@ services:
       ACDP_REGISTRY_LIFECYCLE__ENABLED: "true"
       ACDP_REGISTRY_AUTH__JWT_SECRET: ${ACDP_JWT_SECRET:?set ACDP_JWT_SECRET in .env}
       ACDP_REGISTRY_AUTH__ANONYMOUS_PUBLIC_READS: "true"
+      # did:key producers verify offline (the DID is the key); did:web is required.
+      ACDP_REGISTRY_AUTH__DID_METHODS: did:web,did:key
       ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST: none
       RUST_LOG: info,acdp=info,acdp_registry=info
     ports:

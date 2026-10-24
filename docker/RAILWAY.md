@@ -226,6 +226,7 @@ readable `public` contexts. Add these:
 | `ACDP_REGISTRY_LIFECYCLE__ENABLED` | `true`. Once lifecycle state exists it cannot be turned back off |
 | `ACDP_REGISTRY_REGISTRY__PROFILES` | `acdp-registry-core,acdp-registry-discovery,acdp-registry-receipts,acdp-registry-lifecycle` |
 | `ACDP_REGISTRY_AUTH__ANONYMOUS_PUBLIC_READS` | `true` (see the read-posture note above) |
+| `ACDP_REGISTRY_AUTH__DID_METHODS` | `did:web,did:key`. The default is `did:web` alone, which rejects `did:key` producers such as the SDK quickstarts |
 | `ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST` | `none` |
 
 `registry.authority` must be the hostname consumers reach over HTTPS. The

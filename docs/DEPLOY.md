@@ -57,6 +57,7 @@ ACDP_REGISTRY_RECEIPT__KEY_ID_FRAGMENT=receipt-key-1
 ACDP_REGISTRY_LIFECYCLE__ENABLED=true
 ACDP_REGISTRY_AUTH__JWT_SECRET=<openssl rand -base64 32>
 ACDP_REGISTRY_AUTH__ANONYMOUS_PUBLIC_READS=true
+ACDP_REGISTRY_AUTH__DID_METHODS=did:web,did:key
 ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST=none
 ```
 
@@ -64,6 +65,13 @@ ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST=none
 without a signing key, or `acdp-registry-lifecycle` without
 `lifecycle.enabled = true`, stops the binary at boot instead of letting it
 advertise something it cannot do.
+
+**Producer DID methods.** `auth.did_methods` defaults to `["did:web"]`. With
+only that default, a `did:key` publish is rejected with `key_resolution_failed`.
+Most SDK quickstart producers use `did:key`, so these examples enable both
+methods. `did:web` must stay in the list. With auth on, the same list also
+controls which DIDs can obtain a token. See
+[RECEIPTS.md · did:key producers](RECEIPTS.md#didkey-producers).
 
 **Read posture.** `ANONYMOUS_PUBLIC_READS=true` makes `public` contexts readable
 without a credential. A cross-registry consumer needs that to resolve a context

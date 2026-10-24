@@ -46,6 +46,10 @@ SMOKE_PRODUCER_SEED_B64=… cargo run --release -- run \
   --producer-did did:web:<host>
 ```
 
+To run as the seed's own `did:key`, with nothing to host, pass
+`--producer-did did:key`. That needs `did:key` in the registry's
+`auth.did_methods`.
+
 Every run leaves one retracted context titled `live smoke <timestamp>` behind.
 
 For the reference deployment, the producer is

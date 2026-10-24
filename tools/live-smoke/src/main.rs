@@ -8,12 +8,16 @@
 //! ```text
 //! live-smoke did-doc --did did:web:<host>
 //! live-smoke run --base-url https://<registry> --producer-did did:web:<host>
+//! live-smoke run --base-url https://<registry> --producer-did did:key
 //! ```
 //!
 //! Both read the producer's Ed25519 seed (standard base64, 32 bytes) from
 //! `SMOKE_PRODUCER_SEED_B64`. `did-doc` prints the `did.json` to serve at the
 //! producer DID's `did:web` URL; `run` needs that document to be live, because
 //! the registry and the resolver both fetch it to check the producer signature.
+//! `--producer-did did:key` publishes as the seed's own did:key instead, which
+//! needs nothing hosted but does need the registry to list `did:key` in
+//! `auth.did_methods`.
 //! The publish is `public`, so the registry must run with
 //! `auth.anonymous_public_reads = true` for the resolver to read it back.
 
@@ -124,6 +128,20 @@ async fn resolve_and_report(r: &CrossRegistryResolver, ctx: &CtxId) -> Result<Va
 
 async fn run(base_url: &str, producer_did: &str) -> Result<()> {
     let key = seed()?;
+    // `did:key` means "the did:key of the seed": self-verifying, nothing to
+    // host. Anything else must be a did:web serving `did-doc`'s output.
+    let (producer_did, key_id) = if producer_did == "did:key" {
+        let did = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+        let key_id = acdp::did::key::did_key_url(&did)?;
+        (did, key_id)
+    } else {
+        AgentDid::parse_web(producer_did)?;
+        (
+            producer_did.to_string(),
+            format!("{producer_did}#{KEY_FRAGMENT}"),
+        )
+    };
+    let producer_did = producer_did.as_str();
     let base_url = base_url.trim_end_matches('/');
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -143,6 +161,14 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
         .iter()
         .filter_map(Value::as_str)
         .collect();
+    if producer_did.starts_with("did:key:") {
+        ensure!(
+            caps["supported_did_methods"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|v| v == "did:key")),
+            "capabilities do not list did:key in supported_did_methods"
+        );
+    }
     for p in ["acdp-registry-lifecycle", "acdp-registry-receipts"] {
         ensure!(
             profiles.contains(&p),
@@ -156,11 +182,7 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
     println!("capabilities: {}", serde_json::to_string(&caps)?);
 
     // 2. Publish a public context signed by the did:web producer.
-    let producer = Producer::new_ed25519(
-        seed()?,
-        AgentDid::parse_web(producer_did)?,
-        format!("{producer_did}#{KEY_FRAGMENT}"),
-    );
+    let producer = Producer::new_ed25519(seed()?, AgentDid::parse(producer_did)?, key_id.clone());
     let req = producer
         .publish_request()
         .title(format!("live smoke {}", chrono::Utc::now().to_rfc3339()))
@@ -200,10 +222,10 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
         ctx.clone(),
         LifecycleEventType::Retracted,
         chrono::Utc::now(),
-        AgentDid::parse_web(producer_did)?,
+        AgentDid::parse(producer_did)?,
         Some("live smoke test".into()),
     )?
-    .sign_with(key, format!("{producer_did}#{KEY_FRAGMENT}"))?;
+    .sign_with(key, key_id)?;
     let path: String = ctx
         .as_str()
         .bytes()
@@ -253,6 +275,6 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some("run") => run(&arg(&args, "--base-url")?, &arg(&args, "--producer-did")?).await,
-        _ => bail!("usage: live-smoke did-doc --did <did:web> | run --base-url <url> --producer-did <did:web>"),
+        _ => bail!("usage: live-smoke did-doc --did <did:web> | run --base-url <url> --producer-did <did:web>|did:key"),
     }
 }
