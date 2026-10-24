@@ -31,6 +31,7 @@ go deeper.
 | [MULTI-TENANCY.md](MULTI-TENANCY.md) | Tenant resolution precedence, strict mode, agent→tenant bindings, the SQL filter. |
 | [WEBHOOKS.md](WEBHOOKS.md) | Event payloads, the GitHub-compatible signature scheme, delivery and retry semantics. |
 | [RECEIPTS.md](RECEIPTS.md) | ACDP 0.2.0 registry receipts: enabling, serving `/.well-known/did.json`, the key-retention rule, rotation, did:key, the lineage audit. |
+| [DEPLOY.md](DEPLOY.md) | **Start here for production.** Postgres, receipts + lifecycle on, the signing key, TLS, health checks, backups, upgrades; the release binaries and image; Compose and Kubernetes examples; the reference deployment. |
 | [OPERATIONS.md](OPERATIONS.md) | Deploying, observability, backup/restore, key rotation, federation ops. |
 | [UPGRADING.md](UPGRADING.md) | **Read before upgrading a deployment.** Operator-visible changes per version — ordering requirements, moved defaults, config whose meaning changed. |
 | [MAINTAINING.md](MAINTAINING.md) | For maintainers: required vs advisory checks, the protection drift job, the enforce_admins / tag-ruleset runbook, the release flow, `cargo vet` and the crypto-critical exemption guard, `acdp` and spec bumps, the mutation oracle and its `mutants pins` PR check. |

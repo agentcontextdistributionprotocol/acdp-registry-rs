@@ -10,6 +10,10 @@ members = [
     "crates/acdp-registry-server",
 ]
 resolver = "2"
+# A standalone operator tool with its own lockfile; it is not part of the
+# registry build, so CI's workspace-wide gates do not cover it. See
+# tools/live-smoke/README.md.
+exclude = ["tools/live-smoke"]
 
 [workspace.package]
 version       = "0.5.4"
