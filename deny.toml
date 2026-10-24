@@ -71,6 +71,16 @@ ignore = [
     # RE-CHECK if `webpki-roots 1.x` in Cargo.lock ever drops below 1.0.10: this
     # ignore is by ID and would then also hide the real thing.
     { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 is a re-export shim of 1.x; 1.0.10 (fixed) is locked; see comment" },
+    # RUSTSEC-2026-0387 (non-constant-time crypto-bigint operations) on
+    # crypto-bigint 0.5.5 only. Fixed in 0.7.6; no 0.5.x fix exists. 0.5.5 enters
+    # solely via jsonwebtoken 11's `rust_crypto` feature -> p256/p384 0.13
+    # (ES256/ES384). Unreachable for the same reason as RUSTSEC-2023-0071 above:
+    # every verification pins HS256 or EdDSA before any verifier is built, and
+    # the registry holds no P-256/P-384 JWT key. The SDK's own P-256 path
+    # (acdp-crypto -> p256 0.14) uses crypto-bigint 0.7.x, locked at >= 0.7.6.
+    # RE-CHECK if crypto-bigint 0.7.x in Cargo.lock ever drops below 0.7.6, or if
+    # ES256/ES384 JWTs are ever accepted: this ignore is by ID.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 reachable only via jsonwebtoken ES256/ES384, which the alg pin excludes; 0.7.x is fixed; see comment" },
 ]
 
 [licenses]
