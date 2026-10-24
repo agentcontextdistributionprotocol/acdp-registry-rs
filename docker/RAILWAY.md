@@ -213,6 +213,32 @@ alive and cannot fix the database by restarting — and every restart discards t
 in-memory webhook queue, which has no outbox and no replay. Use **`/livez`** for
 liveness: it always answers `200` and never touches storage.
 
+### Receipts and lifecycle (what a remote consumer needs)
+
+The variables above give you a working registry, but not one a cross-registry
+consumer such as Seam can rely on. It also needs receipts, lifecycle and
+readable `public` contexts. Add these:
+
+| Variable | Value |
+|----------|-------|
+| `ACDP_REGISTRY_RECEIPT__SIGNING_KEY_SEED_B64` | `openssl rand -base64 32`, kept in a secrets manager and backed up offline: it is the registry's signing identity ([RECEIPTS.md](../docs/RECEIPTS.md)) |
+| `ACDP_REGISTRY_RECEIPT__KEY_ID_FRAGMENT` | `receipt-key-1` (choose a fresh fragment on every rotation) |
+| `ACDP_REGISTRY_LIFECYCLE__ENABLED` | `true`. Once lifecycle state exists it cannot be turned back off |
+| `ACDP_REGISTRY_REGISTRY__PROFILES` | `acdp-registry-core,acdp-registry-discovery,acdp-registry-receipts,acdp-registry-lifecycle` |
+| `ACDP_REGISTRY_AUTH__ANONYMOUS_PUBLIC_READS` | `true` (see the read-posture note above) |
+| `ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST` | `none` |
+
+`registry.authority` must be the hostname consumers reach over HTTPS. The
+registry DID is `did:web:<authority>`, so attach the custom domain before the
+first publish and keep it. Receipts minted under a `*.up.railway.app` authority
+would keep naming that DID.
+
+This is the configuration of the reference deployment at
+`https://registry.agentcontextdistributionprotocol.io`: the image pinned to
+`:0.5.4`, a Railway Postgres service, the seed injected from Doppler, the
+healthcheck on `/healthz`, and one replica. The full production guide,
+including backups and upgrades, is [docs/DEPLOY.md](../docs/DEPLOY.md).
+
 ## Local parity
 
 `docker/docker-compose.yml` runs the same image against a local Postgres — use it

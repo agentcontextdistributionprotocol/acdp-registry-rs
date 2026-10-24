@@ -1,0 +1,99 @@
+# Production-shaped single-host deployment: Postgres + the released GHCR image,
+# with receipts and lifecycle on. Walkthrough: docs/DEPLOY.md.
+#
+# Unlike docker/docker-compose.yml (a local demo that builds from source), this
+# file pulls a pinned release, keeps every secret out of the file, and refuses
+# to start until each one is supplied:
+#
+#   mkdir -p secrets && chmod 700 secrets
+#   openssl rand -base64 32 > secrets/receipt_key_seed     # registry signing key — BACK IT UP
+#   openssl rand -base64 24 | tr -d '/+=' > secrets/postgres_password
+#   cat > .env <<EOF
+#   ACDP_AUTHORITY=registry.example.com
+#   ACDP_JWT_SECRET=$(openssl rand -base64 32)
+#   EOF
+#   docker compose up -d
+#
+# TLS is terminated in front of this stack (Caddy, nginx, a cloud load
+# balancer): the registry listens on plain HTTP on 127.0.0.1:8443 only.
+
+name: acdp-registry
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: acdp
+      POSTGRES_DB: acdp_registry
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U acdp -d acdp_registry"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  registry:
+    # Pin an exact release (or its digest) — never :latest, which tracks main.
+    image: ghcr.io/agentcontextdistributionprotocol/acdp-registry:${ACDP_VERSION:-0.5.4}
+    # The image is published for linux/amd64 only. On an arm64 host this runs
+    # it under emulation; for native arm64 use the release binary instead
+    # (docs/DEPLOY.md).
+    platform: linux/amd64
+    restart: unless-stopped
+    read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    secrets: [postgres_password, receipt_key_seed]
+    # The connection URL embeds the password, so it is assembled from the
+    # secret file at start instead of being written here.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        ACDP_REGISTRY_STORAGE__POSTGRES_URL="postgres://acdp:$$(cat /run/secrets/postgres_password)@postgres:5432/acdp_registry"
+        export ACDP_REGISTRY_STORAGE__POSTGRES_URL
+        exec /usr/local/bin/acdp-registry
+    environment:
+      ACDP_REGISTRY_STORAGE__BACKEND: postgres
+      ACDP_REGISTRY_STORAGE__MAX_CONNECTIONS: "10"
+      ACDP_REGISTRY_REGISTRY__AUTHORITY: ${ACDP_AUTHORITY:?set ACDP_AUTHORITY in .env}
+      ACDP_REGISTRY_REGISTRY__BIND: 0.0.0.0
+      ACDP_REGISTRY_REGISTRY__PORT: "8443"
+      # The container binds 0.0.0.0 without in-process TLS; the host port
+      # below is loopback-only and the TLS proxy is the public listener.
+      ACDP_REGISTRY_REGISTRY__ALLOW_PUBLIC_BIND: "true"
+      ACDP_REGISTRY_REGISTRY__PROFILES: acdp-registry-core,acdp-registry-discovery,acdp-registry-receipts,acdp-registry-lifecycle
+      ACDP_REGISTRY_RECEIPT__SIGNING_KEY_PATH: /run/secrets/receipt_key_seed
+      ACDP_REGISTRY_RECEIPT__KEY_ID_FRAGMENT: receipt-key-1
+      ACDP_REGISTRY_LIFECYCLE__ENABLED: "true"
+      ACDP_REGISTRY_AUTH__JWT_SECRET: ${ACDP_JWT_SECRET:?set ACDP_JWT_SECRET in .env}
+      ACDP_REGISTRY_AUTH__ANONYMOUS_PUBLIC_READS: "true"
+      ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST: none
+      RUST_LOG: info,acdp=info,acdp_registry=info
+    ports:
+      - "127.0.0.1:8443:8443"
+    healthcheck:
+      # The image ships no curl; bash's /dev/tcp is enough to probe readiness.
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/8443 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  receipt_key_seed:
+    file: ./secrets/receipt_key_seed
+
+volumes:
+  pgdata:

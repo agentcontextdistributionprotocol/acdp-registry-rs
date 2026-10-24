@@ -1,0 +1,21 @@
+[package]
+name = "acdp-registry-live-smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Publish -> resolve -> retract -> resolve against a live ACDP registry, through acdp's CrossRegistryResolver"
+
+# Standalone: excluded from the root workspace (see the root Cargo.toml).
+[workspace]
+
+[dependencies]
+# The same umbrella crate, version and feature Seam pins (seam-context-acdp).
+acdp       = { version = "=0.15.1", features = ["client"] }
+anyhow     = "1"
+base64     = "0.23"
+chrono     = "0.4"
+reqwest    = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+tokio      = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+uuid       = { version = "1", features = ["v4"] }
