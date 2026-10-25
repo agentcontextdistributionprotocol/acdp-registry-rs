@@ -44,6 +44,10 @@ they omit the member, exactly as before this release.
   receipt key. Lifecycle responses and full retrievals of its contexts gain
   `registry_state.event_receipts`. Unless both are set, nothing changes. See
   [RECEIPTS.md](RECEIPTS.md#event-receipts-acdp-050--rfc-acdp-0017-10).
+- **Lineage members carry event receipts too (RFC-ACDP-0017 §11).** Each element of
+  `GET /lineages/{id}`, and the head served by `/current`, carries the same `registry_receipt`,
+  `lifecycle_events` and `event_receipts` as that version's full retrieval; only `event_receipts`
+  is new.
 - **Who is affected:** API consumers of a minting registry see the new
   `registry_state.event_receipts` member. Anyone who queries `lifecycle_events` with `SELECT *`
   sees one more column; named-column queries are unaffected.

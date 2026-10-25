@@ -31,6 +31,35 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+### RFC-ACDP-0017 event receipts (§10) and receipted lineage members (§11)
+
+A registry that advertises lifecycle and receipts at `acdp_version` 0.5.0 now signs an
+`acdp-event-receipt/1` for every accepted retract and republish, producer or `/admin/*`, and serves
+the receipts parallel to `lifecycle_events` wherever those are served, lineage members included.
+Minting happens inside the store's own lifecycle transaction (migration 016 adds one nullable
+`receipt` column per event row), not in the handler. The reason is atomicity: an event without its
+receipt, or a receipt without its event, is a state no reader can be shown. The SDK's
+`commit_lifecycle_event` has no signer, so the registry's own store path owns minting.
+`accepted_at` is `max(now_ms, created_at, previous accepted_at)` and never backdated, so a legacy
+event receipted by the startup sweep carries the sweep's clock. That is why this does not contradict
+the RFC-ACDP-0010 no-backfill decision: the receipt attests acceptance *at* its time, and that is
+true. A byte-identical retry serves the stored receipt. A history with a gap is served without
+`event_receipts` rather than with a partial list, because a partial list breaks the parallel-array
+invariant consumers index by.
+
+Rejected alternatives:
+- a separate receipts table: two writes to keep parallel;
+- re-minting into holes: breaks append-only, and a hole's `accepted_at` would have to exceed a
+  later receipt's;
+- hand-rolled JCS and signing on acdp 0.16.0: the work waited for 0.16.1's
+  `mint_event_receipt` instead.
+
+Evidence:
+- conformance fixture chain-009 scenarios A–B run directly against the binary and through
+  `acdp::chain::verify_chain`, which admits the events on the `registry` basis;
+- a mutation that drops the receipts fails that test;
+- memory, SQLite and Postgres parity tests pin the store behaviour.
+
 ### acdp-rs guide links re-pinned to `acdp-v0.15.0`
 
 The move to `acdp` 0.15.0 (#435) left 20 acdp-rs guide links pinned to `424253b`, a commit older than the tag the code now depends on:
