@@ -69,6 +69,8 @@ acdp-registry-rs/
 │   ├── acdp-registry-core/         # axum router + handlers
 │   └── acdp-registry-server/       # binary: `acdp-registry`
 ├── docker/                         # Dockerfile + docker-compose
+├── deploy/                         # production Compose + Kubernetes examples
+├── tools/live-smoke/               # end-to-end check of a deployed registry
 ├── config/                         # example TOML configs
 └── docs/                           # reference docs (API, auth, config, ops)
 ```
@@ -117,12 +119,19 @@ package version; an image built by CI reports `<version>+g<shortsha>`,
 which is what actually pins it to a commit. Treat the string as opaque — see
 [HTTP-API.md](docs/HTTP-API.md#the-version-field-117).
 
-### Production (Postgres + Docker)
+### Postgres + Docker (local)
 
 ```bash
 cd docker
 docker compose up --build
 ```
+
+This is a local stack built from source with auth off. For a real deployment
+(pinned image or release binary, receipts and lifecycle on, signing-key
+handling, TLS, backups, upgrades) follow [`docs/DEPLOY.md`](docs/DEPLOY.md). It
+ships a production Compose file and a Kubernetes manifest under
+[`deploy/`](deploy/), and a public reference instance runs at
+`https://registry.agentcontextdistributionprotocol.io`.
 
 ## Configuration
 

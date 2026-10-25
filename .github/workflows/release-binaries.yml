@@ -1,0 +1,212 @@
+name: release-binaries
+
+# Prebuilt `acdp-registry` binaries attached to the server's GitHub Release.
+#
+# Same trigger as docker.yml, for the same reason: release-plz tags all eight
+# crates at once, and only `acdp-registry-server/v*` denotes a server release.
+# The tag is pushed with the ACDP bot App token (release-plz.yml), which is what
+# lets it start this workflow at all — a tag pushed with the default
+# GITHUB_TOKEN would not. Keep this in step with release-plz.toml's
+# `git_tag_name`.
+#
+# `workflow_dispatch` backfills a release that predates this workflow (or
+# re-runs one whose upload failed); `pull_request` builds and boot-tests every
+# target but uploads nothing, so a change here is exercised before it merges.
+on:
+  push:
+    tags: ["acdp-registry-server/v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing server release tag to build and attach, e.g. acdp-registry-server/v0.5.4"
+        required: true
+        type: string
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/release-binaries.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-binaries-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build (${{ matrix.target }}, ${{ matrix.flavor }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # glibc builds on 22.04 so the binaries run on any distro with glibc
+        # >= 2.35 (Ubuntu 22.04, Debian 12, RHEL 9). x86_64-apple-darwin is
+        # cross-compiled on the arm64 runner and boot-tested under Rosetta.
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+        # The storage features are mutually exclusive in one binary
+        # (`run()` in crates/acdp-registry-server/src/main.rs), so each target
+        # ships one binary per backend. `postgres` is the production build —
+        # the same feature set as the GHCR image.
+        flavor: [postgres, sqlite]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-14
+          - flavor: postgres
+            feature: storage-pg
+          - flavor: sqlite
+            feature: storage-sqlite
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: resolve version
+        id: v
+        env:
+          REF_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # The workspace version is the release version: every crate is
+          # `version = { workspace = true }`.
+          VERSION="$(awk '
+            /^\[workspace\.package\]/ { in_wp = 1; next }
+            /^\[/                       { in_wp = 0 }
+            in_wp && /^[[:space:]]*version[[:space:]]*=/ {
+              if (match($0, /"[^"]+"/)) { print substr($0, RSTART+1, RLENGTH-2); exit }
+            }
+          ' Cargo.toml)"
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "::error::parsed workspace version '$VERSION', not a semver triple"; exit 1 ;;
+          esac
+          case "$REF_NAME" in
+            acdp-registry-server/v*)
+              [ "${REF_NAME#acdp-registry-server/v}" = "$VERSION" ] || {
+                echo "::error::tag $REF_NAME does not match workspace version $VERSION"; exit 1; } ;;
+          esac
+          {
+            echo "version=$VERSION"
+            echo "sha=$(git rev-parse --short=12 HEAD)"
+            echo "name=acdp-registry-$VERSION-${{ matrix.target }}-${{ matrix.flavor }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: build
+        env:
+          # Compiled in via option_env!, so /healthz reports
+          # `<version>+g<sha>` exactly like the image (docker.yml).
+          ACDP_BUILD_SHA: ${{ steps.v.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked \
+            --target "${{ matrix.target }}" \
+            --no-default-features --features "${{ matrix.feature }}" \
+            -p acdp-registry-server
+
+      - name: package
+        id: pkg
+        env:
+          NAME: ${{ steps.v.outputs.name }}
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/acdp-registry"
+          strip "$BIN" 2>/dev/null || true
+          file "$BIN"
+          STAGE="$RUNNER_TEMP/$NAME"
+          mkdir -p "$STAGE"
+          cp "$BIN" LICENSE* README.md "$STAGE/"
+          cp config/registry.example.toml "$STAGE/registry.example.toml"
+          # Absent on tags older than the guide (a workflow_dispatch backfill).
+          if [ -f docs/DEPLOY.md ]; then cp docs/DEPLOY.md "$STAGE/DEPLOY.md"; fi
+          mkdir -p dist
+          tar -C "$RUNNER_TEMP" -czf "dist/$NAME.tar.gz" "$NAME"
+          ( cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+          cat "dist/$NAME.tar.gz.sha256"
+          echo "bin=$STAGE/acdp-registry" >> "$GITHUB_OUTPUT"
+
+      # The packaged binary must boot, not merely link. The sqlite flavor needs
+      # nothing external, so it serves /healthz from a throwaway database; the
+      # postgres flavor is exercised by docker.yml's smoke test (same features).
+      - name: boot test (sqlite)
+        if: matrix.flavor == 'sqlite'
+        env:
+          BIN: ${{ steps.pkg.outputs.bin }}
+          ACDP_REGISTRY_STORAGE__BACKEND: sqlite
+          ACDP_REGISTRY_REGISTRY__BIND: 127.0.0.1
+          ACDP_REGISTRY_REGISTRY__PORT: "18443"
+          ACDP_REGISTRY_REGISTRY__AUTHORITY: localhost
+        run: |
+          set -euo pipefail
+          export ACDP_REGISTRY_STORAGE__SQLITE_PATH="$RUNNER_TEMP/boot.db"
+          "$BIN" > "$RUNNER_TEMP/boot.log" 2>&1 &
+          PID=$!
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18443/healthz -o "$RUNNER_TEMP/healthz.json"; then ok=1; break; fi
+            sleep 1
+          done
+          kill "$PID" 2>/dev/null || true
+          cat "$RUNNER_TEMP/boot.log"
+          [ "$ok" = 1 ] || { echo "::error::binary did not serve /healthz"; exit 1; }
+          cat "$RUNNER_TEMP/healthz.json"
+          VERSION="$(jq -r .version "$RUNNER_TEMP/healthz.json")"
+          [ "$VERSION" = "${{ steps.v.outputs.version }}+g${{ steps.v.outputs.sha }}" ] || {
+            echo "::error::healthz version '$VERSION' is not ${{ steps.v.outputs.version }}+g${{ steps.v.outputs.sha }}"; exit 1; }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.v.outputs.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  upload:
+    name: attach to release
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          # One file a consumer can verify everything against:
+          #   shasum -a 256 -c SHA256SUMS --ignore-missing
+          cat ./*.sha256 | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          [ "$(wc -l < SHA256SUMS)" -eq 8 ] || { echo "::error::expected 8 archives"; exit 1; }
+          # release-plz creates the GitHub Release just after pushing the tag
+          # that started this run, so on a tag push it can lag the builds.
+          for _ in $(seq 1 30); do
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 && break
+            sleep 20
+          done
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber ./*.tar.gz ./*.sha256 SHA256SUMS
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'

@@ -1,0 +1,148 @@
+# Minimal Kubernetes deployment of the registry: receipts + lifecycle on,
+# Postgres external (a managed instance or your own operator — not run here).
+# Walkthrough, secrets and upgrade notes: docs/DEPLOY.md.
+#
+# Create the Secret first; this file deliberately ships none:
+#
+#   kubectl create namespace acdp
+#   kubectl -n acdp create secret generic acdp-registry \
+#     --from-literal=postgres-url='postgres://acdp:<password>@<host>:5432/acdp_registry?sslmode=require' \
+#     --from-literal=jwt-secret="$(openssl rand -base64 32)" \
+#     --from-file=receipt-key-seed=./receipt_key_seed     # openssl rand -base64 32 > receipt_key_seed
+#
+# Then replace registry.example.com below and `kubectl apply -n acdp -f registry.yaml`.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acdp-registry
+  labels: {app.kubernetes.io/name: acdp-registry}
+data:
+  ACDP_REGISTRY_STORAGE__BACKEND: postgres
+  ACDP_REGISTRY_STORAGE__MAX_CONNECTIONS: "10"
+  ACDP_REGISTRY_REGISTRY__AUTHORITY: registry.example.com
+  ACDP_REGISTRY_REGISTRY__BIND: 0.0.0.0
+  ACDP_REGISTRY_REGISTRY__PORT: "8443"
+  # TLS terminates at the Ingress below; the pod listens on plain HTTP.
+  ACDP_REGISTRY_REGISTRY__ALLOW_PUBLIC_BIND: "true"
+  ACDP_REGISTRY_REGISTRY__PROFILES: acdp-registry-core,acdp-registry-discovery,acdp-registry-receipts,acdp-registry-lifecycle
+  ACDP_REGISTRY_RECEIPT__SIGNING_KEY_PATH: /var/run/secrets/acdp/receipt-key-seed
+  ACDP_REGISTRY_RECEIPT__KEY_ID_FRAGMENT: receipt-key-1
+  ACDP_REGISTRY_LIFECYCLE__ENABLED: "true"
+  ACDP_REGISTRY_AUTH__ANONYMOUS_PUBLIC_READS: "true"
+  ACDP_REGISTRY_AUTH__DID_METHODS: did:web,did:key
+  ACDP_REGISTRY_AUTH__TENANT_HEADER_TRUST: none
+  RUST_LOG: info,acdp=info,acdp_registry=info
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: acdp-registry
+  labels: {app.kubernetes.io/name: acdp-registry}
+spec:
+  # One replica: rate-limit and webhook state is per process unless
+  # rate_limit.backend = postgres (docs/OPERATIONS.md, Rate limiting).
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: acdp-registry}
+  strategy:
+    # Start the new pod (which migrates) before stopping the old one. Safe
+    # because migrations are additive and an older binary tolerates a newer
+    # schema (docs/OPERATIONS.md, Migrations).
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: acdp-registry}
+    spec:
+      # The GHCR image is linux/amd64 only.
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile: {type: RuntimeDefault}
+      terminationGracePeriodSeconds: 40   # the server drains for up to 30s on SIGTERM
+      containers:
+        - name: registry
+          # Pin an exact release, or better its digest — never :latest.
+          image: ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.5.4
+          ports:
+            - {name: http, containerPort: 8443}
+          envFrom:
+            - configMapRef: {name: acdp-registry}
+          env:
+            - name: ACDP_REGISTRY_STORAGE__POSTGRES_URL
+              valueFrom: {secretKeyRef: {name: acdp-registry, key: postgres-url}}
+            - name: ACDP_REGISTRY_AUTH__JWT_SECRET
+              valueFrom: {secretKeyRef: {name: acdp-registry, key: jwt-secret}}
+          volumeMounts:
+            - name: receipt-key
+              mountPath: /var/run/secrets/acdp
+              readOnly: true
+          # /livez never touches storage; /healthz answers 503 while Postgres is
+          # unreachable. Liveness on /healthz would restart a healthy process
+          # during a database outage.
+          startupProbe:
+            httpGet: {path: /livez, port: http}
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /livez, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+      volumes:
+        - name: receipt-key
+          secret:
+            secretName: acdp-registry
+            items:
+              - {key: receipt-key-seed, path: receipt-key-seed}
+            defaultMode: 0400
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: acdp-registry
+  labels: {app.kubernetes.io/name: acdp-registry}
+spec:
+  selector: {app.kubernetes.io/name: acdp-registry}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+# HTTPS at the bare authority is required: the registry DID did:web:<authority>
+# resolves to https://<authority>/.well-known/did.json. Adjust the class and
+# issuer to your cluster (this assumes ingress-nginx + cert-manager).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: acdp-registry
+  labels: {app.kubernetes.io/name: acdp-registry}
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/proxy-body-size: 2m   # limits.max_payload_bytes is 1 MiB
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [registry.example.com]
+      secretName: acdp-registry-tls
+  rules:
+    - host: registry.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: acdp-registry, port: {name: http}}
