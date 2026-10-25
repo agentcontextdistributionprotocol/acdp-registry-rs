@@ -1,5 +1,12 @@
 
 
+## [0.5.6](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-webhook/v0.5.5...acdp-registry-webhook/v0.5.6) - 2026-10-25
+
+### Other
+
+- update Cargo.toml dependencies
+
+
 ## [0.5.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-webhook/v0.5.4...acdp-registry-webhook/v0.5.5) - 2026-10-25
 
 No changes. This crate is released at 0.5.5 because the workspace shares a
