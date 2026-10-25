@@ -8,28 +8,152 @@
 //! deliberately does not expose its internal map. The `/admin/contexts`
 //! endpoint (compile-gated by `playground`) returns a 500 against this
 //! backend; choose `storage-sqlite` if you need it.
+//!
+//! RFC-ACDP-0017 §10 event receipts live in a wrapper-level side map, since
+//! the inner store has nowhere to put them. One mutex serializes every
+//! lifecycle commit and every read that overlays receipts, so a read never
+//! sees an event without the receipt committed with it. Lock order is
+//! wrapper, then inner, everywhere.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use acdp::error::AcdpError;
 use acdp::registry::store::{PublishCommit, PublishCommitOutcome, RegistryStore};
-use acdp::registry::{IdempotencyRecord, InMemoryStore};
+use acdp::registry::{IdempotencyRecord, InMemoryStore, LifecycleCommitOutcome};
 use acdp::types::body::{Body, FullContext};
+use acdp::types::lifecycle::LifecycleEvent;
 use acdp::types::primitives::{AgentDid, ContentHash, CtxId, LineageId};
 use acdp::types::publish::PublishResponse;
 use acdp::types::search::{SearchParams, SearchResponse};
-use acdp_registry_store::{ExtendedRegistryStore, Page};
+use acdp::types::EventReceipt;
+use acdp_registry_store::event_receipts::{attach_event_receipts, plan_event_receipts};
+use acdp_registry_store::{EventReceiptMinter, ExtendedRegistryStore, Page, StoredReceipt};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+/// `ctx_id -> event_id -> receipt`. Keyed by event, not position, so a slot
+/// can never drift onto a different event; the position is checked against
+/// the receipt's own `index` on every read.
+type ReceiptMap = HashMap<String, HashMap<String, EventReceipt>>;
+
 /// Adapter that delegates the protocol store to `acdp::registry::InMemoryStore`
 /// while implementing the registry's extension trait.
-#[derive(Default)]
+///
+/// Clones share state: a clone with a minter attached and one without see
+/// the same contexts, events and receipts.
+#[derive(Default, Clone)]
 pub struct MemoryStore {
-    inner: InMemoryStore,
+    inner: Arc<InMemoryStore>,
+    receipts: Arc<Mutex<ReceiptMap>>,
+    event_receipt_minter: Option<Arc<dyn EventReceiptMinter>>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Mint an RFC-ACDP-0017 §10 event receipt for every lifecycle event
+    /// this store accepts, and serve `registry_state.event_receipts`.
+    // TODO(rfc0017 P4a): drop once main.rs attaches the minter at startup.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_event_receipt_minter(mut self, minter: Arc<dyn EventReceiptMinter>) -> Self {
+        self.event_receipt_minter = Some(minter);
+        self
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, ReceiptMap>, AcdpError> {
+        self.receipts
+            .lock()
+            .map_err(|_| AcdpError::RegistryInternal("event receipt map lock poisoned".into()))
+    }
+
+    /// The context's events, each paired with its receipt slot.
+    fn slots(map: &ReceiptMap, ctx: &FullContext) -> Vec<(LifecycleEvent, StoredReceipt)> {
+        let stored = map.get(ctx.body.ctx_id.as_str());
+        ctx.registry_state
+            .lifecycle_events
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let slot = match stored.and_then(|m| m.get(&e.event_id)) {
+                    None => StoredReceipt::Null,
+                    Some(r) if r.index == i as u64 => StoredReceipt::Valid(Box::new(r.clone())),
+                    Some(_) => StoredReceipt::Corrupt,
+                };
+                (e.clone(), slot)
+            })
+            .collect()
+    }
+
+    fn overlay(&self, map: &ReceiptMap, mut ctx: FullContext) -> FullContext {
+        let receipts = Self::slots(map, &ctx)
+            .into_iter()
+            .map(|(_, s)| s.into_option())
+            .collect();
+        attach_event_receipts(&mut ctx, receipts, self.event_receipt_minter.is_some());
+        ctx
+    }
+
+    /// Mint (when a minter is attached) and commit under the wrapper lock.
+    ///
+    /// The receipts are minted *before* the inner commit: the inner append
+    /// cannot be rolled back, so a signing failure must abort first. A
+    /// receipt minted for an event the inner store then refuses is dropped.
+    fn commit_with_receipts(
+        &self,
+        map: &mut ReceiptMap,
+        minter: &dyn EventReceiptMinter,
+        event: &LifecycleEvent,
+    ) -> Result<LifecycleCommitOutcome, AcdpError> {
+        // Missing context, replay and event_id reuse all go straight to the
+        // inner store, which owns those answers; nothing is minted for them.
+        let Some(ctx) = self.inner.get(&event.ctx_id)? else {
+            return self.inner.commit_lifecycle_event(event);
+        };
+        let slots = Self::slots(map, &ctx);
+        if slots.iter().any(|(e, _)| e.event_id == event.event_id) {
+            return self
+                .inner
+                .commit_lifecycle_event(event)
+                .map(|o| self.overlay_outcome(map, o));
+        }
+        let plan = plan_event_receipts(
+            minter,
+            &event.ctx_id,
+            ctx.body.created_at,
+            &slots,
+            event,
+            Utc::now(),
+        )?;
+        let outcome = self.inner.commit_lifecycle_event(event)?;
+        if matches!(outcome, LifecycleCommitOutcome::Applied(_)) {
+            let entry = map.entry(event.ctx_id.as_str().to_string()).or_default();
+            plan.record_committed();
+            for (_, r) in plan.fills {
+                entry.insert(r.event_id.clone(), r);
+            }
+            entry.insert(plan.new.event_id.clone(), plan.new);
+        }
+        Ok(self.overlay_outcome(map, outcome))
+    }
+
+    fn overlay_outcome(
+        &self,
+        map: &ReceiptMap,
+        outcome: LifecycleCommitOutcome,
+    ) -> LifecycleCommitOutcome {
+        match outcome {
+            LifecycleCommitOutcome::Applied(c) => {
+                LifecycleCommitOutcome::Applied(self.overlay(map, c))
+            }
+            LifecycleCommitOutcome::IdempotentReplay(c) => {
+                LifecycleCommitOutcome::IdempotentReplay(self.overlay(map, c))
+            }
+        }
     }
 }
 
@@ -38,13 +162,24 @@ impl RegistryStore for MemoryStore {
         self.inner.put(body)
     }
     fn get(&self, ctx_id: &CtxId) -> Result<Option<FullContext>, AcdpError> {
-        self.inner.get(ctx_id)
+        let map = self.lock()?;
+        Ok(self.inner.get(ctx_id)?.map(|c| self.overlay(&map, c)))
     }
     fn lineage(&self, lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError> {
-        self.inner.lineage(lineage_id)
+        let map = self.lock()?;
+        Ok(self
+            .inner
+            .lineage(lineage_id)?
+            .into_iter()
+            .map(|c| self.overlay(&map, c))
+            .collect())
     }
     fn current(&self, lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError> {
-        self.inner.current(lineage_id)
+        let map = self.lock()?;
+        Ok(self
+            .inner
+            .current(lineage_id)?
+            .map(|c| self.overlay(&map, c)))
     }
     fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), AcdpError> {
         self.inner.mark_superseded(ctx_id)
@@ -78,12 +213,18 @@ impl RegistryStore for MemoryStore {
     }
     fn commit_lifecycle_event(
         &self,
-        event: &acdp::types::lifecycle::LifecycleEvent,
-    ) -> Result<acdp::registry::LifecycleCommitOutcome, AcdpError> {
+        event: &LifecycleEvent,
+    ) -> Result<LifecycleCommitOutcome, AcdpError> {
         // Delegate explicitly: without this the trait DEFAULT (a loud
         // `not_implemented`) would shadow the inner store's real
-        // implementation (RFC-ACDP-0013).
-        self.inner.commit_lifecycle_event(event)
+        // implementation (RFC-ACDP-0013). The lock is taken even without a
+        // minter, so a non-minting clone cannot append between a minting
+        // clone's plan and its commit.
+        let mut map = self.lock()?;
+        match self.event_receipt_minter.clone() {
+            Some(minter) => self.commit_with_receipts(&mut map, minter.as_ref(), event),
+            None => self.inner.commit_lifecycle_event(event),
+        }
     }
     fn search(
         &self,
@@ -613,6 +754,160 @@ mod tests {
             .commit_lifecycle_event(&retract_event(&missing, did(10)))
             .expect_err("unknown ctx_id");
         assert!(matches!(err, AcdpError::NotFound(_)), "{err:?}");
+    }
+
+    fn receipt_signer(seed: u8) -> (Arc<dyn EventReceiptMinter>, [u8; 32]) {
+        let key = SigningKey::from_bytes(&[seed; 32]);
+        let pubkey = key.verifying_key_bytes();
+        let signer = acdp::types::ReceiptSigner::new(
+            key,
+            "did:web:reg.test",
+            "did:web:reg.test#receipt-key-1",
+        )
+        .expect("signer");
+        (Arc::new(signer), pubkey)
+    }
+
+    /// RFC-ACDP-0017 §10: the same contract the durable backends run. The
+    /// two handles share state, so the legacy prefix written by `plain` is
+    /// filled on the first append through `minting`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn event_receipts_match_the_cross_backend_contract() {
+        let plain = Arc::new(MemoryStore::new());
+        let (signer, pubkey) = receipt_signer(98);
+        let minting = Arc::new(plain.as_ref().clone().with_event_receipt_minter(signer));
+        parity::assert_lifecycle_event_receipts(&plain, &minting, pubkey, "memory").await;
+    }
+
+    struct FailingMinter;
+
+    impl EventReceiptMinter for FailingMinter {
+        fn mint(
+            &self,
+            _ctx_id: &CtxId,
+            _raw_event: &serde_json::Value,
+            _index: u64,
+            _accepted_at: DateTime<Utc>,
+        ) -> Result<EventReceipt, AcdpError> {
+            Err(AcdpError::RegistryInternal("minter unavailable".into()))
+        }
+    }
+
+    /// The inner append cannot roll back, so a mint failure must stop the
+    /// commit before it reaches the inner store.
+    #[test]
+    fn a_mint_failure_never_reaches_the_inner_store() {
+        let plain = MemoryStore::new();
+        let failing = plain
+            .clone()
+            .with_event_receipt_minter(Arc::new(FailingMinter));
+        let resp = commit(&plain, &request(&producer(11), "mint failure"));
+        let err = failing
+            .commit_lifecycle_event(&retract_event(&resp.ctx_id, did(11)))
+            .expect_err("a failing minter must fail the commit");
+        assert!(matches!(err, AcdpError::RegistryInternal(_)), "{err:?}");
+        let ctx = plain.get(&resp.ctx_id).unwrap().unwrap();
+        assert!(ctx.registry_state.lifecycle_events.is_none());
+        assert_eq!(ctx.registry_state.status, Status::Active);
+    }
+
+    /// A replay and a refused transition persist no receipt (a refusal may
+    /// call the minter, but its receipt is dropped); reads through a
+    /// non-minting clone never carry receipts.
+    #[test]
+    fn replays_and_refusals_persist_no_receipt() {
+        let plain = MemoryStore::new();
+        let (signer, _) = receipt_signer(97);
+        let minting = plain.clone().with_event_receipt_minter(signer);
+        let resp = commit(&plain, &request(&producer(12), "replay"));
+        let event = retract_event(&resp.ctx_id, did(12));
+        let LifecycleCommitOutcome::Applied(first) =
+            minting.commit_lifecycle_event(&event).unwrap()
+        else {
+            panic!("first retract must apply")
+        };
+        let first =
+            serde_json::to_value(first.registry_state.event_receipts().unwrap().unwrap()).unwrap();
+        let LifecycleCommitOutcome::IdempotentReplay(again) =
+            minting.commit_lifecycle_event(&event).unwrap()
+        else {
+            panic!("identical retry must replay")
+        };
+        assert_eq!(
+            serde_json::to_value(again.registry_state.event_receipts().unwrap().unwrap()).unwrap(),
+            first
+        );
+        minting
+            .commit_lifecycle_event(&retract_event(&resp.ctx_id, did(12)))
+            .expect_err("double retract");
+        let map = plain.receipts.lock().unwrap();
+        assert_eq!(map[resp.ctx_id.as_str()].len(), 1, "a refusal minted");
+        drop(map);
+        assert!(plain
+            .get(&resp.ctx_id)
+            .unwrap()
+            .unwrap()
+            .registry_state
+            .event_receipts()
+            .is_none());
+    }
+
+    #[test]
+    fn a_minting_commit_to_an_unknown_context_is_not_found_and_stores_nothing() {
+        let (signer, _) = receipt_signer(96);
+        let minting = MemoryStore::new().with_event_receipt_minter(signer);
+        let ghost = CtxId("acdp://r.example/00000000-0000-4000-8000-0000000000ff".into());
+        let err = minting
+            .commit_lifecycle_event(&retract_event(&ghost, did(13)))
+            .expect_err("unknown ctx_id");
+        assert!(matches!(err, AcdpError::NotFound(_)), "{err:?}");
+        assert!(minting.receipts.lock().unwrap().is_empty());
+    }
+
+    /// A stored receipt whose index does not match the event's position is
+    /// corrupt: the read omits the member rather than serve it.
+    #[test]
+    fn a_receipt_at_the_wrong_index_is_omitted() {
+        let plain = MemoryStore::new();
+        let (signer, _) = receipt_signer(95);
+        let minting = plain.clone().with_event_receipt_minter(signer);
+        let resp = commit(&plain, &request(&producer(14), "corrupt"));
+        minting
+            .commit_lifecycle_event(&retract_event(&resp.ctx_id, did(14)))
+            .unwrap();
+        let read = |s: &MemoryStore| s.get(&resp.ctx_id).unwrap().unwrap();
+        assert!(read(&minting).registry_state.event_receipts().is_some());
+        for r in plain
+            .receipts
+            .lock()
+            .unwrap()
+            .get_mut(resp.ctx_id.as_str())
+            .unwrap()
+            .values_mut()
+        {
+            r.index += 1;
+        }
+        assert!(read(&minting).registry_state.event_receipts().is_none());
+    }
+
+    /// A poisoned receipt map is an internal error on reads and commits,
+    /// never a panic and never a read that silently drops receipts.
+    #[test]
+    fn a_poisoned_receipt_map_is_an_internal_error() {
+        let plain = MemoryStore::new();
+        let resp = commit(&plain, &request(&producer(15), "poison"));
+        let clone = plain.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.receipts.lock().unwrap();
+            panic!("poison the receipt map");
+        })
+        .join();
+        let err = plain.get(&resp.ctx_id).expect_err("poisoned get");
+        assert!(matches!(err, AcdpError::RegistryInternal(_)), "{err:?}");
+        let err = plain
+            .commit_lifecycle_event(&retract_event(&resp.ctx_id, did(15)))
+            .expect_err("poisoned commit");
+        assert!(matches!(err, AcdpError::RegistryInternal(_)), "{err:?}");
     }
 
     /// The unscoped half of `parity::assert_batched_visibility_parity`, stated
