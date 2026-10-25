@@ -21,6 +21,21 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.5.5
+
+**No operator-visible upgrade steps.** The server binary, configuration, schema and API are unchanged
+from 0.5.4.
+
+What is new is distribution. Each release now attaches prebuilt `acdp-registry-server` binaries for
+Linux x86_64 and aarch64 and macOS, with a `.sha256` per archive and a `SHA256SUMS`. Alongside them
+are [`DEPLOY.md`](DEPLOY.md) and the compose and Kubernetes examples under `deploy/`. Running the GHCR
+image needs nothing different.
+
+- **Rollback:** safe. Nothing to migrate.
+- **Unchanged:** configuration keys and defaults, the schema, and every endpoint.
+
+---
+
 ## 0.5.4
 
 **Outbound TLS no longer trusts the distrusted emSign G3 certificates, and the conformance suite runs

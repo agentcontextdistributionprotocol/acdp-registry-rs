@@ -1,5 +1,12 @@
 
 
+## [0.5.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.4...acdp-registry-server/v0.5.5) - 2026-10-25
+
+### Other
+
+- update Cargo.lock dependencies
+
+
 ## [0.5.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.3...acdp-registry-server/v0.5.4) - 2026-10-21
 
 ### Other
