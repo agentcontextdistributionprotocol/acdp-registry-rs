@@ -28,10 +28,12 @@ use acdp::client::{
     RevocationDiscovery, RevocationPolicy,
 };
 use acdp::crypto::SigningKey;
+use acdp::did::key::DidKeyMaterial;
 use acdp::producer::Producer;
 use acdp::safe_http::SsrfPolicy;
 use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
 use acdp::types::primitives::{AgentDid, ContextType, CtxId, Visibility};
+use acdp::types::EventReceipt;
 use anyhow::{bail, ensure, Context as _, Result};
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -93,19 +95,84 @@ fn resolver(authority: &str) -> CrossRegistryResolver {
         .with_revocation_cache(RevocationCache::new())
 }
 
-/// Seam's `retraction_of`: status first, then the library's event scan.
-fn retraction(rs: &acdp::types::RegistryState) -> &'static str {
-    if rs.status.is_retracted() {
-        return "retracted";
-    }
-    match rs.lifecycle_events {
+/// The library's retraction predicate (`RegistryState::retraction`): status
+/// first, then the event scan. A registry that advertises
+/// `acdp-registry-lifecycle` omits `lifecycle_events` when there are none, so
+/// for it an absent list reads `not_retracted`, not `unknown`.
+fn retraction(rs: &acdp::types::RegistryState, lifecycle_advertised: bool) -> &'static str {
+    match rs.retraction(lifecycle_advertised) {
         None => "unknown",
-        Some(_) if rs.is_retracted() => "retracted",
-        Some(_) => "not_retracted",
+        Some(true) => "retracted",
+        Some(false) => "not_retracted",
     }
 }
 
-async fn resolve_and_report(r: &CrossRegistryResolver, ctx: &CtxId) -> Result<Value> {
+/// RFC-ACDP-0017 §10.3, run on the context as the registry serves it: every
+/// event receipt parses under the closed schema, binds the lifecycle event at
+/// its position (steps 2-6, 9), and is signed under the key the registry's
+/// `did.json` publishes for its `key_id` (step 7). Returns the receipts.
+async fn verify_event_receipts(
+    http: &reqwest::Client,
+    base_url: &str,
+    ctx: &Value,
+) -> Result<Vec<Value>> {
+    let Some(raws) = ctx["registry_state"]["event_receipts"].as_array() else {
+        return Ok(Vec::new());
+    };
+    let events = ctx["registry_state"]["lifecycle_events"]
+        .as_array()
+        .context("event_receipts served without lifecycle_events")?;
+    let did_doc: Value = http
+        .get(format!("{base_url}/.well-known/did.json"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let origin = ctx["body"]["origin_registry"]
+        .as_str()
+        .context("body has no origin_registry")?;
+    let ctx_id = CtxId(
+        ctx["body"]["ctx_id"]
+            .as_str()
+            .context("body has no ctx_id")?
+            .into(),
+    );
+    let created_at = chrono::DateTime::parse_from_rfc3339(
+        ctx["body"]["created_at"]
+            .as_str()
+            .context("body has no created_at")?,
+    )?
+    .with_timezone(&chrono::Utc);
+    for (index, raw) in raws.iter().enumerate() {
+        let receipt = EventReceipt::from_value(raw)?;
+        let event = events
+            .get(index)
+            .with_context(|| format!("event receipt {index} has no lifecycle event"))?;
+        receipt.check_binding(origin, &ctx_id, event, index as u64, created_at)?;
+        let multibase = did_doc["verificationMethod"]
+            .as_array()
+            .and_then(|vms| vms.iter().find(|vm| vm["id"] == receipt.signature.key_id))
+            .and_then(|vm| vm["publicKeyMultibase"].as_str())
+            .with_context(|| format!("did.json publishes no key {}", receipt.signature.key_id))?;
+        let hash = EventReceipt::preimage_hash_of_value(raw)?;
+        match acdp::did::key::resolve_did_key(&format!("did:key:{multibase}"))? {
+            DidKeyMaterial::Ed25519(pk) => {
+                receipt.verify_signature_against_hash(&hash, Some(&pk), None)?
+            }
+            DidKeyMaterial::EcdsaP256(pk) => {
+                receipt.verify_signature_against_hash(&hash, None, Some(&pk))?
+            }
+        }
+    }
+    Ok(raws.clone())
+}
+
+async fn resolve_and_report(
+    r: &CrossRegistryResolver,
+    ctx: &CtxId,
+    lifecycle_advertised: bool,
+) -> Result<Value> {
     let v = r
         .resolve(ctx)
         .await
@@ -116,8 +183,13 @@ async fn resolve_and_report(r: &CrossRegistryResolver, ctx: &CtxId) -> Result<Va
     let rs = v.registry_state();
     Ok(json!({
         "status": serde_json::to_value(&rs.status)?,
-        "retraction": retraction(rs),
+        "retraction": retraction(rs, lifecycle_advertised),
         "lifecycle_events": rs.lifecycle_events.as_ref().map(|e| e.len()),
+        "event_receipts": match rs.event_receipts() {
+            None => Value::Null,
+            Some(Ok(r)) => json!(r.len()),
+            Some(Err(e)) => json!({ "error": e.to_string() }),
+        },
         "receipt_verified": v.verified_receipt().is_some(),
         "receipt_key_status": format!("{:?}", v.receipt_key_status()),
         "key_status": format!("{:?}", v.key_status()),
@@ -179,6 +251,14 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
         caps["anonymous_public_reads"] == true,
         "anonymous_public_reads is off; the resolver cannot read a public context back"
     );
+    // Event receipts (RFC-ACDP-0017 §10) are minted from acdp_version 0.5.0.
+    let receipts_required = caps["acdp_version"]
+        .as_str()
+        .and_then(|v| {
+            let mut parts = v.split('.').map(str::parse::<u64>);
+            Some((parts.next()?.ok()?, parts.next()?.ok()?))
+        })
+        .is_some_and(|version| version >= (0, 5));
     println!("capabilities: {}", serde_json::to_string(&caps)?);
 
     // 2. Publish a public context signed by the did:web producer.
@@ -205,17 +285,18 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
     // 3. Resolve through the cross-registry resolver (DNS -> capabilities ->
     //    registry DID -> body + receipt + producer DID + revocation).
     let r = resolver(ctx.authority());
-    let before = resolve_and_report(&r, &ctx).await?;
+    let lifecycle_advertised = profiles.contains(&"acdp-registry-lifecycle");
+    let before = resolve_and_report(&r, &ctx, lifecycle_advertised).await?;
     println!("resolve before retract: {before}");
     ensure!(
         before["receipt_verified"] == true,
         "receipt was not verified"
     );
-    // A context with no events omits `lifecycle_events` (RFC-ACDP-0013: omitted,
-    // not [], when empty), so a fresh context reads `unknown`, not
-    // `not_retracted`; what must hold is that it is active and not retracted.
+    // A fresh context has no events, so `lifecycle_events` is omitted
+    // (RFC-ACDP-0013: omitted, not [], when empty); from a lifecycle registry
+    // that reads `not_retracted`.
     ensure!(
-        before["status"] == "active" && before["retraction"] != "retracted",
+        before["status"] == "active" && before["retraction"] == "not_retracted",
         "expected an active, unretracted context: {before}"
     );
 
@@ -252,8 +333,36 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
         body["registry_state"]["status"]
     );
 
+    // 4b. RFC-ACDP-0017 §10: a 0.5 registry advertising lifecycle + receipts
+    //     mints one receipt per accepted event; verify it as served.
+    let served: Value = http
+        .get(format!("{base_url}/contexts/{path}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let receipts = verify_event_receipts(&http, base_url, &served)
+        .await
+        .context("event receipt verification (RFC-ACDP-0017 §10.3)")?;
+    let events = served["registry_state"]["lifecycle_events"]
+        .as_array()
+        .map_or(0, Vec::len);
+    if receipts_required {
+        ensure!(
+            receipts.len() == events,
+            "{} event receipts for {events} lifecycle events: {served}",
+            receipts.len()
+        );
+    }
+    println!(
+        "event_receipts ({} verified: binding + signature): {}",
+        receipts.len(),
+        serde_json::to_string(&receipts)?
+    );
+
     // 5. Resolve again: the body is still served, the retraction is visible.
-    let after = resolve_and_report(&resolver(ctx.authority()), &ctx).await?;
+    let after = resolve_and_report(&resolver(ctx.authority()), &ctx, lifecycle_advertised).await?;
     println!("resolve after retract: {after}");
     ensure!(
         after["retraction"] == "retracted",
