@@ -1,5 +1,16 @@
 
 
+## [0.5.6](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.5...acdp-registry-server/v0.5.6) - 2026-10-25
+
+### Added
+
+- RFC-ACDP-0017 event receipts (W1) and receipted lineage members (W3); acdp 0.16.1 ([#461](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/461))
+
+### Other
+
+- *(spec)* adopt 093279a: digest, fixture total, chain family, spec links
+
+
 ## [0.5.5](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.4...acdp-registry-server/v0.5.5) - 2026-10-25
 
 ### Other
