@@ -9789,6 +9789,14 @@ impl ExtendedRegistryStore for CountingStore {
     ) -> Result<Vec<acdp::types::lifecycle::LifecycleEvent>, acdp::error::AcdpError> {
         self.inner.lifecycle_events_of_ctx(ctx_id).await
     }
+    async fn has_lifecycle_state(&self) -> Result<bool, acdp::error::AcdpError> {
+        self.inner.has_lifecycle_state().await
+    }
+    async fn backfill_event_receipts(
+        &self,
+    ) -> Result<acdp_registry_store::SweepReport, acdp::error::AcdpError> {
+        self.inner.backfill_event_receipts().await
+    }
     async fn log_tree_size(&self) -> Result<u64, acdp::error::AcdpError> {
         self.inner.log_tree_size().await
     }

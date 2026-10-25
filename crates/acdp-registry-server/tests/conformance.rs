@@ -18191,7 +18191,6 @@ fn served_registry_documents_satisfy_the_pinned_schemas() {
 #[test]
 fn the_shipped_binary_mints_event_receipts_when_lifecycle_and_receipts_are_on() {
     use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
-    use acdp::types::EventReceipt;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let extra = format!(
@@ -18234,50 +18233,152 @@ fn the_shipped_binary_mints_event_receipts_when_lifecycle_and_receipts_are_on() 
     let (status, retracted) = reg.post(&path, &json!({ "event": event }));
     assert_eq!(status, 200, "retract: {retracted}\n{}", reg.output());
 
-    let (status, ctx) = reg.get(&format!("/contexts/{}", pct_encode_path_segment(&ctx_id)));
+    let served = verified_binary_event_receipts(&reg, &ctx_id, 1);
+    assert_eq!(&retracted["registry_state"]["event_receipts"], &served);
+}
+
+/// GET `ctx_id` from the spawned binary and check its served
+/// `event_receipts`: `expected` of them, each bound (§10.3) to the served
+/// event at its position and signed by the receipt key (seed 0x2c,
+/// `served_full_features_toml`) that `did.json` publishes under its
+/// `key_id`. Returns the served array.
+fn verified_binary_event_receipts(
+    reg: &spawned_registry::SpawnedRegistry,
+    ctx_id: &str,
+    expected: usize,
+) -> Value {
+    use acdp::types::EventReceipt;
+
+    let (status, ctx) = reg.get(&format!("/contexts/{}", pct_encode_path_segment(ctx_id)));
     assert_eq!(status, 200, "get: {ctx}\n{}", reg.output());
-    let served = &ctx["registry_state"]["event_receipts"];
+    let served = ctx["registry_state"]["event_receipts"].clone();
     assert_eq!(
         served.as_array().map(Vec::len),
-        Some(1),
-        "the binary must mint one event receipt per accepted event: {ctx}\n{}",
+        Some(expected),
+        "the binary must serve one event receipt per accepted event: {ctx}\n{}",
         reg.output()
     );
-    assert_eq!(&retracted["registry_state"]["event_receipts"], served);
-
-    let raw = &served[0];
-    let receipt = EventReceipt::from_value(raw).expect("closed schema");
     let created_at =
         chrono::DateTime::parse_from_rfc3339(ctx["body"]["created_at"].as_str().unwrap())
             .unwrap()
             .with_timezone(&chrono::Utc);
-    receipt
-        .check_binding(
-            ctx["body"]["origin_registry"].as_str().unwrap(),
-            &CtxId(ctx_id.clone()),
-            &ctx["registry_state"]["lifecycle_events"][0],
-            0,
-            created_at,
-        )
-        .expect("§10.3 binding");
-
     let (status, doc) = reg.get("/.well-known/did.json");
     assert_eq!(status, 200, "did.json: {doc}");
-    let vm = doc["verificationMethod"]
-        .as_array()
-        .expect("verificationMethod")
-        .iter()
-        .find(|m| m["id"] == receipt.signature.key_id.as_str())
-        .unwrap_or_else(|| panic!("{} not in did.json: {doc}", receipt.signature.key_id));
     let receipt_key = SigningKey::from_bytes(&[0x2c; 32]).verifying_key_bytes();
     let multibase = acdp::did::key::did_key_from_ed25519(&receipt_key);
-    assert_eq!(
-        multibase.strip_prefix("did:key:"),
-        vm["publicKeyMultibase"].as_str(),
-        "did.json must publish the configured receipt key"
+    for (i, raw) in served.as_array().unwrap().iter().enumerate() {
+        let receipt = EventReceipt::from_value(raw).expect("closed schema");
+        receipt
+            .check_binding(
+                ctx["body"]["origin_registry"].as_str().unwrap(),
+                &CtxId(ctx_id.to_string()),
+                &ctx["registry_state"]["lifecycle_events"][i],
+                i as u64,
+                created_at,
+            )
+            .unwrap_or_else(|e| panic!("receipt {i}: §10.3 binding: {e}"));
+        let vm = doc["verificationMethod"]
+            .as_array()
+            .expect("verificationMethod")
+            .iter()
+            .find(|m| m["id"] == receipt.signature.key_id.as_str())
+            .unwrap_or_else(|| panic!("{} not in did.json: {doc}", receipt.signature.key_id));
+        assert_eq!(
+            multibase.strip_prefix("did:key:"),
+            vm["publicKeyMultibase"].as_str(),
+            "did.json must publish the configured receipt key"
+        );
+        let hash = EventReceipt::preimage_hash_of_value(raw).expect("preimage");
+        receipt
+            .verify_signature_against_hash(&hash, Some(&receipt_key), None)
+            .unwrap_or_else(|e| panic!("receipt {i}: signature: {e}"));
+    }
+    served
+}
+
+/// Phase 4b wiring, end to end on the shipped binary: events accepted while
+/// receipts were off are receipted by the startup sweep when the registry
+/// restarts with them on — before, and without, any new event. A second
+/// restart sweeps nothing and serves the same bytes.
+#[test]
+fn the_shipped_binary_sweeps_legacy_events_on_startup() {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let legacy = format!("{}\n[lifecycle]\nenabled = true\n", served_auth_toml(false));
+    let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "sweep", "", &legacy);
+    let key = SigningKey::from_bytes(&[0x87; 32]);
+    let producer = Producer::new_did_key(SigningKey::from_bytes(&[0x87; 32]));
+    let req = producer
+        .publish_request()
+        .title("legacy events swept on startup")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("publish request");
+    let (status, published) = reg.post(
+        "/contexts",
+        &serde_json::to_value(&req).expect("serialize the publish request"),
     );
-    let hash = EventReceipt::preimage_hash_of_value(raw).expect("preimage");
-    receipt
-        .verify_signature_against_hash(&hash, Some(&receipt_key), None)
-        .expect("event receipt signature");
+    assert_eq!(status, 201, "publish: {published}\n{}", reg.output());
+    let ctx_id = published["ctx_id"].as_str().expect("ctx_id").to_string();
+    let did = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+    let key_id = acdp::did::key::did_key_url(&did).expect("did:key url");
+    let event = LifecycleEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        CtxId(ctx_id.clone()),
+        LifecycleEventType::Retracted,
+        chrono::Utc::now(),
+        AgentDid::new(did),
+        None,
+    )
+    .expect("valid event")
+    .sign_with(key, key_id)
+    .expect("signed event");
+    let path = format!("/contexts/{}/retract", pct_encode_path_segment(&ctx_id));
+    let (status, retracted) = reg.post(&path, &json!({ "event": event }));
+    assert_eq!(status, 200, "retract: {retracted}\n{}", reg.output());
+    assert!(
+        retracted["registry_state"].get("event_receipts").is_none(),
+        "receipts are off: nothing may be minted yet: {retracted}"
+    );
+    drop(reg);
+
+    let receipts_on = format!(
+        "{}\n[receipt]\nsigning_key_seed_b64 = \"{}\"\n\n[lifecycle]\nenabled = true\n\n\
+         [metrics]\nenabled = true\n",
+        served_auth_toml(false),
+        b64_32(0x2c)
+    );
+    let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "sweep", "", &receipts_on);
+    let swept = verified_binary_event_receipts(&reg, &ctx_id, 1);
+    assert!(
+        reg.output().contains("event receipt sweep complete"),
+        "the sweep must log its report: {}",
+        reg.output()
+    );
+    // The sweep runs before `AppState` exists; its counter must still land
+    // in the recorder `/metrics` serves.
+    let (status, metrics) = reg.get("/metrics");
+    assert_eq!(status, 200, "metrics: {metrics}");
+    let metrics = metrics.as_str().expect("text exposition");
+    assert!(
+        metrics
+            .lines()
+            .any(|l| l == "acdp_registry_event_receipts_minted_total 1"),
+        "the sweep's fill must be counted: {metrics}"
+    );
+    drop(reg);
+
+    let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "sweep", "", &receipts_on);
+    assert_eq!(
+        verified_binary_event_receipts(&reg, &ctx_id, 1),
+        swept,
+        "a second start must serve the swept receipt unchanged"
+    );
+    assert!(
+        !reg.output().contains("event receipt sweep complete"),
+        "a second start has nothing to sweep: {}",
+        reg.output()
+    );
 }

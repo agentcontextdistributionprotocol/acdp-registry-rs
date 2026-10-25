@@ -388,7 +388,8 @@ async fn migration_is_idempotent_and_table_is_unlogged() {
     store.migrate().await.expect("first migrate");
     store.migrate().await.expect("second migrate");
     let persistence: String = sqlx::query_scalar(
-        "SELECT relpersistence::text FROM pg_class WHERE relname = 'rate_limit_windows'",
+        "SELECT relpersistence::text FROM pg_class \
+         WHERE relname = 'rate_limit_windows' AND relnamespace = current_schema()::regnamespace",
     )
     .fetch_one(store.pool())
     .await
@@ -396,7 +397,8 @@ async fn migration_is_idempotent_and_table_is_unlogged() {
     assert_eq!(persistence, "u", "rate_limit_windows must be UNLOGGED");
     // No index beyond the primary key (a window_start index defeats HOT updates).
     let idx: Vec<String> = sqlx::query_scalar(
-        "SELECT indexname FROM pg_indexes WHERE tablename = 'rate_limit_windows'",
+        "SELECT indexname FROM pg_indexes \
+         WHERE schemaname = current_schema() AND tablename = 'rate_limit_windows'",
     )
     .fetch_all(store.pool())
     .await

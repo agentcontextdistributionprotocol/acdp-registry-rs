@@ -27,7 +27,7 @@ use acdp_registry_types::config::RESERVED_TENANT;
 use async_trait::async_trait;
 
 pub use cursor::{decode_cursor, encode_cursor};
-pub use event_receipts::{EventReceiptMinter, StoredReceipt};
+pub use event_receipts::{EventReceiptMinter, StoredReceipt, SweepReport};
 pub use log::{build_leaf_record, LogEntryRecord};
 pub use rate_limit::{LimitDecision, SharedLimitScope, SharedRateLimitBackend};
 
@@ -183,6 +183,18 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
     /// default.
     async fn has_lifecycle_state(&self) -> Result<bool, AcdpError> {
         Ok(false)
+    }
+
+    /// RFC-ACDP-0017 §10.2 startup sweep: receipt the trailing
+    /// un-receipted lifecycle events of every context, each context under
+    /// the same lock and rules as fill-on-append. A context whose receipts
+    /// have a hole is skipped (logged and counted), never rewritten.
+    /// Idempotent: a second run, or a concurrent replica, fills nothing.
+    ///
+    /// The default is "nothing to do": a backend without receipt storage,
+    /// or one built without an event-receipt minter.
+    async fn backfill_event_receipts(&self) -> Result<SweepReport, AcdpError> {
+        Ok(SweepReport::default())
     }
 
     // ── Transparency log reads (ACDP 0.3, RFC-ACDP-0012) ──────────────

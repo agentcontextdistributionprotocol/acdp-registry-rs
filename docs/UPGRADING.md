@@ -24,12 +24,18 @@ belongs in the per-crate changelogs.
 ## 0.5.6
 
 **This release adds migration 016 (both backends): a nullable `receipt` column on
-`lifecycle_events`, which holds the RFC-ACDP-0017 §10 event receipt for each lifecycle event.**
+`lifecycle_events`, which holds the RFC-ACDP-0017 §10 event receipt for each lifecycle event, and a
+partial index on the rows where it is NULL.**
 
 The column is additive and starts NULL for every existing event. A registry that mints event
-receipts fills it in the same transaction as each new event. It also receipts a context's earlier
-un-receipted events the next time that context gets an event, so a legacy history becomes complete
-on its next transition. A stored receipt is never rewritten. Reads serve
+receipts fills it in the same transaction as each new event. **On every start, before it serves a
+request, it also sweeps the database and receipts each event that has none** (one short transaction
+per context, in batches of 200 contexts), so a legacy history is complete as soon as the upgraded
+registry is up. The first start after upgrading takes longer in proportion to the number of
+contexts with lifecycle events; later starts find nothing to do. The sweep logs `event receipt
+sweep complete` with its counts when it filled or skipped anything. A store error during it refuses
+to start; bad data on one context is skipped and logged instead (see
+[OPERATIONS.md](OPERATIONS.md#event-receipt-sweep)). A stored receipt is never rewritten. Reads serve
 `registry_state.event_receipts` only when every event of the context has a valid receipt; otherwise
 they omit the member, exactly as before this release.
 
@@ -43,11 +49,11 @@ they omit the member, exactly as before this release.
   sees one more column; named-column queries are unaffected.
 - **Rollback, Postgres:** safe to 0.5.5. The migrator tolerates the newer applied version, and 0.5.5
   names its columns, so it ignores `receipt`. Receipts minted before the rollback stay in the
-  column and are served again after rolling forward, except on a context that took an event while
-  0.5.5 was running: that event has no receipt, so the context omits `event_receipts` until its next
-  lifecycle event receipts the missing one.
+  column and are served again after rolling forward. An event accepted while 0.5.5 was running
+  has no receipt; the startup sweep of the rolled-forward registry receipts it.
 - **Rollback, SQLite:** unchanged. A database migrated by a newer binary already refuses an older
-  one; restore the pre-upgrade file, as for any release that adds a migration.
+  one; restore the pre-upgrade file, as for any release that adds a migration. Take that backup
+  before the first start: the startup sweep writes receipts into it.
 - **Unchanged:** configuration keys and defaults, and every response of a registry that does not
   mint event receipts.
 

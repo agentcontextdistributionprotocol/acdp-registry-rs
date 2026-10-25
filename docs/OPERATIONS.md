@@ -273,6 +273,34 @@ request-rate/latency/status by route, the registry exports domain counters
 witness cosignatures, rate-limit rejections). Full metric list:
 [HTTP-API.md · `GET /metrics`](HTTP-API.md#get-metrics-feat-10).
 
+## Event receipt sweep
+
+A registry that mints RFC-ACDP-0017 §10 event receipts (`[lifecycle] enabled = true` and a
+`[receipt]` key) runs a sweep on every start, after migrations and before it serves a request. It
+receipts each stored lifecycle event that has none: events accepted before minting was on, or while
+an older binary was running. Each context is filled in its own transaction under the same lock a
+lifecycle commit takes, so several replicas starting together fill each event exactly once.
+
+- **Log.** `event receipt sweep complete (RFC-ACDP-0017 §10.2)` with `contexts_filled`,
+  `receipts_filled` and `contexts_skipped`, logged only when it did something. A store error fails
+  startup with `event receipt sweep: …`.
+- **Skipped contexts** have an un-receiptable history: a NULL receipt before a receipted event, or a
+  corrupt stored receipt (logged at `error` with the `ctx_id`), or a context or event row this binary
+  cannot decode (`event receipt sweep: undecodable context; skipped`). Bad data on one context never
+  refuses startup. The sweep never rewrites a stored receipt, so such a context keeps omitting
+  `registry_state.event_receipts` and is skipped again on every start. Each read of it logs
+  `event_receipts incomplete; omitting the member` at `warn`.
+- **Startup time.** The sweep runs before the listener binds, one short transaction per context,
+  sequentially. Its cost is proportional to the number of contexts with un-receipted events, which on
+  the first start after upgrading is every context with lifecycle events. If that number is large, raise the startup/liveness probe budget
+  for that rollout. Progress is durable, so a killed start resumes where it stopped. Later starts
+  read only the un-receipted rows (a partial index from migration 016) and are effectively free.
+- **Metrics** (with `[metrics] enabled = true`; the sweep's counts are recorded too).
+  `acdp_registry_event_receipts_minted_total`,
+  `acdp_registry_event_receipts_sweep_skipped_total` and
+  `acdp_registry_event_receipts_incomplete_total` (see [HTTP-API.md](HTTP-API.md)). A rising
+  incomplete count after the sweep has run points at a skipped context.
+
 ## Webhooks
 
 Receivers verify `X-ACDP-Signature` (GitHub-compatible HMAC-SHA256 over the raw

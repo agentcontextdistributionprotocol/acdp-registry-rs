@@ -11,3 +11,9 @@
 -- `set_ignore_missing`): rolling back past this migration means restoring
 -- the pre-upgrade backup or rolling forward.
 ALTER TABLE lifecycle_events ADD COLUMN receipt TEXT;
+
+-- The startup sweep's candidate scan (`DISTINCT ctx_id … WHERE receipt IS
+-- NULL`) reads only un-receipted rows, so after the first sweep a restart
+-- costs O(remaining NULLs), not O(all events).
+CREATE INDEX IF NOT EXISTS idx_lifecycle_events_receipt_null
+    ON lifecycle_events (ctx_id) WHERE receipt IS NULL;

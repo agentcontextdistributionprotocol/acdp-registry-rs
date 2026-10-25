@@ -181,35 +181,127 @@ pub fn plan_event_receipts(
     new_event: &LifecycleEvent,
     now: DateTime<Utc>,
 ) -> Result<ReceiptPlan, AcdpError> {
-    let slots: Vec<StoredReceipt> = prior.iter().map(|(_, s)| s.clone()).collect();
-    let hole = has_hole(&slots);
-    let mut prev = slots
-        .iter()
-        .filter_map(|s| match s {
-            StoredReceipt::Valid(r) => Some(r.accepted_at),
-            _ => None,
-        })
-        .max();
-    let mut fills = Vec::new();
-    if hole {
+    let hole = slots_have_hole(prior);
+    let mut prev = latest_accepted_at(prior);
+    let fills = if hole {
         tracing::error!(
             %ctx_id,
             "lifecycle event receipts have a hole (a missing or corrupt receipt before a \
              receipted event); not filling it — event_receipts stays omitted until repaired"
         );
+        Vec::new()
     } else {
-        for (i, (event, slot)) in prior.iter().enumerate() {
-            if matches!(slot, StoredReceipt::Null) {
-                let at = clamp_accepted_at(now, created_at, prev);
-                let r = minter.mint(ctx_id, &event_value(event)?, i as u64, at)?;
-                prev = Some(r.accepted_at);
-                fills.push((i, r));
-            }
-        }
-    }
+        fill_nulls(minter, ctx_id, created_at, prior, now, &mut prev)?
+    };
     let at = clamp_accepted_at(now, created_at, prev);
     let new = minter.mint(ctx_id, &event_value(new_event)?, prior.len() as u64, at)?;
     Ok(ReceiptPlan { fills, new, hole })
+}
+
+fn slots_have_hole(prior: &[(LifecycleEvent, StoredReceipt)]) -> bool {
+    let slots: Vec<StoredReceipt> = prior.iter().map(|(_, s)| s.clone()).collect();
+    has_hole(&slots)
+}
+
+fn latest_accepted_at(prior: &[(LifecycleEvent, StoredReceipt)]) -> Option<DateTime<Utc>> {
+    prior
+        .iter()
+        .filter_map(|(_, s)| match s {
+            StoredReceipt::Valid(r) => Some(r.accepted_at),
+            _ => None,
+        })
+        .max()
+}
+
+/// Receipt every NULL slot of a hole-free history, in order, each clamp
+/// chained from the last (`prev` is advanced past every minted receipt).
+fn fill_nulls(
+    minter: &dyn EventReceiptMinter,
+    ctx_id: &CtxId,
+    created_at: DateTime<Utc>,
+    prior: &[(LifecycleEvent, StoredReceipt)],
+    now: DateTime<Utc>,
+    prev: &mut Option<DateTime<Utc>>,
+) -> Result<Vec<(usize, EventReceipt)>, AcdpError> {
+    let mut fills = Vec::new();
+    for (i, (event, slot)) in prior.iter().enumerate() {
+        if matches!(slot, StoredReceipt::Null) {
+            let at = clamp_accepted_at(now, created_at, *prev);
+            let r = minter.mint(ctx_id, &event_value(event)?, i as u64, at)?;
+            *prev = Some(r.accepted_at);
+            fills.push((i, r));
+        }
+    }
+    Ok(fills)
+}
+
+/// What the startup sweep must do for one context's history.
+#[derive(Debug)]
+pub enum BackfillPlan {
+    /// Every slot already holds a valid receipt.
+    Complete,
+    /// `(position, receipt)` for each trailing NULL slot, in order.
+    Fill(Vec<(usize, EventReceipt)>),
+    /// A NULL precedes a receipted slot, or a slot is corrupt: filling
+    /// would break §10.3 step 8, so nothing is written (logged).
+    Hole,
+}
+
+/// Plan the startup sweep for one context (RFC-ACDP-0017 §10.2): the same
+/// rules as fill-on-append, without a new event. Call under the backend's
+/// append lock, with `now` read after it was taken.
+pub fn plan_backfill(
+    minter: &dyn EventReceiptMinter,
+    ctx_id: &CtxId,
+    created_at: DateTime<Utc>,
+    prior: &[(LifecycleEvent, StoredReceipt)],
+    now: DateTime<Utc>,
+) -> Result<BackfillPlan, AcdpError> {
+    if slots_have_hole(prior) {
+        tracing::error!(
+            %ctx_id,
+            "event receipt sweep skipped a context whose receipts have a hole (a missing or \
+             corrupt receipt before a receipted event); event_receipts stays omitted"
+        );
+        return Ok(BackfillPlan::Hole);
+    }
+    let mut prev = latest_accepted_at(prior);
+    let fills = fill_nulls(minter, ctx_id, created_at, prior, now, &mut prev)?;
+    Ok(if fills.is_empty() {
+        BackfillPlan::Complete
+    } else {
+        BackfillPlan::Fill(fills)
+    })
+}
+
+/// Contexts the sweep examines per page (keyset-paginated by `ctx_id`, so
+/// a skipped context is never revisited in the same run).
+pub const SWEEP_BATCH: i64 = 200;
+
+/// What [`crate::ExtendedRegistryStore::backfill_event_receipts`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// Contexts whose trailing NULL receipts were filled.
+    pub contexts_filled: u64,
+    /// Receipts minted across them.
+    pub receipts_filled: u64,
+    /// Contexts left incomplete: a hole, or (defensively) no context row.
+    pub contexts_skipped: u64,
+}
+
+impl SweepReport {
+    /// Count one context's committed fill. Call after its commit.
+    pub fn record_filled(&mut self, receipts: usize) {
+        self.contexts_filled += 1;
+        self.receipts_filled += receipts as u64;
+        metrics::counter!(EVENT_RECEIPTS_MINTED_TOTAL).increment(receipts as u64);
+    }
+
+    /// Count one context the sweep left incomplete.
+    pub fn record_skipped(&mut self) {
+        self.contexts_skipped += 1;
+        metrics::counter!(EVENT_RECEIPTS_SWEEP_SKIPPED_TOTAL).increment(1);
+    }
 }
 
 impl ReceiptPlan {

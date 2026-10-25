@@ -10,3 +10,9 @@
 -- Additive and N-1 safe: older binaries name their columns and run with
 -- `set_ignore_missing`.
 ALTER TABLE lifecycle_events ADD COLUMN IF NOT EXISTS receipt JSONB;
+
+-- The startup sweep's candidate scan (`DISTINCT ctx_id … WHERE receipt IS
+-- NULL`) reads only un-receipted rows, so after the first sweep a restart
+-- costs O(remaining NULLs), not O(all events).
+CREATE INDEX IF NOT EXISTS idx_lifecycle_events_receipt_null
+    ON lifecycle_events (ctx_id) WHERE receipt IS NULL;

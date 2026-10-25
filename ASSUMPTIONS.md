@@ -4990,3 +4990,15 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** the D1–D5 design as planned.
 - **Alternatives:** repairing holes by re-minting (breaks append-only); a separate receipts table (two writes to keep parallel).
 - **Blast radius if wrong:** a context's `event_receipts` stays omitted (never wrong data); the version heading moves if release-plz picks another version. **Status:** UNCONFIRMED.
+
+## rfc0017-event-receipts — Phase 4b (2026-10-24)
+
+- **CONFIRMED (decided, reversible): bad data on one context is skipped, never fatal.** A
+  context or event row the binary cannot decode, a corrupt stored receipt, or a hole (a NULL
+  before a receipted event) is skipped and logged at `error`. It bumps
+  `acdp_registry_event_receipts_sweep_skipped_total` and the sweep continues. Only a store
+  error refuses startup. Why: one bad row must not take a registry down on upgrade. The
+  skipped context keeps omitting `event_receipts`, which is exactly the pre-upgrade behaviour.
+- **CONFIRMED (decided, reversible): migration 016 was edited in place to add the
+  `receipt IS NULL` partial index.** This is safe because 016 has not been released yet: it
+  is only on `feat/rfc0017-event-receipts` and no tag contains it.

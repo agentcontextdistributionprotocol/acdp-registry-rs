@@ -1312,6 +1312,182 @@ mod lifecycle {
             );
             assert_eq!(index_of(stored[1].1.as_deref().unwrap()), 1);
         }
+
+        /// Publish a context and append `n` legacy (un-receipted) events.
+        async fn legacy_ctx(plain: &Arc<SqliteStore>, seed: u8, title: &str, n: usize) -> CtxId {
+            let actor = AgentDid::new(format!("did:web:agents.test:contract-{seed}"));
+            let (ctx_id, _) = published_ctx(plain, seed, title).await;
+            for i in 0..n {
+                let t = if i % 2 == 0 {
+                    LifecycleEventType::Retracted
+                } else {
+                    LifecycleEventType::Republished
+                };
+                plain
+                    .commit_lifecycle_event(&event(&actor, &ctx_id, t, None))
+                    .unwrap();
+            }
+            ctx_id
+        }
+
+        /// Phase 4b AC1 on a fresh database: exact report, every slot
+        /// receipted at its own index, and a rerun is a no-op.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn the_sweep_counts_exactly_and_a_rerun_fills_nothing() {
+            let (plain, _tmp) = store().await;
+            let minting = with_minter(&plain, signer());
+            let two = legacy_ctx(&plain, 76, "sweep two", 2).await;
+            let one = legacy_ctx(&plain, 77, "sweep one", 1).await;
+            published_ctx(&plain, 78, "sweep no events").await;
+
+            let report = minting.backfill_event_receipts().await.unwrap();
+            assert_eq!(
+                (
+                    report.contexts_filled,
+                    report.receipts_filled,
+                    report.contexts_skipped
+                ),
+                (2, 3, 0)
+            );
+            for (ctx, n) in [(&two, 2), (&one, 1)] {
+                let stored = rows(&plain, ctx).await;
+                assert_eq!(stored.len(), n);
+                for (i, (_, r)) in stored.iter().enumerate() {
+                    assert_eq!(index_of(r.as_deref().expect("receipted")), i as u64);
+                }
+            }
+            let before = (rows(&plain, &two).await, rows(&plain, &one).await);
+            assert_eq!(
+                minting.backfill_event_receipts().await.unwrap(),
+                acdp_registry_store::SweepReport::default(),
+                "a rerun must fill nothing"
+            );
+            assert_eq!((rows(&plain, &two).await, rows(&plain, &one).await), before);
+        }
+
+        /// A minter error fails the sweep (startup refuses) and rolls that
+        /// context's fills back: no partial history is left receipted.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_failing_minter_fails_the_sweep_and_writes_nothing() {
+            let (plain, _tmp) = store().await;
+            let failing = with_minter(&plain, Arc::new(FailingMinter));
+            let ctx = legacy_ctx(&plain, 79, "sweep failure", 2).await;
+            let err = failing.backfill_event_receipts().await.unwrap_err();
+            assert!(matches!(err, AcdpError::RegistryInternal(_)), "{err:?}");
+            assert!(rows(&plain, &ctx).await.iter().all(|(_, r)| r.is_none()));
+        }
+
+        /// Replicas starting at once: the per-context lock plus
+        /// `WHERE receipt IS NULL` make every slot fill exactly once.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_sweeps_fill_each_slot_exactly_once() {
+            let (plain, _tmp) = store().await;
+            let mut ctxs = Vec::new();
+            for seed in 80..86u8 {
+                ctxs.push(legacy_ctx(&plain, seed, "sweep race", 3).await);
+            }
+            let sweeps: Vec<_> = (0..4)
+                .map(|_| {
+                    let s = with_minter(&plain, signer());
+                    tokio::spawn(async move { s.backfill_event_receipts().await.unwrap() })
+                })
+                .collect();
+            let mut filled = 0;
+            for h in sweeps {
+                filled += h.await.unwrap().receipts_filled;
+            }
+            assert_eq!(filled, 18, "every slot must be filled by exactly one sweep");
+            for ctx in &ctxs {
+                for (i, (_, r)) in rows(&plain, ctx).await.iter().enumerate() {
+                    assert_eq!(index_of(r.as_deref().expect("receipted")), i as u64);
+                }
+            }
+        }
+
+        /// Bad data on one context never refuses startup: a corrupt stored
+        /// receipt and an undecodable event are each skipped (and counted),
+        /// left untouched, and the sweep still fills the healthy context.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn bad_rows_are_skipped_and_the_rest_is_swept() {
+            let (plain, _tmp) = store().await;
+            let corrupt = legacy_ctx(&plain, 92, "sweep corrupt tail", 2).await;
+            let tail = rows(&plain, &corrupt).await[1].0.clone();
+            set_receipt(&plain, &tail, Some("{\"index\": 7}")).await;
+            let undecodable = legacy_ctx(&plain, 93, "sweep undecodable", 1).await;
+            sqlx::query(
+                "UPDATE lifecycle_events SET occurred_at = 'not a timestamp' WHERE ctx_id = ?",
+            )
+            .bind(undecodable.as_str())
+            .execute(plain.pool())
+            .await
+            .unwrap();
+            let healthy = legacy_ctx(&plain, 94, "sweep healthy", 1).await;
+            let report = with_minter(&plain, signer())
+                .backfill_event_receipts()
+                .await
+                .expect("bad rows must not fail the sweep");
+            assert_eq!(
+                (
+                    report.contexts_filled,
+                    report.receipts_filled,
+                    report.contexts_skipped
+                ),
+                (1, 1, 2)
+            );
+            let stored = rows(&plain, &corrupt).await;
+            assert!(
+                stored[0].1.is_none(),
+                "a context with a corrupt slot was filled"
+            );
+            assert_eq!(index_of(stored[1].1.as_deref().unwrap()), 7);
+            assert!(rows(&plain, &undecodable).await[0].1.is_none());
+            assert_eq!(
+                index_of(rows(&plain, &healthy).await[0].1.as_deref().unwrap()),
+                0
+            );
+        }
+
+        /// More candidate contexts than one keyset page, with holes among
+        /// them: every legacy context is filled, each hole is skipped once
+        /// per run, and the loop terminates.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn the_sweep_pages_past_one_batch_and_skips_each_hole_once() {
+            use acdp_registry_store::event_receipts::SWEEP_BATCH;
+            let (plain, _tmp) = store().await;
+            let minting = with_minter(&plain, signer());
+            let total = SWEEP_BATCH as usize + 5;
+            for i in 0..total {
+                legacy_ctx(&plain, 90, &format!("sweep page {i}"), 1).await;
+            }
+            let actor = AgentDid::new("did:web:agents.test:contract-91".to_string());
+            let mut holes = Vec::new();
+            for i in 0..3 {
+                let (ctx, _) = published_ctx(&plain, 91, &format!("sweep hole {i}")).await;
+                for t in [
+                    LifecycleEventType::Retracted,
+                    LifecycleEventType::Republished,
+                ] {
+                    minting
+                        .commit_lifecycle_event(&event(&actor, &ctx, t, None))
+                        .unwrap();
+                }
+                let first = rows(&plain, &ctx).await[0].0.clone();
+                set_receipt(&plain, &first, None).await;
+                holes.push(ctx);
+            }
+            let report = minting.backfill_event_receipts().await.unwrap();
+            assert_eq!(
+                (
+                    report.contexts_filled,
+                    report.receipts_filled,
+                    report.contexts_skipped
+                ),
+                (total as u64, total as u64, 3)
+            );
+            for ctx in &holes {
+                assert!(rows(&plain, ctx).await[0].1.is_none(), "a hole was filled");
+            }
+        }
     }
 }
 

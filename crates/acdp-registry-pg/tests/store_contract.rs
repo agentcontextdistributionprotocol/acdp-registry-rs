@@ -903,6 +903,147 @@ mod lifecycle {
             );
             assert_eq!(index_of(stored[1].1.as_deref().unwrap()), 1);
         }
+
+        /// A store whose tables live in a run-unique schema. The sweep is
+        /// whole-database: on the shared schema it would receipt the legacy
+        /// rows other tests in this binary assert stay NULL.
+        async fn isolated(url: &str) -> (Arc<PgStore>, PgStore, String) {
+            let schema = format!("sweep_{}", uuid::Uuid::new_v4().simple());
+            let admin = PgStore::connect(url, 1).await.expect("pg connect");
+            sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+                .execute(admin.pool())
+                .await
+                .expect("create run-unique schema");
+            let sep = if url.contains('?') { '&' } else { '?' };
+            let store = PgStore::connect(&format!("{url}{sep}options[search_path]={schema}"), 8)
+                .await
+                .expect("pg connect (isolated schema)");
+            store.migrate().await.expect("pg migrate (isolated schema)");
+            (Arc::new(store), admin, schema)
+        }
+
+        async fn drop_isolated(admin: PgStore, schema: &str) {
+            sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+                .execute(admin.pool())
+                .await
+                .expect("drop run-unique schema");
+        }
+
+        /// Publish a context and append `n` legacy (un-receipted) events.
+        async fn legacy_ctx(plain: &Arc<PgStore>, seed: u8, title: &str, n: usize) -> CtxId {
+            let actor = AgentDid::new(format!("did:web:agents.test:contract-{seed}"));
+            let (ctx_id, _) = published_ctx(plain, seed, title).await;
+            for i in 0..n {
+                let t = if i % 2 == 0 {
+                    LifecycleEventType::Retracted
+                } else {
+                    LifecycleEventType::Republished
+                };
+                plain
+                    .commit_lifecycle_event(&event(&actor, &ctx_id, t, None))
+                    .unwrap();
+            }
+            ctx_id
+        }
+
+        /// Replicas starting at once: the `FOR UPDATE` row lock plus
+        /// `WHERE receipt IS NULL` make every slot fill exactly once.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_sweeps_fill_each_slot_exactly_once() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let (plain, admin, schema) = isolated(&url).await;
+            let mut ctxs = Vec::new();
+            for seed in 80..84u8 {
+                ctxs.push(legacy_ctx(&plain, seed, "pg sweep race", 3).await);
+            }
+            let sweeps: Vec<_> = (0..4)
+                .map(|_| {
+                    let s = with_minter(&plain, signer());
+                    tokio::spawn(async move { s.backfill_event_receipts().await })
+                })
+                .collect();
+            let mut filled = 0;
+            for h in sweeps {
+                filled += h
+                    .await
+                    .unwrap()
+                    .expect("a concurrent sweep must not fail")
+                    .receipts_filled;
+            }
+            assert_eq!(filled, 12, "every slot must be filled by exactly one sweep");
+            for ctx in &ctxs {
+                let stored = rows(&plain, ctx).await;
+                assert_eq!(stored.len(), 3);
+                for (i, (_, r)) in stored.iter().enumerate() {
+                    assert_eq!(index_of(r.as_deref().expect("receipted")), i as u64);
+                }
+            }
+            drop(plain);
+            drop_isolated(admin, &schema).await;
+        }
+
+        /// A minter error fails the sweep (startup refuses) and rolls that
+        /// context's fills back: no partial history is left receipted.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_failing_minter_fails_the_sweep_and_writes_nothing() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let (plain, admin, schema) = isolated(&url).await;
+            let ctx = legacy_ctx(&plain, 84, "pg sweep failure", 2).await;
+            let err = with_minter(&plain, Arc::new(FailingMinter))
+                .backfill_event_receipts()
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AcdpError::RegistryInternal(_)), "{err:?}");
+            assert!(rows(&plain, &ctx).await.iter().all(|(_, r)| r.is_none()));
+            drop(plain);
+            drop_isolated(admin, &schema).await;
+        }
+
+        /// Bad data on one context never refuses startup: a corrupt stored
+        /// receipt and an undecodable event are each skipped (and counted),
+        /// left untouched, and the sweep still fills the healthy context.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn bad_rows_are_skipped_and_the_rest_is_swept() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let (plain, admin, schema) = isolated(&url).await;
+            let corrupt = legacy_ctx(&plain, 85, "pg sweep corrupt tail", 2).await;
+            let tail = rows(&plain, &corrupt).await[1].0.clone();
+            set_receipt(&plain, &tail, Some("{\"index\": 7}")).await;
+            let undecodable = legacy_ctx(&plain, 86, "pg sweep undecodable", 1).await;
+            sqlx::query(
+                "UPDATE lifecycle_events SET occurred_at = 'not a timestamp' WHERE ctx_id = $1",
+            )
+            .bind(undecodable.as_str())
+            .execute(plain.pool())
+            .await
+            .unwrap();
+            let healthy = legacy_ctx(&plain, 87, "pg sweep healthy", 1).await;
+            let report = with_minter(&plain, signer())
+                .backfill_event_receipts()
+                .await
+                .expect("bad rows must not fail the sweep");
+            assert_eq!(
+                (
+                    report.contexts_filled,
+                    report.receipts_filled,
+                    report.contexts_skipped
+                ),
+                (1, 1, 2)
+            );
+            let stored = rows(&plain, &corrupt).await;
+            assert!(
+                stored[0].1.is_none(),
+                "a context with a corrupt slot was filled"
+            );
+            assert_eq!(index_of(stored[1].1.as_deref().unwrap()), 7);
+            assert!(rows(&plain, &undecodable).await[0].1.is_none());
+            assert_eq!(
+                index_of(rows(&plain, &healthy).await[0].1.as_deref().unwrap()),
+                0
+            );
+            drop(plain);
+            drop_isolated(admin, &schema).await;
+        }
     }
 }
 

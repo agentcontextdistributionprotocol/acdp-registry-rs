@@ -370,6 +370,9 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_request_duration_seconds` | histogram | `route`, `method` | Request latency. |
 | `acdp_registry_publish_total` | counter | `outcome` | Publishes: `inserted`, `idempotent_replay` (every path), or a wire code (`schema_violation`, `payload_too_large`, …). |
 | `acdp_registry_receipts_minted_total` | counter | — | RFC-ACDP-0010 receipts minted on accepted publishes. |
+| `acdp_registry_event_receipts_minted_total` | counter | — | RFC-ACDP-0017 §10 event receipts minted: one per accepted lifecycle event, plus each earlier event receipted by fill-on-append or the startup sweep. |
+| `acdp_registry_event_receipts_incomplete_total` | counter | — | Reads by a minting registry that omitted `registry_state.event_receipts` because a context's history is not fully receipted. |
+| `acdp_registry_event_receipts_sweep_skipped_total` | counter | — | Contexts the startup sweep (or fill-on-append) could not complete: a NULL before a receipted event, or a corrupt stored receipt. |
 | `acdp_registry_log_leaves_total` | counter | — | RFC-ACDP-0012 transparency-log leaves appended. |
 | `acdp_registry_lifecycle_event_total` | counter | `event`, `outcome` | Retract / republish outcomes. |
 | `acdp_registry_witness_cosignatures_total` | counter | `outcome` | Witness cosignatures `aggregated` / `rejected` / `store_error`. |

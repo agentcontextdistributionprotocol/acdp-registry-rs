@@ -89,9 +89,11 @@ signed before a rotation keeps verifying against the retired key in
   neither does. A byte-identical retry of an event serves the stored receipt
   and mints nothing.
 - `registry_state.event_receipts` is served, parallel to `lifecycle_events`,
-  only when every event has a receipt. A context whose events predate
-  receipts omits the member until its next lifecycle event, which also
-  receipts the earlier events (see [UPGRADING.md](UPGRADING.md#056)).
+  only when every event has a receipt. Events that predate receipts are
+  receipted by a sweep on every start, before the registry serves a request,
+  and by the next lifecycle event on their context (see
+  [UPGRADING.md](UPGRADING.md#056) and
+  [OPERATIONS.md](OPERATIONS.md#event-receipt-sweep)).
 
 ## Lineage-head receipts (ACDP 0.3.0 / RFC-ACDP-0011)
 

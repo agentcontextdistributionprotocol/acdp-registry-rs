@@ -12,12 +12,13 @@ use acdp::types::primitives::{AgentDid, ContentHash, CtxId, LineageId, Status, V
 use acdp::types::publish::PublishResponse;
 use acdp::types::search::{SearchParams, SearchResponse, SearchResult};
 use acdp_registry_store::event_receipts::{
-    attach_event_receipts, plan_event_receipts, receipt_value,
+    attach_event_receipts, plan_backfill, plan_event_receipts, receipt_value, BackfillPlan,
+    SWEEP_BATCH,
 };
 use acdp_registry_store::lifecycle::reconcile_retraction;
 use acdp_registry_store::{
     decode_cursor, encode_cursor, EventReceiptMinter, ExtendedRegistryStore, LogEntryRecord, Page,
-    StoredReceipt,
+    StoredReceipt, SweepReport,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -368,6 +369,35 @@ impl ExtendedRegistryStore for PgStore {
         .await
         .map_err(|e| AcdpError::RegistryInternal(format!("has_lifecycle_state: {e}")))?;
         Ok(found)
+    }
+
+    async fn backfill_event_receipts(&self) -> Result<SweepReport, AcdpError> {
+        let mut report = SweepReport::default();
+        let Some(minter) = self.event_receipt_minter.clone() else {
+            return Ok(report);
+        };
+        // Keyset pages over contexts that still hold a NULL receipt. A
+        // skipped (holed) context keeps its NULLs, so the cursor, not the
+        // predicate, is what guarantees it is visited once per run.
+        let mut after = String::new();
+        loop {
+            let ids: Vec<(String,)> = sqlx::query_as(
+                "SELECT DISTINCT ctx_id FROM lifecycle_events \
+                 WHERE receipt IS NULL AND ctx_id > $1 ORDER BY ctx_id ASC LIMIT $2",
+            )
+            .bind(&after)
+            .bind(SWEEP_BATCH)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+            let Some((last,)) = ids.last() else {
+                return Ok(report);
+            };
+            after = last.clone();
+            for (ctx_id,) in &ids {
+                backfill_ctx(&self.pool, minter.as_ref(), ctx_id, &mut report).await?;
+            }
+        }
     }
 
     // ── Transparency log reads (RFC-ACDP-0012) ─────────────────────────
@@ -1738,6 +1768,104 @@ fn slot_from_row(r: &PgRow, index: usize) -> Result<(LifecycleEvent, StoredRecei
     let raw: Option<serde_json::Value> = r.try_get("receipt").map_err(map_sqlx_err)?;
     let slot = StoredReceipt::decode(raw.as_ref(), &event, index as u64);
     Ok((event, slot))
+}
+
+/// Sweep one context under the same `FOR UPDATE` row lock an append
+/// takes, so a concurrent append or a second replica's sweep serializes
+/// with it and sees its fills (and then fills nothing).
+async fn backfill_ctx(
+    pool: &PgPool,
+    minter: &dyn EventReceiptMinter,
+    ctx_id: &str,
+    report: &mut SweepReport,
+) -> Result<(), AcdpError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| AcdpError::RegistryInternal(format!("tx begin: {e}")))?;
+    let row = sqlx::query(
+        "SELECT body_json, status, registry_receipt, retracted \
+         FROM contexts WHERE ctx_id = $1 FOR UPDATE",
+    )
+    .bind(ctx_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_err)?;
+    let Some(row) = row else {
+        // The FK makes this unreachable; never mint for an unknown context.
+        tracing::error!(%ctx_id, "event receipt sweep: lifecycle events without a context");
+        report.record_skipped();
+        return end_sweep_tx(tx).await;
+    };
+    // Read the clock only once the row lock is held (RFC-ACDP-0017 §10.1).
+    let now = Utc::now();
+    let ev_rows = sqlx::query(
+        "SELECT event_id, ctx_id, event_type, occurred_at, actor, reason, signature, receipt \
+         FROM lifecycle_events WHERE ctx_id = $1 ORDER BY seq ASC",
+    )
+    .bind(ctx_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(map_sqlx_err)?;
+    // A row this binary cannot decode is bad data on one context, not a
+    // store failure: skip it (reads of it fail as before) rather than
+    // refuse to start every replica over it.
+    let decoded = row_to_context(&row).and_then(|ctx| {
+        ev_rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| slot_from_row(r, i))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|slots| (ctx, slots))
+    });
+    let (ctx, slots) = match decoded {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            tracing::error!(%ctx_id, error = %e, "event receipt sweep: undecodable context; skipped");
+            report.record_skipped();
+            return end_sweep_tx(tx).await;
+        }
+    };
+    let fills = match plan_backfill(minter, &ctx.body.ctx_id, ctx.body.created_at, &slots, now)? {
+        BackfillPlan::Complete => return end_sweep_tx(tx).await,
+        BackfillPlan::Hole => {
+            report.record_skipped();
+            return end_sweep_tx(tx).await;
+        }
+        BackfillPlan::Fill(fills) => fills,
+    };
+    for (i, r) in &fills {
+        let done = sqlx::query(
+            "UPDATE lifecycle_events SET receipt = $1 \
+             WHERE ctx_id = $2 AND event_id = $3 AND receipt IS NULL",
+        )
+        .bind(receipt_value(r)?)
+        .bind(ctx_id)
+        .bind(slots[*i].0.event_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_err)?;
+        if done.rows_affected() != 1 {
+            return Err(AcdpError::RegistryInternal(format!(
+                "event receipt sweep fill for '{}' matched {} rows",
+                slots[*i].0.event_id,
+                done.rows_affected()
+            )));
+        }
+    }
+    tx.commit()
+        .await
+        .map_err(|e| AcdpError::RegistryInternal(format!("tx commit: {e}")))?;
+    report.record_filled(fills.len());
+    Ok(())
+}
+
+/// Close a sweep transaction that wrote nothing, releasing its lock now
+/// rather than when the pool recycles the connection.
+async fn end_sweep_tx(tx: sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), AcdpError> {
+    tx.rollback()
+        .await
+        .map_err(|e| AcdpError::RegistryInternal(format!("tx rollback: {e}")))
 }
 
 /// Split slots into the served event array and the receipts parallel to it.

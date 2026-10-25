@@ -1061,6 +1061,27 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
         tracing::error!(error = %e, "refusing to start: lifecycle state present with [lifecycle] disabled");
         return Err(e);
     }
+    // RFC-ACDP-0017 §10.2: receipt the lifecycle events accepted before
+    // minting was on, before anything is served. A store built without a
+    // minter (the gate is closed) has nothing to do; a store error refuses
+    // to start rather than serve a partial sweep silently. Install the
+    // metrics recorder first (idempotent; `AppStateInner::new` reuses it) so
+    // the sweep's counters are not recorded into the void.
+    if cfg.metrics.enabled {
+        acdp_registry_core::metrics::install_recorder(&cfg.metrics.duration_buckets);
+    }
+    let sweep = store
+        .backfill_event_receipts()
+        .await
+        .map_err(|e| anyhow::anyhow!("event receipt sweep: {e}"))?;
+    if sweep != acdp_registry_store::SweepReport::default() {
+        tracing::info!(
+            contexts_filled = sweep.contexts_filled,
+            receipts_filled = sweep.receipts_filled,
+            contexts_skipped = sweep.contexts_skipped,
+            "event receipt sweep complete (RFC-ACDP-0017 §10.2)"
+        );
+    }
     // Capabilities + RegistryServer.
     let caps = build_capabilities(&cfg);
     let server = RegistryServer::try_new(store, caps, cfg.registry.authority.clone())
