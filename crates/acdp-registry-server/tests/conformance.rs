@@ -9467,6 +9467,7 @@ const KNOWN_FAMILIES: &[&str] = &[
     "body",
     "can",
     "caps",
+    "chain",
     "cur",
     "data-ref",
     "data-ref-ssrf",
@@ -9729,6 +9730,22 @@ const EXCUSED: &[(&str, &str)] = &[
          CROSS_BINARY_GUARDS for why that is structural and what it costs. \
          Reclassified from DEFERRED (#130) under the maintainer's explicit extension of \
          the Phase 14 lc ruling -- see the block comment above rcpt's entry.",
+    ),    (
+        "chain",
+        "applies_to_profiles = [acdp-consumer-chain] on all 10 fixtures (RFC-ACDP-0017, \
+         spec pin 093279a), and none carries an endpoint or a vectors array. Two grounds, \
+         split by fixture. chain-001..008 and chain-010 are rot-shaped: offline \
+         derived_from walks, as-of verdicts, drift and verdict digests are the \
+         CONSUMER's evaluation of a bundle it holds (RFC-ACDP-0017 \u{a7}8-\u{a7}9), so no \
+         harness configuration change would make this registry responsible for them. \
+         chain-009 is lc-shaped and the WEAKER kind: registries/profiles.json lists it in \
+         acdp-registry-lifecycle's conditional_fixtures, required when the registry also \
+         advertises acdp-registry-receipts and declares acdp_version >= 0.5.0 (it then \
+         MUST mint registry_state.event_receipts, RFC-ACDP-0017 \u{a7}10). This harness \
+         advertises only acdp-registry-core (HARNESS_PROFILES), so it is not owed here \
+         today, but a deployment advertising lifecycle + receipts at 0.5.0 DOES owe it, \
+         and event-receipt minting (RFC-ACDP-0017 W1) is what discharges it. None of the \
+         family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
 ];
 
@@ -10122,10 +10139,11 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// before the `16211e6` bump and 144 after. It caught the next one too: 144
 /// before the `9deb7e7` bump (rev-003, rev-004 added; rev-002 only modified,
 /// not counted again) and 146 after; 147 after the `6d5cdb8` bump (sig-004
-/// added). A `>=` floor passes the very scanner
+/// added); 169 after the `093279a` bump (chain-001..010 added, RFC-ACDP-0017).
+/// A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 159;
+const TOTAL_FIXTURES_AT_PIN: usize = 169;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
