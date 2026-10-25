@@ -1125,7 +1125,10 @@ impl Default for ReceiptConfig {
 ///   * serves `registry_state.lifecycle_events` on full retrieval and
 ///     the lineage array;
 ///   * advertises the `acdp-registry-lifecycle` profile plus
-///     `acdp_version` ≥ 0.3.0.
+///     `acdp_version` ≥ 0.3.0;
+///   * with a [`ReceiptConfig`] key configured too, mints an RFC-ACDP-0017
+///     §10 event receipt for every accepted event, in the same
+///     transaction (`acdp_registry_core::receipt::event_receipts_gate`).
 ///
 /// When disabled (the default), both endpoints return
 /// `not_implemented` (HTTP 501) and neither `lifecycle_events` nor the

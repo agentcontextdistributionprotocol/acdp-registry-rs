@@ -63,6 +63,36 @@ publishes would fall through to the fully unverified path. That is a playground
 rule rather than a receipts rule; see
 [CONFIGURATION.md](CONFIGURATION.md).
 
+## Event receipts (ACDP 0.5.0 / RFC-ACDP-0017 §10)
+
+An **event receipt** attests that the registry accepted one lifecycle event
+(a producer `retract`/`republish`, or an `/admin/*` lifecycle action) at
+position `index` of a context's `lifecycle_events`, at `accepted_at`. It binds
+the exact served event JSON, signature included, by `event_hash`.
+
+There is no switch of its own. The registry mints event receipts when all
+three hold:
+
+- `[lifecycle] enabled = true` (advertises `acdp-registry-lifecycle`);
+- a `[receipt]` key is configured (advertises `acdp-registry-receipts`);
+- the registry claims `acdp_version` >= 0.5.0 (always true today).
+
+The **same receipt key** signs them, under the same `key_id`, so the rotation
+procedure and the retention rule below cover event receipts too: a receipt
+signed before a rotation keeps verifying against the retired key in
+`did.json`'s `verificationMethod`.
+
+- `accepted_at` is the registry clock in canonical milliseconds, clamped up so
+  it is never earlier than the context's `created_at` or the previous event's
+  `accepted_at`.
+- The receipt commits in the same transaction as the event: both land or
+  neither does. A byte-identical retry of an event serves the stored receipt
+  and mints nothing.
+- `registry_state.event_receipts` is served, parallel to `lifecycle_events`,
+  only when every event has a receipt. A context whose events predate
+  receipts omits the member until its next lifecycle event, which also
+  receipts the earlier events (see [UPGRADING.md](UPGRADING.md#056)).
+
 ## Lineage-head receipts (ACDP 0.3.0 / RFC-ACDP-0011)
 
 Registry receipts attest **publish-time** facts; a **lineage-head receipt**

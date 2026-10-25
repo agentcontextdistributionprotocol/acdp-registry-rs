@@ -18180,3 +18180,104 @@ fn served_registry_documents_satisfy_the_pinned_schemas() {
         );
     }
 }
+
+/// Phase 4a wiring, end to end on the shipped binary: `run()` attaches the
+/// RFC-ACDP-0017 §10 event-receipt minter when lifecycle and a receipt key
+/// are configured (the binary always claims `acdp_version` 0.5.0). A retract
+/// carries `registry_state.event_receipts[0]`, bound to the served event and
+/// signed by the key the binary's `did.json` publishes under its `key_id`.
+/// The in-process harness mirrors this gate in `tests/common`; only this test
+/// would notice if `main.rs` stopped attaching the minter.
+#[test]
+fn the_shipped_binary_mints_event_receipts_when_lifecycle_and_receipts_are_on() {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    use acdp::types::EventReceipt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let extra = format!(
+        "{}\n{}",
+        served_auth_toml(false),
+        served_full_features_toml()
+    );
+    let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "event-receipts", "", &extra);
+
+    let key = SigningKey::from_bytes(&[0x86; 32]);
+    let producer = Producer::new_did_key(SigningKey::from_bytes(&[0x86; 32]));
+    let req = producer
+        .publish_request()
+        .title("event receipts from the shipped binary")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("publish request");
+    let (status, published) = reg.post(
+        "/contexts",
+        &serde_json::to_value(&req).expect("serialize the publish request"),
+    );
+    assert_eq!(status, 201, "publish: {published}\n{}", reg.output());
+    let ctx_id = published["ctx_id"].as_str().expect("ctx_id").to_string();
+
+    let did = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+    let key_id = acdp::did::key::did_key_url(&did).expect("did:key url");
+    let event = LifecycleEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        CtxId(ctx_id.clone()),
+        LifecycleEventType::Retracted,
+        chrono::Utc::now(),
+        AgentDid::new(did),
+        None,
+    )
+    .expect("valid event")
+    .sign_with(key, key_id)
+    .expect("signed event");
+    let path = format!("/contexts/{}/retract", pct_encode_path_segment(&ctx_id));
+    let (status, retracted) = reg.post(&path, &json!({ "event": event }));
+    assert_eq!(status, 200, "retract: {retracted}\n{}", reg.output());
+
+    let (status, ctx) = reg.get(&format!("/contexts/{}", pct_encode_path_segment(&ctx_id)));
+    assert_eq!(status, 200, "get: {ctx}\n{}", reg.output());
+    let served = &ctx["registry_state"]["event_receipts"];
+    assert_eq!(
+        served.as_array().map(Vec::len),
+        Some(1),
+        "the binary must mint one event receipt per accepted event: {ctx}\n{}",
+        reg.output()
+    );
+    assert_eq!(&retracted["registry_state"]["event_receipts"], served);
+
+    let raw = &served[0];
+    let receipt = EventReceipt::from_value(raw).expect("closed schema");
+    let created_at =
+        chrono::DateTime::parse_from_rfc3339(ctx["body"]["created_at"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+    receipt
+        .check_binding(
+            ctx["body"]["origin_registry"].as_str().unwrap(),
+            &CtxId(ctx_id.clone()),
+            &ctx["registry_state"]["lifecycle_events"][0],
+            0,
+            created_at,
+        )
+        .expect("§10.3 binding");
+
+    let (status, doc) = reg.get("/.well-known/did.json");
+    assert_eq!(status, 200, "did.json: {doc}");
+    let vm = doc["verificationMethod"]
+        .as_array()
+        .expect("verificationMethod")
+        .iter()
+        .find(|m| m["id"] == receipt.signature.key_id.as_str())
+        .unwrap_or_else(|| panic!("{} not in did.json: {doc}", receipt.signature.key_id));
+    let receipt_key = SigningKey::from_bytes(&[0x2c; 32]).verifying_key_bytes();
+    let multibase = acdp::did::key::did_key_from_ed25519(&receipt_key);
+    assert_eq!(
+        multibase.strip_prefix("did:key:"),
+        vm["publicKeyMultibase"].as_str(),
+        "did.json must publish the configured receipt key"
+    );
+    let hash = EventReceipt::preimage_hash_of_value(raw).expect("preimage");
+    receipt
+        .verify_signature_against_hash(&hash, Some(&receipt_key), None)
+        .expect("event receipt signature");
+}

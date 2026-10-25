@@ -33,8 +33,14 @@ on its next transition. A stored receipt is never rewritten. Reads serve
 `registry_state.event_receipts` only when every event of the context has a valid receipt; otherwise
 they omit the member, exactly as before this release.
 
-- **Who is affected:** anyone who queries `lifecycle_events` with `SELECT *` sees one more column.
-  Named-column queries are unaffected.
+- **Minting turns on by itself.** There is no new flag: a registry with `[lifecycle] enabled =
+  true` and a `[receipt]` key configured starts minting event receipts on upgrade, signed with the
+  receipt key. Lifecycle responses and full retrievals of its contexts gain
+  `registry_state.event_receipts`. Unless both are set, nothing changes. See
+  [RECEIPTS.md](RECEIPTS.md#event-receipts-acdp-050--rfc-acdp-0017-10).
+- **Who is affected:** API consumers of a minting registry see the new
+  `registry_state.event_receipts` member. Anyone who queries `lifecycle_events` with `SELECT *`
+  sees one more column; named-column queries are unaffected.
 - **Rollback, Postgres:** safe to 0.5.5. The migrator tolerates the newer applied version, and 0.5.5
   names its columns, so it ignores `receipt`. Receipts minted before the rollback stay in the
   column and are served again after rolling forward, except on a context that took an event while

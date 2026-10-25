@@ -867,6 +867,12 @@ async fn run(cfg: RegistryConfig) -> anyhow::Result<()> {
     } else {
         store
     };
+    // RFC-ACDP-0017 §10: mint an event receipt in the lifecycle transaction
+    // when lifecycle and receipts are advertised at acdp_version >= 0.5.0.
+    let store = match event_receipt_minter(&cfg)? {
+        Some(minter) => store.with_event_receipt_minter(minter),
+        None => store,
+    };
     store.migrate().await?;
     {
         let evictor = store.clone();
@@ -914,6 +920,12 @@ async fn run(cfg: RegistryConfig) -> anyhow::Result<()> {
         store.with_transparency_log()
     } else {
         store
+    };
+    // RFC-ACDP-0017 §10: mint an event receipt in the lifecycle transaction
+    // when lifecycle and receipts are advertised at acdp_version >= 0.5.0.
+    let store = match event_receipt_minter(&cfg)? {
+        Some(minter) => store.with_event_receipt_minter(minter),
+        None => store,
     };
     store.migrate().await?;
     {
@@ -983,7 +995,10 @@ async fn run(cfg: RegistryConfig) -> anyhow::Result<()> {
     if !matches!(cfg.storage.backend, StorageBackend::Memory) {
         anyhow::bail!("this build only supports the memory backend; rebuild with another feature");
     }
-    let store = MemoryStore::new();
+    let store = match event_receipt_minter(&cfg)? {
+        Some(minter) => MemoryStore::new().with_event_receipt_minter(minter),
+        None => MemoryStore::new(),
+    };
     store.migrate().await?;
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
     let revocations: Arc<dyn RevocationStore> = Arc::new(InMemoryRevocationStore::new());
@@ -1413,6 +1428,24 @@ fn ladder_rung_claim(cfg: &RegistryConfig) -> &'static str {
 /// that goes up and back down is a worse signal than one that never
 /// moved.
 const ANCHORS_VERSION_CLAIM: (u32, &str) = (5, "0.5.0");
+
+/// The store's RFC-ACDP-0017 event-receipt minter, gated on the version
+/// this deployment will claim. The store is built before `serve_with_store`
+/// assembles the capabilities, so the claim is computed from the config.
+#[cfg_attr(
+    not(any(
+        feature = "storage-sqlite",
+        feature = "storage-pg",
+        feature = "storage-memory"
+    )),
+    allow(dead_code)
+)]
+fn event_receipt_minter(
+    cfg: &RegistryConfig,
+) -> anyhow::Result<Option<std::sync::Arc<dyn acdp_registry_store::EventReceiptMinter>>> {
+    acdp_registry_core::receipt::event_receipt_minter(cfg, acdp_version_claim(cfg))
+        .map_err(|e| anyhow::anyhow!(e))
+}
 
 /// The final advertised `acdp_version`: the max of every applicable
 /// claim, pre-existing ladder rungs plus the unconditional anchors

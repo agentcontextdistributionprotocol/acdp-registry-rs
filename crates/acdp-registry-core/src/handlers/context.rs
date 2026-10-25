@@ -828,7 +828,7 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
 ///
 /// Comparison is numeric, not lexical — `"0.10.0"` must compare `>=`
 /// `"0.5.0"` rather than losing to it because `"10" < "5"` as strings.
-fn version_at_least(v: &str, major: u64, minor: u64) -> bool {
+pub(crate) fn version_at_least(v: &str, major: u64, minor: u64) -> bool {
     let Ok(parts) = v
         .split('.')
         .map(|p| p.parse::<u64>())

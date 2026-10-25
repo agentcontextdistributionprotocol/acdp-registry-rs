@@ -105,6 +105,9 @@ const AUTHORITY: &str = "registry.test";
 pub enum StoreMode {
     Memory,
     File,
+    /// Reconnect to the database in a [`StoreMode::File`] harness's
+    /// directory (taken from [`Harness::db`]), as a restarted binary would.
+    Reopen(tempfile::TempDir),
 }
 
 /// Per-test handle. When built with [`StoreMode::File`], `db` keeps the
@@ -163,6 +166,20 @@ impl Harness {
     }
 }
 
+/// Mirror the binary's RFC-ACDP-0017 wiring: attach the event-receipt
+/// minter when the gate opens for the harness's declared `acdp_version`.
+#[cfg(feature = "storage-sqlite")]
+fn with_event_receipts(
+    store: SqliteStore,
+    cfg: &RegistryConfig,
+    caps: &CapabilitiesDocument,
+) -> SqliteStore {
+    match acdp_registry_core::receipt::event_receipt_minter(cfg, &caps.acdp_version).unwrap() {
+        Some(minter) => store.with_event_receipt_minter(minter),
+        None => store,
+    }
+}
+
 /// Builds a full `Harness` (or bare `Router`, via `.router`) the same way
 /// the real binary's `run()` wires a `RegistryServer` + `AppStateInner`:
 /// transparency log, receipt signer, lineage head receipts, and lifecycle
@@ -200,6 +217,11 @@ pub async fn build_harness_with_webhook(
             let store = SqliteStore::connect_in_memory().await.unwrap();
             (store, None, None)
         }
+        StoreMode::Reopen(dir) => {
+            let path = dir.path().join(DB_FILE_NAME);
+            let store = SqliteStore::connect(&path, 1).await.unwrap();
+            (store, Some(dir), Some(path))
+        }
     };
     // RFC-ACDP-0012: mirror the binary's run() wiring — an enabled [log]
     // makes every commit_publish append the leaf atomically.
@@ -208,6 +230,7 @@ pub async fn build_harness_with_webhook(
     } else {
         store
     };
+    let store = with_event_receipts(store, &cfg, &caps);
     store.migrate().await.unwrap();
     let server = RegistryServer::try_new(store, caps, authority).unwrap();
     // Mirror the binary's serve_with_store wiring: a configured receipt
@@ -287,6 +310,7 @@ impl SeededHarness {
         } else {
             store
         };
+        let store = with_event_receipts(store, &cfg, &caps);
         store.migrate().await.unwrap();
         let server = wire_server(store, caps, authority, &cfg);
         let server = Arc::new(server);
@@ -340,6 +364,11 @@ impl SeededHarness {
     /// combined with the new `caps`. This is what actually makes the new
     /// `public_arm_open` value take effect, while every context
     /// published before the rebuild remains readable afterward.
+    ///
+    /// The cloned store keeps the event-receipt minter decided at
+    /// construction (`with_event_receipts`): a rebuild that changes the
+    /// lifecycle, receipt or `acdp_version` half of the RFC-ACDP-0017
+    /// gate does NOT re-decide minting. Build a fresh harness for that.
     pub fn rebuild(&mut self, cfg: RegistryConfig, caps: CapabilitiesDocument) {
         let store = self.server.store().clone();
         let server = Arc::new(wire_server(store, caps, &self.authority, &cfg));

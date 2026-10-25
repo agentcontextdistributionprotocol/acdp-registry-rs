@@ -56,8 +56,6 @@ impl MemoryStore {
 
     /// Mint an RFC-ACDP-0017 §10 event receipt for every lifecycle event
     /// this store accepts, and serve `registry_state.event_receipts`.
-    // TODO(rfc0017 P4a): drop once main.rs attaches the minter at startup.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_event_receipt_minter(mut self, minter: Arc<dyn EventReceiptMinter>) -> Self {
         self.event_receipt_minter = Some(minter);
         self

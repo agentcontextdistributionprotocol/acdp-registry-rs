@@ -10,9 +10,11 @@
 use acdp::crypto::SigningKey;
 use acdp::did::authority_to_did_web;
 use acdp::types::receipt::ReceiptSigner;
-use acdp_registry_types::ReceiptConfig;
+use acdp_registry_store::EventReceiptMinter;
+use acdp_registry_types::{ReceiptConfig, RegistryConfig};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use std::sync::Arc;
 
 /// Load the Ed25519 receipt signing key from the configured source.
 ///
@@ -72,6 +74,31 @@ pub fn build_signer(cfg: &ReceiptConfig, authority: &str) -> Result<ReceiptSigne
     let registry_did = authority_to_did_web(authority);
     let key_id = format!("{registry_did}#{fragment}");
     ReceiptSigner::new(key, registry_did, key_id).map_err(|e| format!("receipt signer: {e}"))
+}
+
+/// Whether this deployment mints RFC-ACDP-0017 §10 event receipts: it
+/// advertises `acdp-registry-lifecycle` (lifecycle enabled) and
+/// `acdp-registry-receipts` (a receipt key is configured), and claims
+/// `acdp_version` >= 0.5.0. An unparseable version fails closed.
+pub fn event_receipts_gate(cfg: &RegistryConfig, acdp_version: &str) -> bool {
+    cfg.lifecycle.enabled
+        && cfg.receipt.is_configured()
+        && crate::handlers::version_at_least(acdp_version, 0, 5)
+}
+
+/// The event-receipt minter for the store, or `None` when
+/// [`event_receipts_gate`] is closed. It signs with the publish receipt key
+/// and key id; it is a second [`ReceiptSigner`] because the publish path
+/// takes its signer by value.
+pub fn event_receipt_minter(
+    cfg: &RegistryConfig,
+    acdp_version: &str,
+) -> Result<Option<Arc<dyn EventReceiptMinter>>, String> {
+    if !event_receipts_gate(cfg, acdp_version) {
+        return Ok(None);
+    }
+    let signer = build_signer(&cfg.receipt, &cfg.registry.authority)?;
+    Ok(Some(Arc::new(signer)))
 }
 
 /// Generate the registry's own `did:web` DID document, served at
@@ -159,6 +186,70 @@ mod tests {
             signing_key_seed_b64: B64.encode([7u8; 32]),
             ..Default::default()
         }
+    }
+
+    fn gate_cfg(lifecycle: bool, key: bool) -> RegistryConfig {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.registry.authority = "reg.test".into();
+        cfg.lifecycle.enabled = lifecycle;
+        if key {
+            cfg.receipt = cfg_with_seed();
+        }
+        cfg
+    }
+
+    #[test]
+    fn event_receipts_gate_truth_table() {
+        for lifecycle in [false, true] {
+            for key in [false, true] {
+                for (version, at_least) in [
+                    ("0.3.0", false),
+                    ("0.5.0", true),
+                    ("0.6.0", true),
+                    ("0.5", false),
+                ] {
+                    let cfg = gate_cfg(lifecycle, key);
+                    let want = lifecycle && key && at_least;
+                    assert_eq!(
+                        event_receipts_gate(&cfg, version),
+                        want,
+                        "lifecycle={lifecycle} key={key} version={version}"
+                    );
+                    let minter = event_receipt_minter(&cfg, version).expect("valid config");
+                    assert_eq!(minter.is_some(), want);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn event_receipt_minter_signs_with_the_publish_key() {
+        let cfg = gate_cfg(true, true);
+        let minter = event_receipt_minter(&cfg, "0.5.0").unwrap().unwrap();
+        let publish = build_signer(&cfg.receipt, &cfg.registry.authority).unwrap();
+        let ctx_id = acdp::types::primitives::CtxId(
+            "acdp://reg.test/00000000-0000-4000-8000-000000000000".into(),
+        );
+        let event = serde_json::json!({
+            "event_id": "00000000-0000-4000-8000-000000000001",
+            "ctx_id": ctx_id.0,
+            "event_type": "retracted",
+            "occurred_at": "2026-01-01T00:00:00.000Z",
+            "actor": "did:web:agents.test:actor",
+        });
+        let at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:01.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let r = minter.mint(&ctx_id, &event, 0, at).unwrap();
+        assert_eq!(r.registry_did, publish.registry_did());
+        assert_eq!(r.signature.key_id, publish.key_id());
+    }
+
+    #[test]
+    fn event_receipt_minter_surfaces_a_bad_key() {
+        let mut cfg = gate_cfg(true, true);
+        cfg.receipt.signing_key_seed_b64 = "not base64!".into();
+        assert!(event_receipt_minter(&cfg, "0.5.0").is_err());
     }
 
     #[test]
