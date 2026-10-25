@@ -9738,14 +9738,17 @@ const EXCUSED: &[(&str, &str)] = &[
          derived_from walks, as-of verdicts, drift and verdict digests are the \
          CONSUMER's evaluation of a bundle it holds (RFC-ACDP-0017 \u{a7}8-\u{a7}9), so no \
          harness configuration change would make this registry responsible for them. \
-         chain-009 is lc-shaped and the WEAKER kind: registries/profiles.json lists it in \
+         chain-009 is lc-shaped: registries/profiles.json lists it in \
          acdp-registry-lifecycle's conditional_fixtures, required when the registry also \
          advertises acdp-registry-receipts and declares acdp_version >= 0.5.0 (it then \
-         MUST mint registry_state.event_receipts, RFC-ACDP-0017 \u{a7}10). This harness \
-         advertises only acdp-registry-core (HARNESS_PROFILES), so it is not owed here \
-         today, but a deployment advertising lifecycle + receipts at 0.5.0 DOES owe it, \
-         and event-receipt minting (RFC-ACDP-0017 W1) is what discharges it. None of the \
-         family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
+         MUST mint registry_state.event_receipts, RFC-ACDP-0017 \u{a7}10). Its \
+         registry-side scenarios A and B are DISCHARGED, not excused: \
+         chain009_event_receipts_registry_side runs them against the shipped binary \
+         configured with lifecycle + receipts at 0.5.0 (EXERCISED_FIXTURES), and its \
+         consumer-side scenarios C-G stay the consumer's, like the rest of the family. \
+         This replay harness advertises only acdp-registry-core (HARNESS_PROFILES), so \
+         the family stays excused from the replay. None of the family is in \
+         acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
 ];
 
@@ -14151,8 +14154,9 @@ macro_rules! exercised_by {
 /// `pub-009`, `pub-010`, `ret-002`. Eight at U-553, which added the three
 /// `ConditionalOnCapability` rows: `dk-003`, `err-002`, `idem-007`. Nine once
 /// `pub-007` was retired, after a fresh publish began answering `201 Created`
-/// with a percent-encoded `Location`.
-const EXERCISED_FIXTURES_AT_PIN: usize = 9;
+/// with a percent-encoded `Location`. Ten with `chain-009`, once event
+/// receipts (RFC-ACDP-0017 W1) made its registry-side scenarios testable.
+const EXERCISED_FIXTURES_AT_PIN: usize = 10;
 
 #[rustfmt::skip]
 const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
@@ -14170,6 +14174,9 @@ const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
     exercised_by!("dk-003", dk003_did_key_publish_refused_when_method_not_advertised),
     exercised_by!("err-002", err002_media_type_matrix_is_driven_by_the_fixture),
     exercised_by!("idem-007", idem007_capabilities_at_0_3_0_must_advertise_idempotency),
+    // RFC-ACDP-0017 W1: scenarios A and B against the shipped binary, which
+    // advertises lifecycle + receipts at 0.5.0 (asserted by the test itself).
+    exercised_by!("chain-009", chain009_event_receipts_registry_side),
 ];
 
 /// Every fixture this suite claims to have retired must really be requested by
@@ -18294,6 +18301,206 @@ fn verified_binary_event_receipts(
             .unwrap_or_else(|e| panic!("receipt {i}: signature: {e}"));
     }
     served
+}
+
+/// chain-009 scenarios A and B (RFC-ACDP-0017 §10), the registry-side half,
+/// against the shipped binary. The fixture applies to registries advertising
+/// `acdp-registry-lifecycle` and `acdp-registry-receipts` at an
+/// `acdp_version` of at least 0.5.0, so that precondition is asserted from
+/// the binary's own capabilities before anything else.
+///
+/// A: after a retract (e0) and a republish (e1) the context serves exactly
+/// two receipts, index 0 and 1, each bound to its served event
+/// (`event_hash` = sha256(JCS(event incl. signature))), signed under the
+/// receipt key that `did.json` publishes, of type `acdp-event-receipt/1`,
+/// with `accepted_at` non-decreasing and >= `body.created_at`.
+/// B: a byte-identical retry of e1 answers 200 with the same receipts and
+/// mints no third.
+///
+/// Finally the served evidence goes through `acdp::chain::verify_chain`,
+/// as a consumer would run it: the retraction stage must admit both events
+/// on the `registry` basis, which it grants only to verified receipts.
+#[test]
+fn chain009_event_receipts_registry_side() {
+    use acdp::chain::RetractionValue;
+    use acdp::chain::{verify_chain, Basis, ContextEvidence, DidSnapshot, Evidence, Options};
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    use acdp::types::EventReceipt;
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping chain-009");
+        return;
+    };
+    let Some(fx) = find_fixture_by_id(&fixtures, "chain-009") else {
+        panic!("chain-009 not found at the pinned spec");
+    };
+    let scenarios: Vec<&str> = fx["scenarios"]
+        .as_array()
+        .unwrap_or_else(|| panic!("chain-009 scenarios[] missing: {fx}"))
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    for prefix in ["A ", "B "] {
+        assert!(
+            scenarios.iter().any(|n| n.starts_with(prefix)),
+            "chain-009 no longer has scenario {prefix}— re-read the fixture: {scenarios:?}"
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let extra = format!(
+        "{}\n{}",
+        served_auth_toml(false),
+        served_full_features_toml()
+    );
+    let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "chain-009", "", &extra);
+
+    // The fixture's precondition, from the registry's own capabilities.
+    let (status, caps) = reg.get("/.well-known/acdp.json");
+    assert_eq!(status, 200, "capabilities: {caps}");
+    let profiles: Vec<&str> = caps["profiles"]
+        .as_array()
+        .expect("profiles")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        profiles.contains(&"acdp-registry-lifecycle")
+            && profiles.contains(&"acdp-registry-receipts"),
+        "chain-009 binds only a lifecycle + receipts registry: {caps}"
+    );
+    let version = caps["acdp_version"].as_str().expect("acdp_version");
+    let parse = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.parse().unwrap()).collect() };
+    assert!(
+        parse(version) >= vec![0, 5, 0],
+        "chain-009 binds at >= 0.5.0: {version}"
+    );
+
+    let seed = [0x88; 32];
+    let req = Producer::new_did_key(SigningKey::from_bytes(&seed))
+        .publish_request()
+        .title("chain-009 registry side")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("publish request");
+    let (status, published) = reg.post(
+        "/contexts",
+        &serde_json::to_value(&req).expect("serialize the publish request"),
+    );
+    assert_eq!(status, 201, "publish: {published}\n{}", reg.output());
+    let ctx_id = published["ctx_id"].as_str().expect("ctx_id").to_string();
+
+    let event = |event_type: LifecycleEventType| {
+        let key = SigningKey::from_bytes(&seed);
+        let did = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+        let key_id = acdp::did::key::did_key_url(&did).expect("did:key url");
+        let e = LifecycleEvent::new(
+            uuid::Uuid::new_v4().to_string(),
+            CtxId(ctx_id.clone()),
+            event_type,
+            chrono::Utc::now(),
+            AgentDid::new(did),
+            None,
+        )
+        .expect("valid event")
+        .sign_with(key, key_id)
+        .expect("signed event");
+        json!({ "event": e })
+    };
+    let path = |op: &str| format!("/contexts/{}/{op}", pct_encode_path_segment(&ctx_id));
+
+    // Scenario A — issuance.
+    let e0 = event(LifecycleEventType::Retracted);
+    let (status, v) = reg.post(&path("retract"), &e0);
+    assert_eq!(status, 200, "e0 retract: {v}\n{}", reg.output());
+    let e1 = event(LifecycleEventType::Republished);
+    let (status, v) = reg.post(&path("republish"), &e1);
+    assert_eq!(status, 200, "e1 republish: {v}\n{}", reg.output());
+    let served = verified_binary_event_receipts(&reg, &ctx_id, 2);
+    assert_eq!(v["registry_state"]["event_receipts"], served);
+
+    let (_, ctx) = reg.get(&format!("/contexts/{}", pct_encode_path_segment(&ctx_id)));
+    let events = ctx["registry_state"]["lifecycle_events"]
+        .as_array()
+        .expect("lifecycle_events");
+    assert_eq!(events, &vec![e0["event"].clone(), e1["event"].clone()]);
+    let created_at =
+        chrono::DateTime::parse_from_rfc3339(ctx["body"]["created_at"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+    let mut previous = created_at;
+    for (i, raw) in served.as_array().unwrap().iter().enumerate() {
+        let r = EventReceipt::from_value(raw).expect("closed schema");
+        assert_eq!(r.receipt_type, "acdp-event-receipt/1");
+        assert_eq!(r.index, i as u64);
+        assert_eq!(
+            r.event_hash,
+            EventReceipt::event_hash_of_value(&events[i]).expect("event hash"),
+            "receipt {i}: event_hash is sha256(JCS(event incl. signature))"
+        );
+        assert!(
+            r.accepted_at >= previous,
+            "receipt {i}: accepted_at went backwards"
+        );
+        previous = r.accepted_at;
+    }
+
+    // Scenario B — a byte-identical retry of e1 mints nothing.
+    let (status, retry) = reg.post(&path("republish"), &e1);
+    assert_eq!(status, 200, "e1 retry: {retry}\n{}", reg.output());
+    assert_eq!(retry["registry_state"]["event_receipts"], served);
+    assert_eq!(verified_binary_event_receipts(&reg, &ctx_id, 2), served);
+
+    // A consumer's verdict over the served evidence.
+    let (_, did_doc) = reg.get("/.well-known/did.json");
+    let registry_did = did_doc["id"].as_str().expect("did.json id").to_string();
+    let mut evidence = Evidence::new();
+    let mut ce = ContextEvidence::new(ctx["body"].clone());
+    ce.registry_receipt = Some(ctx["registry_receipt"].clone());
+    ce.lifecycle_events = Some(events.clone());
+    ce.event_receipts = Some(served.as_array().unwrap().clone());
+    evidence.contexts.insert(ctx_id.clone(), ce);
+    // Both the snapshot and the as-of time are millisecond-aligned (§5.3).
+    let observed = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    let t = chrono::DateTime::parse_from_rfc3339(&observed)
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    evidence.did_documents = Some(
+        [(
+            registry_did,
+            vec![DidSnapshot::new(
+                did_doc.as_object().expect("did.json object").clone(),
+                observed,
+            )],
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let verdict =
+        verify_chain(&[ctx_id.as_str()], &evidence, &Options::as_of(t)).expect("verify_chain");
+    let node = verdict
+        .nodes
+        .iter()
+        .find(|n| n.ctx_id == ctx_id)
+        .expect("root node");
+    for (label, pass) in [
+        ("as-of", node.as_of.as_ref().expect("as-of pass")),
+        ("latest", &node.latest),
+    ] {
+        let r = pass.stages.retraction.as_ref().expect("retraction stage");
+        assert_eq!(
+            (r.value, r.events_admitted, r.basis),
+            (
+                RetractionValue::NotRetracted,
+                Some(2),
+                Some(Basis::Registry)
+            ),
+            "{label}: a consumer must admit both events on the registry basis: {r:?}"
+        );
+    }
 }
 
 /// Phase 4b wiring, end to end on the shipped binary: events accepted while

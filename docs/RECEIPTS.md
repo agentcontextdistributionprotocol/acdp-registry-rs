@@ -94,6 +94,21 @@ signed before a rotation keeps verifying against the retired key in
   and by the next lifecycle event on their context (see
   [UPGRADING.md](UPGRADING.md#056) and
   [OPERATIONS.md](OPERATIONS.md#event-receipt-sweep)).
+- It is served everywhere `lifecycle_events` is: `GET /contexts/{id}`, the
+  `retract`/`republish` responses (producer and `/admin/*`), and each member
+  of `GET /lineages/{id}` and `/lineages/{id}/current`, which also carry
+  their `registry_receipt` (RFC-ACDP-0017 §11). A federated retrieval passes
+  the origin registry's receipts through untouched.
+
+To verify one (§10.3): parse it against the closed schema, check that it
+binds to the served event at its position (`ctx_id`, `index`, `event_id`,
+`event_hash` = sha256 over the JCS of the event including its signature,
+`registry_did` = the origin's `did:web`, `accepted_at` >= `created_at`),
+then verify the signature against the key `did.json` publishes for its
+`key_id`. The `acdp` SDK does all of it: `EventReceipt::check_binding` and
+`verify_signature_against_hash`, or `acdp::chain::verify_chain` over a
+whole bundle, which admits an event on the `registry` basis only when its
+receipt verifies.
 
 ## Lineage-head receipts (ACDP 0.3.0 / RFC-ACDP-0011)
 
@@ -241,6 +256,14 @@ receipts for previously published contexts, attesting the stored `created_at`.
 This implementation does not, for the reason above, so those contexts are served
 without a receipt. The same applies to transparency-log leaves (see
 [CONFIGURATION.md · `[log]`](CONFIGURATION.md#log-acdp-030)).
+
+**Event receipts are the exception, and they do not contradict the rule.**
+An event receipt attests only that the registry accepted the event *at*
+`accepted_at`, and `accepted_at` is never backdated. A legacy event receipted
+by the startup sweep carries the sweep's clock, which is true: the registry
+holds that event and vouches for it from then on. A consumer evaluating an
+as-of time before the sweep does not count that receipt, which is the honest
+answer.
 
 The `GET /admin/lineages/{lineage_id}/audit` report exposes
 `receiptless_contexts` so you can see how much pre-receipts history a lineage

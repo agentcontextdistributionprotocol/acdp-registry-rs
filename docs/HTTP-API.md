@@ -490,6 +490,15 @@ empty) and its `status` reflects the §7.2 precedence
 (`retracted` > `superseded` > `expired` > `active`). Retraction is
 mark-not-delete: the body of a retracted context is served unchanged.
 
+When the registry also advertises `acdp-registry-receipts` and declares
+`acdp_version` >= 0.5.0, `registry_state.event_receipts` runs parallel to
+`lifecycle_events`: element `i` is the `acdp-event-receipt/1` the registry
+signed with its receipt key when it accepted event `i` (RFC-ACDP-0017 §10).
+It is append-only, and it is served only when every event has a receipt
+(omitted otherwise, including when there are no events). A byte-identical
+retry of an event serves the stored receipt rather than minting another. See
+[RECEIPTS.md](RECEIPTS.md#event-receipts-acdp-050--rfc-acdp-0017-10).
+
 ### `GET /contexts/{ctx_id}/body`
 
 As above, but returns only the context `Body` (no envelope metadata, and
@@ -568,7 +577,11 @@ RFC-ACDP-0008, rather than as a value to paginate against.
 Every version in a lineage as a `FullContext` array, visibility- and
 tenant-filtered. Optional bearer. Each version carries its own projected
 `status` and (under the lifecycle profile) its `lifecycle_events` — the
-lineage array is the record, and the record includes withdrawals.
+lineage array is the record, and the record includes withdrawals. Each
+member also carries what its full retrieval carries (RFC-ACDP-0017 §11):
+the top-level `registry_receipt` when one was minted and, on an event
+receipts registry, `registry_state.event_receipts`, so a consumer can
+verify a whole lineage from this one response.
 
 ### `GET /lineages/{lineage_id}/current`
 
@@ -578,6 +591,9 @@ still a valid head). `404` when the lineage is unknown, no version is
 visible, or every version is superseded-or-retracted; retracting a linear
 lineage's head therefore takes the lineage off `/current` entirely until
 the producer republishes it or supersedes it with a fresh version.
+The head is served as a full `FullContext`, with the same
+`registry_receipt`, `lifecycle_events` and `event_receipts` as its full
+retrieval.
 
 When `receipt.head_receipts = true` (ACDP 0.3.0 / RFC-ACDP-0011) the
 response additionally carries a top-level `lineage_head_receipt`: a
@@ -619,7 +635,8 @@ What is specific to this registry:
   not the producer) is never charged. See [Rate limits](#rate-limits-429).
 - **Response.** `200` with the post-transition full-retrieval envelope
   (`body` + `registry_state`, `status` re-derived, `lifecycle_events`
-  including the new event).
+  including the new event, and on an event-receipts registry
+  `event_receipts` including its receipt).
 
 Only the producer may use these endpoints (delegation is not supported).
 Registry-initiated events go through the admin-gated
@@ -918,7 +935,8 @@ non-retracted context), byte-identical-`event_id` idempotency, and the
 DID). On success returns `200` with the full-retrieval envelope (`body` +
 `registry_state`), the minted event appended to
 `registry_state.lifecycle_events` so its registry attribution is visible to
-consumers.
+consumers. On an event-receipts registry the event is receipted exactly
+like a producer event, in the same transaction, under the same receipt key.
 
 **Cross-actor alternation is allowed.** RFC-ACDP-0013 §7.1 derives retraction
 state from event-type *order* alone (never the actor), and §6 authorizes the

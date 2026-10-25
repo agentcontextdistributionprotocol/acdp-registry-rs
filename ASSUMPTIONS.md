@@ -5002,3 +5002,9 @@ underlying settings and code were not touched by this pass, only the record of t
 - **CONFIRMED (decided, reversible): migration 016 was edited in place to add the
   `receipt IS NULL` partial index.** This is safe because 016 has not been released yet: it
   is only on `feat/rfc0017-event-receipts` and no tag contains it.
+
+## rfc0017-event-receipts — Phase 5 (2026-10-24)
+
+- **CONFIRMED (decided, reversible): chain-009 is checked by verify_chain with only the registry's DID snapshot.** The evidence holds the context, its registry receipt, events and event receipts, and the registry's `did.json`. The producer is a `did:key`, so it needs no snapshot. The as-of time is ms-aligned, which `Options::as_of` requires. Why: it is the smallest evidence set on which the SDK admits the events on the `registry` basis. A mutation (dropping the receipts) makes the test fail.
+- **CONFIRMED (decided, reversible): the test harnesses gained receipt-gated variants, not new defaults.** These are `didweb_lifecycle_harness_with(resolver, rate, event_receipts)` and pg `harness_with_config(cfg, url, caps)`. Existing tests keep the caps_030 harnesses, so their wire expectations are unchanged.
+- **CONFIRMED (decided, reversible): chain-009 is described as discharged rather than excused.** Its registry-side A–B scenarios run against the binary configured with lifecycle + receipts at 0.5.0. `HARNESS_PROFILES` stays core-only, so the replay still excuses the chain family.
