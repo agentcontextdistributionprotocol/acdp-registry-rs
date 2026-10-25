@@ -21,6 +21,32 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.5.6
+
+**This release adds migration 016 (both backends): a nullable `receipt` column on
+`lifecycle_events`, which holds the RFC-ACDP-0017 §10 event receipt for each lifecycle event.**
+
+The column is additive and starts NULL for every existing event. A registry that mints event
+receipts fills it in the same transaction as each new event. It also receipts a context's earlier
+un-receipted events the next time that context gets an event, so a legacy history becomes complete
+on its next transition. A stored receipt is never rewritten. Reads serve
+`registry_state.event_receipts` only when every event of the context has a valid receipt; otherwise
+they omit the member, exactly as before this release.
+
+- **Who is affected:** anyone who queries `lifecycle_events` with `SELECT *` sees one more column.
+  Named-column queries are unaffected.
+- **Rollback, Postgres:** safe to 0.5.5. The migrator tolerates the newer applied version, and 0.5.5
+  names its columns, so it ignores `receipt`. Receipts minted before the rollback stay in the
+  column and are served again after rolling forward, except on a context that took an event while
+  0.5.5 was running: that event has no receipt, so the context omits `event_receipts` until its next
+  lifecycle event receipts the missing one.
+- **Rollback, SQLite:** unchanged. A database migrated by a newer binary already refuses an older
+  one; restore the pre-upgrade file, as for any release that adds a migration.
+- **Unchanged:** configuration keys and defaults, and every response of a registry that does not
+  mint event receipts.
+
+---
+
 ## 0.5.5
 
 **No operator-visible upgrade steps.** The server binary, configuration, schema and API are unchanged

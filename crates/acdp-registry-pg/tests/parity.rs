@@ -235,3 +235,24 @@ async fn batched_visibility_matches_the_cross_backend_contract() {
     let store = store(&url).await;
     parity::assert_batched_visibility_parity(&store, "pg").await;
 }
+
+/// RFC-ACDP-0017 §10: fill-on-append, binding, signature, replay and read
+/// parity of event receipts. Two handles on one database: one without a
+/// minter (the legacy prefix), one with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_receipts_match_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    let key = acdp::crypto::SigningKey::from_bytes(&[98u8; 32]);
+    let pubkey = key.verifying_key_bytes();
+    let signer =
+        acdp::types::ReceiptSigner::new(key, "did:web:reg.test", "did:web:reg.test#receipt-key-1")
+            .expect("signer");
+    let minting = Arc::new(
+        plain
+            .as_ref()
+            .clone()
+            .with_event_receipt_minter(Arc::new(signer)),
+    );
+    parity::assert_lifecycle_event_receipts(&plain, &minting, pubkey, "pg").await;
+}

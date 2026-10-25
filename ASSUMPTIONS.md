@@ -4983,3 +4983,10 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** remap in this registry and keep acdp's `SchemaViolation` variant (the spec pins `consumer_error: schema_violation` for schema-002/005/008, a direct consumer).
 - **Alternatives:** a dedicated acdp variant; changing `http_status_for_acdp` for `SchemaViolation` (would flip genuine local 400s); matching the `"malformed registry response:"` prefix.
 - **Blast radius if wrong:** one status code on federated retrieval; revert the mapping. **Status:** CONFIRMED (2026-10-18) for (a): the maintainer approved merging #445 (9fcded8) and releasing 0.5.3 with this mapping. (b) is recorded in DEFERRED.md with its trigger.
+
+## RFC-ACDP-0017 event receipts, Phase 2 (2026-10-24)
+- **Plan:** plans/rfc0017-event-receipts.md
+- **Assumed:** (a) a stored receipt that decodes but names another event, index or ctx is `Corrupt`: logged, served as missing, never overwritten, and it makes the history a hole (no fills; the new event is still receipted at its true index). (b) Fill-on-append mints receipts for earlier NULL slots only when no NULL precedes a receipted slot; filling a hole would need an `accepted_at` above a later receipt's (§10.3 step 8). (c) `accepted_at` lifts `created_at` with `ceil_ms` so the mint's ms truncation never lands below it. (d) SQLite stays not-N-1-safe for this migration, like every SQLite migration; Postgres is N-1 safe. (e) The UPGRADING section is headed `## 0.5.6`, assuming release-plz cuts a patch for a `feat` on 0.x.
+- **Chose:** the D1–D5 design as planned.
+- **Alternatives:** repairing holes by re-minting (breaks append-only); a separate receipts table (two writes to keep parallel).
+- **Blast radius if wrong:** a context's `event_receipts` stays omitted (never wrong data); the version heading moves if release-plz picks another version. **Status:** UNCONFIRMED.

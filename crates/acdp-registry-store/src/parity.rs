@@ -1680,6 +1680,181 @@ where
     );
 }
 
+/// **RFC-ACDP-0017 §10 — event receipts are minted, stored and served
+/// identically by every durable backend.**
+///
+/// `plain` and `minting` MUST be two handles on the SAME database: `plain`
+/// built without an event-receipt minter (a pre-upgrade registry, or one
+/// with the profile off), `minting` with
+/// `with_event_receipt_minter(<ReceiptSigner for did:web:reg.test>)`. The
+/// builder is inherent to each backend, so the caller attaches it; `pubkey`
+/// is that signer's Ed25519 public key.
+///
+/// Legs:
+/// 1. **Fill-on-append (AC8).** Three events committed through `plain`
+///    carry no receipt and `plain` never serves the member; a fourth through
+///    `minting` receipts all four in one transaction. The fixture ends on a
+///    republish so the context is the lineage head `current` serves.
+/// 2. **Binding + signature (AC2).** Every served receipt passes
+///    `check_binding` against its served event at its position, verifies
+///    under `pubkey`, and `accepted_at` is non-decreasing from `created_at`.
+/// 3. **Replay (AC3).** A byte-identical retry returns the same receipt
+///    bytes and mints nothing.
+/// 4. **Read parity (AC5).** `get`, `lineage` and `current` serve the same
+///    array.
+pub async fn assert_lifecycle_event_receipts<S>(
+    plain: &Arc<S>,
+    minting: &Arc<S>,
+    pubkey: [u8; 32],
+    label: &str,
+) where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::registry::LifecycleCommitOutcome;
+    use acdp::types::EventReceipt;
+
+    const SEED: u8 = 252;
+    let ctx_id = publish_titled(plain, SEED, "event receipt parity fixture").await;
+    let ctx = CtxId(ctx_id.clone());
+    let commit = |store: &Arc<S>, event: LifecycleEvent| {
+        let s = Arc::clone(store);
+        async move {
+            tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&event))
+                .await
+                .expect("commit task")
+                .expect("lifecycle commit succeeds")
+        }
+    };
+    let event = |n: u8, kind: LifecycleEventType| {
+        // A canonical lowercase v4 UUID, unique per run: the context's own
+        // UUID with its last hex digit replaced by `n`.
+        let uuid = ctx_id.rsplit('/').next().expect("ctx_id ends in a UUID");
+        let event_id = format!("{}{n:x}", &uuid[..uuid.len() - 1]);
+        LifecycleEvent::new(
+            event_id,
+            ctx.clone(),
+            kind,
+            Utc::now(),
+            AgentDid::new(agent_did(SEED)),
+            None,
+        )
+        .expect("valid lifecycle event")
+    };
+
+    // Leg 1: a legacy prefix with no receipts, then fill-on-append.
+    commit(plain, event(1, LifecycleEventType::Retracted)).await;
+    commit(plain, event(2, LifecycleEventType::Republished)).await;
+    let legacy = commit(plain, event(3, LifecycleEventType::Retracted)).await;
+    let LifecycleCommitOutcome::Applied(legacy) = legacy else {
+        panic!("[{label}] fixture is wrong: the third event must apply");
+    };
+    assert!(
+        legacy.registry_state.event_receipts().is_none(),
+        "[{label}] a store without a minter must never serve event_receipts"
+    );
+    let fourth = event(4, LifecycleEventType::Republished);
+    let applied = match commit(minting, fourth.clone()).await {
+        LifecycleCommitOutcome::Applied(c) => c,
+        other => panic!("[{label}] the fourth event must apply, got {other:?}"),
+    };
+
+    // Leg 2: every receipt binds to its served event and verifies.
+    let check = |c: &acdp::types::body::FullContext, what: &str| -> Vec<serde_json::Value> {
+        let events = c.registry_state.lifecycle_events.as_deref().unwrap_or(&[]);
+        let receipts = c
+            .registry_state
+            .event_receipts()
+            .unwrap_or_else(|| panic!("[{label}] {what}: event_receipts is absent"))
+            .unwrap_or_else(|e| panic!("[{label}] {what}: event_receipts undecodable: {e}"));
+        assert_eq!(
+            receipts.len(),
+            events.len(),
+            "[{label}] {what}: event_receipts is not parallel to lifecycle_events"
+        );
+        assert_eq!(events.len(), 4, "[{label}] {what}: expected four events");
+        let mut prev = c.body.created_at;
+        let mut raw = Vec::new();
+        for (i, (r, e)) in receipts.iter().zip(events).enumerate() {
+            let served = serde_json::to_value(e).expect("event serializes");
+            r.check_binding(AUTHORITY, &ctx, &served, i as u64, c.body.created_at)
+                .unwrap_or_else(|err| panic!("[{label}] {what}: receipt {i} binding: {err}"));
+            let value = serde_json::to_value(r).expect("receipt serializes");
+            let hash = EventReceipt::preimage_hash_of_value(&value).expect("preimage hash");
+            r.verify_signature_against_hash(&hash, Some(&pubkey), None)
+                .unwrap_or_else(|err| panic!("[{label}] {what}: receipt {i} signature: {err}"));
+            assert!(
+                r.accepted_at >= prev,
+                "[{label}] {what}: receipt {i} accepted_at {} precedes {prev}",
+                r.accepted_at
+            );
+            prev = r.accepted_at;
+            raw.push(value);
+        }
+        raw
+    };
+    let on_commit = check(&applied, "commit response");
+
+    // Leg 3: a byte-identical replay serves the stored receipts, mints none.
+    let replay = match commit(minting, fourth).await {
+        LifecycleCommitOutcome::IdempotentReplay(c) => c,
+        other => panic!("[{label}] a byte-identical retry must replay, got {other:?}"),
+    };
+    assert_eq!(
+        check(&replay, "replay"),
+        on_commit,
+        "[{label}] the replay must serve the stored receipts byte-for-byte"
+    );
+
+    // Leg 4: every read path serves the same array.
+    let s = Arc::clone(minting);
+    let c2 = ctx.clone();
+    let got = tokio::task::spawn_blocking(move || s.get(&c2))
+        .await
+        .expect("get task")
+        .expect("get")
+        .expect("context exists");
+    assert_eq!(check(&got, "get"), on_commit, "[{label}] get diverges");
+    let lineage_id = got.body.lineage_id.clone();
+    let s = Arc::clone(minting);
+    let l2 = lineage_id.clone();
+    let members = tokio::task::spawn_blocking(move || s.lineage(&l2))
+        .await
+        .expect("lineage task")
+        .expect("lineage");
+    let member = members
+        .iter()
+        .find(|m| m.body.ctx_id == ctx)
+        .unwrap_or_else(|| panic!("[{label}] lineage omits the context"));
+    assert_eq!(
+        check(member, "lineage"),
+        on_commit,
+        "[{label}] lineage diverges"
+    );
+    let s = Arc::clone(minting);
+    let current = tokio::task::spawn_blocking(move || s.current(&lineage_id))
+        .await
+        .expect("current task")
+        .expect("current")
+        .expect("lineage has a current member");
+    assert_eq!(
+        check(&current, "current"),
+        on_commit,
+        "[{label}] current diverges"
+    );
+
+    // `plain` reads the same rows but, minting off, never serves the member.
+    let s = Arc::clone(plain);
+    let got = tokio::task::spawn_blocking(move || s.get(&ctx))
+        .await
+        .expect("get task")
+        .expect("get")
+        .expect("context exists");
+    assert!(
+        got.registry_state.event_receipts().is_none(),
+        "[{label}] a store without a minter must not serve stored receipts"
+    );
+}
+
 /// Falsification for [`assert_lifecycle_state_probe_sees_retraction`]: the
 /// assertion is only worth running if a backend that inherits the trait's
 /// `Ok(false)` default actually fails it. Also the falsification for

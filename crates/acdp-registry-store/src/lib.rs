@@ -5,6 +5,7 @@
 //! check, and migration runner.
 
 pub mod cursor;
+pub mod event_receipts;
 pub mod fulltext;
 pub mod lifecycle;
 pub mod log;
@@ -26,6 +27,7 @@ use acdp_registry_types::config::RESERVED_TENANT;
 use async_trait::async_trait;
 
 pub use cursor::{decode_cursor, encode_cursor};
+pub use event_receipts::{EventReceiptMinter, StoredReceipt};
 pub use log::{build_leaf_record, LogEntryRecord};
 pub use rate_limit::{LimitDecision, SharedLimitScope, SharedRateLimitBackend};
 

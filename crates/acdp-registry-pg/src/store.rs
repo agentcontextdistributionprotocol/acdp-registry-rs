@@ -1,5 +1,7 @@
 //! Postgres implementation of `RegistryStore` + `ExtendedRegistryStore`.
 
+use std::sync::Arc;
+
 use acdp::error::AcdpError;
 use acdp::pagination::try_paginate_rows;
 use acdp::registry::store::{PublishCommit, PublishCommitOutcome, RegistryStore};
@@ -9,9 +11,13 @@ use acdp::types::lifecycle::{retraction_state, LifecycleEvent, LifecycleEventTyp
 use acdp::types::primitives::{AgentDid, ContentHash, CtxId, LineageId, Status, Visibility};
 use acdp::types::publish::PublishResponse;
 use acdp::types::search::{SearchParams, SearchResponse, SearchResult};
+use acdp_registry_store::event_receipts::{
+    attach_event_receipts, plan_event_receipts, receipt_value,
+};
 use acdp_registry_store::lifecycle::reconcile_retraction;
 use acdp_registry_store::{
-    decode_cursor, encode_cursor, ExtendedRegistryStore, LogEntryRecord, Page,
+    decode_cursor, encode_cursor, EventReceiptMinter, ExtendedRegistryStore, LogEntryRecord, Page,
+    StoredReceipt,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -26,6 +32,11 @@ pub struct PgStore {
     /// (§7.1 — no degraded mode). Enabled via
     /// [`Self::with_transparency_log`] when `[log]` is configured.
     log_enabled: bool,
+    /// RFC-ACDP-0017 §10: when set, `commit_lifecycle_event` mints an
+    /// event receipt in the SAME transaction as the event row, and reads
+    /// serve `registry_state.event_receipts`. Set via
+    /// [`Self::with_event_receipt_minter`].
+    event_receipt_minter: Option<Arc<dyn EventReceiptMinter>>,
 }
 
 /// `pg_advisory_xact_lock` key serializing transparency-log appends so
@@ -69,6 +80,7 @@ impl PgStore {
         Ok(Self {
             pool,
             log_enabled: false,
+            event_receipt_minter: None,
         })
     }
 
@@ -80,6 +92,20 @@ impl PgStore {
     pub fn with_transparency_log(mut self) -> Self {
         self.log_enabled = true;
         self
+    }
+
+    /// Enable RFC-ACDP-0017 §10 event receipts: every accepted lifecycle
+    /// event (producer or registry-initiated) is receipted atomically with
+    /// its append, prior un-receipted events of the context are filled
+    /// first (fill-on-append), and every read serves `event_receipts`
+    /// parallel to `lifecycle_events` when complete.
+    pub fn with_event_receipt_minter(mut self, minter: Arc<dyn EventReceiptMinter>) -> Self {
+        self.event_receipt_minter = Some(minter);
+        self
+    }
+
+    fn minting(&self) -> bool {
+        self.event_receipt_minter.is_some()
     }
 
     fn block_on<F: std::future::Future<Output = T>, T>(&self, fut: F) -> T {
@@ -323,7 +349,11 @@ impl ExtendedRegistryStore for PgStore {
         &self,
         ctx_id: &str,
     ) -> Result<Vec<LifecycleEvent>, AcdpError> {
-        events_for_ctx(&self.pool, ctx_id).await
+        Ok(events_for_ctx(&self.pool, ctx_id)
+            .await?
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect())
     }
 
     /// Both sources (see the trait docs): a republished context keeps its
@@ -513,7 +543,8 @@ impl RegistryStore for PgStore {
             let mut ctx = row_to_context(&row)?;
             // RFC-ACDP-0013 §4.1: full retrieval serves the event array
             // inside registry_state (omitted, not [], when empty).
-            let events = events_for_ctx(&self.pool, ctx_id.as_str()).await?;
+            let slots = events_for_ctx(&self.pool, ctx_id.as_str()).await?;
+            let (events, receipts) = split_slots(slots);
             // B3: the row and the events are two separate reads with no shared
             // snapshot, so a retraction committing between them would otherwise
             // be served as `status: "active"` alongside a `retracted` event —
@@ -522,9 +553,7 @@ impl RegistryStore for PgStore {
             // whichever read is fresher.
             ctx.registry_state.status =
                 reconcile_retraction(ctx.registry_state.status.clone(), &events);
-            if !events.is_empty() {
-                ctx.registry_state.lifecycle_events = Some(events);
-            }
+            let ctx = attach_events(ctx, events, receipts, self.minting());
             Ok(Some(project_context(ctx, Utc::now())))
         })
     }
@@ -547,13 +576,12 @@ impl RegistryStore for PgStore {
             let mut out = Vec::with_capacity(rows.len());
             for r in &rows {
                 let mut ctx = row_to_context(r)?;
-                if let Some(events) = events_by_ctx.remove(ctx.body.ctx_id.as_str()) {
+                if let Some(slots) = events_by_ctx.remove(ctx.body.ctx_id.as_str()) {
+                    let (events, receipts) = split_slots(slots);
                     // B3: same reconciliation as `get()` — see the comment there.
                     ctx.registry_state.status =
                         reconcile_retraction(ctx.registry_state.status.clone(), &events);
-                    if !events.is_empty() {
-                        ctx.registry_state.lifecycle_events = Some(events);
-                    }
+                    ctx = attach_events(ctx, events, receipts, self.minting());
                 }
                 out.push(project_context(ctx, now));
             }
@@ -583,8 +611,8 @@ impl RegistryStore for PgStore {
         event: &LifecycleEvent,
     ) -> Result<LifecycleCommitOutcome, AcdpError> {
         let event = event.clone();
+        let minter = self.event_receipt_minter.clone();
         self.block_on(async move {
-            let now = Utc::now();
             let mut tx = self
                 .pool
                 .begin()
@@ -611,28 +639,37 @@ impl RegistryStore for PgStore {
                     event.ctx_id
                 )));
             };
+            // Read the clock only once the row lock is held: an event
+            // receipt's `accepted_at` must never be backdated by the lock
+            // wait (RFC-ACDP-0017 §10.1).
+            let now = Utc::now();
             let tenant_id: String = row.try_get("tenant_id").map_err(map_sqlx_err)?;
             let ctx = row_to_context(&row)?;
 
             // 2. Load the append-ordered event history under the row lock.
             let ev_rows = sqlx::query(
-                "SELECT event_id, ctx_id, event_type, occurred_at, actor, reason, signature \
-                 FROM lifecycle_events WHERE ctx_id = $1 ORDER BY seq ASC",
+                "SELECT event_id, ctx_id, event_type, occurred_at, actor, reason, signature, \
+                 receipt FROM lifecycle_events WHERE ctx_id = $1 ORDER BY seq ASC",
             )
             .bind(event.ctx_id.as_str())
             .fetch_all(&mut *tx)
             .await
             .map_err(map_sqlx_err)?;
-            let mut events = Vec::with_capacity(ev_rows.len() + 1);
+            let mut slots = Vec::with_capacity(ev_rows.len() + 1);
             for r in &ev_rows {
-                events.push(event_from_row(r)?);
+                slots.push(slot_from_row(r, slots.len())?);
             }
+            let minting = minter.is_some();
 
-            // 3. §6 retry idempotency / duplicate event_id (step 2).
-            if let Some(prior) = events.iter().find(|e| e.event_id == event.event_id) {
+            // 3. §6 retry idempotency / duplicate event_id (step 2). The
+            //    replay returns BEFORE any minting: the stored receipt is
+            //    served and no second one is minted (RFC-ACDP-0017 §10.1,
+            //    chain-009 B).
+            if let Some((prior, _)) = slots.iter().find(|(e, _)| e.event_id == event.event_id) {
                 if *prior == event {
                     tx.rollback().await.ok();
-                    let ctx = attach_events(ctx, events);
+                    let (events, receipts) = split_slots(slots);
+                    let ctx = attach_events(ctx, events, receipts, minting);
                     return Ok(LifecycleCommitOutcome::IdempotentReplay(project_context(
                         ctx, now,
                     )));
@@ -646,7 +683,8 @@ impl RegistryStore for PgStore {
 
             // 4. §6 step 4 — strict retracted/republished alternation
             //    against the §7.1 retraction state.
-            let currently_retracted = retraction_state(&events);
+            let currently_retracted =
+                retraction_state(&slots.iter().map(|(e, _)| e.clone()).collect::<Vec<_>>());
             match &event.event_type {
                 LifecycleEventType::Retracted if currently_retracted => {
                     return Err(AcdpError::InvalidLifecycleTransition(format!(
@@ -676,6 +714,43 @@ impl RegistryStore for PgStore {
             //    (the denormalized `retracted` flag the read paths project
             //    from) in ONE transaction. Stored `status` keeps tracking
             //    supersession only.
+            //    RFC-ACDP-0017 §10: with a minter, receipt every un-receipted
+            //    prior event (fill-on-append) and this one, in the same
+            //    transaction. A mint failure returns Err here and the
+            //    dropped transaction rolls the whole append back.
+            let plan = match &minter {
+                Some(m) => Some(plan_event_receipts(
+                    m.as_ref(),
+                    &event.ctx_id,
+                    ctx.body.created_at,
+                    &slots,
+                    &event,
+                    now,
+                )?),
+                None => None,
+            };
+            if let Some(plan) = &plan {
+                for (i, r) in &plan.fills {
+                    let done = sqlx::query(
+                        "UPDATE lifecycle_events SET receipt = $1 \
+                         WHERE ctx_id = $2 AND event_id = $3 AND receipt IS NULL",
+                    )
+                    .bind(receipt_value(r)?)
+                    .bind(event.ctx_id.as_str())
+                    .bind(slots[*i].0.event_id.as_str())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_err)?;
+                    if done.rows_affected() != 1 {
+                        return Err(AcdpError::RegistryInternal(format!(
+                            "event receipt fill for '{}' matched {} rows",
+                            slots[*i].0.event_id,
+                            done.rows_affected()
+                        )));
+                    }
+                }
+            }
+            let receipt_json = plan.as_ref().map(|p| receipt_value(&p.new)).transpose()?;
             let signature_json = event
                 .signature
                 .as_ref()
@@ -684,8 +759,9 @@ impl RegistryStore for PgStore {
                 .map_err(|e| AcdpError::RegistryInternal(format!("encode signature: {e}")))?;
             sqlx::query(
                 "INSERT INTO lifecycle_events \
-                 (ctx_id, event_id, event_type, occurred_at, actor, reason, signature, tenant_id) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                 (ctx_id, event_id, event_type, occurred_at, actor, reason, signature, tenant_id, \
+                  receipt) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             )
             .bind(event.ctx_id.as_str())
             .bind(event.event_id.as_str())
@@ -695,6 +771,7 @@ impl RegistryStore for PgStore {
             .bind(event.reason.clone())
             .bind(signature_json)
             .bind(&tenant_id)
+            .bind(receipt_json)
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_err)?;
@@ -712,8 +789,19 @@ impl RegistryStore for PgStore {
             // Post-transition projection: recompute the served status from
             // the NEW retraction state (row_to_context above applied the
             // pre-transition flag).
-            events.push(event.clone());
-            let mut ctx = attach_events(ctx, events);
+            let new_slot = match plan {
+                Some(plan) => {
+                    plan.record_committed();
+                    for (i, r) in plan.fills {
+                        slots[i].1 = StoredReceipt::Valid(Box::new(r));
+                    }
+                    StoredReceipt::Valid(Box::new(plan.new))
+                }
+                None => StoredReceipt::Null,
+            };
+            slots.push((event.clone(), new_slot));
+            let (events, receipts) = split_slots(slots);
+            let mut ctx = attach_events(ctx, events, receipts, minting);
             ctx.registry_state.status = if retracted_now {
                 Status::Retracted
             } else {
@@ -1643,17 +1731,40 @@ fn event_from_row(r: &PgRow) -> Result<LifecycleEvent, AcdpError> {
     LifecycleEvent::from_value(&value)
 }
 
-/// One context's lifecycle events in registry acceptance order (`seq`).
-async fn events_for_ctx(pool: &PgPool, ctx_id: &str) -> Result<Vec<LifecycleEvent>, AcdpError> {
+/// Decode a row's event and its RFC-ACDP-0017 receipt slot; `index` is
+/// the event's position in the context's acceptance order.
+fn slot_from_row(r: &PgRow, index: usize) -> Result<(LifecycleEvent, StoredReceipt), AcdpError> {
+    let event = event_from_row(r)?;
+    let raw: Option<serde_json::Value> = r.try_get("receipt").map_err(map_sqlx_err)?;
+    let slot = StoredReceipt::decode(raw.as_ref(), &event, index as u64);
+    Ok((event, slot))
+}
+
+/// Split slots into the served event array and the receipts parallel to it.
+fn split_slots(
+    slots: Vec<(LifecycleEvent, StoredReceipt)>,
+) -> (Vec<LifecycleEvent>, Vec<Option<acdp::types::EventReceipt>>) {
+    slots.into_iter().map(|(e, s)| (e, s.into_option())).unzip()
+}
+
+/// One context's lifecycle events in registry acceptance order (`seq`),
+/// each with its receipt slot.
+async fn events_for_ctx(
+    pool: &PgPool,
+    ctx_id: &str,
+) -> Result<Vec<(LifecycleEvent, StoredReceipt)>, AcdpError> {
     let rows = sqlx::query(
-        "SELECT event_id, ctx_id, event_type, occurred_at, actor, reason, signature \
+        "SELECT event_id, ctx_id, event_type, occurred_at, actor, reason, signature, receipt \
          FROM lifecycle_events WHERE ctx_id = $1 ORDER BY seq ASC",
     )
     .bind(ctx_id)
     .fetch_all(pool)
     .await
     .map_err(map_sqlx_err)?;
-    rows.iter().map(event_from_row).collect()
+    rows.iter()
+        .enumerate()
+        .map(|(i, r)| slot_from_row(r, i))
+        .collect()
 }
 
 /// All lifecycle events across a lineage, grouped by ctx_id, each group
@@ -1661,9 +1772,10 @@ async fn events_for_ctx(pool: &PgPool, ctx_id: &str) -> Result<Vec<LifecycleEven
 async fn events_for_lineage(
     pool: &PgPool,
     lineage_id: &str,
-) -> Result<std::collections::HashMap<String, Vec<LifecycleEvent>>, AcdpError> {
+) -> Result<std::collections::HashMap<String, Vec<(LifecycleEvent, StoredReceipt)>>, AcdpError> {
     let rows = sqlx::query(
-        "SELECT e.event_id, e.ctx_id, e.event_type, e.occurred_at, e.actor, e.reason, e.signature \
+        "SELECT e.event_id, e.ctx_id, e.event_type, e.occurred_at, e.actor, e.reason, e.signature, \
+                e.receipt \
          FROM lifecycle_events e \
          JOIN contexts c ON c.ctx_id = e.ctx_id \
          WHERE c.lineage_id = $1 ORDER BY e.seq ASC",
@@ -1672,26 +1784,32 @@ async fn events_for_lineage(
     .fetch_all(pool)
     .await
     .map_err(map_sqlx_err)?;
-    let mut grouped: std::collections::HashMap<String, Vec<LifecycleEvent>> =
+    let mut grouped: std::collections::HashMap<String, Vec<(LifecycleEvent, StoredReceipt)>> =
         std::collections::HashMap::new();
     for r in &rows {
-        let event = event_from_row(r)?;
-        grouped
-            .entry(event.ctx_id.as_str().to_string())
-            .or_default()
-            .push(event);
+        let ctx_id: String = r.try_get("ctx_id").map_err(map_sqlx_err)?;
+        let group = grouped.entry(ctx_id).or_default();
+        let slot = slot_from_row(r, group.len())?;
+        group.push(slot);
     }
     Ok(grouped)
 }
 
 /// Attach a (possibly empty) event history to a context, honoring the
-/// absent-vs-empty wire rule (RFC-ACDP-0013 §4.1: omit, never `[]`).
-fn attach_events(mut ctx: FullContext, events: Vec<LifecycleEvent>) -> FullContext {
+/// absent-vs-empty wire rule (RFC-ACDP-0013 §4.1: omit, never `[]`), and
+/// its parallel RFC-ACDP-0017 §10.2 `event_receipts` when minting.
+fn attach_events(
+    mut ctx: FullContext,
+    events: Vec<LifecycleEvent>,
+    receipts: Vec<Option<acdp::types::EventReceipt>>,
+    minting: bool,
+) -> FullContext {
     ctx.registry_state.lifecycle_events = if events.is_empty() {
         None
     } else {
         Some(events)
     };
+    attach_event_receipts(&mut ctx, receipts, minting);
     ctx
 }
 
