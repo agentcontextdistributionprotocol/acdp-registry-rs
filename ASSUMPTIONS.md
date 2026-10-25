@@ -4989,7 +4989,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Assumed:** (a) a stored receipt that decodes but names another event, index or ctx is `Corrupt`: logged, served as missing, never overwritten, and it makes the history a hole (no fills; the new event is still receipted at its true index). (b) Fill-on-append mints receipts for earlier NULL slots only when no NULL precedes a receipted slot; filling a hole would need an `accepted_at` above a later receipt's (§10.3 step 8). (c) `accepted_at` lifts `created_at` with `ceil_ms` so the mint's ms truncation never lands below it. (d) SQLite stays not-N-1-safe for this migration, like every SQLite migration; Postgres is N-1 safe. (e) The UPGRADING section is headed `## 0.5.6`, assuming release-plz cuts a patch for a `feat` on 0.x.
 - **Chose:** the D1–D5 design as planned.
 - **Alternatives:** repairing holes by re-minting (breaks append-only); a separate receipts table (two writes to keep parallel).
-- **Blast radius if wrong:** a context's `event_receipts` stays omitted (never wrong data); the version heading moves if release-plz picks another version. **Status:** UNCONFIRMED.
+- **Blast radius if wrong:** a context's `event_receipts` stays omitted (never wrong data); the version heading moves if release-plz picks another version. **Status:** CONFIRMED (2026-10-24) by Opus at /reconcile, (a)–(e) as written; see DECISIONS.md "RFC-ACDP-0017 event receipts".
 
 ## rfc0017-event-receipts — Phase 4b (2026-10-24)
 

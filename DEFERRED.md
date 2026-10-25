@@ -25,6 +25,8 @@ the trigger that reopens it:
 - The lifecycle webhook also fires on a byte-identical replay of an event, because `into_context()` drops the outcome kind
   (`crates/acdp-registry-core/src/handlers/context.rs:1629`). This predates RFC-0017. Revisit when a subscriber reports duplicates,
   or when the SDK exposes the replay outcome on the lifecycle path.
+- Event receipts are signed for `did:web:<current registry.authority>` without comparing it to the context's `origin_registry`;
+  add a skip-and-count guard if `registry.authority` ever becomes changeable for a populated store.
 
 When one of these is settled, edit its status in `ASSUMPTIONS.md` in the same PR as the change that settled it, and note the decision in
 `DECISIONS.md`. Do not open a PR only to tidy a status line.

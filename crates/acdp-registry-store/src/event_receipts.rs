@@ -516,6 +516,65 @@ mod tests {
             .expect("mint")
     }
 
+    /// The store-side clamp, not just `clamp_accepted_at`: a prior receipt
+    /// dated after `now` (clock skew between replicas) lifts both the fills
+    /// and the new event, and a `created_at` after `now` lifts a fill.
+    #[test]
+    fn plans_chain_the_clamp_from_a_future_prior_receipt_and_created_at() {
+        let c = ctx_with_events(3);
+        let signer = ReceiptSigner::new(
+            acdp::crypto::SigningKey::from_bytes(&[5u8; 32]),
+            "did:web:r.example",
+            "did:web:r.example#receipt-key-1",
+        )
+        .expect("signer");
+        let events = c.registry_state.lifecycle_events.clone().expect("events");
+        let id = &c.body.ctx_id;
+        let ahead = signer
+            .mint_event_receipt(id, &event_value(&events[0]).unwrap(), 0, t(5_000))
+            .expect("mint");
+        let prior = vec![
+            (events[0].clone(), StoredReceipt::Valid(Box::new(ahead))),
+            (events[1].clone(), StoredReceipt::Null),
+        ];
+
+        let plan =
+            plan_event_receipts(&signer, id, t(0), &prior, &events[2], t(1_000)).expect("plan");
+        assert!(!plan.hole);
+        assert_eq!(plan.fills.len(), 1);
+        assert_eq!(plan.fills[0].0, 1);
+        assert_eq!(plan.fills[0].1.index, 1);
+        assert_eq!(plan.fills[0].1.accepted_at, t(5_000), "fill lifted to prev");
+        assert_eq!(plan.new.index, 2);
+        assert_eq!(plan.new.accepted_at, t(5_000), "new event lifted to prev");
+
+        match plan_backfill(&signer, id, t(0), &prior, t(1_000)).expect("backfill") {
+            BackfillPlan::Fill(f) => {
+                assert_eq!(f.len(), 1);
+                assert_eq!(f[0].1.accepted_at, t(5_000), "sweep lifted to prev");
+            }
+            other => panic!("expected a fill, got {other:?}"),
+        }
+
+        let nulls = vec![(events[0].clone(), StoredReceipt::Null)];
+        let plan =
+            plan_event_receipts(&signer, id, t(9_000), &nulls, &events[1], t(1_000)).expect("plan");
+        assert_eq!(
+            plan.fills[0].1.accepted_at,
+            t(9_000),
+            "fill lifted to created_at"
+        );
+        assert_eq!(
+            plan.new.accepted_at,
+            t(9_000),
+            "new event lifted to created_at"
+        );
+        match plan_backfill(&signer, id, t(9_000), &nulls, t(1_000)).expect("backfill") {
+            BackfillPlan::Fill(f) => assert_eq!(f[0].1.accepted_at, t(9_000)),
+            other => panic!("expected a fill, got {other:?}"),
+        }
+    }
+
     #[test]
     fn attach_serves_a_complete_parallel_array() {
         let mut c = ctx_with_events(2);

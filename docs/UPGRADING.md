@@ -51,6 +51,10 @@ they omit the member, exactly as before this release.
 - **Who is affected:** API consumers of a minting registry see the new
   `registry_state.event_receipts` member. Anyone who queries `lifecycle_events` with `SELECT *`
   sees one more column; named-column queries are unaffected.
+- **Migration 016 on a large Postgres table.** It runs in one transaction, so the `ALTER TABLE`'s
+  exclusive lock on `lifecycle_events` is held while the partial index builds over every row.
+  Lifecycle reads on replicas still running 0.5.5 wait for that build. On a table with millions of
+  events, start one upgraded replica first and let it finish migrating before the others roll.
 - **Rollback, Postgres:** safe to 0.5.5. The migrator tolerates the newer applied version, and 0.5.5
   names its columns, so it ignores `receipt`. Receipts minted before the rollback stay in the
   column and are served again after rolling forward. An event accepted while 0.5.5 was running

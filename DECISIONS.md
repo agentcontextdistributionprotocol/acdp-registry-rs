@@ -4675,3 +4675,24 @@ evidence. No follow-up blocks the next `/ship`.
   green on #445 and #444).
 - **Docs:** acdp-rs links re-pinned to `acdp-v0.15.1`; the 0.5.3 upgrade note corrected (0.5.2 answered 500, not 400).
 
+
+## RFC-ACDP-0017 event receipts — 2026-10-24
+
+The Phase 2 entry, items (a)–(e), was **CONFIRMED by Opus** (reversible tier). No one-way door was found, and no path signs a
+receipt that fails §10.3.
+
+- **(a) A mismatched stored receipt is Corrupt and never overwritten.** Re-minting would break append-only and destroy the
+  evidence of tampering. A holed history omits the whole array, so a corrupt slot is never served.
+- **(b) Fill only a NULL tail.** The spec forces this: filling under a later receipt means backdating it (§10.1) or failing step 8.
+  The cost is that a holed context omits `event_receipts` permanently.
+- **(c) `ceil_ms(created_at)`.** Strictly safer than truncating, which could sign a receipt below `created_at`. The worst case is
+  1 ms.
+- **(d) SQLite is not N-1 safe, Postgres is N-1 safe.** The same as every migration. Making SQLite N-1 safe is a migrator change
+  for all migrations.
+- **(e) `## 0.5.6`.** release-plz bumps the patch for a non-breaking `feat` on 0.x, as it did for 0.5.4 → 0.5.5. The release PR
+  renames the heading if the version differs.
+
+Noted, not changed: receipts are signed for `did:web:<current authority>` without comparing it to the context's
+`origin_registry`. One line in `DEFERRED.md`.
+
+**Resulting status:** 0 open declarations for this plan. No follow-up blocks `/ship`.

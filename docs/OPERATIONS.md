@@ -299,7 +299,11 @@ lifecycle commit takes, so several replicas starting together fill each event ex
   `acdp_registry_event_receipts_minted_total`,
   `acdp_registry_event_receipts_sweep_skipped_total` and
   `acdp_registry_event_receipts_incomplete_total` (see [HTTP-API.md](HTTP-API.md)). A rising
-  incomplete count after the sweep has run points at a skipped context.
+  incomplete count after the sweep has run points at a skipped context. Each replica sweeps on its
+  own start and re-counts the contexts it skips, so `…_sweep_skipped_total` grows with replicas ×
+  restarts for the same contexts: alert on the incomplete count, or on the skipped count staying
+  above zero, not on its rate. During a Postgres rolling upgrade, events that 0.5.5 replicas still
+  accept have no receipt until the next append or restart, so the incomplete count rises then too.
 
 ## Webhooks
 
