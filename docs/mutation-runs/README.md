@@ -6,8 +6,15 @@ per-mutant verdicts for 95 of this file's 138 mutants were lost exactly that way
 
 ## Index — which ledgers are CURRENT
 
-**One ledger is CURRENT for the whole CI scope: `run39071836771-scope-350-outcomes.json`.**
-It is the unmodified `outcomes.json` of `mutants.yml` run 39071836771 (a `workflow_dispatch`
+**One ledger is CURRENT for the whole CI scope: `run40232497328-scope-370-outcomes.json`.**
+It is the unmodified `outcomes.json` of `mutants.yml` run 40232497328 (a `workflow_dispatch`
+on `feat/rfc0017-event-receipts` bf24e1a), committed by the RFC-ACDP-0017 event-receipt
+re-pin (#461). The scope grew 350 -> 370: receipt.rs 9 -> 16 (event-receipt mint/verify)
+and `sqlite/src/store.rs` 140 -> 153 (receipt persistence and the legacy-event sweep). The
+seven earlier survivors are the same mutants, the two store.rs ones on shifted lines; the
+eighth, `end_sweep_tx -> Ok(())`, is equivalent and reasoned in `mutants.yml`.
+
+Before that, `run39071836771-scope-350-outcomes.json` was CURRENT. It is the unmodified `outcomes.json` of `mutants.yml` run 39071836771 (a `workflow_dispatch`
 on `feat/acdp-0.15.0` 9cffe36), committed by the acdp 0.15.0 re-pin (#435). The scope
 shrank 353 -> 350 when the federation proxy started serving the origin's raw body:
 `retrieve` now returns `Result<Response, _>`, so its four unviable `Json<FullContext>`
@@ -20,10 +27,11 @@ ledger.
 
 | ledger | scope | result | status |
 |---|---|---|---|
-| `run39071836771-scope-350-outcomes.json` | **350** — context.rs 136 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 227 caught / **7 missed** / 115 unviable / 1 timeout (117.3 min) | **CURRENT** |
-| `run37972268890-scope-353-outcomes.json` | 353 — context.rs 139 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 226 caught / 7 missed / 119 unviable / 1 timeout (113.0 min) | SUPERSEDED by `run39071836771` |
-| `run37248684286-scope-354-outcomes.json` | 354 — context.rs 140 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 221 caught / 7 missed / 125 unviable / 1 timeout (101.2 min) | SUPERSEDED by `run39071836771` |
-| `run37222567772-scope-358-outcomes.json` | 358 — context.rs 144 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 225 caught / 7 missed / 125 unviable / 1 timeout (108.7 min) | SUPERSEDED by `run39071836771` |
+| `run40232497328-scope-370-outcomes.json` | **370** — context.rs 136 + log.rs 65 + receipt.rs 16 + `sqlite/src/store.rs` 153 | 239 caught / **8 missed** / 122 unviable / 1 timeout (136.2 min) | **CURRENT** |
+| `run39071836771-scope-350-outcomes.json` | 350 — context.rs 136 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 227 caught / 7 missed / 115 unviable / 1 timeout (117.3 min) | SUPERSEDED by `run40232497328` |
+| `run37972268890-scope-353-outcomes.json` | 353 — context.rs 139 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 226 caught / 7 missed / 119 unviable / 1 timeout (113.0 min) | SUPERSEDED by `run40232497328` (via `run39071836771`) |
+| `run37248684286-scope-354-outcomes.json` | 354 — context.rs 140 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 221 caught / 7 missed / 125 unviable / 1 timeout (101.2 min) | SUPERSEDED by `run40232497328` (via `run39071836771`) |
+| `run37222567772-scope-358-outcomes.json` | 358 — context.rs 144 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 140 | 225 caught / 7 missed / 125 unviable / 1 timeout (108.7 min) | SUPERSEDED by `run40232497328` (via `run39071836771`) |
 | `run36417581090-scope-346-outcomes.json` | 346 — context.rs 134 + log.rs 65 + receipt.rs 9 + `sqlite/src/store.rs` 138 | 214 caught / 7 missed / 124 unviable / 1 timeout | SUPERSEDED by `run39071836771` (via `run37222567772`) |
 | `u552-union-scope-351-outcomes.json` | 351 — core 213 + `sqlite/src/store.rs` 138 | 219 caught / 7 missed / 124 unviable / 1 timeout | SUPERSEDED by `run39071836771` (via `run36417581090`) |
 | `u551-core-scope-213-outcomes.json` | 213 | 134 caught / 5 missed / 73 unviable / 1 timeout | SUPERSEDED by `u552` |

@@ -63,6 +63,53 @@ publishes would fall through to the fully unverified path. That is a playground
 rule rather than a receipts rule; see
 [CONFIGURATION.md](CONFIGURATION.md).
 
+## Event receipts (ACDP 0.5.0 / RFC-ACDP-0017 §10)
+
+An **event receipt** attests that the registry accepted one lifecycle event
+(a producer `retract`/`republish`, or an `/admin/*` lifecycle action) at
+position `index` of a context's `lifecycle_events`, at `accepted_at`. It binds
+the exact served event JSON, signature included, by `event_hash`.
+
+There is no switch of its own. The registry mints event receipts when all
+three hold:
+
+- `[lifecycle] enabled = true` (advertises `acdp-registry-lifecycle`);
+- a `[receipt]` key is configured (advertises `acdp-registry-receipts`);
+- the registry claims `acdp_version` >= 0.5.0 (always true today).
+
+The **same receipt key** signs them, under the same `key_id`, so the rotation
+procedure and the retention rule below cover event receipts too: a receipt
+signed before a rotation keeps verifying against the retired key in
+`did.json`'s `verificationMethod`.
+
+- `accepted_at` is the registry clock in canonical milliseconds, clamped up so
+  it is never earlier than the context's `created_at` or the previous event's
+  `accepted_at`.
+- The receipt commits in the same transaction as the event: both land or
+  neither does. A byte-identical retry of an event serves the stored receipt
+  and mints nothing.
+- `registry_state.event_receipts` is served, parallel to `lifecycle_events`,
+  only when every event has a receipt. Events that predate receipts are
+  receipted by a sweep on every start, before the registry serves a request,
+  and by the next lifecycle event on their context (see
+  [UPGRADING.md](UPGRADING.md#056) and
+  [OPERATIONS.md](OPERATIONS.md#event-receipt-sweep)).
+- It is served everywhere `lifecycle_events` is: `GET /contexts/{id}`, the
+  `retract`/`republish` responses (producer and `/admin/*`), and each member
+  of `GET /lineages/{id}` and `/lineages/{id}/current`, which also carry
+  their `registry_receipt` (RFC-ACDP-0017 §11). A federated retrieval passes
+  the origin registry's receipts through untouched.
+
+To verify one (§10.3): parse it against the closed schema, check that it
+binds to the served event at its position (`ctx_id`, `index`, `event_id`,
+`event_hash` = sha256 over the JCS of the event including its signature,
+`registry_did` = the origin's `did:web`, `accepted_at` >= `created_at`),
+then verify the signature against the key `did.json` publishes for its
+`key_id`. The `acdp` SDK does all of it: `EventReceipt::check_binding` and
+`verify_signature_against_hash`, or `acdp::chain::verify_chain` over a
+whole bundle, which admits an event on the `registry` basis only when its
+receipt verifies.
+
 ## Lineage-head receipts (ACDP 0.3.0 / RFC-ACDP-0011)
 
 Registry receipts attest **publish-time** facts; a **lineage-head receipt**
@@ -209,6 +256,14 @@ receipts for previously published contexts, attesting the stored `created_at`.
 This implementation does not, for the reason above, so those contexts are served
 without a receipt. The same applies to transparency-log leaves (see
 [CONFIGURATION.md · `[log]`](CONFIGURATION.md#log-acdp-030)).
+
+**Event receipts are the exception, and they do not contradict the rule.**
+An event receipt attests only that the registry accepted the event *at*
+`accepted_at`, and `accepted_at` is never backdated. A legacy event receipted
+by the startup sweep carries the sweep's clock, which is true: the registry
+holds that event and vouches for it from then on. A consumer evaluating an
+as-of time before the sweep does not count that receipt, which is the honest
+answer.
 
 The `GET /admin/lineages/{lineage_id}/audit` report exposes
 `receiptless_contexts` so you can see how much pre-receipts history a lineage

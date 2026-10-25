@@ -223,6 +223,35 @@ async fn the_search_filter_indexes_exist() {
     );
 }
 
+/// Migration 016: the startup sweep's candidate scan has its partial index,
+/// and the planner uses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_candidate_index_exists_and_is_used() {
+    let (store, _tmp) = store().await;
+    let (sql,): (String,) = sqlx::query_as(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' \
+         AND name = 'idx_lifecycle_events_receipt_null'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("the sweep index must exist after migration 016");
+    assert!(sql.contains("WHERE receipt IS NULL"), "{sql}");
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+        "EXPLAIN QUERY PLAN SELECT DISTINCT ctx_id FROM lifecycle_events \
+         WHERE receipt IS NULL AND ctx_id > ? ORDER BY ctx_id ASC LIMIT ?",
+    )
+    .bind("")
+    .bind(200_i64)
+    .fetch_all(store.pool())
+    .await
+    .expect("explain");
+    assert!(
+        plan.iter()
+            .any(|(_, _, _, d)| d.contains("idx_lifecycle_events_receipt_null")),
+        "{plan:?}"
+    );
+}
+
 /// H-I-s: a batched visibility check must answer exactly what N individual
 /// retrieve checks answer — for a fixture mixing public / owned / audience /
 /// contributor-only / retracted / foreign-tenant, across six requester
@@ -326,4 +355,73 @@ async fn the_batched_path_costs_one_round_trip_for_a_full_page() {
         "[sqlite] {PAGE}-entry page: batched (1 query) {batched_ms:?} vs per-id ({PAGE} queries) \
          {per_id_ms:?}"
     );
+}
+
+/// RFC-ACDP-0017 §10: fill-on-append, binding, signature, replay and read
+/// parity of event receipts. Two handles on one database: one without a
+/// minter (the legacy prefix), one with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_receipts_match_the_cross_backend_contract() {
+    let (plain, _tmp) = store().await;
+    let key = acdp::crypto::SigningKey::from_bytes(&[98u8; 32]);
+    let pubkey = key.verifying_key_bytes();
+    let signer =
+        acdp::types::ReceiptSigner::new(key, "did:web:reg.test", "did:web:reg.test#receipt-key-1")
+            .expect("signer");
+    let minting = Arc::new(
+        plain
+            .as_ref()
+            .clone()
+            .with_event_receipt_minter(Arc::new(signer)),
+    );
+    parity::assert_lifecycle_event_receipts(&plain, &minting, pubkey, "sqlite").await;
+}
+
+/// Raw slot access for [`parity::assert_event_receipt_sweep`].
+struct Slots(Arc<SqliteStore>);
+
+#[async_trait::async_trait]
+impl parity::RawReceiptSlots for Slots {
+    async fn receipt_slots(&self, ctx_id: &str) -> Vec<Option<serde_json::Value>> {
+        let rows: Vec<(Option<String>,)> =
+            sqlx::query_as("SELECT receipt FROM lifecycle_events WHERE ctx_id = ? ORDER BY seq")
+                .bind(ctx_id)
+                .fetch_all(self.0.pool())
+                .await
+                .expect("read receipt slots");
+        rows.into_iter()
+            .map(|(raw,)| {
+                raw.map(|t: String| serde_json::from_str(&t).expect("stored receipt is JSON"))
+            })
+            .collect()
+    }
+
+    async fn clear_receipt(&self, event_id: &str) {
+        let done = sqlx::query("UPDATE lifecycle_events SET receipt = NULL WHERE event_id = ?")
+            .bind(event_id)
+            .execute(self.0.pool())
+            .await
+            .expect("clear receipt");
+        assert_eq!(done.rows_affected(), 1, "fixture UPDATE must hit one row");
+    }
+}
+
+/// RFC-ACDP-0017 §10.2: the startup sweep fills legacy and trailing NULL
+/// receipts, skips a hole without writing, and is idempotent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_receipt_sweep_matches_the_cross_backend_contract() {
+    let (plain, _tmp) = store().await;
+    let key = acdp::crypto::SigningKey::from_bytes(&[98u8; 32]);
+    let pubkey = key.verifying_key_bytes();
+    let signer =
+        acdp::types::ReceiptSigner::new(key, "did:web:reg.test", "did:web:reg.test#receipt-key-1")
+            .expect("signer");
+    let minting = Arc::new(
+        plain
+            .as_ref()
+            .clone()
+            .with_event_receipt_minter(Arc::new(signer)),
+    );
+    let raw = Slots(Arc::clone(&plain));
+    parity::assert_event_receipt_sweep(&plain, &minting, &raw, pubkey, "sqlite").await;
 }

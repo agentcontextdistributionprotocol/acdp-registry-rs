@@ -1680,6 +1680,402 @@ where
     );
 }
 
+/// **RFC-ACDP-0017 §10 — event receipts are minted, stored and served
+/// identically by every durable backend.**
+///
+/// `plain` and `minting` MUST be two handles on the SAME database: `plain`
+/// built without an event-receipt minter (a pre-upgrade registry, or one
+/// with the profile off), `minting` with
+/// `with_event_receipt_minter(<ReceiptSigner for did:web:reg.test>)`. The
+/// builder is inherent to each backend, so the caller attaches it; `pubkey`
+/// is that signer's Ed25519 public key.
+///
+/// Legs:
+/// 1. **Fill-on-append (AC8).** Three events committed through `plain`
+///    carry no receipt and `plain` never serves the member; a fourth through
+///    `minting` receipts all four in one transaction. The fixture ends on a
+///    republish so the context is the lineage head `current` serves.
+/// 2. **Binding + signature (AC2).** Every served receipt passes
+///    `check_binding` against its served event at its position, verifies
+///    under `pubkey`, and `accepted_at` is non-decreasing from `created_at`.
+/// 3. **Replay (AC3).** A byte-identical retry returns the same receipt
+///    bytes and mints nothing.
+/// 4. **Read parity (AC5).** `get`, `lineage` and `current` serve the same
+///    array.
+pub async fn assert_lifecycle_event_receipts<S>(
+    plain: &Arc<S>,
+    minting: &Arc<S>,
+    pubkey: [u8; 32],
+    label: &str,
+) where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::registry::LifecycleCommitOutcome;
+
+    const SEED: u8 = 252;
+    let ctx_id = publish_titled(plain, SEED, "event receipt parity fixture").await;
+    let ctx = CtxId(ctx_id.clone());
+    let commit = |store: &Arc<S>, event: LifecycleEvent| {
+        let s = Arc::clone(store);
+        async move {
+            tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&event))
+                .await
+                .expect("commit task")
+                .expect("lifecycle commit succeeds")
+        }
+    };
+    let event = |n: u8, kind: LifecycleEventType| {
+        // A canonical lowercase v4 UUID, unique per run: the context's own
+        // UUID with its last hex digit replaced by `n`.
+        let uuid = ctx_id.rsplit('/').next().expect("ctx_id ends in a UUID");
+        let event_id = format!("{}{n:x}", &uuid[..uuid.len() - 1]);
+        LifecycleEvent::new(
+            event_id,
+            ctx.clone(),
+            kind,
+            Utc::now(),
+            AgentDid::new(agent_did(SEED)),
+            None,
+        )
+        .expect("valid lifecycle event")
+    };
+
+    // Leg 1: a legacy prefix with no receipts, then fill-on-append.
+    commit(plain, event(1, LifecycleEventType::Retracted)).await;
+    commit(plain, event(2, LifecycleEventType::Republished)).await;
+    let legacy = commit(plain, event(3, LifecycleEventType::Retracted)).await;
+    let LifecycleCommitOutcome::Applied(legacy) = legacy else {
+        panic!("[{label}] fixture is wrong: the third event must apply");
+    };
+    assert!(
+        legacy.registry_state.event_receipts().is_none(),
+        "[{label}] a store without a minter must never serve event_receipts"
+    );
+    let fourth = event(4, LifecycleEventType::Republished);
+    let applied = match commit(minting, fourth.clone()).await {
+        LifecycleCommitOutcome::Applied(c) => c,
+        other => panic!("[{label}] the fourth event must apply, got {other:?}"),
+    };
+
+    // Leg 2: every receipt binds to its served event and verifies.
+    let check = |c: &acdp::types::body::FullContext, what: &str| -> Vec<serde_json::Value> {
+        verified_event_receipts(c, &ctx, pubkey, 4, &format!("{label}] [{what}"))
+    };
+    let on_commit = check(&applied, "commit response");
+
+    // Leg 3: a byte-identical replay serves the stored receipts, mints none.
+    let replay = match commit(minting, fourth).await {
+        LifecycleCommitOutcome::IdempotentReplay(c) => c,
+        other => panic!("[{label}] a byte-identical retry must replay, got {other:?}"),
+    };
+    assert_eq!(
+        check(&replay, "replay"),
+        on_commit,
+        "[{label}] the replay must serve the stored receipts byte-for-byte"
+    );
+
+    // Leg 4: every read path serves the same array.
+    let s = Arc::clone(minting);
+    let c2 = ctx.clone();
+    let got = tokio::task::spawn_blocking(move || s.get(&c2))
+        .await
+        .expect("get task")
+        .expect("get")
+        .expect("context exists");
+    assert_eq!(check(&got, "get"), on_commit, "[{label}] get diverges");
+    let lineage_id = got.body.lineage_id.clone();
+    let s = Arc::clone(minting);
+    let l2 = lineage_id.clone();
+    let members = tokio::task::spawn_blocking(move || s.lineage(&l2))
+        .await
+        .expect("lineage task")
+        .expect("lineage");
+    let member = members
+        .iter()
+        .find(|m| m.body.ctx_id == ctx)
+        .unwrap_or_else(|| panic!("[{label}] lineage omits the context"));
+    assert_eq!(
+        check(member, "lineage"),
+        on_commit,
+        "[{label}] lineage diverges"
+    );
+    let s = Arc::clone(minting);
+    let current = tokio::task::spawn_blocking(move || s.current(&lineage_id))
+        .await
+        .expect("current task")
+        .expect("current")
+        .expect("lineage has a current member");
+    assert_eq!(
+        check(&current, "current"),
+        on_commit,
+        "[{label}] current diverges"
+    );
+
+    // `plain` reads the same rows but, minting off, never serves the member.
+    let s = Arc::clone(plain);
+    let got = tokio::task::spawn_blocking(move || s.get(&ctx))
+        .await
+        .expect("get task")
+        .expect("get")
+        .expect("context exists");
+    assert!(
+        got.registry_state.event_receipts().is_none(),
+        "[{label}] a store without a minter must not serve stored receipts"
+    );
+}
+
+/// The served `event_receipts` of `c`, each checked: parallel to
+/// `lifecycle_events` with `expected` entries, `check_binding` OK at its
+/// position, signed by `pubkey`, and `accepted_at` non-decreasing from
+/// `created_at`. Returns the receipts as JSON for byte comparisons.
+fn verified_event_receipts(
+    c: &acdp::types::body::FullContext,
+    ctx: &CtxId,
+    pubkey: [u8; 32],
+    expected: usize,
+    what: &str,
+) -> Vec<serde_json::Value> {
+    use acdp::types::EventReceipt;
+
+    let events = c.registry_state.lifecycle_events.as_deref().unwrap_or(&[]);
+    let receipts = c
+        .registry_state
+        .event_receipts()
+        .unwrap_or_else(|| panic!("[{what}] event_receipts is absent"))
+        .unwrap_or_else(|e| panic!("[{what}] event_receipts undecodable: {e}"));
+    assert_eq!(
+        receipts.len(),
+        events.len(),
+        "[{what}] event_receipts is not parallel to lifecycle_events"
+    );
+    assert_eq!(events.len(), expected, "[{what}] unexpected event count");
+    let mut prev = c.body.created_at;
+    let mut raw = Vec::new();
+    for (i, (r, e)) in receipts.iter().zip(events).enumerate() {
+        let served = serde_json::to_value(e).expect("event serializes");
+        r.check_binding(AUTHORITY, ctx, &served, i as u64, c.body.created_at)
+            .unwrap_or_else(|err| panic!("[{what}] receipt {i} binding: {err}"));
+        let value = serde_json::to_value(r).expect("receipt serializes");
+        let hash = EventReceipt::preimage_hash_of_value(&value).expect("preimage hash");
+        r.verify_signature_against_hash(&hash, Some(&pubkey), None)
+            .unwrap_or_else(|err| panic!("[{what}] receipt {i} signature: {err}"));
+        assert!(
+            r.accepted_at >= prev,
+            "[{what}] receipt {i} accepted_at {} precedes {prev}",
+            r.accepted_at
+        );
+        prev = r.accepted_at;
+        raw.push(value);
+    }
+    raw
+}
+
+/// Raw access to a backend's stored receipt slots, which the trait does not
+/// expose: the sweep assertion needs to plant a hole and to prove rows were
+/// left untouched. Implemented by each backend's own test suite.
+#[async_trait::async_trait]
+pub trait RawReceiptSlots: Send + Sync {
+    /// The stored `receipt` of each of `ctx_id`'s events, in `seq` order.
+    async fn receipt_slots(&self, ctx_id: &str) -> Vec<Option<serde_json::Value>>;
+    /// Set `event_id`'s stored receipt to NULL.
+    async fn clear_receipt(&self, event_id: &str);
+}
+
+/// **RFC-ACDP-0017 §10.2 — the startup sweep receipts legacy events
+/// identically on every durable backend.**
+///
+/// `plain` and `minting` are two handles on the same database, as for
+/// [`assert_lifecycle_event_receipts`]; `raw` reads and writes its slots.
+/// Assertions are per fixture context, and the report is checked only as
+/// lower bounds, so the kit is safe on a database shared with other tests
+/// (Postgres). Exact report counts belong to a test on a fresh database.
+///
+/// Legs:
+/// 1. A store without a minter sweeps nothing and touches no row.
+/// 2. **AC1:** a context of legacy events only is fully receipted, in
+///    order; each receipt binds, verifies, and `accepted_at` is
+///    non-decreasing.
+/// 3. **AC3:** a receipted prefix plus a NULL tail: only the tail is
+///    filled, and the prefix bytes are unchanged.
+/// 4. **AC2:** a NULL before a receipted slot is skipped: no row changes
+///    and reads omit the member.
+/// 5. A second sweep changes no row.
+/// 6. **AC4:** a later append on the holed context leaves the hole,
+///    receipts only the new event at its true index, and reads still omit.
+pub async fn assert_event_receipt_sweep<S>(
+    plain: &Arc<S>,
+    minting: &Arc<S>,
+    raw: &dyn RawReceiptSlots,
+    pubkey: [u8; 32],
+    label: &str,
+) where
+    S: ExtendedRegistryStore + 'static,
+{
+    let commit = |store: &Arc<S>, event: LifecycleEvent| {
+        let s = Arc::clone(store);
+        async move {
+            tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&event))
+                .await
+                .expect("commit task")
+                .expect("lifecycle commit succeeds");
+        }
+    };
+    let get = |store: &Arc<S>, ctx: &CtxId| {
+        let s = Arc::clone(store);
+        let ctx = ctx.clone();
+        async move {
+            tokio::task::spawn_blocking(move || s.get(&ctx))
+                .await
+                .expect("get task")
+                .expect("get")
+                .expect("context exists")
+        }
+    };
+    let event = |ctx_id: &str, seed: u8, n: u8, kind: LifecycleEventType| {
+        let uuid = ctx_id.rsplit('/').next().expect("ctx_id ends in a UUID");
+        LifecycleEvent::new(
+            format!("{}{n:x}", &uuid[..uuid.len() - 1]),
+            CtxId(ctx_id.to_string()),
+            kind,
+            Utc::now(),
+            AgentDid::new(agent_did(seed)),
+            None,
+        )
+        .expect("valid lifecycle event")
+    };
+    use LifecycleEventType::{Republished, Retracted};
+
+    // Fixtures. A: legacy only. B: receipted prefix, NULL tail. C: a hole.
+    let a = publish_titled(plain, 247, "sweep legacy-only fixture").await;
+    commit(plain, event(&a, 247, 1, Retracted)).await;
+    commit(plain, event(&a, 247, 2, Republished)).await;
+    let b = publish_titled(plain, 248, "sweep prefix-and-tail fixture").await;
+    commit(minting, event(&b, 248, 1, Retracted)).await;
+    commit(plain, event(&b, 248, 2, Republished)).await;
+    let c = publish_titled(plain, 249, "sweep hole fixture").await;
+    commit(minting, event(&c, 249, 1, Retracted)).await;
+    commit(minting, event(&c, 249, 2, Republished)).await;
+    raw.clear_receipt(&event(&c, 249, 1, Retracted).event_id)
+        .await;
+
+    let a_before = raw.receipt_slots(&a).await;
+    let b_before = raw.receipt_slots(&b).await;
+    let c_before = raw.receipt_slots(&c).await;
+    assert_eq!(a_before, vec![None, None], "[{label}] fixture A");
+    assert!(
+        b_before[0].is_some() && b_before[1].is_none(),
+        "[{label}] fixture B"
+    );
+    assert!(
+        c_before[0].is_none() && c_before[1].is_some(),
+        "[{label}] fixture C"
+    );
+
+    // Leg 1: no minter, no sweep.
+    let report = plain.backfill_event_receipts().await.expect("plain sweep");
+    assert_eq!(
+        report,
+        crate::SweepReport::default(),
+        "[{label}] a store without a minter must sweep nothing"
+    );
+    assert_eq!(
+        raw.receipt_slots(&a).await,
+        a_before,
+        "[{label}] plain sweep wrote"
+    );
+
+    let report = minting.backfill_event_receipts().await.expect("sweep");
+    assert!(
+        report.contexts_filled >= 2 && report.receipts_filled >= 3 && report.contexts_skipped >= 1,
+        "[{label}] the report undercounts the fixtures: {report:?}"
+    );
+
+    // Leg 2 (AC1).
+    let a_ctx = CtxId(a.clone());
+    let got = get(minting, &a_ctx).await;
+    verified_event_receipts(&got, &a_ctx, pubkey, 2, &format!("{label}] [legacy-only"));
+
+    // Leg 3 (AC3).
+    let b_ctx = CtxId(b.clone());
+    let got = get(minting, &b_ctx).await;
+    let served = verified_event_receipts(&got, &b_ctx, pubkey, 2, &format!("{label}] [tail"));
+    let b_after = raw.receipt_slots(&b).await;
+    assert_eq!(
+        b_after[0], b_before[0],
+        "[{label}] the receipted prefix was rewritten"
+    );
+    assert_eq!(
+        b_after[0].as_ref(),
+        Some(&served[0]),
+        "[{label}] prefix not served as stored"
+    );
+
+    // Leg 4 (AC2).
+    let c_ctx = CtxId(c.clone());
+    assert_eq!(
+        raw.receipt_slots(&c).await,
+        c_before,
+        "[{label}] the holed context was written"
+    );
+    assert!(
+        get(minting, &c_ctx)
+            .await
+            .registry_state
+            .event_receipts()
+            .is_none(),
+        "[{label}] a holed context must omit event_receipts"
+    );
+
+    // Leg 5: idempotent rerun.
+    let a_after = raw.receipt_slots(&a).await;
+    let report = minting
+        .backfill_event_receipts()
+        .await
+        .expect("second sweep");
+    assert!(
+        report.contexts_skipped >= 1,
+        "[{label}] the hole was not re-skipped: {report:?}"
+    );
+    assert_eq!(
+        raw.receipt_slots(&a).await,
+        a_after,
+        "[{label}] rerun rewrote A"
+    );
+    assert_eq!(
+        raw.receipt_slots(&b).await,
+        b_after,
+        "[{label}] rerun rewrote B"
+    );
+    assert_eq!(
+        raw.receipt_slots(&c).await,
+        c_before,
+        "[{label}] rerun wrote C"
+    );
+
+    // Leg 6 (AC4).
+    commit(minting, event(&c, 249, 3, Retracted)).await;
+    let slots = raw.receipt_slots(&c).await;
+    assert_eq!(slots.len(), 3, "[{label}] the append was not stored");
+    assert!(slots[0].is_none(), "[{label}] the append filled the hole");
+    assert_eq!(
+        slots[1], c_before[1],
+        "[{label}] the append rewrote a receipt"
+    );
+    assert_eq!(
+        slots[2].as_ref().and_then(|r| r["index"].as_u64()),
+        Some(2),
+        "[{label}] the new event must be receipted at its true index"
+    );
+    assert!(
+        get(minting, &c_ctx)
+            .await
+            .registry_state
+            .event_receipts()
+            .is_none(),
+        "[{label}] a holed context must still omit event_receipts"
+    );
+}
+
 /// Falsification for [`assert_lifecycle_state_probe_sees_retraction`]: the
 /// assertion is only worth running if a backend that inherits the trait's
 /// `Ok(false)` default actually fails it. Also the falsification for

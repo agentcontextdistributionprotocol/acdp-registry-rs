@@ -1,0 +1,18 @@
+-- RFC-ACDP-0017 §10 event receipts.
+--
+-- The registry-signed `acdp-event-receipt/1` for each lifecycle event,
+-- stored on the event's own row so the served `registry_state.event_receipts`
+-- array is parallel to `lifecycle_events` by construction (one SELECT, one
+-- snapshot). NULL for events accepted before receipts were minted. Written
+-- in the same transaction as the event, or once by fill-on-append / the
+-- startup sweep (NULL slots only); never updated after.
+--
+-- Additive and N-1 safe: older binaries name their columns and run with
+-- `set_ignore_missing`.
+ALTER TABLE lifecycle_events ADD COLUMN IF NOT EXISTS receipt JSONB;
+
+-- The startup sweep's candidate scan (`DISTINCT ctx_id … WHERE receipt IS
+-- NULL`) reads only un-receipted rows, so after the first sweep a restart
+-- costs O(remaining NULLs), not O(all events).
+CREATE INDEX IF NOT EXISTS idx_lifecycle_events_receipt_null
+    ON lifecycle_events (ctx_id) WHERE receipt IS NULL;

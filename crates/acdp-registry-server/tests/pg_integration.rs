@@ -192,14 +192,46 @@ async fn harness_with_caps(
     url: &str,
     caps: CapabilitiesDocument,
 ) -> axum::Router {
+    harness_with_config(config(playground), url, caps).await
+}
+
+/// Like [`harness_with_caps`] but with a caller-supplied config, wired the
+/// way the binary's `serve_with_store` wires it: the RFC-ACDP-0017 event
+/// receipt minter, the receipt signer and lifecycle are each attached iff
+/// `cfg` (and, for the minter, `caps.acdp_version`) turns them on.
+async fn harness_with_config(
+    cfg: RegistryConfig,
+    url: &str,
+    caps: CapabilitiesDocument,
+) -> axum::Router {
     let store = PgStore::connect(url, 4).await.unwrap();
+    let store = match acdp_registry_core::receipt::event_receipt_minter(&cfg, &caps.acdp_version)
+        .unwrap()
+    {
+        Some(minter) => store.with_event_receipt_minter(minter),
+        None => store,
+    };
     store.migrate().await.unwrap();
     // Reach into the underlying pool to truncate via a fresh connection.
     let pool = sqlx::PgPool::connect(url).await.unwrap();
     truncate(&pool).await;
     pool.close().await;
 
-    let server = Arc::new(RegistryServer::try_new(store, caps, AUTHORITY).unwrap());
+    let server = RegistryServer::try_new(store, caps, AUTHORITY).unwrap();
+    let server = if cfg.receipt.is_configured() {
+        let signer =
+            acdp_registry_core::receipt::build_signer(&cfg.receipt, &cfg.registry.authority)
+                .expect("receipt signer");
+        server.with_receipt_signer(signer).expect("receipt signer")
+    } else {
+        server
+    };
+    let server = if cfg.lifecycle.enabled {
+        server.with_lifecycle().expect("lifecycle enabled")
+    } else {
+        server
+    };
+    let server = Arc::new(server);
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
     let secret = JwtSecret::from_bytes(&[42u8; 32]);
     let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
@@ -211,7 +243,7 @@ async fn harness_with_caps(
         resolver,
         AUTHORITY.into(),
     ));
-    let state = AppStateInner::new(server, auth, None, config(playground), None);
+    let state = AppStateInner::new(server, auth, None, cfg, None);
     build_router(state)
 }
 
@@ -1234,4 +1266,133 @@ async fn memory_backend_admits_twice_the_budget_across_two_routers() {
         8,
         "each replica's global ceiling of 4"
     );
+}
+
+// ─── RFC-ACDP-0017 §10: event receipts on the pg-backed HTTP path ───
+
+/// The receipt key the pg event-receipt harness signs with.
+const PG_RECEIPT_SEED: [u8; 32] = [91u8; 32];
+
+/// A did:key lifecycle event envelope signed by the producer `seed`.
+fn pg_signed_event_envelope(seed: u8, ctx_id: &str, event_type: &str) -> Value {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    let did = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+    let key_id = acdp::did::key::did_key_url(&did).expect("did:key url");
+    let event = LifecycleEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        acdp::types::primitives::CtxId(ctx_id.to_string()),
+        LifecycleEventType::parse(event_type).unwrap(),
+        chrono::Utc::now(),
+        AgentDid::new(did),
+        None,
+    )
+    .expect("valid event")
+    .sign_with(key, key_id)
+    .expect("signed event");
+    json!({ "event": event })
+}
+
+async fn pg_send(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<&Value>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    let body = match body {
+        Some(v) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(v).unwrap())
+        }
+        None => Body::empty(),
+    };
+    let resp = app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_to_json(resp).await)
+}
+
+/// The pg store mints the receipt inside its lifecycle transaction: a
+/// retract through the HTTP surface serves `event_receipts[0]` that binds
+/// to the served event and verifies under the receipt key, a byte-identical
+/// retry mints none, and `GET /lineages/{id}` serves the same receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn pg_retract_serves_a_verifying_event_receipt() {
+    use acdp::types::EventReceipt;
+    use base64::Engine as _;
+    let Some(url) = pg_url_or_skip() else { return };
+    let mut cfg = config(false);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.lifecycle.enabled = true;
+    cfg.receipt.signing_key_seed_b64 =
+        base64::engine::general_purpose::STANDARD.encode(PG_RECEIPT_SEED);
+    let mut caps = caps_050();
+    caps.supported_did_methods = vec!["did:web".into(), "did:key".into()];
+    let app = harness_with_config(cfg, &url, caps).await;
+
+    let req = Producer::new_did_key(SigningKey::from_bytes(&[92u8; 32]))
+        .publish_request()
+        .title("pg event receipt")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&app, &req, None).await;
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+    let lineage_id = v["lineage_id"].as_str().unwrap().to_string();
+    let path = pct_encode_path_segment(&ctx_id);
+
+    let envelope = pg_signed_event_envelope(92, &ctx_id, "retracted");
+    let uri = format!("/contexts/{path}/retract");
+    let (status, v) = pg_send(&app, "POST", &uri, Some(&envelope)).await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+    let served = v["registry_state"]["event_receipts"].clone();
+    assert_eq!(served.as_array().map(Vec::len), Some(1), "retract = {v}");
+    let (status, retry) = pg_send(&app, "POST", &uri, Some(&envelope)).await;
+    assert_eq!(status, StatusCode::OK, "retry body = {retry}");
+    assert_eq!(
+        retry["registry_state"]["event_receipts"], served,
+        "a retry mints none"
+    );
+
+    let (status, full) = pg_send(&app, "GET", &format!("/contexts/{path}"), None).await;
+    assert_eq!(status, StatusCode::OK, "retrieve body = {full}");
+    assert_eq!(full["registry_state"]["event_receipts"], served);
+    let raw = &served[0];
+    let receipt = EventReceipt::from_value(raw).expect("closed schema");
+    let created_at =
+        chrono::DateTime::parse_from_rfc3339(full["body"]["created_at"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+    receipt
+        .check_binding(
+            full["body"]["origin_registry"].as_str().unwrap(),
+            &acdp::types::primitives::CtxId(ctx_id.clone()),
+            &full["registry_state"]["lifecycle_events"][0],
+            0,
+            created_at,
+        )
+        .expect("§10.3 binding");
+    let hash = EventReceipt::preimage_hash_of_value(raw).expect("preimage");
+    let key = SigningKey::from_bytes(&PG_RECEIPT_SEED).verifying_key_bytes();
+    receipt
+        .verify_signature_against_hash(&hash, Some(&key), None)
+        .expect("event receipt signature");
+
+    let (status, members) = pg_send(
+        &app,
+        "GET",
+        &format!("/lineages/{}", pct_encode_path_segment(&lineage_id)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "lineage = {members}");
+    assert_eq!(members[0]["registry_state"]["event_receipts"], served);
+    assert_eq!(members[0]["registry_receipt"], full["registry_receipt"]);
 }

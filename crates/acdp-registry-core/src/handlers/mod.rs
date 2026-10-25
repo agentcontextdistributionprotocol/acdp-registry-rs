@@ -6,6 +6,7 @@ mod log;
 mod meta;
 
 pub use auth::{issue_challenge, issue_token, revoke_token};
+pub(crate) use context::version_at_least;
 pub use context::{current, lineage, publish, republish, retract, retrieve, retrieve_body, search};
 pub use log::{log_checkpoint, log_entries, log_proof};
 pub use meta::{capabilities, health, jwks, livez, registry_did_document};

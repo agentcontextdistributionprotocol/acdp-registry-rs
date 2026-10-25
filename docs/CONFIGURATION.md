@@ -514,6 +514,11 @@ for the operator runbook (rotation, retention, backfill policy).
 | `key_id_fragment` | string | `receipt-key-1` | Fragment under the registry DID; `signature.key_id = did:web:<authority>#<fragment>`. Pick a fresh fragment per rotation. |
 | `head_receipts` | bool | `false` | *(ACDP 0.3.0)* Mint a lineage-head receipt on every `GET /lineages/{id}/current` response (RFC-ACDP-0011). Requires a configured signing key (the same receipt key signs — no new key role); advertises `acdp-registry-head-receipts` (`acdp_version` itself is unconditionally `"0.5.0"` as of REG-3 and no longer moves with this flag). |
 
+With `[lifecycle] enabled = true` as well, the same key also signs an
+RFC-ACDP-0017 §10 event receipt for every accepted lifecycle event, served in
+`registry_state.event_receipts`. There is no separate flag; see
+[RECEIPTS.md](RECEIPTS.md#event-receipts-acdp-050--rfc-acdp-0017-10).
+
 #### `[[receipt.retired_keys]]`
 
 Repeatable. Rotated-out receipt keys, published in the DID document's
@@ -539,6 +544,10 @@ longer moves with this flag). When disabled (the default) both endpoints
 answer `501 not_implemented` and the registry emits neither
 `lifecycle_events` nor the `retracted` status — guaranteed by the startup
 refusal below, not by the read paths.
+
+With a `[receipt]` key configured as well, every accepted lifecycle event
+also gets an RFC-ACDP-0017 §10 event receipt (`registry_state.event_receipts`),
+committed atomically with the event.
 
 **Turning the flag off over existing lifecycle state refuses to start.**
 [RFC-ACDP-0013 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/093279a99e98815fbb948e8d20652c1d5fca0585/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints)

@@ -184,7 +184,8 @@ async fn the_version_column_is_wide_enough_for_any_u32() {
 
     let (data_type,): (String,) = sqlx::query_as(
         "SELECT data_type FROM information_schema.columns \
-         WHERE table_name = 'contexts' AND column_name = 'version'",
+         WHERE table_schema = current_schema() AND table_name = 'contexts' \
+         AND column_name = 'version'",
     )
     .fetch_one(store.pool())
     .await
@@ -212,8 +213,8 @@ async fn the_search_filter_indexes_exist() {
     let Some(url) = pg_url_or_skip() else { return };
     let store = store(&url).await;
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT indexname FROM pg_indexes WHERE tablename = 'contexts' \
-         AND indexname IN ('idx_ctx_domain', 'idx_ctx_expires') ORDER BY indexname",
+        "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() \
+         AND tablename = 'contexts' AND indexname IN ('idx_ctx_domain', 'idx_ctx_expires') ORDER BY indexname",
     )
     .fetch_all(store.pool())
     .await
@@ -226,6 +227,21 @@ async fn the_search_filter_indexes_exist() {
     );
 }
 
+/// Migration 016: the startup sweep's candidate scan has its partial index.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_candidate_index_exists() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    let (def,): (String,) = sqlx::query_as(
+        "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() \
+         AND indexname = 'idx_lifecycle_events_receipt_null'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("the sweep index must exist after migration 016");
+    assert!(def.contains("WHERE (receipt IS NULL)"), "{def}");
+}
+
 /// H-I-s: a batched visibility check must answer exactly what N individual
 /// retrieve checks answer — same assertion SQLite runs, so a divergence between
 /// the two backends fails both suites.
@@ -234,4 +250,99 @@ async fn batched_visibility_matches_the_cross_backend_contract() {
     let Some(url) = pg_url_or_skip() else { return };
     let store = store(&url).await;
     parity::assert_batched_visibility_parity(&store, "pg").await;
+}
+
+/// RFC-ACDP-0017 §10: fill-on-append, binding, signature, replay and read
+/// parity of event receipts. Two handles on one database: one without a
+/// minter (the legacy prefix), one with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_receipts_match_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    let key = acdp::crypto::SigningKey::from_bytes(&[98u8; 32]);
+    let pubkey = key.verifying_key_bytes();
+    let signer =
+        acdp::types::ReceiptSigner::new(key, "did:web:reg.test", "did:web:reg.test#receipt-key-1")
+            .expect("signer");
+    let minting = Arc::new(
+        plain
+            .as_ref()
+            .clone()
+            .with_event_receipt_minter(Arc::new(signer)),
+    );
+    parity::assert_lifecycle_event_receipts(&plain, &minting, pubkey, "pg").await;
+}
+
+/// A store whose tables live in a fresh, run-unique schema (`search_path`
+/// pinned on the connection), plus an admin handle and the schema name for
+/// the final `DROP`. The sweep is whole-database, so on the shared schema
+/// it would receipt other tests' legacy rows while they assert on them.
+async fn isolated_store(url: &str, prefix: &str) -> (Arc<PgStore>, PgStore, String) {
+    let schema = format!("{prefix}_{}", uuid::Uuid::new_v4().simple());
+    let admin = PgStore::connect(url, 1).await.expect("pg connect");
+    sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+        .execute(admin.pool())
+        .await
+        .expect("create run-unique schema");
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let store = PgStore::connect(&format!("{url}{sep}options[search_path]={schema}"), 4)
+        .await
+        .expect("pg connect (isolated schema)");
+    store.migrate().await.expect("pg migrate (isolated schema)");
+    (Arc::new(store), admin, schema)
+}
+
+async fn drop_schema(admin: &PgStore, schema: &str) {
+    sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+        .execute(admin.pool())
+        .await
+        .expect("drop run-unique schema");
+}
+
+/// Raw slot access for [`parity::assert_event_receipt_sweep`].
+struct Slots(Arc<PgStore>);
+
+#[async_trait::async_trait]
+impl parity::RawReceiptSlots for Slots {
+    async fn receipt_slots(&self, ctx_id: &str) -> Vec<Option<serde_json::Value>> {
+        let rows: Vec<(Option<serde_json::Value>,)> =
+            sqlx::query_as("SELECT receipt FROM lifecycle_events WHERE ctx_id = $1 ORDER BY seq")
+                .bind(ctx_id)
+                .fetch_all(self.0.pool())
+                .await
+                .expect("read receipt slots");
+        rows.into_iter().map(|(raw,)| raw).collect()
+    }
+
+    async fn clear_receipt(&self, event_id: &str) {
+        let done = sqlx::query("UPDATE lifecycle_events SET receipt = NULL WHERE event_id = $1")
+            .bind(event_id)
+            .execute(self.0.pool())
+            .await
+            .expect("clear receipt");
+        assert_eq!(done.rows_affected(), 1, "fixture UPDATE must hit one row");
+    }
+}
+
+/// RFC-ACDP-0017 §10.2: the startup sweep fills legacy and trailing NULL
+/// receipts, skips a hole without writing, and is idempotent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_receipt_sweep_matches_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let (plain, admin, schema) = isolated_store(&url, "sweep").await;
+    let key = acdp::crypto::SigningKey::from_bytes(&[98u8; 32]);
+    let pubkey = key.verifying_key_bytes();
+    let signer =
+        acdp::types::ReceiptSigner::new(key, "did:web:reg.test", "did:web:reg.test#receipt-key-1")
+            .expect("signer");
+    let minting = Arc::new(
+        plain
+            .as_ref()
+            .clone()
+            .with_event_receipt_minter(Arc::new(signer)),
+    );
+    let raw = Slots(Arc::clone(&plain));
+    parity::assert_event_receipt_sweep(&plain, &minting, &raw, pubkey, "pg").await;
+    drop((plain, minting, raw));
+    drop_schema(&admin, &schema).await;
 }

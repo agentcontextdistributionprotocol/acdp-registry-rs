@@ -587,6 +587,464 @@ mod lifecycle {
             .await
             .expect("drop run-unique schema");
     }
+    // ─── RFC-ACDP-0017 §10: event receipts minted in the commit transaction ───
+
+    mod event_receipts {
+        use super::*;
+        use acdp::types::{EventReceipt, ReceiptSigner};
+        use acdp_registry_store::EventReceiptMinter;
+        use chrono::{DateTime, Utc};
+
+        const REGISTRY_DID: &str = "did:web:reg.test";
+
+        fn signer() -> Arc<dyn EventReceiptMinter> {
+            Arc::new(
+                ReceiptSigner::new(
+                    SigningKey::from_bytes(&[97u8; 32]),
+                    REGISTRY_DID,
+                    format!("{REGISTRY_DID}#receipt-key-1"),
+                )
+                .unwrap(),
+            )
+        }
+
+        /// A minter that always fails: stands in for an unavailable key.
+        struct FailingMinter;
+
+        impl EventReceiptMinter for FailingMinter {
+            fn mint(
+                &self,
+                _ctx_id: &CtxId,
+                _raw_event: &serde_json::Value,
+                _index: u64,
+                _accepted_at: DateTime<Utc>,
+            ) -> Result<EventReceipt, AcdpError> {
+                Err(AcdpError::RegistryInternal("minter unavailable".into()))
+            }
+        }
+
+        fn with_minter(plain: &Arc<PgStore>, minter: Arc<dyn EventReceiptMinter>) -> Arc<PgStore> {
+            Arc::new(plain.as_ref().clone().with_event_receipt_minter(minter))
+        }
+
+        /// `(event_id, receipt JSON text)` for one context, in `seq` order.
+        async fn rows(store: &Arc<PgStore>, ctx_id: &CtxId) -> Vec<(String, Option<String>)> {
+            sqlx::query_as(
+                "SELECT event_id, receipt::text FROM lifecycle_events WHERE ctx_id = $1 ORDER BY seq",
+            )
+            .bind(ctx_id.as_str())
+            .fetch_all(store.pool())
+            .await
+            .unwrap()
+        }
+
+        async fn set_receipt(store: &Arc<PgStore>, event_id: &str, value: Option<&str>) {
+            let done =
+                sqlx::query("UPDATE lifecycle_events SET receipt = $1::jsonb WHERE event_id = $2")
+                    .bind(value)
+                    .bind(event_id)
+                    .execute(store.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(done.rows_affected(), 1, "fixture UPDATE must hit one row");
+        }
+
+        fn index_of(receipt: &str) -> u64 {
+            serde_json::from_str::<serde_json::Value>(receipt).unwrap()["index"]
+                .as_u64()
+                .unwrap()
+        }
+
+        /// AC4: a minter error rolls the whole append back — the event, the
+        /// retracted flag and any fill-on-append UPDATE in the same
+        /// transaction.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn failing_minter_aborts_the_whole_append() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let plain = store(&url).await;
+            let failing = with_minter(&plain, Arc::new(FailingMinter));
+            let actor = AgentDid::new("did:web:agents.test:contract-70".to_string());
+            let (ctx_id, _) = published_ctx(&plain, 70, "receipt minter failure").await;
+
+            let err = failing
+                .commit_lifecycle_event(&event(
+                    &actor,
+                    &ctx_id,
+                    LifecycleEventType::Retracted,
+                    None,
+                ))
+                .expect_err("a failing minter must fail the commit");
+            assert!(matches!(err, AcdpError::RegistryInternal(_)), "{err:?}");
+            assert!(
+                rows(&plain, &ctx_id).await.is_empty(),
+                "no event row may survive"
+            );
+            assert_eq!(
+                plain.get(&ctx_id).unwrap().unwrap().registry_state.status,
+                Status::Active,
+                "the status effect must roll back with the event"
+            );
+
+            // With an un-receipted prefix, the failed fill rolls back too.
+            plain
+                .commit_lifecycle_event(&event(
+                    &actor,
+                    &ctx_id,
+                    LifecycleEventType::Retracted,
+                    None,
+                ))
+                .expect("legacy retract");
+            failing
+                .commit_lifecycle_event(&event(
+                    &actor,
+                    &ctx_id,
+                    LifecycleEventType::Republished,
+                    None,
+                ))
+                .expect_err("a failing minter must fail the commit");
+            let after = rows(&plain, &ctx_id).await;
+            assert_eq!(after.len(), 1, "the republish must not be appended");
+            assert!(after[0].1.is_none(), "the prefix must stay un-receipted");
+            assert_eq!(
+                plain.get(&ctx_id).unwrap().unwrap().registry_state.status,
+                Status::Retracted
+            );
+        }
+
+        /// The racing losers mint nothing: exactly one receipt row exists.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_retracts_mint_exactly_one_receipt() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let plain = store(&url).await;
+            let minting = with_minter(&plain, signer());
+            let actor = AgentDid::new("did:web:agents.test:contract-71".to_string());
+            let (ctx_id, _) = published_ctx(&plain, 71, "receipt race").await;
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let store = Arc::clone(&minting);
+                    let e = event(&actor, &ctx_id, LifecycleEventType::Retracted, None);
+                    tokio::task::spawn_blocking(move || store.commit_lifecycle_event(&e))
+                })
+                .collect();
+            let mut applied = 0usize;
+            for h in handles {
+                match h.await.unwrap() {
+                    Ok(LifecycleCommitOutcome::Applied(c)) => {
+                        applied += 1;
+                        let r = c.registry_state.event_receipts().unwrap().unwrap();
+                        assert_eq!(r.len(), 1);
+                    }
+                    Err(AcdpError::InvalidLifecycleTransition(_)) => {}
+                    other => panic!("unexpected outcome under race: {other:?}"),
+                }
+            }
+            assert_eq!(applied, 1, "exactly one retract wins");
+            let stored = rows(&plain, &ctx_id).await;
+            assert_eq!(stored.len(), 1);
+            assert_eq!(index_of(stored[0].1.as_deref().expect("receipted")), 0);
+        }
+
+        /// AC3 / chain-009 B: a byte-identical retry serves the stored
+        /// receipt and writes nothing.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn replay_serves_the_stored_receipt_and_mints_none() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let plain = store(&url).await;
+            let minting = with_minter(&plain, signer());
+            let actor = AgentDid::new("did:web:agents.test:contract-72".to_string());
+            let (ctx_id, _) = published_ctx(&plain, 72, "receipt replay").await;
+            let e = event(&actor, &ctx_id, LifecycleEventType::Retracted, None);
+            let LifecycleCommitOutcome::Applied(first) =
+                minting.commit_lifecycle_event(&e).unwrap()
+            else {
+                panic!("first commit must apply")
+            };
+            let before = rows(&plain, &ctx_id).await;
+            let LifecycleCommitOutcome::IdempotentReplay(again) =
+                minting.commit_lifecycle_event(&e).unwrap()
+            else {
+                panic!("identical retry must replay")
+            };
+            assert_eq!(rows(&plain, &ctx_id).await, before, "the replay wrote");
+            assert_eq!(
+                serde_json::to_value(again.registry_state.event_receipts().unwrap().unwrap())
+                    .unwrap(),
+                serde_json::to_value(first.registry_state.event_receipts().unwrap().unwrap())
+                    .unwrap(),
+                "the replay must serve the receipt minted by the first commit"
+            );
+        }
+
+        /// AC1 / AC7: without a minter nothing is stored and nothing served.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn without_a_minter_no_receipt_is_stored_or_served() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let plain = store(&url).await;
+            let actor = AgentDid::new("did:web:agents.test:contract-73".to_string());
+            let (ctx_id, lineage_id) = published_ctx(&plain, 73, "no minter").await;
+            let LifecycleCommitOutcome::Applied(c) = plain
+                .commit_lifecycle_event(&event(
+                    &actor,
+                    &ctx_id,
+                    LifecycleEventType::Retracted,
+                    None,
+                ))
+                .unwrap()
+            else {
+                panic!("retract must apply")
+            };
+            assert!(c.registry_state.event_receipts().is_none());
+            assert!(rows(&plain, &ctx_id).await[0].1.is_none());
+            let got = plain.get(&ctx_id).unwrap().unwrap();
+            assert!(got.registry_state.event_receipts().is_none());
+            assert!(!serde_json::to_string(&got)
+                .unwrap()
+                .contains("event_receipts"));
+            for m in plain.lineage(&lineage_id).unwrap() {
+                assert!(m.registry_state.event_receipts().is_none());
+            }
+        }
+
+        /// D2 hole rule: a NULL slot before a receipted one is never filled
+        /// (filling it would mint a receipt dated after its successor's);
+        /// the new event is still receipted at its true index, and every
+        /// read omits the incomplete array rather than serve a gap.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_hole_is_not_filled_and_the_array_is_omitted() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let plain = store(&url).await;
+            let minting = with_minter(&plain, signer());
+            let actor = AgentDid::new("did:web:agents.test:contract-74".to_string());
+            let (ctx_id, _) = published_ctx(&plain, 74, "receipt hole").await;
+            for t in [
+                LifecycleEventType::Retracted,
+                LifecycleEventType::Republished,
+            ] {
+                minting
+                    .commit_lifecycle_event(&event(&actor, &ctx_id, t, None))
+                    .unwrap();
+            }
+            let first = rows(&plain, &ctx_id).await[0].0.clone();
+            set_receipt(&plain, &first, None).await;
+
+            let LifecycleCommitOutcome::Applied(c) = minting
+                .commit_lifecycle_event(&event(
+                    &actor,
+                    &ctx_id,
+                    LifecycleEventType::Retracted,
+                    None,
+                ))
+                .unwrap()
+            else {
+                panic!("the append must still apply")
+            };
+            assert!(
+                c.registry_state.event_receipts().is_none(),
+                "a gap was served"
+            );
+            let stored = rows(&plain, &ctx_id).await;
+            assert!(stored[0].1.is_none(), "the hole was filled");
+            assert_eq!(
+                index_of(stored[2].1.as_deref().expect("new event receipted")),
+                2
+            );
+            assert!(minting
+                .get(&ctx_id)
+                .unwrap()
+                .unwrap()
+                .registry_state
+                .event_receipts()
+                .is_none());
+        }
+
+        /// A corrupt stored receipt is logged and treated as missing: the
+        /// read succeeds without the array, and it is never overwritten.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_corrupt_receipt_is_omitted_not_an_error() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let plain = store(&url).await;
+            let minting = with_minter(&plain, signer());
+            let actor = AgentDid::new("did:web:agents.test:contract-75".to_string());
+            let (ctx_id, _) = published_ctx(&plain, 75, "receipt corrupt").await;
+            minting
+                .commit_lifecycle_event(&event(
+                    &actor,
+                    &ctx_id,
+                    LifecycleEventType::Retracted,
+                    None,
+                ))
+                .unwrap();
+            let first = rows(&plain, &ctx_id).await[0].0.clone();
+            set_receipt(&plain, &first, Some(r#"{"index":0}"#)).await;
+
+            let got = minting.get(&ctx_id).unwrap().unwrap();
+            assert_eq!(
+                got.registry_state
+                    .lifecycle_events
+                    .as_deref()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(got.registry_state.event_receipts().is_none());
+            minting
+                .commit_lifecycle_event(&event(
+                    &actor,
+                    &ctx_id,
+                    LifecycleEventType::Republished,
+                    None,
+                ))
+                .expect("a corrupt slot must not block appends");
+            let stored = rows(&plain, &ctx_id).await;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(stored[0].1.as_deref().unwrap()).unwrap(),
+                serde_json::json!({"index": 0}),
+                "the corrupt slot must never be overwritten"
+            );
+            assert_eq!(index_of(stored[1].1.as_deref().unwrap()), 1);
+        }
+
+        /// A store whose tables live in a run-unique schema. The sweep is
+        /// whole-database: on the shared schema it would receipt the legacy
+        /// rows other tests in this binary assert stay NULL.
+        async fn isolated(url: &str) -> (Arc<PgStore>, PgStore, String) {
+            let schema = format!("sweep_{}", uuid::Uuid::new_v4().simple());
+            let admin = PgStore::connect(url, 1).await.expect("pg connect");
+            sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+                .execute(admin.pool())
+                .await
+                .expect("create run-unique schema");
+            let sep = if url.contains('?') { '&' } else { '?' };
+            let store = PgStore::connect(&format!("{url}{sep}options[search_path]={schema}"), 8)
+                .await
+                .expect("pg connect (isolated schema)");
+            store.migrate().await.expect("pg migrate (isolated schema)");
+            (Arc::new(store), admin, schema)
+        }
+
+        async fn drop_isolated(admin: PgStore, schema: &str) {
+            sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+                .execute(admin.pool())
+                .await
+                .expect("drop run-unique schema");
+        }
+
+        /// Publish a context and append `n` legacy (un-receipted) events.
+        async fn legacy_ctx(plain: &Arc<PgStore>, seed: u8, title: &str, n: usize) -> CtxId {
+            let actor = AgentDid::new(format!("did:web:agents.test:contract-{seed}"));
+            let (ctx_id, _) = published_ctx(plain, seed, title).await;
+            for i in 0..n {
+                let t = if i % 2 == 0 {
+                    LifecycleEventType::Retracted
+                } else {
+                    LifecycleEventType::Republished
+                };
+                plain
+                    .commit_lifecycle_event(&event(&actor, &ctx_id, t, None))
+                    .unwrap();
+            }
+            ctx_id
+        }
+
+        /// Replicas starting at once: the `FOR UPDATE` row lock plus
+        /// `WHERE receipt IS NULL` make every slot fill exactly once.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_sweeps_fill_each_slot_exactly_once() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let (plain, admin, schema) = isolated(&url).await;
+            let mut ctxs = Vec::new();
+            for seed in 80..84u8 {
+                ctxs.push(legacy_ctx(&plain, seed, "pg sweep race", 3).await);
+            }
+            let sweeps: Vec<_> = (0..4)
+                .map(|_| {
+                    let s = with_minter(&plain, signer());
+                    tokio::spawn(async move { s.backfill_event_receipts().await })
+                })
+                .collect();
+            let mut filled = 0;
+            for h in sweeps {
+                filled += h
+                    .await
+                    .unwrap()
+                    .expect("a concurrent sweep must not fail")
+                    .receipts_filled;
+            }
+            assert_eq!(filled, 12, "every slot must be filled by exactly one sweep");
+            for ctx in &ctxs {
+                let stored = rows(&plain, ctx).await;
+                assert_eq!(stored.len(), 3);
+                for (i, (_, r)) in stored.iter().enumerate() {
+                    assert_eq!(index_of(r.as_deref().expect("receipted")), i as u64);
+                }
+            }
+            drop(plain);
+            drop_isolated(admin, &schema).await;
+        }
+
+        /// A minter error fails the sweep (startup refuses) and rolls that
+        /// context's fills back: no partial history is left receipted.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_failing_minter_fails_the_sweep_and_writes_nothing() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let (plain, admin, schema) = isolated(&url).await;
+            let ctx = legacy_ctx(&plain, 84, "pg sweep failure", 2).await;
+            let err = with_minter(&plain, Arc::new(FailingMinter))
+                .backfill_event_receipts()
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AcdpError::RegistryInternal(_)), "{err:?}");
+            assert!(rows(&plain, &ctx).await.iter().all(|(_, r)| r.is_none()));
+            drop(plain);
+            drop_isolated(admin, &schema).await;
+        }
+
+        /// Bad data on one context never refuses startup: a corrupt stored
+        /// receipt and an undecodable event are each skipped (and counted),
+        /// left untouched, and the sweep still fills the healthy context.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn bad_rows_are_skipped_and_the_rest_is_swept() {
+            let Some(url) = pg_url_or_skip() else { return };
+            let (plain, admin, schema) = isolated(&url).await;
+            let corrupt = legacy_ctx(&plain, 85, "pg sweep corrupt tail", 2).await;
+            let tail = rows(&plain, &corrupt).await[1].0.clone();
+            set_receipt(&plain, &tail, Some("{\"index\": 7}")).await;
+            let undecodable = legacy_ctx(&plain, 86, "pg sweep undecodable", 1).await;
+            sqlx::query(
+                "UPDATE lifecycle_events SET occurred_at = 'not a timestamp' WHERE ctx_id = $1",
+            )
+            .bind(undecodable.as_str())
+            .execute(plain.pool())
+            .await
+            .unwrap();
+            let healthy = legacy_ctx(&plain, 87, "pg sweep healthy", 1).await;
+            let report = with_minter(&plain, signer())
+                .backfill_event_receipts()
+                .await
+                .expect("bad rows must not fail the sweep");
+            assert_eq!(
+                (
+                    report.contexts_filled,
+                    report.receipts_filled,
+                    report.contexts_skipped
+                ),
+                (1, 1, 2)
+            );
+            let stored = rows(&plain, &corrupt).await;
+            assert!(
+                stored[0].1.is_none(),
+                "a context with a corrupt slot was filled"
+            );
+            assert_eq!(index_of(stored[1].1.as_deref().unwrap()), 7);
+            assert!(rows(&plain, &undecodable).await[0].1.is_none());
+            assert_eq!(
+                index_of(rows(&plain, &healthy).await[0].1.as_deref().unwrap()),
+                0
+            );
+            drop(plain);
+            drop_isolated(admin, &schema).await;
+        }
+    }
 }
 
 // ─── ACDP 0.3.0: transparency log (RFC-ACDP-0012) ──────────────────────────

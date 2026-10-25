@@ -18,6 +18,15 @@ the trigger that reopens it:
 - W7(f): `#[non_exhaustive]` on `AuthConfig`, at the next deliberate breaking config release.
 - Federation proxy: a foreign context failing hash, signature or key checks answers 400; revisit if RFC-ACDP-0006/0007 assigns proxies
   a code for upstream-integrity failures (0.15.1 adoption, (b)).
+- RFC-ACDP-0004 §5.1 (pinned 093279a, line 165) says `registry_state.registry_receipt` on lineage members, but the receipt is
+  top-level on the envelope everywhere else (acdp-rs, the evidence schema). We serve it top-level; revisit if the spec erratum lands
+  the other way.
+- Webhook payloads (`context.retracted` / `context.republished`) do not carry the event receipt; revisit if RFC-ACDP-0009 adds it.
+- The lifecycle webhook also fires on a byte-identical replay of an event, because `into_context()` drops the outcome kind
+  (`crates/acdp-registry-core/src/handlers/context.rs:1629`). This predates RFC-0017. Revisit when a subscriber reports duplicates,
+  or when the SDK exposes the replay outcome on the lifecycle path.
+- Event receipts are signed for `did:web:<current registry.authority>` without comparing it to the context's `origin_registry`;
+  add a skip-and-count guard if `registry.authority` ever becomes changeable for a populated store.
 
 When one of these is settled, edit its status in `ASSUMPTIONS.md` in the same PR as the change that settled it, and note the decision in
 `DECISIONS.md`. Do not open a PR only to tidy a status line.

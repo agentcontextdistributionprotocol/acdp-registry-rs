@@ -2838,9 +2838,29 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
         "@context": ["https://www.w3.org/ns/did/v1"],
         "id": format!("did:web:{upstream}"),
     });
+    // RFC-ACDP-0017 §10: the origin's event receipts ride in
+    // `registry_state` beside its events and must survive the proxy.
+    let origin_state = json!({
+        "status": "superseded",
+        "lifecycle_events": [signed_event_envelope(seed, &ctx_id, "retracted", None)["event"]],
+        "event_receipts": [{
+            "receipt_type": "acdp-event-receipt/1",
+            "registry_did": format!("did:web:{upstream}"),
+            "ctx_id": ctx_id,
+            "event_id": "opaque-to-the-proxy",
+            "event_hash": "sha256:00",
+            "index": 0,
+            "accepted_at": "2026-05-02T08:00:01.000Z",
+            "signature": {
+                "algorithm": "ed25519",
+                "key_id": format!("did:web:{upstream}#receipt-key-1"),
+                "value": "AA",
+            },
+        }],
+    });
     let wire = json!({
         "body": raw,
-        "registry_state": { "status": "superseded" },
+        "registry_state": origin_state,
     });
     let app = axum::Router::new()
         .route(
@@ -2878,6 +2898,10 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
     assert_eq!(status, StatusCode::OK, "body = {v}");
     assert_eq!(v["body"], raw, "proxied body must be the origin's bytes");
     assert_eq!(v["registry_state"]["status"], "superseded");
+    assert_eq!(
+        v["registry_state"], origin_state,
+        "the origin's lifecycle_events and event_receipts pass through verbatim"
+    );
 
     // What a 0.15 consumer does with the proxied response: hash the raw body.
     let ctx: FullContext = serde_json::from_value(v).unwrap();
@@ -6226,6 +6250,510 @@ fn registry_did() -> String {
     format!("did:web:{AUTHORITY}")
 }
 
+// ─── RFC-ACDP-0017 §10: event receipts — wiring and gate ───
+
+/// The receipt seed a rotated deployment signs with.
+const ROTATED_RECEIPT_SEED: [u8; 32] = [77u8; 32];
+
+fn event_receipts_cfg(lifecycle: bool, key: bool) -> RegistryConfig {
+    let mut cfg = config(false);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.lifecycle.enabled = lifecycle;
+    if key {
+        cfg.receipt.signing_key_seed_b64 = B64.encode(RECEIPT_SEED);
+    }
+    cfg
+}
+
+/// Publish a context as the did:key producer `seed`; returns its ctx_id.
+async fn publish_for_lifecycle(h: &Harness, seed: u8, title: &str) -> String {
+    let req = did_key_producer(seed)
+        .publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
+    v["ctx_id"].as_str().unwrap().to_string()
+}
+
+async fn full_context(h: &Harness, ctx_id: &str) -> Value {
+    let (status, v) = get_json(
+        &h.router,
+        &format!("/contexts/{}", pct_encode_path_segment(ctx_id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retrieve body = {v}");
+    v
+}
+
+/// The Ed25519 key `/.well-known/did.json` publishes under `key_id`, from
+/// the candidate seeds the tests sign with.
+async fn did_json_key(h: &Harness, key_id: &str) -> [u8; 32] {
+    let (status, doc) = get_json(&h.router, "/.well-known/did.json").await;
+    assert_eq!(status, StatusCode::OK, "did.json = {doc}");
+    let vm = doc["verificationMethod"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == key_id)
+        .unwrap_or_else(|| panic!("{key_id} not in did.json: {doc}"));
+    let served = vm["publicKeyMultibase"].as_str().unwrap();
+    [RECEIPT_SEED, ROTATED_RECEIPT_SEED]
+        .into_iter()
+        .map(|seed| SigningKey::from_bytes(&seed).verifying_key_bytes())
+        .find(|pk| {
+            acdp::did::key::did_key_from_ed25519(pk).strip_prefix("did:key:") == Some(served)
+        })
+        .expect("did.json serves a key the tests know")
+}
+
+/// Run the §10.3 verification of event receipt `index` of a served
+/// context: closed-schema parse, binding to the served event, and the
+/// signature under the key `did.json` publishes for its `key_id`.
+async fn verify_event_receipt(h: &Harness, ctx: &Value, index: usize) -> EventReceiptT {
+    let raw = &ctx["registry_state"]["event_receipts"][index];
+    let receipt = EventReceiptT::from_value(raw).expect("closed schema");
+    let created_at =
+        chrono::DateTime::parse_from_rfc3339(ctx["body"]["created_at"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+    receipt
+        .check_binding(
+            ctx["body"]["origin_registry"].as_str().unwrap(),
+            &acdp::types::primitives::CtxId(ctx["body"]["ctx_id"].as_str().unwrap().into()),
+            &ctx["registry_state"]["lifecycle_events"][index],
+            index as u64,
+            created_at,
+        )
+        .expect("§10.3 binding");
+    let key = did_json_key(h, &receipt.signature.key_id).await;
+    let hash = EventReceiptT::preimage_hash_of_value(raw).expect("preimage");
+    receipt
+        .verify_signature_against_hash(&hash, Some(&key), None)
+        .expect("event receipt signature");
+    receipt
+}
+
+use acdp::types::EventReceipt as EventReceiptT;
+
+/// AC2: with lifecycle and receipts at 0.5.0, a retract response carries a
+/// receipt that binds to the served event and verifies against did.json;
+/// the full retrieval serves the same bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn event_receipts_are_minted_when_the_gate_is_open() {
+    let h = build_harness_with_caps(event_receipts_cfg(true, true), caps_050(), None).await;
+    let ctx_id = publish_for_lifecycle(&h, 60, "event receipts on").await;
+    let envelope = signed_event_envelope(60, &ctx_id, "retracted", None);
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+    let served = &v["registry_state"]["event_receipts"];
+    assert_eq!(served.as_array().map(Vec::len), Some(1), "retract = {v}");
+    let full = full_context(&h, &ctx_id).await;
+    assert_eq!(&full["registry_state"]["event_receipts"], served);
+    let receipt = verify_event_receipt(&h, &full, 0).await;
+    assert_eq!(
+        receipt.signature.key_id,
+        format!("did:web:{AUTHORITY}#receipt-key-1"),
+        "signed with the publish receipt key"
+    );
+}
+
+/// AC3 + AC4: no receipt key, lifecycle off, or a claimed version below
+/// 0.5.0 — nothing carries `event_receipts`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn event_receipts_are_never_served_when_the_gate_is_closed() {
+    for (label, cfg, caps) in [
+        (
+            "no receipt key",
+            event_receipts_cfg(true, false),
+            caps_050(),
+        ),
+        ("lifecycle off", event_receipts_cfg(false, true), caps_050()),
+        (
+            "acdp_version 0.3.0",
+            event_receipts_cfg(true, true),
+            caps_030(),
+        ),
+    ] {
+        let lifecycle = cfg.lifecycle.enabled;
+        let h = build_harness_with_caps(cfg, caps, None).await;
+        let ctx_id = publish_for_lifecycle(&h, 61, "event receipts off").await;
+        let envelope = signed_event_envelope(61, &ctx_id, "retracted", None);
+        let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+        if lifecycle {
+            assert_eq!(status, StatusCode::OK, "{label}: retract body = {v}");
+            assert_eq!(v["registry_state"]["status"], "retracted", "{label}");
+        } else {
+            assert_ne!(status, StatusCode::OK, "{label}: lifecycle off must refuse");
+        }
+        assert!(
+            !v.to_string().contains("event_receipts"),
+            "{label}: retract = {v}"
+        );
+        let full = full_context(&h, &ctx_id).await;
+        assert!(
+            full["registry_state"].get("event_receipts").is_none(),
+            "{label}: retrieve = {full}"
+        );
+    }
+}
+
+/// AC6: after a receipt-key rotation and a restart, replaying an event
+/// returns the original receipt bytes, which still verify under the
+/// retired key that did.json keeps in `verificationMethod`; a new event is
+/// signed with the active key and never accepted earlier than the first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replay_after_key_rotation_serves_the_original_receipt() {
+    let mut h = build_harness_with_caps(event_receipts_cfg(true, true), caps_050(), None).await;
+    let ctx_id = publish_for_lifecycle(&h, 62, "rotation").await;
+    let envelope = signed_event_envelope(62, &ctx_id, "retracted", None);
+    let (status, first) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+    assert_eq!(status, StatusCode::OK, "retract body = {first}");
+    let original = first["registry_state"]["event_receipts"][0].clone();
+    assert!(original.is_object(), "retract = {first}");
+
+    let dir = h.db.take().expect("file-backed harness");
+    drop(h);
+    let mut cfg = event_receipts_cfg(true, true);
+    cfg.receipt.signing_key_seed_b64 = B64.encode(ROTATED_RECEIPT_SEED);
+    cfg.receipt.key_id_fragment = "receipt-key-2".into();
+    cfg.receipt.retired_keys = vec![acdp_registry_types::RetiredReceiptKey {
+        public_key_b64: B64.encode(receipt_public_key()),
+        key_id_fragment: "receipt-key-1".into(),
+    }];
+    let h = common::build_harness_with_webhook(
+        cfg,
+        caps_050(),
+        AUTHORITY,
+        common::StoreMode::Reopen(dir),
+        None,
+        None,
+    )
+    .await;
+
+    let (status, replay) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+    assert_eq!(status, StatusCode::OK, "replay body = {replay}");
+    assert_eq!(
+        replay["registry_state"]["event_receipts"],
+        json!([original]),
+        "a replay serves the stored receipt and mints none"
+    );
+    let full = full_context(&h, &ctx_id).await;
+    let old = verify_event_receipt(&h, &full, 0).await;
+    assert_eq!(
+        old.signature.key_id,
+        format!("did:web:{AUTHORITY}#receipt-key-1")
+    );
+
+    let republish = signed_event_envelope(62, &ctx_id, "republished", None);
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "republish", &republish).await;
+    assert_eq!(status, StatusCode::OK, "republish body = {v}");
+    let full = full_context(&h, &ctx_id).await;
+    assert_eq!(full["registry_state"]["event_receipts"][0], original);
+    let new = verify_event_receipt(&h, &full, 1).await;
+    assert_eq!(
+        new.signature.key_id,
+        format!("did:web:{AUTHORITY}#receipt-key-2")
+    );
+    assert!(new.accepted_at >= old.accepted_at);
+}
+
+/// AC5, gate on: rejected lifecycle writes (double retract, a divergent
+/// event_id reuse, an admin transition out of order) mint nothing, and a
+/// registry-initiated `/admin/*` event is receipted on the same path as a
+/// producer event, signed by the registry's receipt key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_events_mint_nothing_and_admin_events_are_receipted() {
+    let mut cfg = event_receipts_cfg(true, true);
+    cfg.auth.admin_tokens = vec![ADMIN_TOKEN.into()];
+    let h = build_harness_with_caps(cfg, caps_050(), None).await;
+    let ctx_id = publish_for_lifecycle(&h, 63, "rejections").await;
+    let receipts_of = |ctx: &Value| ctx["registry_state"]["event_receipts"].clone();
+
+    let envelope = signed_event_envelope(63, &ctx_id, "retracted", None);
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+    let after_retract = receipts_of(&full_context(&h, &ctx_id).await);
+    assert_eq!(after_retract.as_array().map(Vec::len), Some(1));
+
+    let again = signed_event_envelope(63, &ctx_id, "retracted", None);
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &again).await;
+    assert_eq!(status, StatusCode::CONFLICT, "double retract body = {v}");
+    let divergent = json!({
+        "event": signed_event_with_id(
+            63,
+            envelope["event"]["event_id"].as_str().unwrap(),
+            &ctx_id,
+            "retracted",
+            Some("a different reason"),
+        )
+    });
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &divergent).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "divergent body = {v}");
+    let (status, v) =
+        post_admin_lifecycle(&h.router, &ctx_id, "retract", Some(ADMIN_TOKEN), None).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "admin double retract body = {v}"
+    );
+    assert_eq!(
+        receipts_of(&full_context(&h, &ctx_id).await),
+        after_retract,
+        "a rejected write mints and stores nothing"
+    );
+
+    let (status, v) =
+        post_admin_lifecycle(&h.router, &ctx_id, "republish", Some(ADMIN_TOKEN), None).await;
+    assert_eq!(status, StatusCode::OK, "admin republish body = {v}");
+    assert_eq!(
+        v["registry_state"]["event_receipts"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "admin republish = {v}"
+    );
+    let full = full_context(&h, &ctx_id).await;
+    assert_eq!(
+        full["registry_state"]["event_receipts"][0],
+        after_retract[0]
+    );
+    let first = verify_event_receipt(&h, &full, 0).await;
+    let admin = verify_event_receipt(&h, &full, 1).await;
+    assert_eq!(admin.signature.key_id, first.signature.key_id);
+    assert!(admin.accepted_at >= first.accepted_at);
+}
+
+/// RFC-ACDP-0017 §11: a served member carries the same `registry_receipt`
+/// as the full retrieval, `lifecycle_events` and `event_receipts` in
+/// parallel, and every receipt verifies. `expected == 0` means neither
+/// array is served at all (omitted when empty, never `[]`).
+async fn assert_member_carries_receipts(h: &Harness, member: &Value, expected: usize) {
+    let ctx_id = member["body"]["ctx_id"].as_str().unwrap();
+    let full = full_context(h, ctx_id).await;
+    assert!(member["registry_receipt"].is_object(), "member = {member}");
+    assert_eq!(
+        member["registry_receipt"], full["registry_receipt"],
+        "a member's registry_receipt must be the full retrieval's"
+    );
+    let state = &member["registry_state"];
+    assert_eq!(
+        state["lifecycle_events"],
+        full["registry_state"]["lifecycle_events"]
+    );
+    assert_eq!(
+        state["event_receipts"],
+        full["registry_state"]["event_receipts"]
+    );
+    if expected == 0 {
+        assert!(state.get("lifecycle_events").is_none(), "member = {member}");
+        assert!(state.get("event_receipts").is_none(), "member = {member}");
+        return;
+    }
+    assert_eq!(
+        state["lifecycle_events"].as_array().map(Vec::len),
+        Some(expected)
+    );
+    assert_eq!(
+        state["event_receipts"].as_array().map(Vec::len),
+        Some(expected)
+    );
+    for index in 0..expected {
+        let receipt = verify_event_receipt(h, member, index).await;
+        assert_eq!(receipt.index, index as u64);
+    }
+}
+
+/// Publish v1 as the did:key producer `seed` and supersede it with v2;
+/// returns `(lineage_id, v1_ctx_id, v2_ctx_id)`.
+async fn did_key_lineage(h: &Harness, seed: u8) -> (String, String, String) {
+    let p = did_key_producer(seed);
+    let v1 = p
+        .publish_request()
+        .title("receipts-lineage-v1")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &v1, None).await;
+    assert_eq!(status, StatusCode::CREATED, "v1 publish body = {v}");
+    let v1_ctx = v["ctx_id"].as_str().unwrap().to_string();
+    let lineage_id = v["lineage_id"].as_str().unwrap().to_string();
+    let v1_body: acdp::types::body::Body =
+        serde_json::from_value(full_context(h, &v1_ctx).await["body"].clone()).unwrap();
+    let v2 = p
+        .supersede_body(&v1_body)
+        .title("receipts-lineage-v2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &v2, None).await;
+    assert_eq!(status, StatusCode::CREATED, "v2 publish body = {v}");
+    (
+        lineage_id,
+        v1_ctx,
+        v["ctx_id"].as_str().unwrap().to_string(),
+    )
+}
+
+/// W1 + W3 end to end: a producer retract and republish of the lineage
+/// head are receipted, and `GET /contexts/{id}`, `GET /lineages/{id}` and
+/// `GET /lineages/{id}/current` all serve the same verifying receipts; the
+/// version with no events serves neither array. A byte-identical retry of
+/// the republish is idempotent: 200, the same two receipts, no third.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lineage_and_current_serve_verifying_event_receipts() {
+    let h = build_harness_with_caps(event_receipts_cfg(true, true), caps_050(), None).await;
+    let (lineage_id, v1, v2) = did_key_lineage(&h, 64).await;
+
+    let retract = signed_event_envelope(64, &v2, "retracted", None);
+    let (status, v) = post_lifecycle(&h.router, &v2, "retract", &retract).await;
+    assert_eq!(status, StatusCode::OK, "retract body = {v}");
+    let republish = signed_event_envelope(64, &v2, "republished", None);
+    let (status, v) = post_lifecycle(&h.router, &v2, "republish", &republish).await;
+    assert_eq!(status, StatusCode::OK, "republish body = {v}");
+    let served = v["registry_state"]["event_receipts"].clone();
+    assert_eq!(served.as_array().map(Vec::len), Some(2), "republish = {v}");
+
+    let (status, retry) = post_lifecycle(&h.router, &v2, "republish", &republish).await;
+    assert_eq!(status, StatusCode::OK, "retry body = {retry}");
+    assert_eq!(
+        retry["registry_state"]["event_receipts"], served,
+        "a byte-identical retry serves the stored receipts and mints none"
+    );
+
+    let full = full_context(&h, &v2).await;
+    assert_eq!(full["registry_state"]["event_receipts"], served);
+    assert_member_carries_receipts(&h, &full, 2).await;
+
+    let (status, members) = get_json(
+        &h.router,
+        &format!("/lineages/{}", pct_encode_path_segment(&lineage_id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "lineage = {members}");
+    let members = members.as_array().expect("lineage returns an array");
+    assert_eq!(members.len(), 2, "lineage = {members:?}");
+    for member in members {
+        let ctx = member["body"]["ctx_id"].as_str().unwrap();
+        let expected = if ctx == v2 { 2 } else { 0 };
+        assert!(ctx == v1 || ctx == v2, "unexpected member {ctx}");
+        assert_member_carries_receipts(&h, member, expected).await;
+    }
+
+    let (status, current) = get_json(
+        &h.router,
+        &format!("/lineages/{}/current", pct_encode_path_segment(&lineage_id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "current = {current}");
+    assert_eq!(
+        current["body"]["ctx_id"],
+        v2.as_str(),
+        "current = {current}"
+    );
+    assert_member_carries_receipts(&h, &current, 2).await;
+}
+
+/// A registry-initiated retract is receipted at index 0 and a producer
+/// republish after it at index 1, in order, both under the receipt key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_admin_retract_then_a_producer_republish_are_receipted_in_order() {
+    let mut cfg = event_receipts_cfg(true, true);
+    cfg.auth.admin_tokens = vec![ADMIN_TOKEN.into()];
+    let h = build_harness_with_caps(cfg, caps_050(), None).await;
+    let ctx_id = publish_for_lifecycle(&h, 65, "admin then producer").await;
+
+    let (status, v) =
+        post_admin_lifecycle(&h.router, &ctx_id, "retract", Some(ADMIN_TOKEN), None).await;
+    assert_eq!(status, StatusCode::OK, "admin retract body = {v}");
+    assert_eq!(
+        v["registry_state"]["event_receipts"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "admin retract = {v}"
+    );
+    let republish = signed_event_envelope(65, &ctx_id, "republished", None);
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "republish", &republish).await;
+    assert_eq!(status, StatusCode::OK, "producer republish body = {v}");
+
+    let full = full_context(&h, &ctx_id).await;
+    assert_member_carries_receipts(&h, &full, 2).await;
+    let events = &full["registry_state"]["lifecycle_events"];
+    assert_eq!(
+        events[0]["actor"],
+        registry_did().as_str(),
+        "events = {events}"
+    );
+    assert_eq!(events[1]["event_type"], "republished", "events = {events}");
+    let admin = verify_event_receipt(&h, &full, 0).await;
+    let producer = verify_event_receipt(&h, &full, 1).await;
+    assert!(producer.accepted_at >= admin.accepted_at);
+}
+
+/// Tenant isolation: the owning tenant's lineage read serves its receipts;
+/// a foreign tenant sees no members and cannot mint one by retracting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tenant_lineage_serves_only_its_own_receipts() {
+    let h = build_harness_with_caps(
+        trust_tenant_header(event_receipts_cfg(true, true)),
+        caps_050(),
+        None,
+    )
+    .await;
+    let req = did_key_producer(66)
+        .publish_request()
+        .title("tenant receipts")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(&h.router, &req, Some("tenant-rcpt-a")).await;
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+    let lineage_uri = format!(
+        "/lineages/{}",
+        pct_encode_path_segment(v["lineage_id"].as_str().unwrap())
+    );
+
+    let foreign = signed_event_envelope(66, &ctx_id, "retracted", None);
+    let (status, v) = post_lifecycle_with_tenant(
+        &h.router,
+        &ctx_id,
+        "retract",
+        &foreign,
+        Some("tenant-rcpt-b"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "foreign retract body = {v}");
+    assert!(full_context(&h, &ctx_id).await["registry_state"]
+        .get("event_receipts")
+        .is_none());
+
+    let own = signed_event_envelope(66, &ctx_id, "retracted", None);
+    let (status, v) =
+        post_lifecycle_with_tenant(&h.router, &ctx_id, "retract", &own, Some("tenant-rcpt-a"))
+            .await;
+    assert_eq!(status, StatusCode::OK, "own retract body = {v}");
+
+    let (status, members) =
+        get_json_with_tenant(&h.router, &lineage_uri, Some("tenant-rcpt-a")).await;
+    assert_eq!(status, StatusCode::OK, "lineage = {members}");
+    let members = members.as_array().expect("array");
+    assert_eq!(members.len(), 1, "lineage = {members:?}");
+    assert_member_carries_receipts(&h, &members[0], 1).await;
+
+    let (status, members) =
+        get_json_with_tenant(&h.router, &lineage_uri, Some("tenant-rcpt-b")).await;
+    assert_eq!(status, StatusCode::OK, "foreign lineage = {members}");
+    assert_eq!(members, json!([]), "a foreign tenant sees no member");
+}
+
 /// Lifecycle harness with admin tokens configured and, optionally, a
 /// `[receipt]` signing key (so the registry MUST sign its own events).
 async fn admin_lifecycle_harness(receipts: bool) -> Harness {
@@ -9512,6 +10040,14 @@ impl ExtendedRegistryStore for CountingStore {
     ) -> Result<Vec<acdp::types::lifecycle::LifecycleEvent>, acdp::error::AcdpError> {
         self.inner.lifecycle_events_of_ctx(ctx_id).await
     }
+    async fn has_lifecycle_state(&self) -> Result<bool, acdp::error::AcdpError> {
+        self.inner.has_lifecycle_state().await
+    }
+    async fn backfill_event_receipts(
+        &self,
+    ) -> Result<acdp_registry_store::SweepReport, acdp::error::AcdpError> {
+        self.inner.backfill_event_receipts().await
+    }
     async fn log_tree_size(&self) -> Result<u64, acdp::error::AcdpError> {
         self.inner.log_tree_size().await
     }
@@ -11931,12 +12467,31 @@ async fn didweb_lifecycle_harness_with_rate(
     resolver: Arc<WebResolver>,
     publish_rate_per_minute: Option<u32>,
 ) -> Harness {
+    didweb_lifecycle_harness_with(resolver, publish_rate_per_minute, false).await
+}
+
+/// [`didweb_lifecycle_harness_with_rate`], optionally with the RFC-ACDP-0017
+/// §10 gate open: a receipt key, `acdp_version` 0.5.0, and the event-receipt
+/// minter attached exactly as the binary attaches it.
+async fn didweb_lifecycle_harness_with(
+    resolver: Arc<WebResolver>,
+    publish_rate_per_minute: Option<u32>,
+    event_receipts: bool,
+) -> Harness {
     let mut cfg = config(false);
     cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
     cfg.lifecycle.enabled = true;
     if let Some(rate) = publish_rate_per_minute {
         cfg.limits.publish_rate_per_minute = rate;
     }
+    if event_receipts {
+        cfg.receipt.signing_key_seed_b64 = B64.encode(RECEIPT_SEED);
+    }
+    let caps = if event_receipts {
+        caps_050()
+    } else {
+        caps_030()
+    };
 
     let db = tempfile::Builder::new()
         .prefix("acdp-didweb-")
@@ -11945,11 +12500,23 @@ async fn didweb_lifecycle_harness_with_rate(
     let store = SqliteStore::connect(&db.path().join(common::DB_FILE_NAME), 1)
         .await
         .unwrap();
-    store.migrate().await.unwrap();
-    let server = RegistryServer::try_new(store, caps_030(), AUTHORITY)
+    let store = match acdp_registry_core::receipt::event_receipt_minter(&cfg, &caps.acdp_version)
         .unwrap()
-        .with_lifecycle()
-        .expect("lifecycle enabled");
+    {
+        Some(minter) => store.with_event_receipt_minter(minter),
+        None => store,
+    };
+    store.migrate().await.unwrap();
+    let server = RegistryServer::try_new(store, caps, AUTHORITY).unwrap();
+    let server = if event_receipts {
+        let signer =
+            acdp_registry_core::receipt::build_signer(&cfg.receipt, &cfg.registry.authority)
+                .expect("receipt signer");
+        server.with_receipt_signer(signer).expect("receipt signer")
+    } else {
+        server
+    };
+    let server = server.with_lifecycle().expect("lifecycle enabled");
     let server = Arc::new(server);
 
     let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
@@ -11991,6 +12558,42 @@ fn signed_event_envelope_did_web(
     .sign_with(key, didweb::didweb_key_id_for_seed(seed))
     .expect("signed event");
     json!({ "event": event })
+}
+
+/// RFC-ACDP-0017 §10 on the did:web producer path: the actor resolves
+/// through the fixture server, and the retract is receipted and verifies.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_did_web_retract_is_receipted() {
+    let addr = didweb::spawn_didweb_server().await;
+    let resolver = Arc::new(
+        WebResolver::with_test_endpoint(
+            didweb::ca_pem().as_bytes(),
+            didweb::DIDWEB_AUTHORITY,
+            addr,
+        )
+        .expect("test-endpoint resolver"),
+    );
+    let h = didweb_lifecycle_harness_with(resolver, None, true).await;
+    let req = producer(67)
+        .publish_request()
+        .title("did:web event receipt")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+
+    let envelope = signed_event_envelope_did_web(67, &ctx_id, "retracted", None);
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+    assert_eq!(status, StatusCode::OK, "did:web retract body = {v}");
+    let full = full_context(&h, &ctx_id).await;
+    assert!(full["registry_state"]["lifecycle_events"][0]["actor"]
+        .as_str()
+        .unwrap()
+        .starts_with("did:web:"));
+    assert_member_carries_receipts(&h, &full, 1).await;
 }
 
 /// A did:web retract must retract — not republish.

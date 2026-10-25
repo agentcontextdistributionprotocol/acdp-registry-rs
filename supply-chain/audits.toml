@@ -1,6 +1,23 @@
 
 # cargo-vet audits file
 
+[[audits.crypto-bigint]]
+who = "Ajit Koti <ajitkoti@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.7.6 -> 0.7.9"
+notes = """
+Scope: delta 0.7.6 -> 0.7.9, three upstream releases (0.7.7, 0.7.8, 0.7.9). 13 files, +176/-39 (diff -ru, incl. CHANGELOG, Cargo.lock, .cargo_vcs_info.json and one new 28-line test file); src/ 7 files, +113/-30, 143 changed / 46747 src lines = 0.003, so delta per the #322 method rule. Every hunk of the 317-line src/ diff and the metadata diff read. Compiled under ACDP's features: src/modular/mul.rs, src/modular/prime_params.rs, src/non_zero.rs, src/uint/mul_mod.rs; src/uint/boxed/{mul_mod,invert_mod}.rs and src/modular/safegcd/boxed.rs are behind `alloc`, which ACDP does not enable. Base 0.7.6 audited 2026-10-24 (delta 0.7.5 -> 0.7.6, imported from acdp-rs).
+Source: crates.io tarball sha256 d811ea23fdfbcce2e2d5132344d471abdb8f901ac496a0893a3df92e70525e52 == crates.io index cksum == Cargo.lock checksum (root and tools/live-smoke); base 0.7.6 6bb08299a6046833a879ace115697f12fd2bd6c8d3e93c909ffc9e0738e7cae0 == crates.io index cksum. .cargo_vcs_info sha1 6a22557430de57c27d4e1758c81b7e26d4a26aba == upstream tag v0.7.9 (base c34044b8 == tag v0.7.6).
+unsafe: none added, removed or changed; the 14 sites of 0.7.6 are byte-identical and no hunk touches or neighbours an unsafe block. non_zero.rs only tightens trait bounds; its repr(transparent) ref cast is untouched.
+asm/SIMD: none. build.rs / proc-macro: none (build = false).
+Powerful imports: none added (#![no_std]; no fs/net/process/env/FFI).
+Behaviour (compiled): (a) montgomery_multiply_inner takes the high carry bit as c.to_u8() as WideWord instead of choice_to_wide_mask(c) & 1 -- the same 0/1 value, changed upstream (#1370) only to cut const-eval cost. (b) PrimeParams::new_vartime computes t = p >> s once with shr_vartime and reuses it (#1372); p is odd so p >> s == (p-1) >> s; same values, inputs are the public modulus, function already vartime. (c) Uint::mul_mod_special: one-limb c = 0 no longer panics in NonZero::new_unwrap (placeholder divisor Limb::to_nz_or_one plus constant-time Limb::select), and the multi-limb (carry + 1) * c is widened so carry == Limb::MAX cannot overflow -- correctness fixes (#1368). (d) Breaking: Mul, num_traits::One and ConstOne for NonZero<T> now require T: Integer, removing impls that let NonZero<*MontyForm> products hold zero (#1373); impls removed only, no runtime change. No panics added. Not compiled (alloc): the BoxedUint counterpart of (c), and safegcd/boxed.rs no longer truncates the inverse when the modulus is wider (#1367).
+New deps: none; [dependencies] and [features] unchanged (only a new [[test]] target); rust-version stays 1.87.
+Why yanked: upstream yanked every 0.7.x before 0.7.9 on 2026-10-25 for the breaking NonZero<T> Mul bound fix (#1373), and <= 0.7.5 also for RUSTSEC-2026-0387; 0.7.6-0.7.8 were not yanked for a security defect.
+Advisories: RUSTSEC-2026-0387 (patched >= 0.7.6) does not affect 0.7.9; no other crypto-bigint advisory in rustsec/advisory-db as of 2026-10-25.
+Not claimed: cryptographic correctness, constant-time behaviour, side-channel resistance.
+Method: Reviewed with Claude (Opus) assistance; no worksheet."""
+
 [[audits.rustls-webpki]]
 who = "Ajit Koti <ajitkoti@gmail.com>"
 criteria = "safe-to-deploy"

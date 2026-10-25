@@ -89,21 +89,27 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 350 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 370 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
-# MEASURED by mutants.yml run 39071836771 (workflow_dispatch on feat/acdp-0.15.0 9cffe36;
-# re-pin for the acdp 0.15.0 federation-proxy change), whose outcomes.json is committed as
-# docs/mutation-runs/run39071836771-scope-350-outcomes.json.
+# MEASURED by mutants.yml run 40232497328 (workflow_dispatch on feat/rfc0017-event-receipts
+# bf24e1a; re-pin for RFC-ACDP-0017 event receipts), whose outcomes.json is committed as
+# docs/mutation-runs/run40232497328-scope-370-outcomes.json.
 # The command that reproduces the split:
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
 #     crates/acdp-registry-core/src/handlers/context.rs   136
 #     crates/acdp-registry-core/src/handlers/log.rs        65
-#     crates/acdp-registry-core/src/receipt.rs              9
-#     crates/acdp-registry-sqlite/src/store.rs            140
+#     crates/acdp-registry-core/src/receipt.rs             16
+#     crates/acdp-registry-sqlite/src/store.rs            153
 #     ----------------------------------------------------------
-#     total                                               350
+#     total                                               370
+#
+# 350 -> 370 (#461, RFC-ACDP-0017 event receipts): receipt.rs 9 -> 16 (event-receipt
+# mint/verify) and store.rs 140 -> 153 (receipt persistence + the startup sweep that
+# receipts legacy lifecycle events). One new MISSED, store.rs:2052:5 `end_sweep_tx ->
+# Ok(())`, EQUIVALENT (reasoned in mutants.yml MUTANTS_SURVIVORS); caught 227 -> 239,
+# unviable 115 -> 122, timeout 1 unchanged.
 #
 # 353 -> 350 (#435, acdp 0.15.0): context.rs 139 -> 136. The federation proxy serves the
 # origin's raw body, so `retrieve` returns `Result<Response, _>`: its four UNVIABLE
