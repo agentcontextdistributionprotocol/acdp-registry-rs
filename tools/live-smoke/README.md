@@ -11,7 +11,9 @@ does it. It runs these steps in order:
 3. Resolves the context through `acdp::client::CrossRegistryResolver`. The
    resolver is configured like Seam's `seam-context-acdp`: an SSRF policy, an
    authority allowlist, and fail-closed RFC-ACDP-0014 revocation discovery.
-   Fails unless the receipt verifies and the context is `not_retracted`.
+   Fails unless the receipt verifies and the context is active and not
+   retracted. A context with no events omits `lifecycle_events`, so the
+   retraction reads `unknown` at this step.
 4. Posts a producer-signed `retracted` lifecycle event (RFC-ACDP-0013).
 5. Resolves again. Fails unless the context now reads `retracted` and the
    receipt still verifies.

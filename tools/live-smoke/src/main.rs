@@ -211,9 +211,12 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
         before["receipt_verified"] == true,
         "receipt was not verified"
     );
+    // A context with no events omits `lifecycle_events` (RFC-ACDP-0013: omitted,
+    // not [], when empty), so a fresh context reads `unknown`, not
+    // `not_retracted`; what must hold is that it is active and not retracted.
     ensure!(
-        before["retraction"] == "not_retracted",
-        "expected not_retracted: {before}"
+        before["status"] == "active" && before["retraction"] != "retracted",
+        "expected an active, unretracted context: {before}"
     );
 
     // 4. Producer-signed retraction (RFC-ACDP-0013 §5).
