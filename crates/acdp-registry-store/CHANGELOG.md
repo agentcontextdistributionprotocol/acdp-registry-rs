@@ -1,5 +1,6 @@
 
 
+
 ## [0.5.4](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.5.3...acdp-registry-store/v0.5.4) - 2026-10-21
 
 No changes. This crate is released at 0.5.4 because the workspace shares a
