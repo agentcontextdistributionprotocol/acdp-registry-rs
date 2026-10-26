@@ -825,14 +825,14 @@ mod tests {
             panic!("first retract must apply")
         };
         let first =
-            serde_json::to_value(first.registry_state.event_receipts().unwrap().unwrap()).unwrap();
+            serde_json::to_value(first.registry_state.event_receipts.clone().unwrap()).unwrap();
         let LifecycleCommitOutcome::IdempotentReplay(again) =
             minting.commit_lifecycle_event(&event).unwrap()
         else {
             panic!("identical retry must replay")
         };
         assert_eq!(
-            serde_json::to_value(again.registry_state.event_receipts().unwrap().unwrap()).unwrap(),
+            serde_json::to_value(again.registry_state.event_receipts.clone().unwrap()).unwrap(),
             first
         );
         minting
@@ -846,7 +846,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .registry_state
-            .event_receipts()
+            .event_receipts
             .is_none());
     }
 
@@ -874,7 +874,7 @@ mod tests {
             .commit_lifecycle_event(&retract_event(&resp.ctx_id, did(14)))
             .unwrap();
         let read = |s: &MemoryStore| s.get(&resp.ctx_id).unwrap().unwrap();
-        assert!(read(&minting).registry_state.event_receipts().is_some());
+        assert!(read(&minting).registry_state.event_receipts.is_some());
         for r in plain
             .receipts
             .lock()
@@ -885,7 +885,7 @@ mod tests {
         {
             r.index += 1;
         }
-        assert!(read(&minting).registry_state.event_receipts().is_none());
+        assert!(read(&minting).registry_state.event_receipts.is_none());
     }
 
     /// A poisoned receipt map is an internal error on reads and commits,

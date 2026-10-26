@@ -1748,7 +1748,7 @@ pub async fn assert_lifecycle_event_receipts<S>(
         panic!("[{label}] fixture is wrong: the third event must apply");
     };
     assert!(
-        legacy.registry_state.event_receipts().is_none(),
+        legacy.registry_state.event_receipts.is_none(),
         "[{label}] a store without a minter must never serve event_receipts"
     );
     let fourth = event(4, LifecycleEventType::Republished);
@@ -1819,7 +1819,7 @@ pub async fn assert_lifecycle_event_receipts<S>(
         .expect("get")
         .expect("context exists");
     assert!(
-        got.registry_state.event_receipts().is_none(),
+        got.registry_state.event_receipts.is_none(),
         "[{label}] a store without a minter must not serve stored receipts"
     );
 }
@@ -1840,9 +1840,9 @@ fn verified_event_receipts(
     let events = c.registry_state.lifecycle_events.as_deref().unwrap_or(&[]);
     let receipts = c
         .registry_state
-        .event_receipts()
-        .unwrap_or_else(|| panic!("[{what}] event_receipts is absent"))
-        .unwrap_or_else(|e| panic!("[{what}] event_receipts undecodable: {e}"));
+        .event_receipts
+        .clone()
+        .unwrap_or_else(|| panic!("[{what}] event_receipts is absent"));
     assert_eq!(
         receipts.len(),
         events.len(),
@@ -2021,7 +2021,7 @@ pub async fn assert_event_receipt_sweep<S>(
         get(minting, &c_ctx)
             .await
             .registry_state
-            .event_receipts()
+            .event_receipts
             .is_none(),
         "[{label}] a holed context must omit event_receipts"
     );
@@ -2070,7 +2070,7 @@ pub async fn assert_event_receipt_sweep<S>(
         get(minting, &c_ctx)
             .await
             .registry_state
-            .event_receipts()
+            .event_receipts
             .is_none(),
         "[{label}] a holed context must still omit event_receipts"
     );

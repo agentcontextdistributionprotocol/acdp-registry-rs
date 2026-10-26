@@ -185,10 +185,9 @@ async fn resolve_and_report(
         "status": serde_json::to_value(&rs.status)?,
         "retraction": retraction(rs, lifecycle_advertised),
         "lifecycle_events": rs.lifecycle_events.as_ref().map(|e| e.len()),
-        "event_receipts": match rs.event_receipts() {
+        "event_receipts": match &rs.event_receipts {
             None => Value::Null,
-            Some(Ok(r)) => json!(r.len()),
-            Some(Err(e)) => json!({ "error": e.to_string() }),
+            Some(r) => json!(r.len()),
         },
         "receipt_verified": v.verified_receipt().is_some(),
         "receipt_key_status": format!("{:?}", v.receipt_key_status()),

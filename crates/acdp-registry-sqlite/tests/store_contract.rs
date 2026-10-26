@@ -1144,7 +1144,7 @@ mod lifecycle {
                 match h.await.unwrap() {
                     Ok(LifecycleCommitOutcome::Applied(c)) => {
                         applied += 1;
-                        let r = c.registry_state.event_receipts().unwrap().unwrap();
+                        let r = c.registry_state.event_receipts.clone().unwrap();
                         assert_eq!(r.len(), 1);
                     }
                     Err(AcdpError::InvalidLifecycleTransition(_)) => {}
@@ -1179,10 +1179,8 @@ mod lifecycle {
             };
             assert_eq!(rows(&plain, &ctx_id).await, before, "the replay wrote");
             assert_eq!(
-                serde_json::to_value(again.registry_state.event_receipts().unwrap().unwrap())
-                    .unwrap(),
-                serde_json::to_value(first.registry_state.event_receipts().unwrap().unwrap())
-                    .unwrap(),
+                serde_json::to_value(again.registry_state.event_receipts.clone().unwrap()).unwrap(),
+                serde_json::to_value(first.registry_state.event_receipts.clone().unwrap()).unwrap(),
                 "the replay must serve the receipt minted by the first commit"
             );
         }
@@ -1204,15 +1202,15 @@ mod lifecycle {
             else {
                 panic!("retract must apply")
             };
-            assert!(c.registry_state.event_receipts().is_none());
+            assert!(c.registry_state.event_receipts.is_none());
             assert!(rows(&plain, &ctx_id).await[0].1.is_none());
             let got = plain.get(&ctx_id).unwrap().unwrap();
-            assert!(got.registry_state.event_receipts().is_none());
+            assert!(got.registry_state.event_receipts.is_none());
             assert!(!serde_json::to_string(&got)
                 .unwrap()
                 .contains("event_receipts"));
             for m in plain.lineage(&lineage_id).unwrap() {
-                assert!(m.registry_state.event_receipts().is_none());
+                assert!(m.registry_state.event_receipts.is_none());
             }
         }
 
@@ -1249,7 +1247,7 @@ mod lifecycle {
                 panic!("the append must still apply")
             };
             assert!(
-                c.registry_state.event_receipts().is_none(),
+                c.registry_state.event_receipts.is_none(),
                 "a gap was served"
             );
             let stored = rows(&plain, &ctx_id).await;
@@ -1263,7 +1261,7 @@ mod lifecycle {
                 .unwrap()
                 .unwrap()
                 .registry_state
-                .event_receipts()
+                .event_receipts
                 .is_none());
         }
 
@@ -1295,7 +1293,7 @@ mod lifecycle {
                     .len(),
                 1
             );
-            assert!(got.registry_state.event_receipts().is_none());
+            assert!(got.registry_state.event_receipts.is_none());
             minting
                 .commit_lifecycle_event(&event(
                     &actor,

@@ -5008,3 +5008,11 @@ underlying settings and code were not touched by this pass, only the record of t
 - **CONFIRMED (decided, reversible): chain-009 is checked by verify_chain with only the registry's DID snapshot.** The evidence holds the context, its registry receipt, events and event receipts, and the registry's `did.json`. The producer is a `did:key`, so it needs no snapshot. The as-of time is ms-aligned, which `Options::as_of` requires. Why: it is the smallest evidence set on which the SDK admits the events on the `registry` basis. A mutation (dropping the receipts) makes the test fail.
 - **CONFIRMED (decided, reversible): the test harnesses gained receipt-gated variants, not new defaults.** These are `didweb_lifecycle_harness_with(resolver, rate, event_receipts)` and pg `harness_with_config(cfg, url, caps)`. Existing tests keep the caps_030 harnesses, so their wire expectations are unchanged.
 - **CONFIRMED (decided, reversible): chain-009 is described as discharged rather than excused.** Its registry-side A–B scenarios run against the binary configured with lifecycle + receipts at 0.5.0. `HARNESS_PROFILES` stays core-only, so the replay still excuses the chain family.
+
+## RFC-ACDP-0018 retraction recall, Phase 1 (2026-10-25)
+- Plan: plans/rfc0018-retraction-recall.md
+- Assumed: a cross-registry origin whose registry_state.event_receipts fails the acdp 0.17 closed schema is answered 502 cross_registry_resolution_failed (was: passed through inside extensions).
+- Chose: accept the SDK's strict parse; document in UPGRADING.
+- Alternatives: lenient raw passthrough (would need hand-rolled RegistryState parsing).
+- Blast radius: low; reversible; only malformed upstreams.
+- Status: UNCONFIRMED

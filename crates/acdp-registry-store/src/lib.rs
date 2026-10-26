@@ -896,6 +896,7 @@ mod default_visible_ctx_ids_tests {
             registry_state: RegistryState {
                 status,
                 lifecycle_events,
+                event_receipts: None,
                 extensions: serde_json::Map::new(),
             },
             registry_receipt: None,

@@ -1947,6 +1947,7 @@ fn full_context(body: Body, status: Status, receipt: Option<serde_json::Value>) 
         registry_state: RegistryState {
             status,
             lifecycle_events: None,
+            event_receipts: None,
             extensions: Default::default(),
         },
         registry_receipt: receipt,

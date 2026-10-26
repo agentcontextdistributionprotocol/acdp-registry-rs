@@ -1565,6 +1565,10 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
             // config; the rate limiter's ceiling can be advertised here
             // when the registry adopts the 0.3.0 capabilities surface.
             max_publish_per_minute: None,
+            change_retention_seconds: None,
+            max_change_filters: None,
+            max_changes_page: None,
+            max_subscriptions_per_requester: None,
         },
         read_authentication_methods: if cfg.auth.enabled {
             vec![READ_AUTH_METHOD_BEARER_JWT.into()]
