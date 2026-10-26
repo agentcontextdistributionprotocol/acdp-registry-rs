@@ -313,7 +313,10 @@ impl RegistrySection {
 /// the allowlist `registry.profiles` (and `RegistrySection::profiles`) is
 /// checked against at startup (`validate_config` in
 /// `acdp-registry-server/src/main.rs`) — anything outside it is refused
-/// rather than served in the capabilities document.
+/// rather than served in the capabilities document. Interim: the two
+/// RFC-ACDP-0018 entries (`acdp-registry-changes`, `acdp-registry-events`)
+/// are on the list but `validate_config` still refuses them, because the
+/// `GET /changes` / `/subscriptions` surface is not served yet.
 ///
 /// Deliberately excludes `acdp-log-witness`: a witness is NOT a registry
 /// (RFC-ACDP-0015 §6.1) — a registry MAY aggregate cosignatures under
@@ -327,7 +330,7 @@ impl RegistrySection {
 /// (`acdp-registry-server/tests/conformance.rs`) is what keeps it honest —
 /// it recomputes the same prefix-derived set directly from the pinned
 /// spec's `registries/profiles.json` and asserts exact equality, so a
-/// future spec change (e.g. an eighth registry profile) turns CI red
+/// future spec change (e.g. a tenth registry profile) turns CI red
 /// instead of silently drifting out of sync with this list.
 /// The same set is published as data in `docs/advertisable-profiles.json`; the
 /// test `advertisable_profiles_json_matches_const` fails if the two diverge.
@@ -339,6 +342,8 @@ pub const REGISTRY_ADVERTISABLE_PROFILES: &[&str] = &[
     "acdp-registry-head-receipts",
     "acdp-registry-transparency-log",
     "acdp-registry-lifecycle",
+    "acdp-registry-changes",
+    "acdp-registry-events",
 ];
 
 fn default_bind() -> String {

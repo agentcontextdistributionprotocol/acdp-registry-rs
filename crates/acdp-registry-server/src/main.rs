@@ -518,6 +518,23 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
         );
     }
 
+    // ACDP 0.5.x / RFC-ACDP-0018: the change-feed and change-hint profiles
+    // are in the advertisable set (they are spec-defined registry profiles)
+    // but this build does not yet serve GET /changes or /subscriptions, so
+    // advertising either would be a false commitment (§9). Refuse until the
+    // surface lands.
+    if let Some(p) = cfg
+        .registry
+        .profiles
+        .iter()
+        .find(|p| *p == "acdp-registry-changes" || *p == "acdp-registry-events")
+    {
+        anyhow::bail!(
+            "registry.profiles advertises '{p}' but this build does not serve the \
+             RFC-ACDP-0018 surface (GET /changes, /subscriptions). Remove the profile."
+        );
+    }
+
     // ACDP 0.3.0 / RFC-ACDP-0012 §11: the transparency-log profile's
     // prerequisite is `acdp-registry-receipts` — load-bearing twice over:
     // leaves bind receipt hashes (§4) and checkpoints sign with the
@@ -3370,6 +3387,18 @@ mod tests {
                 msg.contains(needle),
                 "refusal must mention {needle:?}: {msg}"
             );
+        }
+    }
+
+    #[test]
+    fn rfc0018_profiles_are_refused_until_served() {
+        for p in ["acdp-registry-changes", "acdp-registry-events"] {
+            let mut cfg = RegistryConfig::defaults();
+            cfg.registry.profiles = vec![p.into()];
+            let msg = validate_config(&cfg)
+                .expect_err("RFC-ACDP-0018 profile must be refused")
+                .to_string();
+            assert!(msg.contains(p), "refusal must name {p}: {msg}");
         }
     }
 

@@ -9490,6 +9490,7 @@ const KNOWN_FAMILIES: &[&str] = &[
     "pub",
     "rate",
     "rcpt",
+    "rec",
     "ret",
     "rev",
     "rot",
@@ -9753,6 +9754,20 @@ const EXCUSED: &[(&str, &str)] = &[
          This replay harness advertises only acdp-registry-core (HARNESS_PROFILES), so \
          the family stays excused from the replay. None of the family is in \
          acdp-registry-core's required_fixtures or conditional_fixtures.",
+    ),
+    (
+        "rec",
+        "RFC-ACDP-0018 retraction recall, spec pin 81bbe3f: 8 fixtures, none carrying an \
+         endpoint (rec-007's vectors array is the hint-hmac-001 HMAC known-answer \
+         vector, not an HTTP exchange). Two grounds, split by fixture. rec-001..005 and \
+         rec-008 apply_to acdp-registry-changes, and rec-007 scenarios A-C and F-H to \
+         acdp-registry-events: registry-side obligations of profiles this replay \
+         harness does not advertise (HARNESS_PROFILES is acdp-registry-core only), so \
+         the replay cannot reach GET /changes or /subscriptions. rec-006, and rec-007 \
+         scenarios D-E, are acdp-consumer-recall: the consumer's verification of entries \
+         and hints it receives (RFC-ACDP-0018 \u{a7}7, \u{a7}8.2 receiver duty), which no \
+         harness configuration would make this registry responsible for. None of the \
+         family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
 ];
 
@@ -10146,11 +10161,12 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// before the `16211e6` bump and 144 after. It caught the next one too: 144
 /// before the `9deb7e7` bump (rev-003, rev-004 added; rev-002 only modified,
 /// not counted again) and 146 after; 147 after the `6d5cdb8` bump (sig-004
-/// added); 169 after the `093279a` bump (chain-001..010 added, RFC-ACDP-0017).
+/// added); 169 after the `093279a` bump (chain-001..010 added, RFC-ACDP-0017);
+/// 177 after the `81bbe3f` bump (rec-001..008 added, RFC-ACDP-0018).
 /// A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 169;
+const TOTAL_FIXTURES_AT_PIN: usize = 177;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
@@ -17988,6 +18004,11 @@ fn served_full_features_toml() -> String {
     )
 }
 
+/// Advertisable profiles the startup guard still refuses, because the
+/// RFC-ACDP-0018 surface is not served yet. Emptied when GET /changes and
+/// /subscriptions land.
+const RFC0018_NOT_YET_SERVED: &[&str] = &["acdp-registry-changes", "acdp-registry-events"];
+
 /// #385: the WHOLE `/.well-known/acdp.json` the shipped binary serves, with
 /// read auth OFF and ON and with every profile it can advertise switched on,
 /// satisfies the pinned `acdp-capabilities.schema.json`.
@@ -17996,7 +18017,8 @@ fn served_full_features_toml() -> String {
 ///   * auth off, default profiles: `read_authentication_methods` omitted;
 ///   * auth on, default profiles: `read_authentication_methods` present (the
 ///     field #372 found shipping a hyphenated id);
-///   * auth on with EVERY entry of `REGISTRY_ADVERTISABLE_PROFILES` listed and
+///   * auth on with EVERY entry of `REGISTRY_ADVERTISABLE_PROFILES` listed
+///     (minus `RFC0018_NOT_YET_SERVED`, which startup still refuses) and
 ///     its backing feature enabled (receipt key, head receipts, lifecycle,
 ///     log): the widest `profiles` array the binary can serve.
 ///
@@ -18017,7 +18039,15 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
     let schema = PinnedSchema::load(&root, "acdp-capabilities.schema.json");
     let dir = tempfile::tempdir().expect("tempdir");
 
-    let all_profiles = REGISTRY_ADVERTISABLE_PROFILES
+    // The RFC-ACDP-0018 profiles are advertisable but refused at startup
+    // until this build serves their surface (validate_config); leave them
+    // out of the all-profiles case until then.
+    let served_profiles: Vec<&str> = REGISTRY_ADVERTISABLE_PROFILES
+        .iter()
+        .copied()
+        .filter(|p| !RFC0018_NOT_YET_SERVED.contains(p))
+        .collect();
+    let all_profiles = served_profiles
         .iter()
         .map(|p| format!("\"{p}\""))
         .collect::<Vec<_>>()
@@ -18064,11 +18094,11 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
         .iter()
         .map(|p| p.as_str().expect("profile ids are strings"))
         .collect();
-    let expected: std::collections::BTreeSet<&str> =
-        REGISTRY_ADVERTISABLE_PROFILES.iter().copied().collect();
+    let expected: std::collections::BTreeSet<&str> = served_profiles.iter().copied().collect();
     assert_eq!(
         advertised, expected,
-        "the all-profiles registry must advertise exactly REGISTRY_ADVERTISABLE_PROFILES"
+        "the all-profiles registry must advertise exactly REGISTRY_ADVERTISABLE_PROFILES \
+         (less RFC0018_NOT_YET_SERVED)"
     );
 
     let on = &served["auth-on"];
