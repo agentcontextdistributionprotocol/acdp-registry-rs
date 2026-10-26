@@ -114,6 +114,7 @@ fn metrics_config() -> RegistryConfig {
         receipt: Default::default(),
         lifecycle: Default::default(),
         log: Default::default(),
+        changes: Default::default(),
         witnesses: Vec::new(),
     }
 }

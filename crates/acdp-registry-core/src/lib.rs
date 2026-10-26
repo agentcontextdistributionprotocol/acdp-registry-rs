@@ -4,6 +4,7 @@
 //! `acdp-registry-core` itself has no compile-time dependency on a
 //! specific storage crate — the binary picks one via Cargo features.
 
+pub mod changes_key;
 pub mod extract;
 pub mod handlers;
 pub mod log;
@@ -104,6 +105,10 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
         .route("/log/checkpoint", get(handlers::log_checkpoint::<S>))
         .route("/log/proof", get(handlers::log_proof::<S>))
         .route("/log/entries", get(handlers::log_entries::<S>))
+        // Change feed (RFC-ACDP-0018 §5). Always mounted: without
+        // `acdp-registry-changes` the handler answers 501. Per-requester
+        // visibility, so it belongs in this `private` group.
+        .route("/changes", get(handlers::changes::<S>))
         // #205 (wire half of #190). These responses depend on WHO is asking --
         // §4.5 visibility, tenant scoping, and the per-requester leaf echo on
         // `/log/*` -- so a shared cache must never reuse one requester's copy

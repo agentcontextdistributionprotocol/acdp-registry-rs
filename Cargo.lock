@@ -196,6 +196,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",
@@ -204,7 +205,9 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

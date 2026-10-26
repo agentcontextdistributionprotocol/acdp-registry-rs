@@ -216,9 +216,12 @@ The binary validates config before serving and refuses to boot on a misconfig
   `acdp-registry-federated`, `acdp-registry-receipts`,
   `acdp-registry-head-receipts`, `acdp-registry-transparency-log`,
   `acdp-registry-lifecycle`, `acdp-registry-changes`,
-  `acdp-registry-events`). `acdp-registry-changes` and `acdp-registry-events`
-  (RFC-ACDP-0018) are on the allowlist but currently refused at startup,
-  because this build does not serve `GET /changes` or `/subscriptions` yet.
+  `acdp-registry-events`). `acdp-registry-events` (RFC-ACDP-0018 §8) is on
+  the allowlist but currently refused at startup, because this build does not
+  serve `/subscriptions` yet. `acdp-registry-changes` is advertised
+  automatically when `[changes] enabled = true` (see
+  [`[changes]`](#changes-acdp-050)); listing it without enabling the feed is
+  refused.
   This is checked before any other
   `registry.profiles`-dependent guard below, so a typo or an out-of-scope
   profile is reported first. `acdp-log-witness` is explicitly rejected with
@@ -273,7 +276,7 @@ values for illustration. Env var = `ACDP_REGISTRY_` + the bracketed path.
 | `bind` | string | `127.0.0.1` | Bind address. Non-loopback needs TLS/auth or `allow_public_bind`. |
 | `allow_public_bind` | bool | `false` | Opt-in to bind a public interface without TLS/auth. |
 | `base_url` | string | `https://{authority}` | Public URL advertised to consumers / federation control plane. |
-| `profiles` | string[] | `["acdp-registry-core","acdp-registry-discovery"]` | Advertised in capabilities. Must be a subset of the nine `acdp-registry-*` profiles the pinned spec defines (`acdp-registry-changes` and `acdp-registry-events` are currently refused: the RFC-ACDP-0018 surface is not served yet) — any other value (including `acdp-log-witness`, which is not a registry profile) fails startup. |
+| `profiles` | string[] | `["acdp-registry-core","acdp-registry-discovery"]` | Advertised in capabilities. Must be a subset of the nine `acdp-registry-*` profiles the pinned spec defines (`acdp-registry-events` is currently refused: `/subscriptions` is not served yet; `acdp-registry-changes` needs `[changes] enabled = true`) — any other value (including `acdp-log-witness`, which is not a registry profile) fails startup. |
 | `cross_registry_resolution` | bool | `true` | Forward foreign `ctx_id`s to their home registry; `false` returns 404 instead. |
 
 #### `[registry.tls]`
@@ -647,6 +650,46 @@ log, not a timing guarantee.
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Opt into the RFC-ACDP-0012 log: atomic leaf appends + the three `/log/*` endpoints. |
 | `instance` | string | `"1"` | The `<instance>` component of `log_id = did:web:<authority>/log/<instance>` (matches `[a-z0-9-]{1,32}`). **Change only on catastrophic tree loss** (§7.4) — a new instance is an explicit, loudly detectable history reset. |
+
+### `[changes]` *(ACDP 0.5.0)*
+
+Registry change feed
+([RFC-ACDP-0018 §5](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/rfcs/RFC-ACDP-0018-retraction-recall.md#5-the-changes-feed-get-changes-normative)):
+`GET /changes` and the `acdp-registry-changes` profile. Feed entries are
+appended whenever a `[receipt]` key is configured, **in the same storage
+transaction** as the lifecycle event, superseding publish or key-revocation
+context they record; this section governs whether they are *served*, and how
+long they are kept. Retention applies whether or not the feed is served: the
+prune task runs on every registry, and `retention_seconds` and
+`prune_interval_seconds` are validated even with `enabled = false`. When disabled (the default) `GET /changes` answers
+`501 not_implemented`. See [HTTP-API.md](HTTP-API.md#get-changes-acdp-050)
+for the wire behaviour.
+
+Prerequisites (enforced at startup): `[lifecycle] enabled = true`, a
+configured `[receipt]` key, a durable storage backend (`sqlite` or
+`postgres`), exactly one master-key source, `retention_seconds >= 2592000`
+(30 days, §5.4), and `100 <= max_change_filters, max_changes_page <= 1000`
+(§9 floor; the ceiling bounds per-request work).
+
+The master key is 32 random bytes, base64. HKDF-SHA-256 derives the cursor
+key from it, so cursors are opaque and tamper-evident (AES-256-GCM). It is a
+secret: supply it through `ACDP_REGISTRY_CHANGES__KEY_B64` or `key_path`, never
+in a committed file, and keep it distinct from the receipt seed. **Every
+replica serving the same store needs the same key and `key_id`.** Rotating
+(`key_id` changed, new key) invalidates every outstanding cursor: consumers
+get `cursor_expired` and resync from `since` absent or `head`, which the
+protocol allows; nothing is misread.
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `false` | Serve `GET /changes` and advertise `acdp-registry-changes` plus the three limits below. |
+| `key_b64` | string | `""` | Base64 of the 32-byte master key. Env `ACDP_REGISTRY_CHANGES__KEY_B64`. Mutually exclusive with `key_path`. |
+| `key_path` | path | unset | File holding the base64 master key. |
+| `key_id` | u8 | `1` | Stamped into every cursor; a cursor under an id this registry does not hold is `cursor_expired`. Change it when rotating the key. |
+| `retention_seconds` | u64 | `2592000` | Minimum entry lifetime; advertised as `limits.change_retention_seconds`. |
+| `max_change_filters` | u64 | `100` | Total `ctx_id`/`lineage_id`/`agent_id`/`kind` values per request; advertised. |
+| `max_changes_page` | u64 | `100` | Largest `limit`; advertised as `limits.max_changes_page`. |
+| `prune_interval_seconds` | u64 | `3600` | How often the background task deletes entries older than `retention_seconds` plus a one-hour clock-skew margin (in batches of 1000). Runs whether or not `enabled` is set. |
 
 ### `[[witnesses]]` *(ACDP 0.4.0)*
 

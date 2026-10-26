@@ -41,6 +41,11 @@ pub const WITNESS_COSIGNATURES_TOTAL: &str = "acdp_registry_witness_cosignatures
 pub const RATE_LIMIT_REJECTIONS_TOTAL: &str = "acdp_registry_rate_limit_rejections_total";
 pub const RATE_LIMIT_SHARED_TOTAL: &str = "acdp_registry_rate_limit_shared_total";
 pub const RATE_LIMIT_SHARED_SECONDS: &str = "acdp_registry_rate_limit_shared_seconds";
+pub const CHANGES_REQUESTS_TOTAL: &str = "acdp_registry_changes_requests_total";
+pub const CHANGES_ROWS_SCANNED_TOTAL: &str = "acdp_registry_changes_rows_scanned_total";
+pub const CHANGES_PRUNED_TOTAL: &str = "acdp_registry_changes_pruned_total";
+pub const CHANGES_HEAD_SEQ: &str = "acdp_registry_changes_head_seq";
+pub const CHANGES_PRUNED_THROUGH: &str = "acdp_registry_changes_pruned_through";
 
 /// Process-global recorder handle. `metrics-exporter-prometheus` installs a
 /// single global recorder; a second install returns an error. A `OnceLock`
@@ -192,6 +197,21 @@ pub fn record_lifecycle_event(event: &'static str, outcome: &'static str) {
 /// verified and stored, `rejected` when it failed verification.
 pub fn record_witness_cosignature(outcome: &'static str) {
     metrics::counter!(WITNESS_COSIGNATURES_TOTAL, "outcome" => outcome).increment(1);
+}
+
+/// One `GET /changes` request (RFC-ACDP-0018 §5) with its outcome (`ok` or
+/// a wire error code such as `cursor_expired`), and the feed rows it
+/// scanned — scanned, not returned, so post-filter visibility cost shows.
+pub fn record_changes_request(outcome: &'static str, rows_scanned: u64) {
+    metrics::counter!(CHANGES_REQUESTS_TOTAL, "outcome" => outcome).increment(1);
+    metrics::counter!(CHANGES_ROWS_SCANNED_TOTAL).increment(rows_scanned);
+}
+
+/// One retention-prune pass: rows deleted, and the feed's markers after it.
+pub fn record_changes_prune(deleted: u64, head: u64, pruned_through: u64) {
+    metrics::counter!(CHANGES_PRUNED_TOTAL).increment(deleted);
+    metrics::gauge!(CHANGES_HEAD_SEQ).set(head as f64);
+    metrics::gauge!(CHANGES_PRUNED_THROUGH).set(pruned_through as f64);
 }
 
 /// The `scope` label on [`RATE_LIMIT_REJECTIONS_TOTAL`]: which bound rejected

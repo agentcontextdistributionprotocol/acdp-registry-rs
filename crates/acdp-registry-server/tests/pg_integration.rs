@@ -149,6 +149,7 @@ fn config(playground: bool) -> RegistryConfig {
         receipt: Default::default(),
         lifecycle: Default::default(),
         log: Default::default(),
+        changes: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -1403,4 +1404,136 @@ async fn pg_retract_serves_a_verifying_event_receipt() {
     assert_eq!(status, StatusCode::OK, "lineage = {members}");
     assert_eq!(members[0]["registry_state"]["event_receipts"], served);
     assert_eq!(members[0]["registry_receipt"], full["registry_receipt"]);
+}
+
+// ─── RFC-ACDP-0018 §5: GET /changes on the pg-backed HTTP path ───
+
+/// The feed the pg store writes in its lifecycle and supersede
+/// transactions, read back over `/changes`: strictly increasing `seq`,
+/// evidence byte-identical to what `registry_state` and the new version
+/// serve, cursor paging, `since=head`, and retention (a pruned prefix makes
+/// an older cursor `cursor_expired` while `since` absent resumes at the
+/// oldest retained entry). The sqlite twin is `tests/changes_http.rs`.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn pg_changes_feed_round_trip() {
+    use acdp::types::body::Body as AcdpBody;
+    use acdp::types::change::ChangesResponse;
+    use base64::Engine as _;
+    let Some(url) = pg_url_or_skip() else { return };
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let mut cfg = config(false);
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.lifecycle.enabled = true;
+    cfg.receipt.signing_key_seed_b64 = b64(&PG_RECEIPT_SEED);
+    cfg.changes.enabled = true;
+    cfg.changes.key_b64 = b64(&[93u8; 32]);
+    let mut caps = caps_050();
+    caps.supported_did_methods = vec!["did:web".into(), "did:key".into()];
+    let app = harness_with_config(cfg, &url, caps).await;
+    let page = |q: String| {
+        let app = app.clone();
+        async move {
+            let (status, v) = pg_send(&app, "GET", &format!("/changes?{q}"), None).await;
+            assert_eq!(status, StatusCode::OK, "/changes?{q} = {v}");
+            ChangesResponse::from_value(&v).expect("validates");
+            v
+        }
+    };
+    let enc = |s: &str| pct_encode_path_segment(s);
+
+    let producer = Producer::new_did_key(SigningKey::from_bytes(&[94u8; 32]));
+    let req = producer
+        .publish_request()
+        .title("pg changes v1")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&app, &req, None).await;
+    assert_eq!(status, StatusCode::CREATED, "publish = {v}");
+    let v1 = v["ctx_id"].as_str().unwrap().to_string();
+    let path = enc(&v1);
+    let empty = page("limit=10".into()).await;
+    assert_eq!(
+        empty["changes"],
+        json!([]),
+        "a plain publish writes nothing"
+    );
+
+    let (status, r) = pg_send(
+        &app,
+        "POST",
+        &format!("/contexts/{path}/retract"),
+        Some(&pg_signed_event_envelope(94, &v1, "retracted")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retract = {r}");
+    let (status, r2) = pg_send(
+        &app,
+        "POST",
+        &format!("/contexts/{path}/republish"),
+        Some(&pg_signed_event_envelope(94, &v1, "republished")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "republish = {r2}");
+    let (_, prev) = get_json(&app, &format!("/contexts/{path}/body")).await;
+    let prev: AcdpBody = serde_json::from_value(prev).unwrap();
+    let next = producer
+        .supersede_body(&prev)
+        .title("pg changes v2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&app, &next, None).await;
+    assert_eq!(status, StatusCode::CREATED, "supersede = {v}");
+    let v2 = v["ctx_id"].as_str().unwrap().to_string();
+
+    let full = page("limit=10".into()).await;
+    let entries = full["changes"].as_array().unwrap();
+    let seqs: Vec<u64> = entries.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
+    assert_eq!(seqs, vec![1, 2, 3]);
+    let (_, served) = get_json(&app, &format!("/contexts/{path}")).await;
+    let state = &served["registry_state"];
+    for i in 0..2 {
+        assert_eq!(entries[i]["kind"], "lifecycle");
+        assert_eq!(entries[i]["event"], state["lifecycle_events"][i]);
+        assert_eq!(entries[i]["event_receipt"], state["event_receipts"][i]);
+    }
+    assert_eq!(entries[2]["kind"], "superseded");
+    assert_eq!(entries[2]["superseded_by"], v2.as_str());
+    let (_, served_v2) = get_json(&app, &format!("/contexts/{}", enc(&v2))).await;
+    assert_eq!(
+        entries[2]["registry_receipt"],
+        served_v2["registry_receipt"]
+    );
+
+    let first = page("limit=2".into()).await;
+    assert_eq!(first["has_more"], true);
+    let c2 = first["next_cursor"].as_str().unwrap().to_string();
+    let rest = page(format!("limit=2&since={}", enc(&c2))).await;
+    assert_eq!(rest["changes"][0]["seq"], 3);
+    assert_eq!(rest["has_more"], false);
+    let head = page("since=head".into()).await;
+    assert_eq!(head["changes"], json!([]));
+    assert_eq!(head["next_cursor"], rest["next_cursor"]);
+
+    // Retention: prune the first two; the cursor at 0 is now expired, the
+    // one at 2 still resumes, and `since` absent starts after the prefix.
+    let c0 = {
+        let key = acdp_registry_core::changes_key::ChangesKey::from_master(&[93u8; 32], 1).unwrap();
+        key.encode_cursor(0)
+    };
+    let store = PgStore::connect(&url, 2).await.unwrap();
+    let future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    assert_eq!(store.prune_changes(future, 2).await.unwrap(), 2);
+    let (status, v) = pg_send(&app, "GET", &format!("/changes?since={}", enc(&c0)), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"]["code"], "cursor_expired");
+    assert_eq!(
+        page(format!("since={}", enc(&c2))).await["changes"][0]["seq"],
+        3
+    );
+    assert_eq!(page(String::new()).await["changes"][0]["seq"], 3);
 }

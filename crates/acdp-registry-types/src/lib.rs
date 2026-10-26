@@ -10,7 +10,7 @@ pub mod event;
 
 pub use auth::{AuthChallenge, BearerClaims, TokenRequest, TokenResponse};
 pub use config::{
-    AuthConfig, CorsConfig, LifecycleConfig, LimitsConfig, LogConfig, MetricsConfig,
+    AuthConfig, ChangesConfig, CorsConfig, LifecycleConfig, LimitsConfig, LogConfig, MetricsConfig,
     PlaygroundConfig, RateLimitConfig, ReceiptConfig, RegistryConfig, RegistrySection,
     RetiredReceiptKey, StorageBackend, StorageConfig, TenantAgentBinding, TenantHeaderTrust,
     WebhookConfig, WitnessConfig, REGISTRY_ADVERTISABLE_PROFILES,

@@ -85,6 +85,10 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// and the head-root cache. `None` when `log.enabled` is false —
     /// the `/log/*` endpoints then answer 501 `not_implemented`.
     pub log: Option<Arc<crate::log::LogState>>,
+    /// RFC-ACDP-0018 change-feed cursor key. `None` when `changes.enabled`
+    /// is false or the key fails to load — `GET /changes` then answers
+    /// 501 `not_implemented`.
+    pub changes: Option<Arc<crate::changes_key::ChangesKey>>,
 }
 
 impl<S: ExtendedRegistryStore> AppStateInner<S> {
@@ -165,6 +169,17 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             .ok()
             .flatten()
             .map(Arc::new);
+        // Change feed (RFC-ACDP-0018). Same posture as the log: the binary's
+        // validate_config refuses a bad key at startup; here a failure
+        // serves 501s rather than panicking.
+        let changes = if config.changes.enabled {
+            crate::changes_key::load_changes_key(&config.changes, &config.receipt)
+                .map_err(|e| tracing::error!(error = %e, "change feed unavailable"))
+                .ok()
+                .map(Arc::new)
+        } else {
+            None
+        };
         // FEAT-06: per-IP + global `/auth/*` limiter. Reuses the fixed-window
         // `AgentRateLimiter`, keyed by client IP. A `0` global budget maps to
         // the `u32::MAX` "disabled" sentinel; the per-IP check is skipped by
@@ -224,6 +239,7 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             metrics,
             registry_did_document,
             log,
+            changes,
         }
     }
 }

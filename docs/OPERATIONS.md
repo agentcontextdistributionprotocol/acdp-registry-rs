@@ -383,13 +383,14 @@ signing key over relying on a restored revocation list.
 ## Capacity
 
 There is no autoscaling story here and no built-in load shedding beyond the
-rate limiter. Four bounds are worth knowing before they find you:
+rate limiter. Five bounds are worth knowing before they find you:
 
 | Bound | Where | What happens at the limit |
 |-------|-------|---------------------------|
 | Webhook queue | `webhook.queue_capacity` | The queue is bounded and delivery is fire-and-forget. When it is full the event is **dropped** with a `warn` log (`webhook queue full; event dropped`) — the publish itself still succeeds. There is no Prometheus gauge for depth; `GET /admin/status` reports `queue_in_flight` and `queue_capacity`, and that plus the warn log is the whole signal. |
 | Transparency log proofs | `[log]` | Tree computation is **O(n) per request** over the stored leaf hashes (only the current head root is cached). `/log/proof` and `/log/checkpoint` therefore get steadily more expensive as the log grows, and they are unauthenticated for hash-only queries. Rate-limit them deliberately rather than discovering the cost. |
 | Search page size | clamped in both stores | A caller-supplied `limit` is clamped to 100. A page can also come back **shorter** than requested when the request uses `?visibility=`, which is applied after the query (tenant scoping is not: it runs in SQL) — see [MULTI-TENANCY.md](MULTI-TENANCY.md#how-the-binding-is-stored-and-filtered) on the refill cap. Short is not "end of results"; page until `next_cursor` is absent. |
+| Change feed | `[changes]` | Rows accumulate at one per lifecycle event, supersession and key revocation, whenever a `[receipt]` key is configured — served or not — and are pruned once older than `retention_seconds` plus a one-hour margin (the cutoff is this replica's clock, Postgres stamps rows with the database's) every `prune_interval_seconds` (default 3600; 1000 rows per batch, repeated until caught up). The prune task runs even with `changes.enabled = false`. A `GET /changes` request reads at most six scan batches of `max(limit, 100)` rows, so a requester who can see little of the feed gets short pages with `has_more: true` rather than an unbounded scan. Losing or rotating `[changes]` key material expires every outstanding cursor (consumers resync); it never corrupts the feed. |
 | Storage pool | `storage.max_connections` (default 20) | Requests queue on the sqlx pool. `/healthz` issues a storage health query of its own, so it reports `degraded` + `503` once the pool can no longer serve one — which is the intended behaviour for a load balancer, and the reason `/livez` exists separately and never touches storage. |
 
 Sizing the webhook queue is a trade between memory and loss: it holds whole

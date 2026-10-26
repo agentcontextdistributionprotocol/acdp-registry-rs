@@ -3172,6 +3172,27 @@ mod lifecycle_probe_tests {
         assert_lifecycle_state_probe_sees_retraction(&store, "recording").await;
     }
 
+    /// A backend that inherits the trait defaults has no change feed: every
+    /// feed method is `NotImplemented` (served as 501), never an empty feed
+    /// a consumer would mistake for "nothing changed".
+    #[tokio::test]
+    async fn a_store_that_inherits_the_feed_defaults_is_not_implemented() {
+        use acdp::error::AcdpError;
+        let store = DefaultOnly(Arc::new(Recording::default()));
+        assert!(matches!(
+            store.changes_head().await,
+            Err(AcdpError::NotImplemented(_))
+        ));
+        assert!(matches!(
+            store.changes_page(&crate::FeedQuery::default()).await,
+            Err(AcdpError::NotImplemented(_))
+        ));
+        assert!(matches!(
+            store.prune_changes(0, 1).await,
+            Err(AcdpError::NotImplemented(_))
+        ));
+    }
+
     /// The falsification: the same store behind `DefaultOnly`, which forwards
     /// every write but does NOT forward `has_lifecycle_state`, so the trait
     /// default answers. The retraction lands in the inner store, the probe

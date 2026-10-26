@@ -27,6 +27,9 @@ the trigger that reopens it:
   or when the SDK exposes the replay outcome on the lifecycle path.
 - Event receipts are signed for `did:web:<current registry.authority>` without comparing it to the context's `origin_registry`;
   add a skip-and-count guard if `registry.authority` ever becomes changeable for a populated store.
+- `[changes]` key rotation keeps no previous-keys list, so rotating expires every cursor (consumers resync).
+  Add one before `acdp-registry-events` has paying subscribers (RFC-ACDP-0018 plan F7).
+- `GET /changes` has no per-requester rate limit of its own (plan A22); each request's work is bounded by the scan budget.
 
 When one of these is settled, edit its status in `ASSUMPTIONS.md` in the same PR as the change that settled it, and note the decision in
 `DECISIONS.md`. Do not open a PR only to tidy a status line.

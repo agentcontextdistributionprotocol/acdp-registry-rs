@@ -518,20 +518,37 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
         );
     }
 
-    // ACDP 0.5.x / RFC-ACDP-0018: the change-feed and change-hint profiles
-    // are in the advertisable set (they are spec-defined registry profiles)
-    // but this build does not yet serve GET /changes or /subscriptions, so
-    // advertising either would be a false commitment (§9). Refuse until the
-    // surface lands.
-    if let Some(p) = cfg
+    // ACDP 0.5.0 / RFC-ACDP-0018 §5: the change feed. Advertising
+    // `acdp-registry-changes` (appended by `build_capabilities` when
+    // `changes.enabled`) is the §3–§6 contract, so every prerequisite the
+    // profile registry names is checked here rather than served degraded.
+    if cfg
         .registry
         .profiles
         .iter()
-        .find(|p| *p == "acdp-registry-changes" || *p == "acdp-registry-events")
+        .any(|p| p == "acdp-registry-changes")
+        && !cfg.changes.enabled
     {
         anyhow::bail!(
-            "registry.profiles advertises '{p}' but this build does not serve the \
-             RFC-ACDP-0018 surface (GET /changes, /subscriptions). Remove the profile."
+            "registry.profiles advertises 'acdp-registry-changes' but changes.enabled is \
+             false. Advertising the profile commits the registry to serve GET /changes \
+             (RFC-ACDP-0018 §5) — set changes.enabled=true or remove the profile."
+        );
+    }
+    validate_changes_retention(&cfg.changes)?;
+    if cfg.changes.enabled {
+        validate_changes(cfg)?;
+    }
+    // The change-hint profile (§8) is not served by this build yet.
+    if cfg
+        .registry
+        .profiles
+        .iter()
+        .any(|p| p == "acdp-registry-events")
+    {
+        anyhow::bail!(
+            "registry.profiles advertises 'acdp-registry-events' but this build does not \
+             serve the RFC-ACDP-0018 §8 subscription surface. Remove the profile."
         );
     }
 
@@ -1152,6 +1169,11 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
         server
     };
     let server = Arc::new(server);
+    // Feed rows are appended whenever lifecycle events or supersessions
+    // commit, whether or not the feed is advertised (A13), so retention
+    // runs unconditionally: a registry with `changes.enabled = false` must
+    // not grow the table forever.
+    spawn_changes_pruner(Arc::clone(&server), &cfg.changes);
 
     // Auth.
     let issuer = authority_to_did_web(&cfg.registry.authority);
@@ -1522,6 +1544,144 @@ fn acdp_version_claim(cfg: &RegistryConfig) -> &'static str {
 /// in the same file, which spawns this binary (#385).
 const READ_AUTH_METHOD_BEARER_JWT: &str = "bearer_jwt";
 
+/// Rows one prune statement may delete, so a long-idle registry catching
+/// up never holds the write lock for one huge delete.
+const CHANGES_PRUNE_BATCH: u32 = 1000;
+
+/// Extra age a feed row must reach before it is pruned, beyond
+/// `retention_seconds`. The cutoff is computed on this replica's clock while
+/// Postgres stamps `appended_at_ms` with the database's, so without a margin
+/// a replica running fast would delete rows younger than the §5.4 minimum.
+const CHANGES_PRUNE_SKEW_MARGIN_MS: i64 = 3_600_000;
+
+/// One retention pass: delete, in bounded batches, every feed row appended
+/// more than `retention_ms` + [`CHANGES_PRUNE_SKEW_MARGIN_MS`] before
+/// `now_ms`. Returns the rows deleted. Stops at the first failed batch;
+/// rows are only ever kept longer, never lost early.
+async fn prune_changes_once<S: ExtendedRegistryStore + 'static>(
+    store: &S,
+    now_ms: i64,
+    retention_ms: i64,
+) -> Result<u64, acdp::error::AcdpError> {
+    let cutoff = now_ms
+        .saturating_sub(retention_ms)
+        .saturating_sub(CHANGES_PRUNE_SKEW_MARGIN_MS);
+    let mut deleted = 0u64;
+    loop {
+        let n = store.prune_changes(cutoff, CHANGES_PRUNE_BATCH).await?;
+        deleted += n;
+        if n < u64::from(CHANGES_PRUNE_BATCH) {
+            return Ok(deleted);
+        }
+    }
+}
+
+/// RFC-ACDP-0018 §5.4 retention: every `prune_interval_seconds`, run
+/// [`prune_changes_once`], then publish the head / pruned-through gauges.
+/// A failed pass is logged and retried next tick.
+fn spawn_changes_pruner<S: ExtendedRegistryStore + 'static>(
+    server: Arc<RegistryServer<S>>,
+    cfg: &acdp_registry_types::ChangesConfig,
+) {
+    let retention_ms =
+        i64::try_from(cfg.retention_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
+    let interval = std::time::Duration::from_secs(cfg.prune_interval_seconds);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        loop {
+            tick.tick().await;
+            let store = server.store();
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let deleted = match prune_changes_once(store, now_ms, retention_ms).await {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(error = %e, "change feed prune failed");
+                    0
+                }
+            };
+            match store.changes_head().await {
+                Ok(h) => {
+                    acdp_registry_core::metrics::record_changes_prune(
+                        deleted,
+                        h.head,
+                        h.pruned_through,
+                    );
+                    if deleted > 0 {
+                        tracing::info!(
+                            deleted,
+                            pruned_through = h.pruned_through,
+                            "change feed pruned (RFC-ACDP-0018 §5.4)"
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "change feed head read failed"),
+            }
+        }
+    });
+}
+
+/// Upper bound on `changes.max_changes_page` and `changes.max_change_filters`:
+/// each filter value is a bound SQL parameter and each page row a decoded
+/// evidence object, so an unbounded operator value is a misconfiguration.
+const CHANGES_LIMIT_CEILING: u64 = 1000;
+
+/// The retention settings, checked whether or not the feed is advertised:
+/// the pruner runs on every registry (A13), so a short retention would
+/// delete rows a later `changes.enabled = true` must still serve, and a
+/// zero interval would panic the prune task.
+fn validate_changes_retention(c: &acdp_registry_types::ChangesConfig) -> anyhow::Result<()> {
+    use acdp::types::change::MIN_CHANGE_RETENTION_SECONDS;
+    if c.retention_seconds < MIN_CHANGE_RETENTION_SECONDS {
+        anyhow::bail!(
+            "changes.retention_seconds={} is below the RFC-ACDP-0018 §5.4 minimum of \
+             {MIN_CHANGE_RETENTION_SECONDS} (30 days).",
+            c.retention_seconds
+        );
+    }
+    if c.prune_interval_seconds == 0 {
+        anyhow::bail!("changes.prune_interval_seconds must be at least 1.");
+    }
+    Ok(())
+}
+
+/// The `changes.enabled` prerequisites (RFC-ACDP-0018 §5.4, §9 and the
+/// `acdp-registry-changes` profile row).
+fn validate_changes(cfg: &RegistryConfig) -> anyhow::Result<()> {
+    let c = &cfg.changes;
+    // Feed rows carry event receipts (lifecycle) and registry receipts
+    // (superseded, key_revocation); the store appends nothing without
+    // them, so a feed without the event-receipt gate open would be empty.
+    if !acdp_registry_core::receipt::event_receipts_gate(cfg, acdp_version_claim(cfg)) {
+        anyhow::bail!(
+            "changes.enabled=true requires lifecycle.enabled=true and a [receipt] signing \
+             key: acdp-registry-changes inherits acdp-registry-lifecycle and requires \
+             acdp-registry-receipts (RFC-ACDP-0018; event receipts, RFC-ACDP-0017 §10)."
+        );
+    }
+    if matches!(cfg.storage.backend, StorageBackend::Memory) {
+        anyhow::bail!(
+            "changes.enabled=true requires a durable storage backend (sqlite or postgres): \
+             feed cursors are durable and entries are retained for at least \
+             change_retention_seconds (RFC-ACDP-0018 §5.4); the memory backend loses both \
+             on restart."
+        );
+    }
+    for (name, v) in [
+        ("max_change_filters", c.max_change_filters),
+        ("max_changes_page", c.max_changes_page),
+    ] {
+        if !(100..=CHANGES_LIMIT_CEILING).contains(&v) {
+            anyhow::bail!(
+                "changes.{name}={v} must be from 100 (the RFC-ACDP-0018 §9 minimum) to \
+                 {CHANGES_LIMIT_CEILING}."
+            );
+        }
+    }
+    acdp_registry_core::changes_key::load_changes_key(c, &cfg.receipt)
+        .map_err(|e| anyhow::anyhow!("changes key: {e}"))?;
+    Ok(())
+}
+
 fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
     CapabilitiesDocument {
         // Plan A4 / REG-3 Phase 4: each rung of the claim is gated on what
@@ -1567,6 +1727,11 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
             if cfg.log.enabled && !profiles.iter().any(|p| p == log_profile) {
                 profiles.push(log_profile.into());
             }
+            // RFC-ACDP-0018: likewise no SDK builder for the change feed.
+            let changes_profile = "acdp-registry-changes";
+            if cfg.changes.enabled && !profiles.iter().any(|p| p == changes_profile) {
+                profiles.push(changes_profile.into());
+            }
             profiles
         },
         limits: Limits {
@@ -1582,9 +1747,13 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
             // config; the rate limiter's ceiling can be advertised here
             // when the registry adopts the 0.3.0 capabilities surface.
             max_publish_per_minute: None,
-            change_retention_seconds: None,
-            max_change_filters: None,
-            max_changes_page: None,
+            // RFC-ACDP-0018 §9: MUST be present with acdp-registry-changes.
+            change_retention_seconds: cfg.changes.enabled.then_some(cfg.changes.retention_seconds),
+            max_change_filters: cfg
+                .changes
+                .enabled
+                .then_some(cfg.changes.max_change_filters),
+            max_changes_page: cfg.changes.enabled.then_some(cfg.changes.max_changes_page),
             max_subscriptions_per_requester: None,
         },
         read_authentication_methods: if cfg.auth.enabled {
@@ -3391,14 +3560,166 @@ mod tests {
     }
 
     #[test]
-    fn rfc0018_profiles_are_refused_until_served() {
-        for p in ["acdp-registry-changes", "acdp-registry-events"] {
-            let mut cfg = RegistryConfig::defaults();
-            cfg.registry.profiles = vec![p.into()];
-            let msg = validate_config(&cfg)
-                .expect_err("RFC-ACDP-0018 profile must be refused")
-                .to_string();
-            assert!(msg.contains(p), "refusal must name {p}: {msg}");
+    fn rfc0018_events_profile_is_refused_until_served() {
+        let mut cfg = changes_cfg();
+        cfg.registry.profiles = vec!["acdp-registry-events".into()];
+        let msg = validate_config(&cfg)
+            .expect_err("acdp-registry-events must be refused")
+            .to_string();
+        assert!(msg.contains("acdp-registry-events"), "{msg}");
+    }
+
+    /// A config `validate_changes` accepts: lifecycle on, a receipt key,
+    /// a distinct changes key, the sqlite default backend.
+    fn changes_cfg() -> RegistryConfig {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.receipt.signing_key_seed_b64 =
+            base64::engine::general_purpose::STANDARD.encode([5u8; 32]);
+        cfg.lifecycle.enabled = true;
+        cfg.changes.enabled = true;
+        cfg.changes.key_b64 = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+        cfg
+    }
+
+    #[test]
+    fn changes_enabled_is_accepted_and_advertised_with_its_limits() {
+        let cfg = changes_cfg();
+        validate_config(&cfg).expect("valid changes config");
+        let caps = build_capabilities(&cfg);
+        assert!(caps.profiles.iter().any(|p| p == "acdp-registry-changes"));
+        assert_eq!(caps.limits.change_retention_seconds, Some(2_592_000));
+        assert_eq!(caps.limits.max_change_filters, Some(100));
+        assert_eq!(caps.limits.max_changes_page, Some(100));
+        assert_eq!(caps.limits.max_subscriptions_per_requester, None);
+    }
+
+    #[test]
+    fn changes_disabled_advertises_nothing() {
+        let caps = build_capabilities(&RegistryConfig::defaults());
+        assert!(!caps.profiles.iter().any(|p| p == "acdp-registry-changes"));
+        assert_eq!(caps.limits.change_retention_seconds, None);
+        assert_eq!(caps.limits.max_change_filters, None);
+        assert_eq!(caps.limits.max_changes_page, None);
+    }
+
+    #[test]
+    fn changes_retention_is_checked_even_when_the_feed_is_off() {
+        // The pruner runs on every registry, so its settings are validated
+        // with `changes.enabled = false` too.
+        let mut cfg = RegistryConfig::defaults();
+        cfg.changes.retention_seconds = 2_591_999;
+        let msg = validate_config(&cfg).unwrap_err().to_string();
+        assert!(msg.contains("retention_seconds"), "{msg}");
+        let mut cfg = RegistryConfig::defaults();
+        cfg.changes.prune_interval_seconds = 0;
+        let msg = validate_config(&cfg).unwrap_err().to_string();
+        assert!(msg.contains("prune_interval_seconds"), "{msg}");
+    }
+
+    /// The retention pass deletes in bounded batches until a short batch,
+    /// and keeps every row younger than retention plus the skew margin.
+    #[cfg(feature = "storage-sqlite")]
+    #[tokio::test]
+    async fn prune_changes_once_batches_and_keeps_the_skew_margin() {
+        use acdp_registry_sqlite::SqliteStore;
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        store.migrate().await.unwrap();
+        let retention_ms = 30 * 86_400_000i64;
+        let now_ms = 100 * 86_400_000i64;
+        let cutoff = now_ms - retention_ms - CHANGES_PRUNE_SKEW_MARGIN_MS;
+        // 2 500 rows just old enough, then 3 inside the margin.
+        let old = 2 * CHANGES_PRUNE_BATCH as usize + 500;
+        for i in 0..old + 3 {
+            let at = if i < old { cutoff - 1 } else { cutoff + 1 };
+            sqlx::query(
+                "INSERT INTO changes (kind, ctx_id, lineage_id, agent_id, receipt, appended_at_ms) \
+                 VALUES ('key_revocation', 'c', 'l', 'a', '{}', ?)",
+            )
+            .bind(at)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        }
+        let deleted = prune_changes_once(&store, now_ms, retention_ms)
+            .await
+            .unwrap();
+        assert_eq!(deleted, old as u64, "every old row, across batches");
+        let head = store.changes_head().await.unwrap();
+        assert_eq!(head.head, (old + 3) as u64);
+        assert_eq!(head.pruned_through, old as u64, "the margin rows stay");
+        assert_eq!(
+            prune_changes_once(&store, now_ms, retention_ms)
+                .await
+                .unwrap(),
+            0,
+            "a second pass finds nothing"
+        );
+    }
+
+    #[test]
+    fn changes_profile_without_changes_enabled_is_refused() {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.registry.profiles = vec!["acdp-registry-changes".into()];
+        let msg = validate_config(&cfg).unwrap_err().to_string();
+        assert!(msg.contains("changes.enabled"), "{msg}");
+    }
+
+    #[test]
+    fn changes_prerequisites_are_each_enforced() {
+        type Breaker = fn(&mut RegistryConfig);
+        let cases: [(&str, Breaker, &str); 10] = [
+            (
+                "no lifecycle",
+                |c| c.lifecycle.enabled = false,
+                "lifecycle.enabled",
+            ),
+            (
+                "no receipt key",
+                |c| c.receipt.signing_key_seed_b64.clear(),
+                "[receipt]",
+            ),
+            (
+                "memory backend",
+                |c| c.storage.backend = StorageBackend::Memory,
+                "durable",
+            ),
+            (
+                "short retention",
+                |c| c.changes.retention_seconds = 2_591_999,
+                "retention_seconds",
+            ),
+            (
+                "few filters",
+                |c| c.changes.max_change_filters = 99,
+                "max_change_filters",
+            ),
+            (
+                "small page",
+                |c| c.changes.max_changes_page = 99,
+                "max_changes_page",
+            ),
+            (
+                "huge page",
+                |c| c.changes.max_changes_page = CHANGES_LIMIT_CEILING + 1,
+                "max_changes_page",
+            ),
+            (
+                "zero prune interval",
+                |c| c.changes.prune_interval_seconds = 0,
+                "prune_interval_seconds",
+            ),
+            ("no key", |c| c.changes.key_b64.clear(), "changes key"),
+            (
+                "key equals receipt seed",
+                |c| c.changes.key_b64 = c.receipt.signing_key_seed_b64.clone(),
+                "distinct",
+            ),
+        ];
+        for (what, brk, needle) in cases {
+            let mut cfg = changes_cfg();
+            brk(&mut cfg);
+            let msg = validate_config(&cfg).expect_err(what).to_string();
+            assert!(msg.contains(needle), "{what}: {msg}");
         }
     }
 

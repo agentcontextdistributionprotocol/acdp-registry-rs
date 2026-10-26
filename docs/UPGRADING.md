@@ -31,7 +31,12 @@ table and a one-row `changes_meta` marker.**
   and key revocation from then on, in the same transaction as the change. Without a receipt minter
   nothing is appended.
 - **Who is affected:** nobody, until the change-feed profile is advertised. The table is written but
-  not served by this migration alone.
+  not served by this migration alone. The prune task runs on every registry, so
+  `changes.retention_seconds` (at least 2592000) and `changes.prune_interval_seconds` (at least 1)
+  are now validated at startup even with `changes.enabled = false`.
+- **Rolling out the feed:** set `changes.enabled = true` (and the profile) only in a **separate
+  deploy, after every replica runs this release**. A replica on the older binary accepts changes
+  without appending feed rows, so a feed advertised during a mixed rollout silently misses them.
 - **Rollback, Postgres:** safe to 0.5.6. The migrator tolerates the newer applied version, and
   older binaries never touch the new tables. Changes accepted while the older binary runs are not
   in the feed; a consumer polling it after the roll-forward does not see them.

@@ -25,6 +25,7 @@ The complete inbound surface of `acdp-registry`. Routes are assembled in
 | GET  | `/log/checkpoint`                | none        | always (501 unless `log.enabled`) |
 | GET  | `/log/proof`                     | optional bearer | always (501 unless `log.enabled`) |
 | GET  | `/log/entries`                   | optional bearer | always (501 unless `log.enabled`) |
+| GET  | `/changes`                       | optional bearer | always (501 unless `changes.enabled`) |
 | POST | `/auth/challenge`                | none        | `auth.enabled` |
 | POST | `/auth/token`                    | challenge signature | `auth.enabled` |
 | POST | `/auth/token/revoke`             | bearer      | `auth.enabled` |
@@ -379,6 +380,11 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_rate_limit_rejections_total` | counter | `scope` | 429s by scope (`auth_per_ip`, `auth_global`, `challenge_per_agent`, `challenge_global`, `publish_per_agent`, `lifecycle_per_agent`). |
 | `acdp_registry_rate_limit_shared_total` | counter | `scope`, `outcome` | Round trips to the shared (cluster-wide) `/auth/*` limiter backend: `scope` is `auth_per_ip` or `auth_global`, `outcome` is `allow`, `deny` or `unavailable`. Counts which layer answered; a client-visible 429 still increments the rejections counter above. Emitted only when a shared backend is configured. |
 | `acdp_registry_rate_limit_shared_seconds` | histogram | `scope` | Latency of those round trips. The series to watch to confirm the shared limiter's database load assumption (see `docs/OPERATIONS.md`). |
+| `acdp_registry_changes_requests_total` | counter | `outcome` | RFC-ACDP-0018 `GET /changes` requests: `ok`, or the wire code (`invalid_cursor`, `cursor_expired`, `schema_violation`, …). |
+| `acdp_registry_changes_rows_scanned_total` | counter | — | Feed rows scanned (not returned) by `GET /changes`; the ratio to requests is the visibility post-filter cost. |
+| `acdp_registry_changes_pruned_total` | counter | — | Feed rows deleted by the retention prune task. |
+| `acdp_registry_changes_head_seq` | gauge | — | Feed head `seq` after the last prune pass. |
+| `acdp_registry_changes_pruned_through` | gauge | — | Highest pruned `seq`; a cursor below it is `cursor_expired`. |
 
 > **`scope` changed meaning for global challenge rejections (H-A/P4).** Until
 > this change, a `/auth/challenge` rejection caused by the process-global
@@ -691,6 +697,59 @@ this registry does with them:
   positions/sizes → `400 schema_violation`. A stored leaf that no longer
   parses surfaces as `invalid_log_proof` from this registry's own
   `/log/proof` — see the [status table](#status--code-table).
+
+### `GET /changes` *(ACDP 0.5.0)*
+
+The registry change feed (profile `acdp-registry-changes`). Entry shapes,
+parameters and cursor semantics are normative in
+[RFC-ACDP-0018 §5](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/rfcs/RFC-ACDP-0018-retraction-recall.md#5-the-changes-feed-get-changes-normative) and
+[§6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/rfcs/RFC-ACDP-0018-retraction-recall.md#6-watching-and-dependents-normative). This section records what this
+registry does with them:
+
+- **Gate.** Mounted always; without `changes.enabled = true` every request is
+  `501 not_implemented`. Enabling it needs lifecycle, a `[receipt]` key and a
+  durable store (see [CONFIGURATION.md](CONFIGURATION.md#changes-acdp-050)).
+- **What is recorded.** One entry per accepted lifecycle event (`kind:
+  lifecycle`, carrying the event and its event receipt), per superseding
+  publish (`kind: superseded`, `ctx_id` the older version, `superseded_by`
+  and `registry_receipt` the new one's), and per accepted key-revocation
+  context (`kind: key_revocation`). A plain publish and an idempotent retry
+  record nothing. Each entry commits in the **same storage transaction** as
+  its change, and its evidence is byte-identical to what `registry_state` (or
+  the new version's retrieval) serves.
+- **Parameters.** `since` is absent (start at the oldest retained entry),
+  `head` (start at the current head; returns `changes: []`), or a cursor from
+  an earlier `next_cursor`; an empty `since=` is `400 invalid_cursor`. `limit` is `1..=max_changes_page` (default 100).
+  `ctx_id`, `lineage_id`, `agent_id` and `kind` repeat; the three id filters
+  OR together and `kind` ANDs with them, and a `ctx_id` watch also matches
+  `key_revocation` entries for that context's producer. More than
+  `max_change_filters` filter values in total, a repeated `since`/`limit`, a
+  malformed id or an unknown `kind` → `400 schema_violation` (`limit` errors
+  name `details.field = "limit"`). Unknown parameters are ignored.
+- **Response.** `{changes, next_cursor, has_more}`; `next_cursor` is always
+  present, including on an empty page, and resumes strictly after the last
+  entry returned when the page is full, otherwise after the last position
+  scanned. Cursors are opaque, authenticated (AES-GCM under the
+  `[changes]` key) and durable: they stay valid until the entry they point
+  past is pruned.
+- **Visibility.** Entries are filtered per requester after the scan: a
+  `lifecycle` entry is visible when its context is retrievable, a
+  `superseded` entry only when the **new** version is retrievable, and a
+  `key_revocation` entry always. Hidden entries never end the feed early: the
+  scan refills past them (up to six scan batches per request), and if that
+  budget runs out the page comes back short with `has_more: true` and a
+  `next_cursor` past everything scanned. A short page is not the end of the
+  feed; `has_more: false` is. A `ctx_id`
+  watch matches its producer's revocations only when that context is
+  visible, so a watch never discloses who produced a hidden context.
+  Responses carry `Cache-Control: private`. When `anonymous_public_reads` is
+  `false`, an anonymous request is `403 not_authorized`, as on search.
+- **Retention.** Entries are kept at least `change_retention_seconds`
+  (advertised; at least 30 days) and pruned oldest-first by a background
+  task. A cursor pointing before the oldest retained entry, past the head, or
+  minted under a key this registry does not hold is `400 cursor_expired`;
+  restart from `since` absent or `head`. A cursor that does not decode or
+  authenticate is `400 invalid_cursor`.
 
 ---
 
@@ -1030,8 +1089,8 @@ This page documents only what **this registry** answers and when.
 | 400 | `immutable_field` | A lifecycle request tried to supply/alter body content (RFC-ACDP-0013 §6 step 2). |
 | 400 | `invalid_signature` | The producer signature did not verify against the resolved key. |
 | 400 | `unsupported_algorithm` | Signature algorithm outside `supported_signature_algorithms`. |
-| 400 | `invalid_cursor` | A `cursor=` value that does not decode or does not match its query. |
-| 400 | `cursor_expired` | A structurally valid cursor whose window has passed. |
+| 400 | `invalid_cursor` | A `cursor=` value that does not decode or does not match its query, or a `GET /changes` `since` cursor that does not decode or authenticate. |
+| 400 | `cursor_expired` | A structurally valid cursor whose window has passed; on `GET /changes`, one before the oldest retained entry, past the head, or under a key this registry does not hold. |
 | 400 | `superseded_target` | A static supersession violation: any `details.reason` other than the two 409 ones below (e.g. `not_found`, `lineage_mismatch`, `cross_registry_supersession_unsupported`, `lineage_walk_failed`, `revocation_type_mismatch`). |
 | 403 | `not_authorized` | Bad/expired/revoked bearer, challenge failure, an anonymous **search** when `anonymous_public_reads` is off, tenant-scope denial in strict mode, an `X-Tenant-Id` the registry does not trust from the sending peer (`auth.tenant_header_trust`). Retrieval never answers 403 for visibility: see 404. |
 | 403 | `key_not_authorized` | The key resolved fine but is not authorized to sign for that agent. |
@@ -1044,7 +1103,7 @@ This page documents only what **this registry** answers and when.
 | 415 | `unsupported_media_type` | A body-bearing request (`POST /contexts`, the lifecycle and admin lifecycle routes, `/auth/*`) whose `Content-Type` is present but neither `application/json` nor `application/*+json` (parameters such as `charset` are ignored). An absent `Content-Type` is accepted on those routes except `/auth/*`, where it is also a 415. How to treat an absent header is registry choice under RFC-ACDP-0007 §4.1; this is ours. |
 | 429 | `rate_limited` | A rate-limit bucket drained (`/auth/*`, challenge, publish or lifecycle; see [Rate limits](#rate-limits-429)), or the shared `/auth/*` backend unavailable under `backend_unavailable = "deny"`; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
-| 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*` and lifecycle endpoints when their profiles are not enabled). |
+| 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*`, `/changes` and lifecycle endpoints when their profiles are not enabled). |
 | 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (on publish, and on `POST /auth/token` since 0.5.1). A foreign registry refused by the SSRF policy is also `cross_registry_resolution_failed`, and so is one that serves a context document this registry cannot parse (not JSON, an unknown or missing field); a refused DID host is not (it is 400 `key_resolution_failed`). |
 | 502 | `invalid_witness_cosignature` | A witness cosignature failed verification (RFC-ACDP-0015 §6.1). Like `invalid_log_proof`, a 502 because it is normally another party's artifact that failed. |
 | 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Normally raised when validating an *upstream's* proofs (federation), which is why it is a 502. **It is also reachable from this registry's own `/log/proof`**: for a retrieval-authorized requester the handler echoes the leaf via `record.leaf()` (`log_proof` in `crates/acdp-registry-core/src/handlers/log.rs`), and a stored leaf that no longer parses under the closed schema surfaces as `invalid_log_proof` from here, not from a peer (`LogEntryRecord::leaf` in `crates/acdp-registry-store/src/log.rs`, with the reject cases pinned by that module's own tests). If you see it and you are not federating, suspect your own `log_leaves` table. The other `/log/*` failures are `schema_violation`, `not_found`, or `not_implemented`; there is no `log_unavailable`. |

@@ -750,6 +750,7 @@ fn config() -> RegistryConfig {
         receipt: Default::default(),
         lifecycle: Default::default(),
         log: Default::default(),
+        changes: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -9763,7 +9764,12 @@ const EXCUSED: &[(&str, &str)] = &[
          rec-008 apply_to acdp-registry-changes, and rec-007 scenarios A-C and F-H to \
          acdp-registry-events: registry-side obligations of profiles this replay \
          harness does not advertise (HARNESS_PROFILES is acdp-registry-core only), so \
-         the replay cannot reach GET /changes or /subscriptions. rec-006, and rec-007 \
+         the replay cannot reach GET /changes or /subscriptions. rec-001, rec-002 and \
+         rec-005 are DISCHARGED, not excused: rec_changes_registry_side runs them, \
+         and rec003_filters_registry_side runs rec-003, against the shipped binary \
+         with acdp-registry-changes advertised (EXERCISED_FIXTURES); rec-004 (it \
+         needs per-requester bearers) and rec-008 are exercised by \
+         tests/changes_http.rs and the store tests. rec-006, and rec-007 \
          scenarios D-E, are acdp-consumer-recall: the consumer's verification of entries \
          and hints it receives (RFC-ACDP-0018 \u{a7}7, \u{a7}8.2 receiver duty), which no \
          harness configuration would make this registry responsible for. None of the \
@@ -14176,7 +14182,11 @@ macro_rules! exercised_by {
 /// `pub-007` was retired, after a fresh publish began answering `201 Created`
 /// with a percent-encoded `Location`. Ten with `chain-009`, once event
 /// receipts (RFC-ACDP-0017 W1) made its registry-side scenarios testable.
-const EXERCISED_FIXTURES_AT_PIN: usize = 10;
+/// Thirteen with `rec-001`, `rec-002` and `rec-005`, once `GET /changes`
+/// (RFC-ACDP-0018 §5) shipped; fourteen with `rec-003`. `rec-004` stays
+/// with `tests/changes_http.rs`: its scenarios need per-requester bearers
+/// the spawned binary (auth off) does not issue.
+const EXERCISED_FIXTURES_AT_PIN: usize = 14;
 
 #[rustfmt::skip]
 const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
@@ -14197,6 +14207,12 @@ const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
     // RFC-ACDP-0017 W1: scenarios A and B against the shipped binary, which
     // advertises lifecycle + receipts at 0.5.0 (asserted by the test itself).
     exercised_by!("chain-009", chain009_event_receipts_registry_side),
+    // RFC-ACDP-0018 §5: GET /changes against the shipped binary with
+    // acdp-registry-changes advertised (asserted by the test itself).
+    exercised_by!("rec-001", rec_changes_registry_side),
+    exercised_by!("rec-002", rec_changes_registry_side),
+    exercised_by!("rec-005", rec_changes_registry_side),
+    exercised_by!("rec-003", rec003_filters_registry_side),
 ];
 
 /// Every fixture this suite claims to have retired must really be requested by
@@ -17994,20 +18010,23 @@ fn served_auth_toml(enabled: bool) -> String {
     )
 }
 
-/// The `[receipt]`, `[lifecycle]` and `[log]` tables that back every optional
-/// registry profile (receipts, head receipts, lifecycle, transparency log).
+/// The `[receipt]`, `[lifecycle]`, `[log]` and `[changes]` tables that back
+/// every optional registry profile (receipts, head receipts, lifecycle,
+/// transparency log, change feed).
 fn served_full_features_toml() -> String {
     format!(
         "[receipt]\nsigning_key_seed_b64 = \"{}\"\nhead_receipts = true\n\n\
-         [lifecycle]\nenabled = true\n\n[log]\nenabled = true\n",
-        b64_32(0x2c)
+         [lifecycle]\nenabled = true\n\n[log]\nenabled = true\n\n\
+         [changes]\nenabled = true\nkey_b64 = \"{}\"\n",
+        b64_32(0x2c),
+        b64_32(0x2d)
     )
 }
 
 /// Advertisable profiles the startup guard still refuses, because the
-/// RFC-ACDP-0018 surface is not served yet. Emptied when GET /changes and
-/// /subscriptions land.
-const RFC0018_NOT_YET_SERVED: &[&str] = &["acdp-registry-changes", "acdp-registry-events"];
+/// RFC-ACDP-0018 §8 subscription surface is not served yet. Emptied when
+/// /subscriptions lands.
+const RFC0018_NOT_YET_SERVED: &[&str] = &["acdp-registry-events"];
 
 /// #385: the WHOLE `/.well-known/acdp.json` the shipped binary serves, with
 /// read auth OFF and ON and with every profile it can advertise switched on,
@@ -18020,7 +18039,7 @@ const RFC0018_NOT_YET_SERVED: &[&str] = &["acdp-registry-changes", "acdp-registr
 ///   * auth on with EVERY entry of `REGISTRY_ADVERTISABLE_PROFILES` listed
 ///     (minus `RFC0018_NOT_YET_SERVED`, which startup still refuses) and
 ///     its backing feature enabled (receipt key, head receipts, lifecycle,
-///     log): the widest `profiles` array the binary can serve.
+///     log, change feed): the widest `profiles` array the binary can serve.
 ///
 /// Synthetic negatives run against the same validator, on one-field edits of a
 /// served document that just passed, so a validator that accepts everything
@@ -18039,9 +18058,9 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
     let schema = PinnedSchema::load(&root, "acdp-capabilities.schema.json");
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // The RFC-ACDP-0018 profiles are advertisable but refused at startup
-    // until this build serves their surface (validate_config); leave them
-    // out of the all-profiles case until then.
+    // acdp-registry-events is advertisable but refused at startup until
+    // this build serves /subscriptions (validate_config); leave it out of
+    // the all-profiles case until then.
     let served_profiles: Vec<&str> = REGISTRY_ADVERTISABLE_PROFILES
         .iter()
         .copied()
@@ -18621,5 +18640,446 @@ fn the_shipped_binary_sweeps_legacy_events_on_startup() {
         !reg.output().contains("event receipt sweep complete"),
         "a second start has nothing to sweep: {}",
         reg.output()
+    );
+}
+
+/// rec-001, rec-002 and rec-005 (RFC-ACDP-0018 §5), the registry-side
+/// `GET /changes` obligations, against the shipped binary. The fixtures apply
+/// to registries advertising `acdp-registry-changes`, so that — and the §9
+/// limits floors (rec-005 D) — is asserted from the binary's own
+/// capabilities first. Every page and every entry is validated against the
+/// pinned `acdp-changes-response` / `acdp-change` schemas.
+///
+/// rec-001 A–F: three changes (retract X, supersede Y, retract Z) in strictly
+/// ascending `seq`; `limit=2` pages with `has_more` and an always-present
+/// `next_cursor`; polling at the head is empty until a fourth change, which
+/// then appears alone; `since=head` sees nothing older; an entry read twice
+/// is byte-identical; `limit=0` and `kind=bogus` are `schema_violation`.
+/// rec-002 A, C, E, F: the retraction's `event` / `event_receipt` are the
+/// served `registry_state` values and `recorded_at` is the receipt's
+/// `accepted_at`; the supersession names the new version and carries its
+/// receipt and `created_at`; a plain publish and a byte-identical retry
+/// append nothing; B, the republish appends a `republished` lifecycle entry.
+/// (D, key revocation, is in `tests/changes_http.rs`.)
+/// rec-005 C–D: `since=%%%garbage` is `invalid_cursor`; the advertised limits
+/// meet the floors. (A, 29-day durability, follows from the advertised
+/// retention plus `tests/changes_http.rs`'s prune tests; B likewise.)
+///
+/// rec-003 (filters) is [`rec003_filters_registry_side`]; rec-004
+/// (visibility) and rec-008 (same-transaction atomicity) are exercised in
+/// `tests/changes_http.rs` and the store tests.
+#[test]
+fn rec_changes_registry_side() {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping rec-001/002/005");
+        return;
+    };
+    let root = spec_root().expect("spec root");
+    for (id, wanted) in [
+        ("rec-001", &["A ", "B ", "C ", "D ", "E ", "F "][..]),
+        ("rec-002", &["A ", "B ", "C ", "E ", "F "][..]),
+        ("rec-005", &["C ", "D "][..]),
+    ] {
+        let fx = find_fixture_by_id(&fixtures, id)
+            .unwrap_or_else(|| panic!("{id} not found at the pinned spec"));
+        let names: Vec<&str> = fx["scenarios"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id} scenarios[] missing: {fx}"))
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+        for prefix in wanted {
+            assert!(
+                names.iter().any(|n| n.starts_with(prefix)),
+                "{id} no longer has scenario {prefix}— re-read the fixture: {names:?}"
+            );
+        }
+    }
+    let page_schema = PinnedSchema::load(&root, "acdp-changes-response.schema.json");
+    let entry_schema = PinnedSchema::load(&root, "acdp-change.schema.json");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let extra = format!(
+        "{}\n{}",
+        served_auth_toml(false),
+        served_full_features_toml()
+    );
+    let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "rec", "", &extra);
+
+    // rec-005 D, and the fixtures' precondition.
+    let (status, caps) = reg.get("/.well-known/acdp.json");
+    assert_eq!(status, 200, "capabilities: {caps}");
+    assert!(
+        caps["profiles"]
+            .as_array()
+            .expect("profiles")
+            .iter()
+            .any(|p| p == "acdp-registry-changes"),
+        "rec-* bind only a registry advertising acdp-registry-changes: {caps}"
+    );
+    let limit = |k: &str| {
+        caps["limits"][k]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{k}: {caps}"))
+    };
+    assert!(limit("change_retention_seconds") >= 2_592_000, "{caps}");
+    assert!(limit("max_change_filters") >= 100, "{caps}");
+    assert!(limit("max_changes_page") >= 100, "{caps}");
+
+    let changes = |q: &str| -> Value {
+        let (status, v) = reg.get(&format!("/changes{q}"));
+        assert_eq!(status, 200, "/changes{q}: {v}\n{}", reg.output());
+        let bad = page_schema.violations(&v);
+        assert!(
+            bad.is_empty(),
+            "/changes{q} violates the response schema: {bad:?}\n{v}"
+        );
+        for e in v["changes"].as_array().expect("changes[]") {
+            let bad = entry_schema.violations(e);
+            assert!(bad.is_empty(), "entry violates acdp-change: {bad:?}\n{e}");
+        }
+        v
+    };
+    let refused = |q: &str, code: &str| {
+        let (status, v) = reg.get(&format!("/changes{q}"));
+        assert_eq!(
+            (status, v["error"]["code"].as_str()),
+            (400, Some(code)),
+            "/changes{q}: {v}"
+        );
+    };
+    let seqs = |v: &Value| -> Vec<u64> {
+        v["changes"]
+            .as_array()
+            .expect("changes[]")
+            .iter()
+            .map(|e| e["seq"].as_u64().expect("seq"))
+            .collect()
+    };
+    let cursor = |v: &Value| -> String {
+        pct_encode_path_segment(
+            v["next_cursor"]
+                .as_str()
+                .expect("next_cursor always present"),
+        )
+    };
+
+    let seed = [0x89; 32];
+    let producer = Producer::new_did_key(SigningKey::from_bytes(&seed));
+    let publish = |title: &str| -> String {
+        let req = producer
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("publish request");
+        let (status, v) = reg.post("/contexts", &serde_json::to_value(&req).unwrap());
+        assert_eq!(status, 201, "publish {title}: {v}\n{}", reg.output());
+        v["ctx_id"].as_str().expect("ctx_id").to_string()
+    };
+    let path =
+        |ctx_id: &str, op: &str| format!("/contexts/{}{op}", pct_encode_path_segment(ctx_id));
+    let event = |ctx_id: &str, t: LifecycleEventType| -> Value {
+        let key = SigningKey::from_bytes(&seed);
+        let did = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+        let key_id = acdp::did::key::did_key_url(&did).expect("did:key url");
+        let e = LifecycleEvent::new(
+            uuid::Uuid::new_v4().to_string(),
+            CtxId(ctx_id.to_string()),
+            t,
+            chrono::Utc::now(),
+            AgentDid::new(did),
+            None,
+        )
+        .expect("valid event")
+        .sign_with(key, key_id)
+        .expect("signed event");
+        json!({ "event": e })
+    };
+
+    // rec-002 E: plain publishes append nothing.
+    let x = publish("rec x");
+    let y = publish("rec y");
+    let z = publish("rec z");
+    let empty = changes("");
+    assert_eq!(seqs(&empty), Vec::<u64>::new(), "plain publish: {empty}");
+    assert_eq!(empty["has_more"], false);
+
+    // Retract X (rec-002 A, F), supersede Y (C), retract Z.
+    let ex = event(&x, LifecycleEventType::Retracted);
+    let (status, rx) = reg.post(&path(&x, "/retract"), &ex);
+    assert_eq!(status, 200, "retract X: {rx}");
+    let (status, retry) = reg.post(&path(&x, "/retract"), &ex);
+    assert_eq!(status, 200, "retry: {retry}");
+    let (status, prev) = reg.get(&path(&y, "/body"));
+    assert_eq!(status, 200, "body of Y: {prev}");
+    let prev: acdp::types::body::Body = serde_json::from_value(prev).expect("body");
+    let next = producer
+        .supersede_body(&prev)
+        .title("rec y2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("supersede request");
+    let (status, y2) = reg.post("/contexts", &serde_json::to_value(&next).unwrap());
+    assert_eq!(status, 201, "supersede Y: {y2}");
+    let (status, _) = reg.post(
+        &path(&z, "/retract"),
+        &event(&z, LifecycleEventType::Retracted),
+    );
+    assert_eq!(status, 200, "retract Z");
+
+    // rec-001 A; rec-002 A, C, F.
+    let all = changes("");
+    assert_eq!(seqs(&all), vec![1, 2, 3], "{all}");
+    let entries = all["changes"].as_array().unwrap();
+    let (_, served_x) = reg.get(&path(&x, ""));
+    let state = &served_x["registry_state"];
+    assert_eq!(entries[0]["kind"], "lifecycle");
+    assert_eq!(entries[0]["ctx_id"], x.as_str());
+    assert_eq!(entries[0]["event"], state["lifecycle_events"][0]);
+    assert_eq!(entries[0]["event_receipt"], state["event_receipts"][0]);
+    assert_eq!(
+        entries[0]["recorded_at"],
+        state["event_receipts"][0]["accepted_at"]
+    );
+    assert_eq!(entries[1]["kind"], "superseded");
+    assert_eq!(entries[1]["ctx_id"], y.as_str());
+    assert_eq!(entries[1]["superseded_by"], y2["ctx_id"]);
+    assert_eq!(entries[1]["registry_receipt"], y2["registry_receipt"]);
+    assert_eq!(entries[1]["recorded_at"], y2["created_at"]);
+    // Y1's lineage, which the superseding version continues.
+    assert_eq!(entries[1]["lineage_id"], y2["lineage_id"]);
+    assert_eq!(entries[2]["ctx_id"], z.as_str());
+
+    // rec-001 B.
+    let first = changes("?limit=2");
+    assert_eq!(
+        (seqs(&first), first["has_more"].clone()),
+        (vec![1, 2], json!(true))
+    );
+    let rest = changes(&format!("?limit=2&since={}", cursor(&first)));
+    assert_eq!(
+        (seqs(&rest), rest["has_more"].clone()),
+        (vec![3], json!(false))
+    );
+
+    // rec-001 E: seq 3 read along a second cursor sequence is identical.
+    let one = changes("?limit=1");
+    let two = changes(&format!("?limit=1&since={}", cursor(&one)));
+    let three = changes(&format!("?limit=1&since={}", cursor(&two)));
+    assert_eq!(three["changes"][0], rest["changes"][0], "immutability");
+
+    // rec-001 C, D.
+    let at_head = changes(&format!("?since={}", cursor(&rest)));
+    assert_eq!(
+        (seqs(&at_head), at_head["has_more"].clone()),
+        (vec![], json!(false))
+    );
+    let head = changes("?since=head");
+    assert_eq!(seqs(&head), Vec::<u64>::new());
+    let (status, _) = reg.post(
+        &path(&x, "/republish"),
+        &event(&x, LifecycleEventType::Republished),
+    );
+    assert_eq!(status, 200, "republish X");
+    let after = changes(&format!("?since={}", cursor(&rest)));
+    assert_eq!(seqs(&after), vec![4]);
+    // rec-002 B: the republish entry carries the accepted `republished` event.
+    assert_eq!(after["changes"][0]["kind"], "lifecycle");
+    assert_eq!(after["changes"][0]["event"]["event_type"], "republished");
+    assert_eq!(
+        seqs(&changes(&format!("?since={}", cursor(&head)))),
+        vec![4]
+    );
+
+    // rec-001 F; rec-005 C.
+    refused("?limit=0", "schema_violation");
+    refused("?kind=bogus", "schema_violation");
+    refused("?since=%25%25%25garbage", "invalid_cursor");
+}
+
+/// rec-003 A–F (RFC-ACDP-0018 §6) against the shipped binary, with the
+/// fixture's own setup: P publishes X and W; X is retracted, W superseded
+/// by W2, and P's key revoked by R; an unrelated Q's context V is
+/// retracted. All contexts are public, so every scenario holds for an
+/// anonymous reader.
+#[test]
+fn rec003_filters_registry_side() {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping rec-003");
+        return;
+    };
+    let fx = find_fixture_by_id(&fixtures, "rec-003").expect("rec-003 at the pinned spec");
+    let names: Vec<&str> = fx["scenarios"]
+        .as_array()
+        .expect("rec-003 scenarios[]")
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    for prefix in ["A ", "B ", "C ", "D ", "E ", "F "] {
+        assert!(
+            names.iter().any(|n| n.starts_with(prefix)),
+            "rec-003 no longer has scenario {prefix}— re-read the fixture: {names:?}"
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let extra = format!(
+        "{}\n{}",
+        served_auth_toml(false),
+        served_full_features_toml()
+    );
+    let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "rec3", "", &extra);
+    let (status, caps) = reg.get("/.well-known/acdp.json");
+    assert_eq!(status, 200, "capabilities: {caps}");
+    assert!(
+        caps["profiles"]
+            .as_array()
+            .expect("profiles")
+            .iter()
+            .any(|p| p == "acdp-registry-changes"),
+        "rec-003 binds only a registry advertising acdp-registry-changes: {caps}"
+    );
+
+    let p_seed = [0x8a; 32];
+    let q_seed = [0x8b; 32];
+    let did = |seed: &[u8; 32]| {
+        acdp::did::key::did_key_from_ed25519(&SigningKey::from_bytes(seed).verifying_key_bytes())
+    };
+    let created = |req: &acdp::types::publish::PublishRequest, what: &str| -> Value {
+        let (status, v) = reg.post("/contexts", &serde_json::to_value(req).unwrap());
+        assert_eq!(status, 201, "{what}: {v}\n{}", reg.output());
+        v
+    };
+    let publish = |seed: &[u8; 32], title: &str| -> Value {
+        let req = Producer::new_did_key(SigningKey::from_bytes(seed))
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("publish request");
+        created(&req, title)
+    };
+    let enc = |s: &str| pct_encode_path_segment(s);
+    let retract = |seed: &[u8; 32], ctx_id: &str| {
+        let key = SigningKey::from_bytes(seed);
+        let agent = did(seed);
+        let key_id = acdp::did::key::did_key_url(&agent).expect("did:key url");
+        let e = LifecycleEvent::new(
+            uuid::Uuid::new_v4().to_string(),
+            CtxId(ctx_id.to_string()),
+            LifecycleEventType::Retracted,
+            chrono::Utc::now(),
+            AgentDid::new(agent),
+            None,
+        )
+        .expect("valid event")
+        .sign_with(key, key_id)
+        .expect("signed event");
+        let (status, v) = reg.post(
+            &format!("/contexts/{}/retract", enc(ctx_id)),
+            &json!({ "event": e }),
+        );
+        assert_eq!(status, 200, "retract {ctx_id}: {v}");
+    };
+
+    let x = publish(&p_seed, "rec003 X");
+    let w = publish(&p_seed, "rec003 W");
+    let v = publish(&q_seed, "rec003 V");
+    let id = |v: &Value| v["ctx_id"].as_str().expect("ctx_id").to_string();
+    retract(&p_seed, &id(&x)); // 1
+    let (status, prev) = reg.get(&format!("/contexts/{}/body", enc(&id(&w))));
+    assert_eq!(status, 200, "body of W: {prev}");
+    let prev: acdp::types::body::Body = serde_json::from_value(prev).expect("body");
+    let w2 = created(
+        &Producer::new_did_key(SigningKey::from_bytes(&p_seed))
+            .supersede_body(&prev)
+            .title("rec003 W2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("supersede request"),
+        "supersede W",
+    ); // 2
+    let fp = acdp::crypto::fingerprint::fingerprint_ed25519(
+        &SigningKey::from_bytes(&[0x8c; 32]).verifying_key_bytes(),
+    );
+    let r = created(
+        &Producer::new_did_key(SigningKey::from_bytes(&p_seed))
+            .publish_request()
+            .title("rec003 R")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .metadata(json!({
+                "revoked_key_fingerprint": fp,
+                "compromised_since": "2026-10-01T00:00:00.000Z",
+            }))
+            .build()
+            .expect("revocation request"),
+        "key revocation R",
+    ); // 3
+    retract(&q_seed, &id(&v)); // 4
+
+    let changes = |q: String| -> Value {
+        let (status, body) = reg.get(&format!("/changes?{q}"));
+        assert_eq!(status, 200, "/changes?{q}: {body}");
+        body
+    };
+    let seqs = |body: &Value| -> Vec<u64> {
+        body["changes"]
+            .as_array()
+            .expect("changes[]")
+            .iter()
+            .map(|e| e["seq"].as_u64().expect("seq"))
+            .collect()
+    };
+
+    // A: X's retraction and the revocation of X's producer.
+    let a = changes(format!("ctx_id={}", enc(&id(&x))));
+    assert_eq!(seqs(&a), vec![1, 3], "A: {a}");
+    assert_eq!(a["changes"][1]["ctx_id"], r["ctx_id"]);
+    // B: W's superseded entry only.
+    let b = changes(format!(
+        "lineage_id={}",
+        enc(w["lineage_id"].as_str().unwrap())
+    ));
+    assert_eq!(seqs(&b), vec![2], "B: {b}");
+    assert_eq!(b["changes"][0]["ctx_id"], w["ctx_id"]);
+    assert_eq!(b["changes"][0]["superseded_by"], w2["ctx_id"]);
+    // C: OR across ctx_id and lineage_id.
+    let c = changes(format!(
+        "ctx_id={}&lineage_id={}",
+        enc(&id(&v)),
+        enc(w["lineage_id"].as_str().unwrap())
+    ));
+    assert_eq!(seqs(&c), vec![2, 4], "C: {c}");
+    // D: agent_id ANDed with kind.
+    let d = changes(format!(
+        "agent_id={}&kind=key_revocation",
+        enc(&did(&p_seed))
+    ));
+    assert_eq!(seqs(&d), vec![3], "D: {d}");
+    // E: kind alone.
+    let e = changes("kind=lifecycle".into());
+    assert_eq!(seqs(&e), vec![1, 4], "E: {e}");
+    // F: more filter values than max_change_filters.
+    let max = caps["limits"]["max_change_filters"]
+        .as_u64()
+        .expect("max_change_filters");
+    let many: Vec<String> = (0..=max)
+        .map(|i| format!("agent_id={}", enc(&format!("did:web:agents.test:a{i}"))))
+        .collect();
+    let (status, f) = reg.get(&format!("/changes?{}", many.join("&")));
+    assert_eq!(
+        (status, f["error"]["code"].as_str()),
+        (400, Some("schema_violation")),
+        "F: {f}"
     );
 }

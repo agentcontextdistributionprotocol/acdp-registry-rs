@@ -158,6 +158,7 @@ fn config(playground: bool) -> RegistryConfig {
         receipt: Default::default(),
         lifecycle: Default::default(),
         log: Default::default(),
+        changes: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -8701,6 +8702,7 @@ const DATA_PLANE_ROUTES: &[(&str, &str, &str)] = &[
         "/lineages/{lineage_id}/current",
     ),
     ("GET", "/log/checkpoint", "/log/checkpoint"),
+    ("GET", "/changes", "/changes"),
     ("GET", "/log/proof", "/log/proof"),
     ("GET", "/log/entries", "/log/entries"),
 ];

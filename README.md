@@ -15,7 +15,8 @@ atomically-persisted publish receipts, RFC-ACDP-0010 — self-certifying
 `did:key` producers, and a self-hosted `/.well-known/did.json`,
 see [docs/RECEIPTS.md](docs/RECEIPTS.md)), the 0.3.0 lifecycle,
 transparency-log, and head-receipt profiles, and 0.4.0 witness cosignature
-aggregation (RFC-ACDP-0015). Version-gated `anchors` acceptance
+aggregation (RFC-ACDP-0015), and the 0.5.0 change feed
+(`acdp-registry-changes`, RFC-ACDP-0018 — `GET /changes`). Version-gated `anchors` acceptance
 (RFC-ACDP-0016, Draft) is unconditional — every deployment advertises
 `acdp_version >= 0.5.0` and accepts well-formed anchors on every publish,
 see [docs/HTTP-API.md](docs/HTTP-API.md).
@@ -196,6 +197,7 @@ Selected routes (the full surface, including request/response shapes, is in
 | GET    | `/log/checkpoint`                 | Signed transparency-log checkpoint (RFC-ACDP-0012). |
 | GET    | `/log/proof`                      | Inclusion / consistency proofs. |
 | GET    | `/log/entries`                    | Log leaves (visibility-filtered). |
+| GET    | `/changes`                        | Change feed: retractions, supersessions, key revocations (RFC-ACDP-0018; when `changes.enabled`). |
 | POST   | `/auth/challenge`                 | Issue a nonce for DID challenge-response (when `auth.enabled`). |
 | POST   | `/auth/token`                     | Verify signed challenge → JWT (when `auth.enabled`). |
 | POST   | `/auth/token/revoke`              | Revoke your own token by `jti` (when `auth.enabled`). |

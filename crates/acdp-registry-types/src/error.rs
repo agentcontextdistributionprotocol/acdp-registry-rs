@@ -45,6 +45,15 @@ pub enum RegistryError {
     #[error("webhook delivery error: {0}")]
     WebhookDelivery(String),
 
+    /// A `schema_violation` naming the offending request member in
+    /// `details.field` (RFC-ACDP-0007 §5), e.g. a `GET /changes` `limit`
+    /// outside 1..=`limits.max_changes_page` (RFC-ACDP-0018 §5.1).
+    #[error("{message}")]
+    FieldViolation {
+        field: &'static str,
+        message: String,
+    },
+
     /// Anything else.
     #[error("internal error: {0}")]
     Internal(String),
@@ -59,6 +68,7 @@ impl RegistryError {
             Self::Config(_) => "internal_error",
             Self::AuthChallenge(_) | Self::AuthToken(_) | Self::Jwt(_) => "not_authorized",
             Self::RateLimited { .. } => "rate_limited",
+            Self::FieldViolation { .. } => "schema_violation",
             Self::WebhookDelivery(_) | Self::Internal(_) => "internal_error",
         }
     }
@@ -73,6 +83,7 @@ impl RegistryError {
             // rejections consistent with that pairing.
             Self::AuthChallenge(_) | Self::AuthToken(_) | Self::Jwt(_) => 403,
             Self::RateLimited { .. } => 429,
+            Self::FieldViolation { .. } => 400,
             Self::Storage(_) | Self::WebhookDelivery(_) | Self::Internal(_) | Self::Config(_) => {
                 500
             }
@@ -151,6 +162,9 @@ impl RegistryError {
                 .ok()
                 .map(|r| serde_json::json!({ "reason": r }));
             return (message.clone(), details);
+        }
+        if let Self::FieldViolation { field, message } = self {
+            return (message.clone(), Some(serde_json::json!({ "field": field })));
         }
         (self.to_string(), None)
     }
@@ -317,6 +331,19 @@ mod tests {
 
     fn acdp(e: AcdpError) -> RegistryError {
         RegistryError::Acdp(e)
+    }
+
+    #[test]
+    fn field_violation_is_a_400_schema_violation_naming_the_field() {
+        let e = RegistryError::FieldViolation {
+            field: "limit",
+            message: "limit must be 1 to 100".into(),
+        };
+        assert_eq!(e.wire_code(), "schema_violation");
+        assert_eq!(e.http_status(), 400);
+        let w = serde_json::to_value(WireError::from(&e)).unwrap();
+        assert_eq!(w["error"]["details"]["field"], "limit");
+        assert_eq!(w["error"]["message"], "limit must be 1 to 100");
     }
 
     /// #10/#11 — wire codes MUST be exactly the RFC-ACDP-0007 §5 registry
