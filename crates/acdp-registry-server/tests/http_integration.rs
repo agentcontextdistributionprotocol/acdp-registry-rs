@@ -521,6 +521,97 @@ async fn cors_preflight_carries_a_request_id() {
     );
 }
 
+/// `[registry.cors] public_reads`: one request through the router, returning
+/// the response headers.
+async fn cors_public_reads_headers(
+    public_reads: bool,
+    method: &str,
+    uri: &str,
+    extra: &[(&str, &str)],
+) -> axum::http::HeaderMap {
+    let mut cfg = config(true);
+    cfg.registry.cors.public_reads = public_reads;
+    let h = harness_from_config(cfg).await;
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(axum::http::header::ORIGIN, "https://explorer.test");
+    for (k, v) in extra {
+        req = req.header(*k, *v);
+    }
+    let resp = h
+        .router
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    resp.headers().clone()
+}
+
+fn header_str<'a>(h: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    h.get(name).and_then(|v| v.to_str().ok())
+}
+
+#[tokio::test]
+async fn cors_public_reads_lets_any_origin_read_anonymously() {
+    let h = cors_public_reads_headers(true, "GET", "/.well-known/acdp.json", &[]).await;
+    assert_eq!(header_str(&h, "access-control-allow-origin"), Some("*"));
+    assert!(
+        h.get("access-control-allow-credentials").is_none(),
+        "the any-origin form must never allow credentials"
+    );
+    let exposed = header_str(&h, "access-control-expose-headers").unwrap_or_default();
+    assert!(exposed.contains("x-request-id"), "exposed: {exposed}");
+    assert!(exposed.contains("location"), "exposed: {exposed}");
+}
+
+#[tokio::test]
+async fn cors_public_reads_preflight_admits_get_only_and_no_authorization() {
+    // A preflight for a plain GET is answered for any origin.
+    let h = cors_public_reads_headers(
+        true,
+        "OPTIONS",
+        "/contexts/anything",
+        &[("access-control-request-method", "GET")],
+    )
+    .await;
+    assert_eq!(header_str(&h, "access-control-allow-origin"), Some("*"));
+    let methods = header_str(&h, "access-control-allow-methods").unwrap_or_default();
+    assert!(methods.contains("GET"), "methods: {methods}");
+    assert!(
+        !methods.contains("POST"),
+        "publish must not be cross-origin under public_reads: {methods}"
+    );
+
+    // A preflight asking to send `Authorization` is NOT granted that header,
+    // so the browser refuses the request: a cross-origin page can never make
+    // an authenticated read with a visitor's token.
+    let h = cors_public_reads_headers(
+        true,
+        "OPTIONS",
+        "/contexts/anything",
+        &[
+            ("access-control-request-method", "GET"),
+            ("access-control-request-headers", "authorization"),
+        ],
+    )
+    .await;
+    let allowed = header_str(&h, "access-control-allow-headers").unwrap_or_default();
+    assert!(
+        !allowed.to_ascii_lowercase().contains("authorization"),
+        "authorization must not be an allowed request header: {allowed}"
+    );
+}
+
+#[tokio::test]
+async fn cors_is_off_by_default() {
+    let h = cors_public_reads_headers(false, "GET", "/.well-known/acdp.json", &[]).await;
+    assert!(
+        h.get("access-control-allow-origin").is_none(),
+        "no CORS headers unless an operator opts in"
+    );
+}
+
 #[tokio::test]
 async fn every_response_carries_a_generated_request_id() {
     // The registry mints a UUIDv4 `x-request-id` when the caller supplies none

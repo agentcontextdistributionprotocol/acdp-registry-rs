@@ -366,6 +366,16 @@ pub struct CorsConfig {
     /// requests using a visitor's stored bearer token.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// Allow ANY origin to make anonymous `GET`/`HEAD` reads
+    /// (`Access-Control-Allow-Origin: *`, no credentials, no request headers
+    /// beyond the CORS-safelisted ones). A browser therefore cannot attach an
+    /// `Authorization` header cross-origin, so every cross-origin request is
+    /// an anonymous read (RFC-ACDP-0008 §6.3) and sees exactly what an
+    /// anonymous `curl` sees. Off by default: a registry reachable only on a
+    /// private network should not let any public page read it through a
+    /// visitor's browser. Mutually exclusive with `allowed_origins`.
+    #[serde(default)]
+    pub public_reads: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
