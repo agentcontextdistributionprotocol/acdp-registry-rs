@@ -602,6 +602,7 @@ mod tests {
             HintOutcome::NothingVisible,
             HintOutcome::Failed,
             HintOutcome::SsrfRefused,
+            HintOutcome::UnknownKey,
             HintOutcome::Disabled,
             HintOutcome::LeaseLost,
             HintOutcome::Error,

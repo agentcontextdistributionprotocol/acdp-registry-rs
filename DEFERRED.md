@@ -33,3 +33,5 @@ the trigger that reopens it:
 
 When one of these is settled, edit its status in `ASSUMPTIONS.md` in the same PR as the change that settled it, and note the decision in
 `DECISIONS.md`. Do not open a PR only to tidy a status line.
+- RFC-ACDP-0018: a retired-key ring for `[changes]` (like `receipt.retired_keys`, no schema change) — do before the first prod `[events] enabled = true` or the first planned `[changes]` rotation with live subscriptions.
+- RFC-ACDP-0018: the conformance_gate scan for the feed bypass writers (`put`, `mark_superseded`) covers only the server and core crates.
