@@ -1,5 +1,12 @@
 
 
+## [0.6.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.6...acdp-registry-server/v0.6.0) - 2026-10-26
+
+### Added
+
+- RFC-ACDP-0018 retraction recall — change feed, GET /changes, subscriptions and signed hints (acdp 0.17.0) ([#471](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/471))
+
+
 ## [0.5.6](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.5...acdp-registry-server/v0.5.6) - 2026-10-25
 
 ### Added

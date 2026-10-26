@@ -21,7 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## Unreleased
+## 0.6.0
 
 **This release adds migration 017 (both backends): the RFC-ACDP-0018 change feed, a new `changes`
 table and a one-row `changes_meta` marker.**
