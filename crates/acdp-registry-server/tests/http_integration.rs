@@ -563,6 +563,9 @@ async fn cors_public_reads_lets_any_origin_read_anonymously() {
     let exposed = header_str(&h, "access-control-expose-headers").unwrap_or_default();
     assert!(exposed.contains("x-request-id"), "exposed: {exposed}");
     assert!(exposed.contains("location"), "exposed: {exposed}");
+
+    let h = cors_public_reads_headers(true, "HEAD", "/.well-known/acdp.json", &[]).await;
+    assert_eq!(header_str(&h, "access-control-allow-origin"), Some("*"));
 }
 
 #[tokio::test]
@@ -600,6 +603,25 @@ async fn cors_public_reads_preflight_admits_get_only_and_no_authorization() {
     assert!(
         !allowed.to_ascii_lowercase().contains("authorization"),
         "authorization must not be an allowed request header: {allowed}"
+    );
+    assert!(h.get("access-control-allow-credentials").is_none());
+
+    // Nor a forwarded tenant: `x-tenant-id` is not safelisted, so it too
+    // needs a grant the preflight never gives.
+    let h = cors_public_reads_headers(
+        true,
+        "OPTIONS",
+        "/contexts/anything",
+        &[
+            ("access-control-request-method", "GET"),
+            ("access-control-request-headers", "x-tenant-id"),
+        ],
+    )
+    .await;
+    let allowed = header_str(&h, "access-control-allow-headers").unwrap_or_default();
+    assert!(
+        !allowed.to_ascii_lowercase().contains("x-tenant-id"),
+        "x-tenant-id must not be an allowed request header: {allowed}"
     );
 }
 
