@@ -168,6 +168,10 @@ async fn truncate(pool: &sqlx::PgPool) {
              TRUNCATE TABLE contexts, idempotency_records, auth_challenges
              RESTART IDENTITY CASCADE;
            END IF;
+           IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'changes') THEN
+             TRUNCATE TABLE changes RESTART IDENTITY;
+             UPDATE changes_meta SET pruned_through = 0;
+           END IF;
          END $$;",
     )
     .execute(pool)

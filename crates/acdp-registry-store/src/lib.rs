@@ -4,6 +4,7 @@
 //! protocol-level store contract — paginated listing, a backend health
 //! check, and migration runner.
 
+pub mod changes;
 pub mod cursor;
 pub mod event_receipts;
 pub mod fulltext;
@@ -26,6 +27,7 @@ use acdp::types::search::{SearchParams, SearchResponse};
 use acdp_registry_types::config::RESERVED_TENANT;
 use async_trait::async_trait;
 
+pub use changes::{FeedAppend, FeedHead, FeedPage, FeedQuery, FeedRow};
 pub use cursor::{decode_cursor, encode_cursor};
 pub use event_receipts::{EventReceiptMinter, StoredReceipt, SweepReport};
 pub use log::{build_leaf_record, LogEntryRecord};
@@ -254,6 +256,67 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
         Err(AcdpError::NotImplemented(
             "this backend does not implement the transparency log (RFC-ACDP-0012)".into(),
         ))
+    }
+
+    // ── Change feed (RFC-ACDP-0018) ──────────────────────────────────
+    //
+    // Rows are APPENDED only inside `RegistryStore::commit_publish` and
+    // `RegistryStore::commit_lifecycle_event` (same transaction as the
+    // change, §5.3 / rec-008 — there is deliberately no standalone append
+    // API). Defaults return `NotImplemented`; a deployment MUST NOT
+    // advertise `acdp-registry-changes` against such a backend.
+
+    /// One feed scan, in a single read snapshot: the matching rows past
+    /// `query.after` (at most `query.limit()`) plus the head markers they
+    /// were read against.
+    async fn changes_page(&self, query: &FeedQuery) -> Result<FeedPage, AcdpError> {
+        let _ = query;
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement the change feed (RFC-ACDP-0018)".into(),
+        ))
+    }
+
+    /// The feed's head and prune markers.
+    async fn changes_head(&self) -> Result<FeedHead, AcdpError> {
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement the change feed (RFC-ACDP-0018)".into(),
+        ))
+    }
+
+    /// Delete up to `batch` of the oldest rows appended before
+    /// `older_than_ms`, stopping at the first younger row so only a seq
+    /// prefix is ever removed, and advance `pruned_through` to the last
+    /// deleted seq in the same transaction (§5.4). Returns the number of
+    /// rows deleted.
+    async fn prune_changes(&self, older_than_ms: i64, batch: u32) -> Result<u64, AcdpError> {
+        let _ = (older_than_ms, batch);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement the change feed (RFC-ACDP-0018)".into(),
+        ))
+    }
+
+    /// The producer (`body.agent_id`) of each of `ctx_ids` that exists,
+    /// for the §6 rule that a `ctx_id` watch also matches key revocations
+    /// of that context's producer. Callers pass only ids that already
+    /// passed [`Self::visible_ctx_ids`], so this applies no visibility of
+    /// its own. Unknown or unparseable ids are omitted.
+    ///
+    /// Like [`Self::visible_ctx_ids`]'s default this goes through the
+    /// synchronous `RegistryStore::get` once per id.
+    async fn producers_of(
+        &self,
+        ctx_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>, AcdpError> {
+        let mut out = std::collections::HashMap::with_capacity(ctx_ids.len());
+        for id in ctx_ids {
+            let Ok(parsed) = CtxId::parse((*id).to_string()) else {
+                continue;
+            };
+            if let Some(ctx) = self.get(&parsed)? {
+                out.insert((*id).to_string(), ctx.body.agent_id.as_str().to_string());
+            }
+        }
+        Ok(out)
     }
 
     // ── Witness cosignature aggregation (ACDP 0.4, RFC-ACDP-0015 §6.1) ─

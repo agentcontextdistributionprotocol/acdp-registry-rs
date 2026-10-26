@@ -5016,3 +5016,11 @@ underlying settings and code were not touched by this pass, only the record of t
 - Alternatives: lenient raw passthrough (would need hand-rolled RegistryState parsing).
 - Blast radius: low; reversible; only malformed upstreams.
 - Status: UNCONFIRMED
+
+## RFC-ACDP-0018 retraction recall, Phase 3 (2026-10-25)
+- Plan: plans/rfc0018-retraction-recall.md
+- Assumed: (a) pg stamps `appended_at_ms` with `clock_timestamp()` rather than `now()` (A7): `now()` is the transaction start, so a long transaction would backdate its row and shorten its retention. (b) `producers_of` has a working per-id `get` default plus batched SQL overrides on sqlite (chunked `IN`) and pg (`= ANY`), rather than a NotImplemented default (D8). (c) A keyed superseding publish that loses the race against its own first attempt on pg now replays the winner. Before, it answered 409 `AlreadySuperseded`. The new concurrency kit found this. (d) The feed append validates its evidence through the acdp 0.17 `Change` constructors, so a publish whose minted receipt the read path could not serve now fails instead of committing an unservable row.
+- Chose: as above. The bypass writers `put` and `mark_superseded` stay for tests and imports, and a conformance_gate scan guards them.
+- Alternatives: (a) `now()`, as planned; (b) NotImplemented; (c) leave the 409.
+- Blast radius: low and reversible. (a) shifts retention by at most the transaction length. (c) changes the outcome only for a racing retry under the same key and content hash.
+- Status: UNCONFIRMED

@@ -21,6 +21,25 @@ belongs in the per-crate changelogs.
 
 ---
 
+## Unreleased
+
+**This release adds migration 017 (both backends): the RFC-ACDP-0018 change feed, a new `changes`
+table and a one-row `changes_meta` marker.**
+
+- **No backfill.** The feed starts empty at the upgrade. Changes accepted before it never appear on
+  it. A registry that mints receipts appends a row for every lifecycle event, superseding publish
+  and key revocation from then on, in the same transaction as the change. Without a receipt minter
+  nothing is appended.
+- **Who is affected:** nobody, until the change-feed profile is advertised. The table is written but
+  not served by this migration alone.
+- **Rollback, Postgres:** safe to 0.5.6. The migrator tolerates the newer applied version, and
+  older binaries never touch the new tables. Changes accepted while the older binary runs are not
+  in the feed; a consumer polling it after the roll-forward does not see them.
+- **Rollback, SQLite:** unchanged. Restore the pre-upgrade file, as for any release that adds a
+  migration.
+
+---
+
 ## 0.5.6
 
 **This release adds migration 016 (both backends): a nullable `receipt` column on

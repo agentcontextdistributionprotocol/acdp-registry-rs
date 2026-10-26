@@ -205,3 +205,70 @@ async fn migrate_still_rejects_a_changed_checksum() {
     })
     .await;
 }
+
+/// Migration 017: the feed tables, the seeded marker row and the shape
+/// CHECKs exist on a fresh database, and re-running `migrate()` is a no-op.
+#[tokio::test]
+async fn migration_017_creates_the_change_feed() {
+    let Some(base_url) = pg_url_or_skip() else {
+        return;
+    };
+    with_throwaway_database(&base_url, "feed", |db_url| async move {
+        let store = PgStore::connect(&db_url, 2).await.expect("pg connect");
+        store.migrate().await.expect("first migrate");
+        store
+            .migrate()
+            .await
+            .expect("re-running migrate is a no-op");
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .expect("connect");
+        let marker: Vec<(i32, i64)> = sqlx::query_as("SELECT id, pruned_through FROM changes_meta")
+            .fetch_all(&pool)
+            .await
+            .expect("read changes_meta");
+        assert_eq!(marker, vec![(1, 0)], "one marker row, starting at 0");
+        let indexes: Vec<(String,)> = sqlx::query_as(
+            "SELECT indexname::text FROM pg_indexes \
+             WHERE tablename = 'changes' AND indexname LIKE 'idx_changes_%' ORDER BY 1",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read pg_indexes");
+        let found: Vec<&str> = indexes.iter().map(|(n,)| n.as_str()).collect();
+        assert_eq!(
+            found,
+            vec![
+                "idx_changes_agent",
+                "idx_changes_ctx",
+                "idx_changes_lineage"
+            ]
+        );
+        for (kind, event, superseded_by) in [
+            ("lifecycle", None::<&str>, None::<&str>),
+            ("superseded", None, None),
+            ("key_revocation", Some("{}"), None),
+            ("other", None, None),
+        ] {
+            let res = sqlx::query(
+                "INSERT INTO changes (kind, ctx_id, lineage_id, agent_id, superseded_by, \
+                 event, receipt, appended_at_ms) \
+                 VALUES ($1, 'c', 'l', 'a', $2, $3::jsonb, '{}'::jsonb, 0)",
+            )
+            .bind(kind)
+            .bind(superseded_by)
+            .bind(event)
+            .execute(&pool)
+            .await;
+            assert!(res.is_err(), "a malformed {kind} row must be refused");
+        }
+        let res = sqlx::query("INSERT INTO changes_meta (id, pruned_through) VALUES (2, 0)")
+            .execute(&pool)
+            .await;
+        assert!(res.is_err(), "changes_meta holds exactly one row");
+    })
+    .await;
+}

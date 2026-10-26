@@ -2445,7 +2445,24 @@ mod predecessor_admission {
         let tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
 
         // v1 under a real tenant, with a real receipt minter.
-        let minter = |_: &acdp::types::body::Body| Ok(serde_json::json!({"kind": "test-receipt"}));
+        // A real signer: a key-revocation successor appends a feed row, and the
+        // feed refuses to persist a receipt the read path could not serve.
+        fn minter(body: &acdp::types::body::Body) -> Result<serde_json::Value, AcdpError> {
+            let receipt = acdp::types::ReceiptSigner::new(
+                SigningKey::from_bytes(&[93u8; 32]),
+                "did:web:reg.test",
+                "did:web:reg.test#receipt-key-1",
+            )?
+            .mint(
+                &body.ctx_id,
+                &body.lineage_id,
+                &body.origin_registry,
+                body.created_at,
+                &body.content_hash,
+                &format!("sha256:{}", "c".repeat(64)),
+            )?;
+            serde_json::to_value(receipt).map_err(AcdpError::from)
+        }
         // Restricted, not Public: every other test in this suite is Public, so a
         // visibility-keyed fast path would otherwise survive the whole suite.
         let v1 = p
@@ -2607,4 +2624,68 @@ async fn lineages_table_is_dropped_and_lineage_reads_still_resolve() {
         first.expect("first_version_ctx_id ok"),
         Some(response(&v1).ctx_id.clone())
     );
+}
+
+/// RFC-ACDP-0018 §5.3: a feed append waits for the feed lock, so `seq`
+/// order is commit order. A raw transaction holds the lock, as an in-flight
+/// append would; a receipted key-revocation publish (which appends a row)
+/// must not complete until that transaction ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_feed_append_waits_for_the_feed_lock() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    let pool = sqlx::PgPool::connect(&url).await.expect("raw pool");
+    let mut holder = pool.begin().await.expect("begin");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(acdp_registry_pg::FEED_APPEND_LOCK_KEY)
+        .execute(&mut *holder)
+        .await
+        .expect("take the feed lock");
+
+    let req = producer(24)
+        .publish_request()
+        .title("feed lock contract")
+        .context_type(ContextType::KeyRevocation)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid publish request");
+    let s = Arc::clone(&store);
+    let publish = tokio::task::spawn_blocking(move || {
+        let signer = acdp::types::ReceiptSigner::new(
+            SigningKey::from_bytes(&[92u8; 32]),
+            "did:web:reg.test",
+            "did:web:reg.test#receipt-key-1",
+        )
+        .expect("signer");
+        let mint = move |body: &acdp::types::body::Body| {
+            let receipt = signer.mint(
+                &body.ctx_id,
+                &body.lineage_id,
+                &body.origin_registry,
+                body.created_at,
+                &body.content_hash,
+                &format!("sha256:{}", "c".repeat(64)),
+            )?;
+            serde_json::to_value(receipt).map_err(AcdpError::from)
+        };
+        s.commit_publish(PublishCommit {
+            req: &req,
+            authority: AUTHORITY,
+            idempotency: None,
+            tenant: None,
+            receipt_minter: Some(&mint),
+            predecessor_admission: None,
+        })
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !publish.is_finished(),
+        "the publish must wait for the feed lock before it commits"
+    );
+    holder.commit().await.expect("release the feed lock");
+    let outcome = publish
+        .await
+        .expect("publish task")
+        .expect("publish succeeds once the lock is free");
+    assert!(matches!(outcome, PublishCommitOutcome::Inserted(_)));
 }

@@ -346,3 +346,73 @@ async fn event_receipt_sweep_matches_the_cross_backend_contract() {
     drop((plain, minting, raw));
     drop_schema(&admin, &schema).await;
 }
+
+fn minting(plain: &Arc<PgStore>, seed: u8) -> Arc<PgStore> {
+    let signer = acdp::types::ReceiptSigner::new(
+        acdp::crypto::SigningKey::from_bytes(&[seed; 32]),
+        "did:web:reg.test",
+        "did:web:reg.test#receipt-key-1",
+    )
+    .expect("signer");
+    Arc::new(
+        plain
+            .as_ref()
+            .clone()
+            .with_event_receipt_minter(Arc::new(signer)),
+    )
+}
+
+/// RFC-ACDP-0018 §4/§5.3: the feed rows every durable backend appends.
+/// Scoped to fixture ctx_ids, so the shared schema is fine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_feed_matches_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    let minting = minting(&plain, 90);
+    parity::assert_change_feed(&plain, &minting, "pg").await;
+}
+
+/// RFC-ACDP-0018 §4: one row per receipted event, matching registry_state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_feed_lifecycle_rows_match_registry_state() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    let minting = minting(&plain, 87);
+    parity::assert_change_feed_lifecycle_sequence(&plain, &minting, "pg").await;
+}
+
+/// RFC-ACDP-0018 §5.3: racing keyed retries append one row, never fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn change_feed_concurrent_idempotent_supersede() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    parity::assert_change_feed_concurrent_idempotent_supersede(&plain, "pg").await;
+}
+
+/// RFC-ACDP-0018 §5.4: prefix pruning and the marker. Prunes the whole
+/// feed, so it runs in a run-unique schema.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_feed_prune_matches_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let (plain, admin, schema) = isolated_store(&url, "feed_prune").await;
+    let minting = minting(&plain, 89);
+    parity::assert_change_feed_prune(&plain, &minting, "pg").await;
+    drop_schema(&admin, &schema).await;
+}
+
+/// RFC-ACDP-0018 §5.3 (rec-008): a failed append rolls back its publish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_feed_rolls_back_with_its_change() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    parity::assert_change_feed_rolls_back_with_its_change(&plain, "pg").await;
+}
+
+/// RFC-ACDP-0018 §5.2: seq order is commit order under concurrent writers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn change_feed_seq_order_is_commit_order() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    let minting = minting(&plain, 88);
+    parity::assert_change_feed_commit_order(&plain, &minting, "pg").await;
+}

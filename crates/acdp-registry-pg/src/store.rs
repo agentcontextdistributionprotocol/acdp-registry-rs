@@ -212,6 +212,24 @@ impl ExtendedRegistryStore for PgStore {
         Ok(rows.into_iter().collect())
     }
 
+    /// One `= ANY($1)` query instead of the default's `get` per id.
+    async fn producers_of(
+        &self,
+        ctx_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>, AcdpError> {
+        if ctx_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let owned: Vec<String> = ctx_ids.iter().map(|s| (*s).to_string()).collect();
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT ctx_id, agent_id FROM contexts WHERE ctx_id = ANY($1)")
+                .bind(&owned)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| AcdpError::RegistryInternal(format!("producers_of: {e}")))?;
+        Ok(rows.into_iter().collect())
+    }
+
     /// One query for a whole page's worth of retrieval-visibility checks,
     /// replacing N blocking `retrieve` round-trips.
     ///
@@ -400,6 +418,23 @@ impl ExtendedRegistryStore for PgStore {
         }
     }
 
+    // ── Change feed (RFC-ACDP-0018) ────────────────────────────────────
+
+    async fn changes_page(
+        &self,
+        query: &acdp_registry_store::FeedQuery,
+    ) -> Result<acdp_registry_store::FeedPage, AcdpError> {
+        crate::changes::page(&self.pool, query).await
+    }
+
+    async fn changes_head(&self) -> Result<acdp_registry_store::FeedHead, AcdpError> {
+        crate::changes::head(&self.pool).await
+    }
+
+    async fn prune_changes(&self, older_than_ms: i64, batch: u32) -> Result<u64, AcdpError> {
+        crate::changes::prune(&self.pool, older_than_ms, batch).await
+    }
+
     // ── Transparency log reads (RFC-ACDP-0012) ─────────────────────────
 
     async fn log_tree_size(&self) -> Result<u64, AcdpError> {
@@ -548,6 +583,8 @@ fn log_row_to_record(r: &PgRow) -> Result<LogEntryRecord, AcdpError> {
 // ── RegistryStore ────────────────────────────────────────────────────────────
 
 impl RegistryStore for PgStore {
+    /// Raw insert for tests and fixtures. Bypasses the RFC-ACDP-0018 change
+    /// feed: no server path calls it (publishes go through `commit_publish`).
     fn put(&self, body: Body) -> Result<(), AcdpError> {
         self.block_on(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx_err)?;
@@ -812,6 +849,14 @@ impl RegistryStore for PgStore {
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sqlx_err)?;
+            // RFC-ACDP-0018 §5.3: the feed row commits with the event.
+            crate::changes::append_lifecycle(
+                &mut tx,
+                &event,
+                &ctx.body,
+                plan.as_ref().map(|p| &p.new),
+            )
+            .await?;
             tx.commit()
                 .await
                 .map_err(|e| AcdpError::RegistryInternal(format!("tx commit: {e}")))?;
@@ -844,6 +889,9 @@ impl RegistryStore for PgStore {
         })
     }
 
+    /// Raw status flip for tests and fixtures. Bypasses the RFC-ACDP-0018
+    /// change feed: no server path calls it (supersession happens inside
+    /// `commit_publish`, which appends the `superseded` row).
     fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), AcdpError> {
         self.block_on(async {
             sqlx::query("UPDATE contexts SET status = 'superseded' WHERE ctx_id = $1")
@@ -1101,6 +1149,19 @@ impl RegistryStore for PgStore {
                     });
                 }
                 if prev_status == "superseded" {
+                    // A keyed retry that raced its own first attempt: step 1
+                    // found no record because the winner had not committed,
+                    // then the predecessor lock waited for it. Its record is
+                    // visible now (READ COMMITTED, fresh statement), so this
+                    // is a replay, not a conflict.
+                    if let Some((key, _)) = &idem {
+                        if let Some(winner) =
+                            committed_idempotent_response(&mut tx, &req, key, now).await?
+                        {
+                            tx.rollback().await.ok();
+                            return Ok(PublishCommitOutcome::IdempotentReplay(winner));
+                        }
+                    }
                     return Err(AcdpError::SupersededTarget {
                         reason: acdp::error::SupersessionReason::AlreadySuperseded,
                         message: format!(
@@ -1307,6 +1368,15 @@ impl RegistryStore for PgStore {
                 }
             }
 
+            // RFC-ACDP-0018 §5.3: the feed rows commit with the publish,
+            // after every path that could still discard it.
+            crate::changes::append_publish(
+                &mut tx,
+                &body,
+                response.registry_receipt.as_ref(),
+                req.supersedes.as_ref(),
+            )
+            .await?;
             tx.commit().await.map_err(map_sqlx_err)?;
             Ok(PublishCommitOutcome::Inserted(response))
         })
@@ -1633,6 +1703,38 @@ impl PgStore {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// The live idempotency record for `key`, as the response to replay.
+/// `DuplicatePublish` when the key was used with another `content_hash`.
+async fn committed_idempotent_response(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    req: &acdp::types::publish::PublishRequest,
+    key: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<PublishResponse>, AcdpError> {
+    let row = sqlx::query(
+        "SELECT content_hash, response_json FROM idempotency_records \
+         WHERE agent_id = $1 AND key = $2 AND expires_at > $3",
+    )
+    .bind(req.agent_id.as_str())
+    .bind(key)
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_err)?;
+    let Some(row) = row else { return Ok(None) };
+    let prior_hash: String = row.try_get("content_hash").map_err(map_sqlx_err)?;
+    if prior_hash != req.content_hash.0 {
+        return Err(AcdpError::DuplicatePublish(format!(
+            "Idempotency-Key '{}' was previously used by '{}' with a different content_hash",
+            key, req.agent_id
+        )));
+    }
+    let response_json: serde_json::Value = row.try_get("response_json").map_err(map_sqlx_err)?;
+    serde_json::from_value(response_json)
+        .map(Some)
+        .map_err(|e| AcdpError::RegistryInternal(format!("decode response: {e}")))
+}
 
 async fn insert_body<'c>(
     tx: &mut sqlx::Transaction<'c, sqlx::Postgres>,

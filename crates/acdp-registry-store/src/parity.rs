@@ -2076,6 +2076,967 @@ pub async fn assert_event_receipt_sweep<S>(
     );
 }
 
+/// Publish `req` through `store`, minting a registry receipt with `signer`
+/// when given, and return the response.
+async fn publish_req<S>(
+    store: &Arc<S>,
+    req: acdp::types::publish::PublishRequest,
+    signer: Option<acdp::types::ReceiptSigner>,
+) -> acdp::types::publish::PublishResponse
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let s = Arc::clone(store);
+    let outcome = tokio::task::spawn_blocking(move || {
+        let mint = signer.map(|signer| {
+            move |body: &acdp::types::body::Body| {
+                let receipt = signer.mint(
+                    &body.ctx_id,
+                    &body.lineage_id,
+                    &body.origin_registry,
+                    body.created_at,
+                    &body.content_hash,
+                    &format!("sha256:{}", "c".repeat(64)),
+                )?;
+                serde_json::to_value(receipt).map_err(acdp::error::AcdpError::from)
+            }
+        });
+        s.commit_publish(PublishCommit {
+            req: &req,
+            authority: AUTHORITY,
+            idempotency: None,
+            tenant: None,
+            receipt_minter: mint
+                .as_ref()
+                .map(|m| m as &(dyn Fn(&acdp::types::body::Body) -> _ + Send + Sync)),
+            predecessor_admission: None,
+        })
+    })
+    .await
+    .expect("publish task")
+    .expect("publish succeeds");
+    match outcome {
+        PublishCommitOutcome::Inserted(r) => r,
+        PublishCommitOutcome::IdempotentReplay(_) => panic!("fixture publish must insert"),
+    }
+}
+
+/// The feed rows past `after` about any of `ctx_ids`, in seq order.
+async fn feed_rows_for<S>(store: &Arc<S>, after: u64, ctx_ids: &[&str]) -> Vec<crate::FeedRow>
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let page = store
+        .changes_page(&crate::FeedQuery {
+            after,
+            ctx_ids: ctx_ids.iter().map(|s| s.to_string()).collect(),
+            scan_limit: 1000,
+            ..Default::default()
+        })
+        .await
+        .expect("changes_page");
+    assert!(page.reached_head, "fixture rows fit in one scan");
+    page.rows
+}
+
+/// **RFC-ACDP-0018 §4/§5.3 — every durable backend appends the same feed
+/// rows for the same changes, with the evidence `registry_state` serves.**
+///
+/// `plain` and `minting` are two handles on one database, as for
+/// [`assert_lifecycle_event_receipts`]. Assertions are scoped to fixture
+/// `ctx_id`s and to rows past the head read at the start, so the kit is
+/// safe on a database shared with other tests (Postgres).
+///
+/// Legs:
+/// 1. A first publish, with or without a registry receipt, appends nothing.
+/// 2. A lifecycle event without an event receipt appends nothing; one with
+///    a receipt appends one `lifecycle` row whose `event` and `receipt` are
+///    byte-identical (as JSON) to what `get` then serves at that index.
+/// 3. A superseding publish appends one `superseded` row: `ctx_id` is the
+///    older version, `superseded_by` the new one, `agent_id` the older
+///    version's producer, `receipt` the new version's registry receipt.
+///    Without a registry receipt it appends nothing.
+/// 4. A key revocation appends one `key_revocation` row whose `agent_id` is
+///    `metadata.revoked_key_controller` when present, else the body's.
+/// 5. Rows are strictly increasing in seq, the head covers them, every row
+///    converts to a valid `Change`, and the filters agree with
+///    [`crate::FeedQuery::matches`].
+pub async fn assert_change_feed<S>(plain: &Arc<S>, minting: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::registry::LifecycleCommitOutcome;
+    use acdp::types::change::ChangeKind;
+
+    let signer = || {
+        acdp::types::ReceiptSigner::new(
+            SigningKey::from_bytes(&[91u8; 32]),
+            "did:web:reg.test",
+            "did:web:reg.test#receipt-key-1",
+        )
+        .expect("signer")
+    };
+    let start = plain.changes_head().await.expect("changes_head").head;
+
+    // Leg 1: first publishes append nothing.
+    let p = producer(230);
+    let build = |title: &str| {
+        p.publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid publish request")
+    };
+    let a = publish_req(plain, build("feed fixture a"), Some(signer())).await;
+    let b = publish_req(plain, build("feed fixture b"), None).await;
+    let (a_id, b_id) = (a.ctx_id.as_str().to_string(), b.ctx_id.as_str().to_string());
+    assert!(
+        feed_rows_for(plain, start, &[&a_id, &b_id])
+            .await
+            .is_empty(),
+        "[{label}] a first publish must append no feed row"
+    );
+
+    // Leg 2: lifecycle rows only with an event receipt.
+    let uuid = a_id.rsplit('/').next().expect("ctx_id ends in a UUID");
+    let event = |n: u8, kind: LifecycleEventType| {
+        LifecycleEvent::new(
+            format!("{}{n:x}", &uuid[..uuid.len() - 1]),
+            a.ctx_id.clone(),
+            kind,
+            Utc::now(),
+            AgentDid::new(agent_did(230)),
+            None,
+        )
+        .expect("valid lifecycle event")
+    };
+    let commit = |store: &Arc<S>, e: LifecycleEvent| {
+        let s = Arc::clone(store);
+        async move {
+            tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&e))
+                .await
+                .expect("commit task")
+                .expect("lifecycle commit succeeds")
+        }
+    };
+    commit(plain, event(1, LifecycleEventType::Retracted)).await;
+    assert!(
+        feed_rows_for(plain, start, &[&a_id]).await.is_empty(),
+        "[{label}] an event without a receipt must append no feed row"
+    );
+    let retry = event(2, LifecycleEventType::Republished);
+    let LifecycleCommitOutcome::Applied(served) = commit(minting, retry.clone()).await else {
+        panic!("[{label}] the republish must apply");
+    };
+    // A byte-identical retry replays and appends nothing.
+    let LifecycleCommitOutcome::IdempotentReplay(_) = commit(minting, retry).await else {
+        panic!("[{label}] the retry must replay");
+    };
+    let rows = feed_rows_for(plain, start, &[&a_id]).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "[{label}] one receipted event, one row: {rows:?}"
+    );
+    let row = &rows[0];
+    let events = served.registry_state.lifecycle_events.clone().unwrap();
+    let receipts = served.registry_state.event_receipts.clone().unwrap();
+    assert_eq!(row.kind, ChangeKind::Lifecycle, "[{label}]");
+    assert_eq!(row.lineage_id, served.body.lineage_id.as_str(), "[{label}]");
+    assert_eq!(row.agent_id, agent_did(230), "[{label}]");
+    assert_eq!(
+        row.event.as_ref(),
+        Some(&serde_json::to_value(&events[1]).unwrap()),
+        "[{label}] the row's event must be the served event"
+    );
+    assert_eq!(
+        row.receipt,
+        serde_json::to_value(&receipts[1]).unwrap(),
+        "[{label}] the row's receipt must be the served receipt"
+    );
+
+    // Leg 3: supersession.
+    let a_body = served.body.clone();
+    let succ = |title: &str| {
+        p.supersede_body(&a_body)
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid successor request")
+    };
+    let a2 = publish_req(plain, succ("feed fixture a v2"), Some(signer())).await;
+    let a2_id = a2.ctx_id.as_str().to_string();
+    let rows = feed_rows_for(plain, start, &[&a_id, &a2_id]).await;
+    assert_eq!(rows.len(), 2, "[{label}] lifecycle + superseded: {rows:?}");
+    let sup = &rows[1];
+    assert_eq!(sup.kind, ChangeKind::Superseded, "[{label}]");
+    assert_eq!(sup.ctx_id, a_id, "[{label}] ctx_id is the older version");
+    assert_eq!(
+        sup.superseded_by.as_deref(),
+        Some(a2_id.as_str()),
+        "[{label}]"
+    );
+    assert_eq!(sup.agent_id, agent_did(230), "[{label}]");
+    assert_eq!(sup.lineage_id, a_body.lineage_id.as_str(), "[{label}]");
+    assert_eq!(
+        Some(&sup.receipt),
+        a2.registry_receipt.as_ref(),
+        "[{label}] the superseded row carries the new version's receipt"
+    );
+    let b_body = plain.get(&b.ctx_id).expect("get").expect("b exists").body;
+    let q = producer(231);
+    let b2 = publish_req(
+        plain,
+        p.supersede_body(&b_body)
+            .title("feed fixture b v2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid successor request"),
+        None,
+    )
+    .await;
+    assert!(
+        feed_rows_for(plain, start, &[&b_id, b2.ctx_id.as_str()])
+            .await
+            .is_empty(),
+        "[{label}] a supersession without a registry receipt appends nothing"
+    );
+
+    // Leg 4: key revocations, with and without the declared controller.
+    // The second supersedes the first, so it appends two rows: superseded
+    // first, then key_revocation.
+    let r1 = publish_req(
+        plain,
+        q.publish_request()
+            .title("feed fixture revocation")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid revocation request"),
+        Some(signer()),
+    )
+    .await;
+    let r1_body = plain.get(&r1.ctx_id).expect("get").expect("r1").body;
+    let r2 = publish_req(
+        plain,
+        q.supersede_body(&r1_body)
+            .title("feed fixture revocation v2")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .metadata(serde_json::json!({
+                "revoked_key_controller": agent_did(232),
+            }))
+            .build()
+            .expect("valid revocation request"),
+        Some(signer()),
+    )
+    .await;
+    let rows = feed_rows_for(plain, start, &[r1.ctx_id.as_str(), r2.ctx_id.as_str()]).await;
+    assert_eq!(
+        rows.len(),
+        3,
+        "[{label}] revocation, then supersede + revocation: {rows:?}"
+    );
+    assert_eq!(
+        rows[1].kind,
+        ChangeKind::Superseded,
+        "[{label}] superseded first"
+    );
+    assert_eq!(rows[1].ctx_id, r1.ctx_id.as_str(), "[{label}]");
+    assert_eq!(
+        rows[1].superseded_by.as_deref(),
+        Some(r2.ctx_id.as_str()),
+        "[{label}]"
+    );
+    for (row, resp, controller) in [
+        (&rows[0], &r1, agent_did(231)),
+        (&rows[2], &r2, agent_did(232)),
+    ] {
+        assert_eq!(row.kind, ChangeKind::KeyRevocation, "[{label}]");
+        assert_eq!(row.ctx_id, resp.ctx_id.as_str(), "[{label}]");
+        assert_eq!(row.agent_id, controller, "[{label}] revoked key controller");
+        assert_eq!(
+            Some(&row.receipt),
+            resp.registry_receipt.as_ref(),
+            "[{label}]"
+        );
+    }
+
+    // Leg 5: ordering, head, conversion and filters.
+    let ids = [
+        a_id.as_str(),
+        a2_id.as_str(),
+        r1.ctx_id.as_str(),
+        r2.ctx_id.as_str(),
+    ];
+    let all = feed_rows_for(plain, start, &ids).await;
+    assert_eq!(all.len(), 5, "[{label}] {all:?}");
+    assert!(
+        all.windows(2).all(|w| w[0].seq < w[1].seq),
+        "[{label}] seq must be strictly increasing in append order"
+    );
+    let head = plain.changes_head().await.expect("changes_head");
+    assert!(
+        head.head >= all.last().unwrap().seq && head.pruned_through <= start,
+        "[{label}] the head covers every row: {head:?}"
+    );
+    for row in &all {
+        let change = row
+            .to_change()
+            .unwrap_or_else(|e| panic!("[{label}] row {} is not servable: {e}", row.seq));
+        assert_eq!(change.seq(), row.seq, "[{label}]");
+    }
+    let lineage_lifecycle = plain
+        .changes_page(&crate::FeedQuery {
+            after: start,
+            lineage_ids: vec![a_body.lineage_id.as_str().to_string()],
+            kinds: vec![ChangeKind::Lifecycle],
+            scan_limit: 1000,
+            ..Default::default()
+        })
+        .await
+        .expect("changes_page");
+    assert_eq!(
+        lineage_lifecycle
+            .rows
+            .iter()
+            .map(|r| r.seq)
+            .collect::<Vec<_>>(),
+        vec![all[0].seq],
+        "[{label}] lineage AND kind filter"
+    );
+    let revocations = plain
+        .changes_page(&crate::FeedQuery {
+            after: start,
+            revocation_agents: vec![agent_did(232)],
+            scan_limit: 1000,
+            ..Default::default()
+        })
+        .await
+        .expect("changes_page");
+    assert_eq!(
+        revocations.rows.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        vec![all[4].seq],
+        "[{label}] revocation-agent filter matches only key_revocation rows"
+    );
+    // A page capped at one row stops at that row, not the head.
+    let capped = plain
+        .changes_page(&crate::FeedQuery {
+            after: start,
+            ctx_ids: ids.iter().map(|s| s.to_string()).collect(),
+            scan_limit: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("changes_page");
+    assert_eq!(capped.rows.len(), 1, "[{label}]");
+    assert!(
+        !capped.reached_head,
+        "[{label}] a full page has not reached the head"
+    );
+    assert_eq!(capped.last_scanned, all[0].seq, "[{label}]");
+
+    // Leg 6: an idempotent retry of a superseding publish appends nothing.
+    let a2_body = plain.get(&a2.ctx_id).expect("get").expect("a2").body;
+    let a3_req = p
+        .supersede_body(&a2_body)
+        .title("feed fixture a v3")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid successor request");
+    let key = format!("feed-idem-{}", &uuid[..8]);
+    let publish_keyed = |req: acdp::types::publish::PublishRequest| {
+        let s = Arc::clone(plain);
+        let key = key.clone();
+        let signer = signer();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mint = move |body: &acdp::types::body::Body| {
+                    let receipt = signer.mint(
+                        &body.ctx_id,
+                        &body.lineage_id,
+                        &body.origin_registry,
+                        body.created_at,
+                        &body.content_hash,
+                        &format!("sha256:{}", "c".repeat(64)),
+                    )?;
+                    serde_json::to_value(receipt).map_err(acdp::error::AcdpError::from)
+                };
+                s.commit_publish(PublishCommit {
+                    req: &req,
+                    authority: AUTHORITY,
+                    idempotency: Some(acdp::registry::store::PendingIdempotencyCommit {
+                        key: &key,
+                        ttl: chrono::Duration::hours(1),
+                    }),
+                    tenant: None,
+                    receipt_minter: Some(&mint),
+                    predecessor_admission: None,
+                })
+            })
+            .await
+            .expect("publish task")
+            .expect("publish succeeds")
+        }
+    };
+    let first = publish_keyed(a3_req.clone()).await;
+    let PublishCommitOutcome::Inserted(a3) = first else {
+        panic!("[{label}] the first keyed publish must insert");
+    };
+    let before = feed_rows_for(plain, start, &[&a2_id, a3.ctx_id.as_str()]).await;
+    assert_eq!(
+        before.len(),
+        1,
+        "[{label}] one superseded row for v2: {before:?}"
+    );
+    let again = publish_keyed(a3_req).await;
+    assert!(
+        matches!(again, PublishCommitOutcome::IdempotentReplay(_)),
+        "[{label}] the keyed retry must replay"
+    );
+    assert_eq!(
+        feed_rows_for(plain, start, &[&a2_id, a3.ctx_id.as_str()]).await,
+        before,
+        "[{label}] an idempotent retry must append no row"
+    );
+}
+
+/// **RFC-ACDP-0018 §5.3 (rec-008) — a feed row commits with its change or
+/// not at all.** Durable backends only: they append inside the change's
+/// transaction. A key revocation whose `revoked_key_controller` is not a
+/// DID fails the append, which must roll back the whole publish — no
+/// context, no superseded predecessor, no row.
+pub async fn assert_change_feed_rolls_back_with_its_change<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let signer = || {
+        acdp::types::ReceiptSigner::new(
+            SigningKey::from_bytes(&[91u8; 32]),
+            "did:web:reg.test",
+            "did:web:reg.test#receipt-key-1",
+        )
+        .expect("signer")
+    };
+    let start = store.changes_head().await.expect("changes_head").head;
+    let p = producer(236);
+    let v1 = publish_req(
+        store,
+        p.publish_request()
+            .title("feed rollback fixture")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid request"),
+        Some(signer()),
+    )
+    .await;
+    let v1_body = store.get(&v1.ctx_id).expect("get").expect("v1").body;
+    let bad = p
+        .supersede_body(&v1_body)
+        .title("feed rollback fixture v2")
+        .context_type(ContextType::KeyRevocation)
+        .visibility(Visibility::Public)
+        .metadata(serde_json::json!({ "revoked_key_controller": 7 }))
+        .build()
+        .expect("valid request");
+    let s = Arc::clone(store);
+    let signer = signer();
+    let err = tokio::task::spawn_blocking(move || {
+        let mint = move |body: &acdp::types::body::Body| {
+            let receipt = signer.mint(
+                &body.ctx_id,
+                &body.lineage_id,
+                &body.origin_registry,
+                body.created_at,
+                &body.content_hash,
+                &format!("sha256:{}", "c".repeat(64)),
+            )?;
+            serde_json::to_value(receipt).map_err(acdp::error::AcdpError::from)
+        };
+        s.commit_publish(PublishCommit {
+            req: &bad,
+            authority: AUTHORITY,
+            idempotency: None,
+            tenant: None,
+            receipt_minter: Some(&mint),
+            predecessor_admission: None,
+        })
+    })
+    .await
+    .expect("publish task")
+    .expect_err("an unservable row must fail the publish");
+    assert!(
+        matches!(&err, acdp::error::AcdpError::SchemaViolation(m)
+            if m.contains("revoked_key_controller")),
+        "[{label}] the feed append, not an earlier check, must refuse it: {err:?}"
+    );
+    let v1_now = store.get(&v1.ctx_id).expect("get").expect("v1");
+    assert_eq!(
+        v1_now.registry_state.status,
+        Status::Active,
+        "[{label}] the predecessor must not stay superseded by a rolled-back publish"
+    );
+    let rows = feed_rows_for(store, start, &[v1.ctx_id.as_str()]).await;
+    assert_eq!(
+        rows.iter().map(|r| r.kind).collect::<Vec<_>>(),
+        vec![acdp::types::change::ChangeKind::KeyRevocation],
+        "[{label}] only v1's own row: the failed publish left none"
+    );
+    let s = Arc::clone(store);
+    let lineage = v1_body.lineage_id.clone();
+    let members = tokio::task::spawn_blocking(move || s.lineage(&lineage))
+        .await
+        .expect("lineage task")
+        .expect("lineage");
+    assert_eq!(
+        members.len(),
+        1,
+        "[{label}] the failed successor was not stored"
+    );
+}
+
+/// **RFC-ACDP-0018 §5.4 — pruning removes an old seq prefix and moves the
+/// marker; it never reorders or renumbers.** Needs a store no other test
+/// writes to (it prunes the whole feed).
+pub async fn assert_change_feed_prune<S>(plain: &Arc<S>, minting: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let empty = plain.changes_head().await.expect("changes_head");
+    assert_eq!(
+        (empty.head, empty.pruned_through),
+        (0, 0),
+        "[{label}] a fresh feed is empty"
+    );
+    assert_eq!(
+        plain.prune_changes(i64::MAX, 100).await.expect("prune"),
+        0,
+        "[{label}] pruning an empty feed deletes nothing"
+    );
+    let mut ids = Vec::new();
+    for seed in 233..=235u8 {
+        let ctx_id = publish_titled(plain, seed, "prune fixture").await;
+        let uuid = ctx_id.rsplit('/').next().unwrap().to_string();
+        let event = LifecycleEvent::new(
+            uuid,
+            CtxId(ctx_id.clone()),
+            LifecycleEventType::Retracted,
+            Utc::now(),
+            AgentDid::new(agent_did(seed)),
+            None,
+        )
+        .unwrap();
+        let s = Arc::clone(minting);
+        tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&event))
+            .await
+            .unwrap()
+            .expect("retract");
+        ids.push(ctx_id);
+    }
+    let head = plain.changes_head().await.unwrap();
+    assert_eq!(head.head, 3, "[{label}]");
+    assert_eq!(
+        plain.prune_changes(0, 100).await.unwrap(),
+        0,
+        "[{label}] nothing is older than the epoch"
+    );
+    assert_eq!(
+        plain.prune_changes(i64::MAX, 2).await.unwrap(),
+        2,
+        "[{label}] the batch bounds a prune"
+    );
+    let after = plain.changes_head().await.unwrap();
+    assert_eq!((after.head, after.pruned_through), (3, 2), "[{label}]");
+    let page = plain
+        .changes_page(&crate::FeedQuery {
+            after: 0,
+            scan_limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        page.rows.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        vec![3],
+        "[{label}] the survivor keeps its seq"
+    );
+    assert_eq!(
+        plain.prune_changes(i64::MAX, 100).await.unwrap(),
+        1,
+        "[{label}]"
+    );
+    let drained = plain.changes_head().await.unwrap();
+    assert_eq!(
+        (drained.head, drained.pruned_through),
+        (3, 3),
+        "[{label}] an emptied feed keeps its head: positions are never reused"
+    );
+    // The next append continues past the pruned positions.
+    let ctx_id = &ids[0];
+    let uuid = ctx_id.rsplit('/').next().unwrap();
+    let event = LifecycleEvent::new(
+        // A fresh event_id: the context's UUID with a different last digit.
+        format!(
+            "{}{}",
+            &uuid[..uuid.len() - 1],
+            if uuid.ends_with('0') { '1' } else { '0' }
+        ),
+        CtxId(ctx_id.clone()),
+        LifecycleEventType::Republished,
+        Utc::now(),
+        AgentDid::new(agent_did(233)),
+        None,
+    )
+    .unwrap();
+    let s = Arc::clone(minting);
+    tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&event))
+        .await
+        .unwrap()
+        .expect("republish");
+    let page = plain
+        .changes_page(&crate::FeedQuery {
+            after: 3,
+            scan_limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.rows.len(), 1, "[{label}]");
+    assert!(
+        page.rows[0].seq > 3,
+        "[{label}] seq is never reused after a prune"
+    );
+}
+
+/// **RFC-ACDP-0018 §5.2 — `seq` order is commit order.** Writers commit
+/// lifecycle events on several contexts at once while a reader polls with
+/// `after` = the last `seq` it saw. The reader must never see a `seq` at or
+/// below one it already passed, and must end up with exactly the rows a
+/// full scan returns: a row that commits under a lower `seq` after the
+/// reader moved past it would be skipped for good.
+pub async fn assert_change_feed_commit_order<S>(plain: &Arc<S>, minting: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    const CONTEXTS: usize = 8;
+    const EVENTS: u8 = 24;
+    let start = plain.changes_head().await.expect("changes_head").head;
+    let p = producer(237);
+    let mut ctxs = Vec::new();
+    for i in 0..CONTEXTS {
+        let resp = publish_req(
+            plain,
+            p.publish_request()
+                .title(format!("feed order fixture {i}"))
+                .context_type(ContextType::DataSnapshot)
+                .visibility(Visibility::Public)
+                .build()
+                .expect("valid publish request"),
+            None,
+        )
+        .await;
+        ctxs.push(resp.ctx_id);
+    }
+    let ids: Vec<String> = ctxs.iter().map(|c| c.as_str().to_string()).collect();
+
+    let writers: Vec<_> = ctxs
+        .iter()
+        .cloned()
+        .map(|ctx_id| {
+            let s = Arc::clone(minting);
+            tokio::task::spawn_blocking(move || {
+                let uuid = ctx_id
+                    .as_str()
+                    .rsplit('/')
+                    .next()
+                    .expect("uuid")
+                    .to_string();
+                for n in 1..=EVENTS {
+                    let kind = if n % 2 == 1 {
+                        LifecycleEventType::Retracted
+                    } else {
+                        LifecycleEventType::Republished
+                    };
+                    let event = LifecycleEvent::new(
+                        format!("{}{n:02x}", &uuid[..uuid.len() - 2]),
+                        ctx_id.clone(),
+                        kind,
+                        Utc::now(),
+                        AgentDid::new(agent_did(237)),
+                        None,
+                    )
+                    .expect("valid lifecycle event");
+                    s.commit_lifecycle_event(&event)
+                        .expect("lifecycle commit succeeds");
+                }
+            })
+        })
+        .collect();
+
+    let poll = |after: u64| {
+        let q = crate::FeedQuery {
+            after,
+            ctx_ids: ids.clone(),
+            scan_limit: 1000,
+            ..Default::default()
+        };
+        let s = Arc::clone(plain);
+        async move { s.changes_page(&q).await.expect("changes_page").rows }
+    };
+    let mut seen: Vec<crate::FeedRow> = Vec::new();
+    let mut after = start;
+    let mut absorb = |rows: Vec<crate::FeedRow>, after: &mut u64| {
+        for row in rows {
+            assert!(
+                row.seq > *after,
+                "[{label}] seq {} surfaced after the reader passed {}",
+                row.seq,
+                *after
+            );
+            *after = row.seq;
+            seen.push(row);
+        }
+    };
+    while writers.iter().any(|w| !w.is_finished()) {
+        absorb(poll(after).await, &mut after);
+        tokio::task::yield_now().await;
+    }
+    for w in writers {
+        w.await.expect("writer task");
+    }
+    absorb(poll(after).await, &mut after);
+
+    let full = poll(start).await;
+    assert_eq!(
+        full.len(),
+        CONTEXTS * usize::from(EVENTS),
+        "[{label}] one row per committed event"
+    );
+    assert_eq!(
+        seen, full,
+        "[{label}] the incremental reader must see exactly the full scan"
+    );
+}
+
+/// **RFC-ACDP-0018 §4 — every receipted lifecycle event is one row, in
+/// order, carrying exactly what `registry_state` serves at its index.**
+/// Three receipted events (retract, republish, retract) on one context must
+/// yield three `lifecycle` rows, row *i* matching `lifecycle_events[i]` and
+/// `event_receipts[i]` of the context as `get` serves it afterwards. Also
+/// pins [`ExtendedRegistryStore::producers_of`]: a known id maps to its
+/// producer; an unknown or unparseable id is omitted.
+pub async fn assert_change_feed_lifecycle_sequence<S>(plain: &Arc<S>, minting: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::registry::LifecycleCommitOutcome;
+    use acdp::types::change::ChangeKind;
+
+    let start = plain.changes_head().await.expect("changes_head").head;
+    let p = producer(233);
+    let signer = acdp::types::ReceiptSigner::new(
+        SigningKey::from_bytes(&[91u8; 32]),
+        "did:web:reg.test",
+        "did:web:reg.test#receipt-key-1",
+    )
+    .expect("signer");
+    let a = publish_req(
+        plain,
+        p.publish_request()
+            .title("feed sequence fixture")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid publish request"),
+        Some(signer),
+    )
+    .await;
+    let a_id = a.ctx_id.as_str().to_string();
+    let uuid = a_id.rsplit('/').next().expect("ctx_id ends in a UUID");
+    let mut last = None;
+    for (n, kind) in [
+        LifecycleEventType::Retracted,
+        LifecycleEventType::Republished,
+        LifecycleEventType::Retracted,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Distinct, strictly later `occurred_at` per event.
+        tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        let e = LifecycleEvent::new(
+            format!("{}{n:x}", &uuid[..uuid.len() - 1]),
+            a.ctx_id.clone(),
+            kind,
+            Utc::now(),
+            AgentDid::new(agent_did(233)),
+            None,
+        )
+        .expect("valid lifecycle event");
+        let s = Arc::clone(minting);
+        let out = tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&e))
+            .await
+            .expect("commit task")
+            .expect("lifecycle commit succeeds");
+        let LifecycleCommitOutcome::Applied(ctx) = out else {
+            panic!("[{label}] event {n} must apply");
+        };
+        last = Some(ctx);
+    }
+    let served = last.expect("three events applied");
+    let events = served.registry_state.lifecycle_events.clone().unwrap();
+    let receipts = served.registry_state.event_receipts.clone().unwrap();
+    assert_eq!(
+        (events.len(), receipts.len()),
+        (3, 3),
+        "[{label}] three events served"
+    );
+    let rows = feed_rows_for(plain, start, &[&a_id]).await;
+    assert_eq!(rows.len(), 3, "[{label}] one row per event: {rows:?}");
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(row.kind, ChangeKind::Lifecycle, "[{label}] row {i}");
+        assert_eq!(row.ctx_id, a_id, "[{label}] row {i}");
+        assert_eq!(
+            row.event.as_ref(),
+            Some(&serde_json::to_value(&events[i]).unwrap()),
+            "[{label}] row {i} must carry lifecycle_events[{i}]"
+        );
+        assert_eq!(
+            row.receipt,
+            serde_json::to_value(&receipts[i]).unwrap(),
+            "[{label}] row {i} must carry event_receipts[{i}]"
+        );
+    }
+    assert!(
+        rows.windows(2).all(|w| w[0].seq < w[1].seq),
+        "[{label}] rows follow event order"
+    );
+
+    let unknown = format!("acdp://{AUTHORITY}/00000000-0000-4000-8000-00000000f00d");
+    let producers = plain
+        .producers_of(&[a_id.as_str(), unknown.as_str(), "not a ctx id"])
+        .await
+        .expect("producers_of");
+    assert_eq!(
+        producers,
+        std::collections::HashMap::from([(a_id.clone(), agent_did(233))]),
+        "[{label}] only the existing id resolves"
+    );
+    assert!(
+        plain.producers_of(&[]).await.expect("empty").is_empty(),
+        "[{label}] no ids, no producers"
+    );
+}
+
+/// **RFC-ACDP-0018 §5.3 with RFC-ACDP-0006 idempotency — concurrent retries
+/// of one keyed superseding publish append exactly one row and never fail.**
+/// Eight tasks race the same `Idempotency-Key` and request. Exactly one
+/// inserts; the rest replay (whether they lost before or after the winner
+/// committed); no task errors; the feed holds one `superseded` row.
+pub async fn assert_change_feed_concurrent_idempotent_supersede<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::types::change::ChangeKind;
+
+    let signer = || {
+        acdp::types::ReceiptSigner::new(
+            SigningKey::from_bytes(&[91u8; 32]),
+            "did:web:reg.test",
+            "did:web:reg.test#receipt-key-1",
+        )
+        .expect("signer")
+    };
+    let start = store.changes_head().await.expect("changes_head").head;
+    let p = producer(234);
+    let v1 = publish_req(
+        store,
+        p.publish_request()
+            .title("feed race fixture")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid publish request"),
+        Some(signer()),
+    )
+    .await;
+    let v1_body = store.get(&v1.ctx_id).expect("get").expect("v1").body;
+    let req = p
+        .supersede_body(&v1_body)
+        .title("feed race fixture v2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid successor request");
+    let key = format!(
+        "feed-race-{}",
+        &v1.ctx_id.as_str()[v1.ctx_id.as_str().len() - 12..]
+    );
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let s = Arc::clone(store);
+            let req = req.clone();
+            let key = key.clone();
+            let signer = signer();
+            let barrier = Arc::clone(&barrier);
+            tokio::task::spawn_blocking(move || {
+                let mint = move |body: &acdp::types::body::Body| {
+                    let receipt = signer.mint(
+                        &body.ctx_id,
+                        &body.lineage_id,
+                        &body.origin_registry,
+                        body.created_at,
+                        &body.content_hash,
+                        &format!("sha256:{}", "c".repeat(64)),
+                    )?;
+                    serde_json::to_value(receipt).map_err(acdp::error::AcdpError::from)
+                };
+                barrier.wait();
+                s.commit_publish(PublishCommit {
+                    req: &req,
+                    authority: AUTHORITY,
+                    idempotency: Some(acdp::registry::store::PendingIdempotencyCommit {
+                        key: &key,
+                        ttl: chrono::Duration::hours(1),
+                    }),
+                    tenant: None,
+                    receipt_minter: Some(&mint),
+                    predecessor_admission: None,
+                })
+            })
+        })
+        .collect();
+    let mut inserted = Vec::new();
+    let mut replayed = Vec::new();
+    for t in tasks {
+        match t.await.expect("publish task") {
+            Ok(PublishCommitOutcome::Inserted(r)) => inserted.push(r),
+            Ok(PublishCommitOutcome::IdempotentReplay(r)) => replayed.push(r),
+            Err(e) => panic!("[{label}] a concurrent keyed retry must not fail: {e}"),
+        }
+    }
+    assert_eq!(inserted.len(), 1, "[{label}] exactly one insert");
+    let winner = inserted.remove(0);
+    assert!(
+        replayed.iter().all(|r| r.ctx_id == winner.ctx_id),
+        "[{label}] every replay returns the winner"
+    );
+    let rows = feed_rows_for(store, start, &[v1.ctx_id.as_str(), winner.ctx_id.as_str()]).await;
+    assert_eq!(rows.len(), 1, "[{label}] one superseded row: {rows:?}");
+    assert_eq!(rows[0].kind, ChangeKind::Superseded, "[{label}]");
+    assert_eq!(
+        rows[0].superseded_by.as_deref(),
+        Some(winner.ctx_id.as_str()),
+        "[{label}]"
+    );
+}
+
 /// Falsification for [`assert_lifecycle_state_probe_sees_retraction`]: the
 /// assertion is only worth running if a backend that inherits the trait's
 /// `Ok(false)` default actually fails it. Also the falsification for
