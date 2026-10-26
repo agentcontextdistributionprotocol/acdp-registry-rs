@@ -236,7 +236,7 @@ would keep naming that DID.
 
 This is the configuration of the reference deployment at
 `https://registry.agentcontextdistributionprotocol.io`: the image pinned to
-`:0.6.0`, a Railway Postgres service, the seed injected from Doppler, the
+`:0.6.1`, a Railway Postgres service, the seed injected from Doppler, the
 healthcheck on `/healthz`, and one replica. The full production guide,
 including backups and upgrades, is [docs/DEPLOY.md](../docs/DEPLOY.md).
 

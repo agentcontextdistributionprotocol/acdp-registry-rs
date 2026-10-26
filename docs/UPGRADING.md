@@ -21,6 +21,20 @@ belongs in the per-crate changelogs.
 
 ---
 
+## 0.6.1
+
+**No operator-visible upgrade steps.** The server binary's behavior, configuration, schema and API
+are unchanged from 0.6.0.
+
+The release adopts ACDP spec revision `1511b08` (RFC-ACDP-0017 Final; RFC-ACDP-0018 gains
+consumer-side verification rules only) and `acdp` 0.17.1, whose changes are client- and
+chain-verifier-side.
+
+- **Rollback:** safe. Nothing to migrate.
+- **Unchanged:** configuration keys and defaults, the schema, and every endpoint.
+
+---
+
 ## 0.6.0
 
 **This release adds migration 017 (both backends): the RFC-ACDP-0018 change feed, a new `changes`
