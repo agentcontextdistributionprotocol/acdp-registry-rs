@@ -111,11 +111,15 @@ impl SubscriptionProgress {
 }
 
 /// How many subscriptions are in each status, for the
-/// `acdp_registry_hint_subscriptions{status}` gauge.
+/// `acdp_registry_hint_subscriptions{status}` gauge, and the backlog for
+/// `acdp_registry_hint_oldest_due_seconds`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SubscriptionCounts {
     pub active: u64,
     pub disabled: u64,
+    /// The earliest `next_attempt_at_ms` among active subscriptions behind
+    /// the given feed head (the ones with a hint owed), or `None`.
+    pub oldest_due_at_ms: Option<i64>,
 }
 
 impl SubscriptionRecord {

@@ -147,7 +147,7 @@ pub(crate) async fn finish_attempt(
     Ok(done.rows_affected() > 0)
 }
 
-pub(crate) async fn counts(pool: &SqlitePool) -> Result<SubscriptionCounts, AcdpError> {
+pub(crate) async fn counts(pool: &SqlitePool, head: u64) -> Result<SubscriptionCounts, AcdpError> {
     let rows: Vec<(String, i64)> =
         sqlx::query_as("SELECT status, COUNT(*) FROM subscriptions GROUP BY status")
             .fetch_all(pool)
@@ -161,6 +161,15 @@ pub(crate) async fn counts(pool: &SqlitePool) -> Result<SubscriptionCounts, Acdp
             SubscriptionStatus::Disabled => out.disabled = n,
         }
     }
+    let (oldest,): (Option<i64>,) = sqlx::query_as(
+        "SELECT MIN(next_attempt_at_ms) FROM subscriptions \
+         WHERE status = 'active' AND last_hinted_seq < ?",
+    )
+    .bind(i64::try_from(head).unwrap_or(i64::MAX))
+    .fetch_one(pool)
+    .await
+    .map_err(db_err("count"))?;
+    out.oldest_due_at_ms = oldest;
     Ok(out)
 }
 

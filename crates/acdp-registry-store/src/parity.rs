@@ -3435,10 +3435,27 @@ where
         Some(T0 - 5),
         "{label}: kept for the operator"
     );
-    let counts = store.subscription_counts().await.expect("counts");
+    let counts = store.subscription_counts(HEAD).await.expect("counts");
     assert!(
         counts.disabled >= 1 && counts.active >= 1,
         "{label}: {counts:?}"
+    );
+    // `b` is active and behind HEAD, so a hint is owed no later than its
+    // retry; nothing sits behind seq 0.
+    assert!(
+        counts
+            .oldest_due_at_ms
+            .is_some_and(|due| due <= T0 + 2 * LEASE),
+        "{label}: backlog {counts:?}"
+    );
+    assert_eq!(
+        store
+            .subscription_counts(0)
+            .await
+            .expect("counts")
+            .oldest_due_at_ms,
+        None,
+        "{label}: no subscription is behind seq 0"
     );
 
     // After every lease lapses: `d` (never finished) and `b` (its retry now

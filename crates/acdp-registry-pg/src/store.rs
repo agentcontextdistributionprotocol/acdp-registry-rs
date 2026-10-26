@@ -483,8 +483,9 @@ impl ExtendedRegistryStore for PgStore {
 
     async fn subscription_counts(
         &self,
+        head: u64,
     ) -> Result<acdp_registry_store::SubscriptionCounts, AcdpError> {
-        crate::subscriptions::counts(&self.pool).await
+        crate::subscriptions::counts(&self.pool, head).await
     }
 
     // ── Transparency log reads (RFC-ACDP-0012) ─────────────────────────

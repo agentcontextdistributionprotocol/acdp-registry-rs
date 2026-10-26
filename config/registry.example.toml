@@ -273,6 +273,30 @@ key_id_fragment = "receipt-key-1"
 # a retracted context makes the binary refuse to start (docs/CONFIGURATION.md).
 enabled = false
 
+[changes]
+# Change feed (RFC-ACDP-0018 §5, ACDP 0.5.0): GET /changes and the
+# `acdp-registry-changes` profile. Entries are appended in the same
+# transaction as the change whenever a [receipt] key is set; this section
+# decides whether they are served. Requires [lifecycle] enabled, a [receipt]
+# key, sqlite or postgres, and a 32-byte master key (base64) — supply it via
+# ACDP_REGISTRY_CHANGES__KEY_B64 or key_path, never in a committed file, and
+# keep it different from the receipt seed. Every replica needs the same key
+# and key_id. Pruning runs (and its settings are validated) even when off.
+enabled = false
+# key_path               = "/run/secrets/acdp_changes_key"
+# key_id                 = 1
+# retention_seconds      = 2592000   # at least 30 days
+# max_change_filters     = 100       # 100..=1000
+# max_changes_page       = 100       # 100..=1000
+# prune_interval_seconds = 3600
+
+[events]
+# Change-hint subscriptions (RFC-ACDP-0018 §8): /subscriptions and the
+# `acdp-registry-events` profile. Requires [changes] enabled and
+# auth.enabled. Every replica runs the hint worker.
+enabled = false
+# max_subscriptions_per_requester = 10
+
 [log]
 # Registry transparency log (RFC-ACDP-0012, ACDP 0.3.0): a per-registry,
 # append-only RFC 6962-style Merkle tree over publish events. When true the

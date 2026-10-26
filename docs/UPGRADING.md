@@ -34,7 +34,9 @@ table and a one-row `changes_meta` marker.**
   not served by this migration alone. The prune task runs on every registry, so
   `changes.retention_seconds` (at least 2592000) and `changes.prune_interval_seconds` (at least 1)
   are now validated at startup even with `changes.enabled = false`.
-- **Rolling out the feed:** set `changes.enabled = true` (and the profile) only in a **separate
+- **Rolling out the feed:** set `changes.enabled = true` (the profile is advertised automatically,
+  and serving needs a 32-byte master key in `ACDP_REGISTRY_CHANGES__KEY_B64` or `changes.key_path`,
+  distinct from the receipt seed and the same on every replica) only in a **separate
   deploy, after every replica runs this release**. A replica on the older binary accepts changes
   without appending feed rows, so a feed advertised during a mixed rollout silently misses them.
 - **Rollback, Postgres:** safe to 0.5.6. The migrator tolerates the newer applied version, and

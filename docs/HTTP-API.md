@@ -159,9 +159,11 @@ check's own `auth_global` or `auth_per_ip` scope.
 > below — `GET /contexts/{ctx_id}`, `/contexts/{ctx_id}/body`,
 > `GET /contexts/search`, `GET /lineages/{lineage_id}`,
 > `/lineages/{lineage_id}/current`, `GET /log/checkpoint`, `GET /log/proof` and
-> `GET /log/entries`, plus the publish/retract/republish `POST`s — answers with
+> `GET /log/entries`, `GET /changes` and the `/subscriptions` routes, plus the
+> publish/retract/republish `POST`s — answers with
 > `Cache-Control: private` and `Vary: authorization, x-tenant-id`, so a shared
-> cache cannot reuse one requester's view for another. `/auth/*`, `/admin/*`,
+> cache cannot reuse one requester's view for another (`POST /subscriptions`
+> answers `no-store`, since it carries the secret). `/auth/*`, `/admin/*`,
 > `GET /healthz`, `GET /livez` and `GET /metrics` answer `Cache-Control:
 > no-store`. The three `/.well-known/*` documents are requester-invariant and
 > keep `Cache-Control: public, max-age=300` — `public` is the half that
@@ -207,8 +209,8 @@ this section records only what **this registry** emits in each one
 | `registry_did` | `did:web:` + `registry.authority` (a port's `:` becomes `%3A`). |
 | `supported_signature_algorithms` | `["ed25519", "ecdsa-p256"]`, fixed by the build; not configurable. |
 | `supported_did_methods` | `auth.did_methods`; may include `"did:key"`. |
-| `profiles` | `registry.profiles` (default: `acdp-registry-core`, `acdp-registry-discovery`) plus the receipts, head-receipts, lifecycle and transparency-log profiles when their config sections enable them. |
-| `limits` | `max_payload_bytes`, `max_embedded_bytes` and `idempotency_key_ttl_seconds` from `[limits]`; `max_publish_per_minute` is never emitted. |
+| `profiles` | `registry.profiles` (default: `acdp-registry-core`, `acdp-registry-discovery`) plus the receipts, head-receipts, lifecycle, transparency-log, `acdp-registry-changes` (`[changes]`) and `acdp-registry-events` (`[events]`) profiles when their config sections enable them. |
+| `limits` | `max_payload_bytes`, `max_embedded_bytes` and `idempotency_key_ttl_seconds` from `[limits]`; `change_retention_seconds`, `max_change_filters` and `max_changes_page` from `[changes]` when it is enabled; `max_subscriptions_per_requester` from `[events]` when it is enabled; `max_publish_per_minute` is never emitted. |
 | `supports_idempotency_key` | Always `true`. |
 | `anonymous_public_reads` | `auth.anonymous_public_reads`; always present (default `false`). |
 | `read_authentication_methods` | `["bearer_jwt"]` when `auth.enabled = true`, omitted otherwise. |
@@ -390,6 +392,7 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_changes_pruned_through` | gauge | — | Highest pruned `seq`; a cursor below it is `cursor_expired`. |
 | `acdp_registry_hint_deliveries_total` | counter | `outcome` | RFC-ACDP-0018 hint attempts. `outcome` is `delivered`, `nothing_visible` (matching entries the owner cannot see; the position advanced, nothing sent), `failed` (non-2xx, redirect, timeout, connect error), `ssrf_refused` (the host no longer resolves to public unicast only), `disabled` (the attempt that disabled the subscription: 72 h of failure, a secret that no longer opens, or an unreadable stored owner), `lease_lost` (the subscription was deleted or taken over meanwhile; nothing recorded) or `error` (a store or evaluation error, or the attempt overran its 20 s bound; nothing recorded, retried once the lease lapses). An address refused at connect time, after the pre-check passed, counts as `failed`. |
 | `acdp_registry_hint_subscriptions` | gauge | `status` | Subscriptions by `status` (`active`, `disabled`), refreshed after every worker pass. |
+| `acdp_registry_hint_oldest_due_seconds` | gauge | — | Seconds the oldest active subscription behind the feed head has been due (its `next_attempt_at` to now), `0` when none is overdue; refreshed after every worker pass. |
 | `acdp_registry_subscription_requests_total` | counter | `op`, `outcome` | RFC-ACDP-0018 `/subscriptions` requests. `op` is `create`, `get` or `delete`; `outcome` is `ok` or the wire code (`schema_violation`, `not_found`, `not_authorized`, `not_implemented`, …). |
 
 > **`scope` changed meaning for global challenge rejections (H-A/P4).** Until

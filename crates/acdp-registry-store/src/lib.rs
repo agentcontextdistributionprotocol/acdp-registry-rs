@@ -405,8 +405,10 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
         ))
     }
 
-    /// Subscriptions per status, across all owners.
-    async fn subscription_counts(&self) -> Result<SubscriptionCounts, AcdpError> {
+    /// Subscriptions per status, across all owners, plus the earliest due
+    /// time among active subscriptions with `last_hinted_seq < head`.
+    async fn subscription_counts(&self, head: u64) -> Result<SubscriptionCounts, AcdpError> {
+        let _ = head;
         Err(AcdpError::NotImplemented(
             "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
         ))

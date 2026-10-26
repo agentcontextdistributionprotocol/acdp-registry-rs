@@ -506,12 +506,20 @@ impl ExtendedRegistryStore for MemoryStore {
         Ok(true)
     }
 
-    async fn subscription_counts(&self) -> Result<SubscriptionCounts, AcdpError> {
+    async fn subscription_counts(&self, head: u64) -> Result<SubscriptionCounts, AcdpError> {
         let state = self.lock()?;
         let mut out = SubscriptionCounts::default();
         for s in state.subscriptions.values() {
             match s.status {
-                acdp::types::change::SubscriptionStatus::Active => out.active += 1,
+                acdp::types::change::SubscriptionStatus::Active => {
+                    out.active += 1;
+                    if s.last_hinted_seq < head {
+                        out.oldest_due_at_ms = Some(
+                            out.oldest_due_at_ms
+                                .map_or(s.next_attempt_at_ms, |o| o.min(s.next_attempt_at_ms)),
+                        );
+                    }
+                }
                 acdp::types::change::SubscriptionStatus::Disabled => out.disabled += 1,
             }
         }

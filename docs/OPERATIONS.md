@@ -270,7 +270,8 @@ reaches it unimpeded; gate it with `metrics.bearer_token` (or network policy)
 when the endpoint is reachable from untrusted networks. Beyond HTTP
 request-rate/latency/status by route, the registry exports domain counters
 (publishes by outcome, receipts minted, log leaves appended, lifecycle events,
-witness cosignatures, rate-limit rejections). Full metric list:
+witness cosignatures, rate-limit rejections, change-feed requests and prunes,
+subscription requests, hint deliveries by outcome, hint backlog age). Full metric list:
 [HTTP-API.md · `GET /metrics`](HTTP-API.md#get-metrics-feat-10).
 
 ## Event receipt sweep
@@ -329,6 +330,10 @@ What to watch:
   which). The subscription retries with backoff (one
   minute doubling to hourly) and disables itself after 72 hours of
   failure.
+- `acdp_registry_hint_oldest_due_seconds` climbing: a subscription owed a
+  hint has been due that long without one being recorded — the worker is
+  behind (every replica's batch is full) or deliveries keep failing; a
+  receiver in backoff counts from its retry time, not from the change.
 - `acdp_registry_hint_subscriptions{status="disabled"}` above zero:
   disabled subscriptions are kept, still count toward their owner's
   `max_subscriptions_per_requester`, and are never retried. The owner
@@ -403,7 +408,15 @@ first boot against it; there is no online restore path.
    without the profile, so the binary logs at `ERROR` and exits non-zero. Set
    the flag to match the backup — see
    [CONFIGURATION.md `[lifecycle]`](CONFIGURATION.md#lifecycle-acdp-030).
-5. **Verify readiness, not liveness.** `GET /healthz` reports storage
+5. **If `[changes]` is enabled, rotate its key after restoring an older
+   backup.** The restore rolls the feed's `seq` back. A cursor issued past
+   the restored head is refused (`cursor_expired`) only until new changes
+   push the head past it; from then on it is accepted, and a consumer
+   holding one silently skips the entries that reuse those numbers. Rotating (new key,
+   new `key_id`, see [Changes key](#changes-key)) turns every outstanding
+   cursor into `cursor_expired`, which makes consumers resync. Existing
+   subscriptions are disabled by the rotation and owners re-create them.
+6. **Verify readiness, not liveness.** `GET /healthz` reports storage
    readiness and answers `503` if the backend is not usable; `GET /livez` says
    only that the process is up and will answer `200` against a broken database.
    Check `/healthz`.

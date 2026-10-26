@@ -84,6 +84,12 @@ top of the upstream sync trait:
   `/log/entries` uses it to decide which leaves to echo.
 - The RFC-ACDP-0018 change feed — `changes_page`, `changes_head`,
   `prune_changes`, `producers_of`. See [Change feed](#change-feed) below.
+- RFC-ACDP-0018 §8 change-hint subscriptions (`subscriptions`, migration
+  018) — `create_subscription`, `get_subscription`, `delete_subscription`
+  (all owner-scoped), `claim_due_subscriptions` and
+  `finish_subscription_attempt` (a lease, so two replicas never deliver the
+  same subscription at once), `subscription_counts`. The hint worker in
+  `acdp-registry-core/src/hints.rs` drives them.
 
 ### Change feed
 

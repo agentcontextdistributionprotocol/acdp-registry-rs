@@ -508,7 +508,7 @@ impl reqwest::dns::Resolve for PolicyResolver {
 /// sender is dropped). A pass in progress claims no further batch after
 /// that, finishes the one in flight, and the task ends. A failed pass is
 /// logged and the next wake-up tries again. Also samples the
-/// subscription-status gauge once per wake-up.
+/// subscription-status and hint-backlog gauges once per wake-up.
 pub fn spawn_hint_worker<S: ExtendedRegistryStore + 'static>(
     state: Arc<AppState<S>>,
     poll: Duration,
@@ -522,8 +522,12 @@ pub fn spawn_hint_worker<S: ExtendedRegistryStore + 'static>(
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "change hint pass failed"),
             }
-            if let Ok(c) = state.server.store().subscription_counts().await {
-                crate::metrics::record_hint_subscriptions(c.active, c.disabled);
+            let store = state.server.store();
+            if let Ok(head) = store.changes_head().await {
+                if let Ok(c) = store.subscription_counts(head.head).await {
+                    crate::metrics::record_hint_subscriptions(c.active, c.disabled);
+                    crate::metrics::record_hint_backlog(c.oldest_due_at_ms, clock());
+                }
             }
             tokio::select! {
                 changed = shutdown.changed() => {

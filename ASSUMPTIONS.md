@@ -5040,11 +5040,12 @@ underlying settings and code were not touched by this pass, only the record of t
 - Alternatives: (a) a separate `[events]` key, which means a second secret to custody; (b) excluding disabled subscriptions, which lets a failing receiver accumulate rows without bound; (f) 400 for a malformed id.
 - Blast radius: low and reversible. Everything is server-side. (a) only changes where the key comes from, and a later split keeps the sealed format through `secret_key_id`.
 - Status: UNCONFIRMED
+- Addendum (P9): (l) Diverges from amendment A14. `/subscriptions` is mounted in the data group (`Cache-Control: private`, `Vary`), not a separate `no-store` group. Only `POST /subscriptions`, the one response that carries the secret, overrides to `no-store`. GET and DELETE never carry the secret, are owner-scoped, and the data group's `Vary: authorization` already stops a shared cache reusing them across requesters; §8 sets no cache requirement. Reversible by moving the routes to a `no-store` group.
 
 ## RFC-ACDP-0018 retraction recall, Phase 6 (2026-10-25)
 - Plan: plans/rfc0018-retraction-recall.md
 - Assumed:
-  - (a) Hint metrics use the repo's `acdp_registry_` prefix: `acdp_registry_hint_deliveries_total{outcome}` and `acdp_registry_hint_subscriptions{status}`. The plan said `acdp_hint_*`.
+  - (a) Hint metrics use the repo's `acdp_registry_` prefix: `acdp_registry_hint_deliveries_total{outcome}`, `acdp_registry_hint_subscriptions{status}` and (added in P9, per A22) `acdp_registry_hint_oldest_due_seconds`. The plan said `acdp_hint_*`. The backlog gauge measures from the oldest `next_attempt_at_ms` among active subscriptions with `last_hinted_seq < head`, clamped at 0.
   - (b) After a delivered hint the subscription is not due for 1 s (`HINT_MIN_INTERVAL_MS`), so a burst of changes coalesces into a few hints.
   - (c) Retries back off from 1 minute, doubling to an hourly cap. The subscription is disabled at the first failure 72 h or more after its failure run began. A delivered hint ends the run. §8.2 asks for at least one hour of retries and allows disabling at 72 h.
   - (d) If the subscription's cursor position has been pruned (`cursor_expired`), the worker re-evaluates from the oldest retained entry. It never hints for an entry the owner cannot see (rec-007 H). Hidden entries advance the position silently.

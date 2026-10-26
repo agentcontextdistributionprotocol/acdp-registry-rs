@@ -49,6 +49,7 @@ pub const CHANGES_PRUNED_THROUGH: &str = "acdp_registry_changes_pruned_through";
 pub const SUBSCRIPTION_REQUESTS_TOTAL: &str = "acdp_registry_subscription_requests_total";
 pub const HINT_DELIVERIES_TOTAL: &str = "acdp_registry_hint_deliveries_total";
 pub const HINT_SUBSCRIPTIONS: &str = "acdp_registry_hint_subscriptions";
+pub const HINT_OLDEST_DUE_SECONDS: &str = "acdp_registry_hint_oldest_due_seconds";
 
 /// Process-global recorder handle. `metrics-exporter-prometheus` installs a
 /// single global recorder; a second install returns an error. A `OnceLock`
@@ -227,6 +228,13 @@ pub fn record_hint_delivery(outcome: &'static str) {
 pub fn record_hint_subscriptions(active: u64, disabled: u64) {
     metrics::gauge!(HINT_SUBSCRIPTIONS, "status" => "active").set(active as f64);
     metrics::gauge!(HINT_SUBSCRIPTIONS, "status" => "disabled").set(disabled as f64);
+}
+
+/// Hint backlog age, sampled by the hint worker: how long the oldest
+/// subscription owed a hint has been due, or 0 when none is overdue.
+pub fn record_hint_backlog(oldest_due_at_ms: Option<i64>, now_ms: i64) {
+    let overdue_ms = oldest_due_at_ms.map_or(0, |due| now_ms.saturating_sub(due).max(0));
+    metrics::gauge!(HINT_OLDEST_DUE_SECONDS).set(overdue_ms as f64 / 1000.0);
 }
 
 /// One retention-prune pass: rows deleted, and the feed's markers after it.
