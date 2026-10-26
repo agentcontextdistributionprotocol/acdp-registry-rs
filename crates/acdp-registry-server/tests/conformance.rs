@@ -9739,9 +9739,11 @@ const EXCUSED: &[(&str, &str)] = &[
          the Phase 14 lc ruling -- see the block comment above rcpt's entry.",
     ),    (
         "chain",
-        "applies_to_profiles = [acdp-consumer-chain] on all 10 fixtures (RFC-ACDP-0017, \
-         spec pin 093279a), and none carries an endpoint or a vectors array. Two grounds, \
-         split by fixture. chain-001..008 and chain-010 are rot-shaped: offline \
+        "applies_to_profiles = [acdp-consumer-chain] on all 11 fixtures (RFC-ACDP-0017, \
+         spec pin 093279a; chain-011 added at 1511b08), and none carries an endpoint; \
+         only chain-011 carries a vectors array, of consumer known-answer tests. Two \
+         grounds, split by fixture. chain-001..008, chain-010 and chain-011 are \
+         rot-shaped: offline \
          derived_from walks, as-of verdicts, drift and verdict digests are the \
          CONSUMER's evaluation of a bundle it holds (RFC-ACDP-0017 \u{a7}8-\u{a7}9), so no \
          harness configuration change would make this registry responsible for them. \
