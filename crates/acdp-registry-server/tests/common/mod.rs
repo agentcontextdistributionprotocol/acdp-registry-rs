@@ -543,18 +543,24 @@ pub fn producer(prefix: &str, seed: u8) -> Producer {
 /// negative offset yields an already-expired token (the harness signer's
 /// leeway is 30s).
 pub fn forged_bearer(sub: &str, jti: &str, exp_offset_seconds: i64) -> String {
+    forged_bearer_for(AUTHORITY, sub, jti, exp_offset_seconds)
+}
+
+/// [`forged_bearer`] for a harness built with another `authority`.
+#[allow(dead_code)]
+pub fn forged_bearer_for(authority: &str, sub: &str, jti: &str, exp_offset_seconds: i64) -> String {
     let secret = JwtSecret::from_bytes(&[42u8; 32]);
-    let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
+    let signer = JwtSigner::new(secret, format!("did:web:{authority}"), authority.into(), 30);
     let now = chrono::Utc::now().timestamp();
     let claims = BearerClaims {
-        iss: format!("did:web:{AUTHORITY}"),
+        iss: format!("did:web:{authority}"),
         sub: sub.to_string(),
-        aud: AUTHORITY.into(),
+        aud: authority.into(),
         jti: jti.to_string(),
         iat: now - 60,
         exp: now + exp_offset_seconds,
         acdp: AcdpClaims {
-            registry: AUTHORITY.into(),
+            registry: authority.into(),
             key_id: format!("{sub}#key-1"),
         },
         tenant: None,

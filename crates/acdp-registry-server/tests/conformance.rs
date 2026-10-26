@@ -9771,10 +9771,13 @@ const EXCUSED: &[(&str, &str)] = &[
          with acdp-registry-changes advertised (EXERCISED_FIXTURES); rec-004 (it \
          needs per-requester bearers) and rec-008 are exercised by \
          tests/changes_http.rs and the store tests; rec-007 scenarios A, B and F by \
-         tests/subscriptions_http.rs. rec-006, and rec-007 \
+         tests/subscriptions_http.rs, and C, G and H by tests/hints_e2e.rs (signed \
+         hints over real TLS). rec-006, and rec-007 \
          scenarios D-E, are acdp-consumer-recall: the consumer's verification of entries \
          and hints it receives (RFC-ACDP-0018 \u{a7}7, \u{a7}8.2 receiver duty), which no \
-         harness configuration would make this registry responsible for. None of the \
+         harness configuration would make this registry responsible for; \
+         tests/recall_e2e.rs runs the SDK consumer (acdp::client::verify_change, \
+         ChangeFeed) against this registry to prove the entries it serves verify. None of the \
          family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
 ];
