@@ -1,5 +1,12 @@
 
 
+## [0.6.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.6.0...acdp-registry-server/v0.6.1) - 2026-10-26
+
+### Other
+
+- *(deps)* adopt ACDP spec @ 1511b08 and bump acdp to =0.17.1 ([#474](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/474))
+
+
 ## [0.6.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.5.6...acdp-registry-server/v0.6.0) - 2026-10-26
 
 ### Added
