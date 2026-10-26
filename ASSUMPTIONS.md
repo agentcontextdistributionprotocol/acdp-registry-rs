@@ -5040,3 +5040,25 @@ underlying settings and code were not touched by this pass, only the record of t
 - Alternatives: (a) a separate `[events]` key, which means a second secret to custody; (b) excluding disabled subscriptions, which lets a failing receiver accumulate rows without bound; (f) 400 for a malformed id.
 - Blast radius: low and reversible. Everything is server-side. (a) only changes where the key comes from, and a later split keeps the sealed format through `secret_key_id`.
 - Status: UNCONFIRMED
+
+## RFC-ACDP-0018 retraction recall, Phase 6 (2026-10-25)
+- Plan: plans/rfc0018-retraction-recall.md
+- Assumed:
+  - (a) Hint metrics use the repo's `acdp_registry_` prefix: `acdp_registry_hint_deliveries_total{outcome}` and `acdp_registry_hint_subscriptions{status}`. The plan said `acdp_hint_*`.
+  - (b) After a delivered hint the subscription is not due for 1 s (`HINT_MIN_INTERVAL_MS`), so a burst of changes coalesces into a few hints.
+  - (c) Retries back off from 1 minute, doubling to an hourly cap. The subscription is disabled at the first failure 72 h or more after its failure run began. A delivered hint ends the run. §8.2 asks for at least one hour of retries and allows disabling at 72 h.
+  - (d) If the subscription's cursor position has been pruned (`cursor_expired`), the worker re-evaluates from the oldest retained entry. It never hints for an entry the owner cannot see (rec-007 H). Hidden entries advance the position silently.
+  - (e) An SSRF refusal at delivery time backs off and retries like any other failure. It is not an immediate disable, so a transient DNS answer cannot kill a subscription.
+  - (f) Replicas coordinate through a 60 s store lease (pg `FOR UPDATE SKIP LOCKED`; sqlite and memory serialize). Only the lease holder may record the outcome. A duplicate hint arises when a POST was sent but its outcome was never recorded: the replica crashed, the attempt overran its 20 s bound, or the store write after delivery failed. The lease then lapses and the next attempt hints again. This is harmless because hints carry no content and the receiver reads from its own cursor. The two-replica e2e test runs on SQLite. The pg claim's mutual exclusion is proven at the store level (parity), not by two pg workers end to end.
+  - (g) A secret that cannot be unsealed (the `[changes]` key was rotated) disables the subscription.
+  - (h) The response body is never read. Only the status matters.
+  - (i) The clock is read per claim batch (for the lease) and per delivery (for the signature `t`, and again after the POST for the retry schedule). Each attempt is bounded at 20 s (`ATTEMPT_TIMEOUT`), and a const assert keeps a batch (2 rounds of 16 in flight) under the 60 s lease. Each callback lookup is bounded at 5 s (`callback::LOOKUP_TIMEOUT`), on creation as well.
+  - (j) A stored owner DID that does not parse disables the subscription with a warn, since no retry could succeed. Any other store or evaluation error records nothing (`outcome="error"`) and leaves the lease to lapse.
+  - (k) Shutdown is cooperative. On SIGTERM the worker stops claiming and finishes the batch in flight. `main` awaits it for up to `LEASE_MS` after the listener drains.
+- Chose: as above.
+- Alternatives:
+  - (b) no minimum interval, which means one hint per commit under load;
+  - (c) a fixed hourly retry, which is slower to recover from a brief outage;
+  - (e) disable on the first refusal.
+- Blast radius: low and reversible. These are server-side delivery-policy constants and internal metric names. The wire format and the stored schema are unaffected.
+- Status: UNCONFIRMED

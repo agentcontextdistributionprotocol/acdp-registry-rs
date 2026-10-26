@@ -66,7 +66,7 @@ use acdp::types::capabilities::{CapabilitiesDocument, Limits};
 use acdp_registry_auth::{AuthService, ChallengeStore, JwtSecret, JwtSigner, RevocationStore};
 #[cfg(feature = "storage-memory")]
 use acdp_registry_auth::{InMemoryChallengeStore, InMemoryRevocationStore};
-use acdp_registry_core::{build_router, AppStateInner};
+use acdp_registry_core::{build_router_shared, AppStateInner};
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::config::SharedLimitBackendKind;
 use acdp_registry_types::{
@@ -1324,7 +1324,22 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
         }
     }
 
-    let router = build_router(state);
+    // RFC-ACDP-0018 §8.2 change hints: one worker per replica, sharing the
+    // handlers' state so their commits wake it. Replicas coordinate through
+    // per-subscription leases in the store.
+    // The worker stops claiming on the shutdown signal and is awaited after
+    // the listener drains, so an in-flight delivery records its outcome.
+    let state = Arc::new(state);
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let hint_worker = state.events_key().is_some().then(|| {
+        tracing::info!("spawning the change hint worker (RFC-ACDP-0018 §8.2)");
+        acdp_registry_core::hints::spawn_hint_worker(
+            Arc::clone(&state),
+            acdp_registry_core::hints::POLL_INTERVAL,
+            stop_rx,
+        )
+    });
+    let router = build_router_shared(state);
 
     // Bind. TLS is optional — production typically terminates upstream.
     let addr = resolve_bind_addr(&cfg.registry.bind, cfg.registry.port)?;
@@ -1332,7 +1347,7 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     // OPS-03: graceful shutdown on SIGTERM / Ctrl-C. In-flight requests
     // get up to 30s to complete before the handle drops the listener.
     let handle = axum_server::Handle::<SocketAddr>::new();
-    spawn_shutdown_watcher(handle.clone());
+    spawn_shutdown_watcher(handle.clone(), stop_tx);
     if cfg.registry.tls.enabled {
         let cert = cfg
             .registry
@@ -1357,10 +1372,20 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
             .serve(router.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     }
+    if let Some(worker) = hint_worker {
+        // A batch finishes within the lease; give it that long.
+        let bound = std::time::Duration::from_millis(acdp_registry_core::hints::LEASE_MS as u64);
+        if tokio::time::timeout(bound, worker).await.is_err() {
+            tracing::warn!("change hint worker did not stop in time; its leases will lapse");
+        }
+    }
     Ok(())
 }
 
-fn spawn_shutdown_watcher(handle: axum_server::Handle<SocketAddr>) {
+fn spawn_shutdown_watcher(
+    handle: axum_server::Handle<SocketAddr>,
+    stop_hints: tokio::sync::watch::Sender<bool>,
+) {
     tokio::spawn(async move {
         #[cfg(unix)]
         let term = async {
@@ -1378,6 +1403,7 @@ fn spawn_shutdown_watcher(handle: axum_server::Handle<SocketAddr>) {
             _ = term => {},
         }
         tracing::info!("shutdown signal received; draining for up to 30s");
+        let _ = stop_hints.send(true);
         handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
     });
 }
@@ -2188,7 +2214,7 @@ mod tests {
             Arc::new(WebResolver::new()),
             authority,
         ));
-        build_router(AppStateInner::new(server, auth, None, cfg, None))
+        acdp_registry_core::build_router(AppStateInner::new(server, auth, None, cfg, None))
     }
 
     /// W3-U5: pins the invariant the auth-off `info!` in `serve_with_store`

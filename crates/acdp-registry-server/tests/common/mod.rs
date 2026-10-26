@@ -399,6 +399,25 @@ impl SeededHarness {
         )));
     }
 
+    /// [`Self::rebuild_state_with`], also returning the state the router
+    /// serves, for a test that drives a background worker (the change-hint
+    /// worker) against the same state the handlers use.
+    pub fn rebuild_shared_with(
+        &mut self,
+        cfg: RegistryConfig,
+        f: impl FnOnce(AppStateInner<SqliteStore>) -> AppStateInner<SqliteStore>,
+    ) -> Arc<AppStateInner<SqliteStore>> {
+        let state = Arc::new(f(AppStateInner::new(
+            self.server.clone(),
+            self.auth.clone(),
+            None,
+            cfg,
+            None,
+        )));
+        self.router = acdp_registry_core::build_router_shared(Arc::clone(&state));
+        state
+    }
+
     /// Direct access to the underlying store, bypassing the HTTP surface
     /// and every publish-time check the SDK's `commit_proven`/validator
     /// pipeline runs — including checks a fixture's own precondition would

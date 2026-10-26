@@ -33,7 +33,10 @@ pub use cursor::{decode_cursor, encode_cursor};
 pub use event_receipts::{EventReceiptMinter, StoredReceipt, SweepReport};
 pub use log::{build_leaf_record, LogEntryRecord};
 pub use rate_limit::{LimitDecision, SharedLimitScope, SharedRateLimitBackend};
-pub use subscriptions::{CreateSubscriptionOutcome, NewSubscription, SubscriptionRecord};
+pub use subscriptions::{
+    CreateSubscriptionOutcome, NewSubscription, SubscriptionCounts, SubscriptionProgress,
+    SubscriptionRecord,
+};
 
 /// Cursor-keyed page returned by [`ExtendedRegistryStore::list_contexts`].
 #[derive(Debug, Clone)]
@@ -362,6 +365,48 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
         subscription_id: &str,
     ) -> Result<bool, AcdpError> {
         let _ = (owner_did, subscription_id);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    /// Lease up to `limit` subscriptions that are due a hint attempt:
+    /// active, `next_attempt_at_ms <= now_ms`, not leased (or the lease has
+    /// lapsed), and behind `head`. Each returned record carries
+    /// `lease_until_ms`. The claim commits before returning, so no
+    /// transaction is held across delivery, and concurrent claimants never
+    /// receive the same row.
+    async fn claim_due_subscriptions(
+        &self,
+        now_ms: i64,
+        head: u64,
+        lease_until_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<SubscriptionRecord>, AcdpError> {
+        let _ = (now_ms, head, lease_until_ms, limit);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    /// Record the outcome of an attempt and release the lease, only if
+    /// `subscription_id` still holds the lease `lease_until_ms`. `false`
+    /// when it does not (deleted, or claimed again after the lease lapsed):
+    /// nothing is written.
+    async fn finish_subscription_attempt(
+        &self,
+        subscription_id: &str,
+        lease_until_ms: i64,
+        progress: &SubscriptionProgress,
+    ) -> Result<bool, AcdpError> {
+        let _ = (subscription_id, lease_until_ms, progress);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    /// Subscriptions per status, across all owners.
+    async fn subscription_counts(&self) -> Result<SubscriptionCounts, AcdpError> {
         Err(AcdpError::NotImplemented(
             "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
         ))

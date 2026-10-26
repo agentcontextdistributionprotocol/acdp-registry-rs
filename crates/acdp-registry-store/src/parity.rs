@@ -3255,6 +3255,236 @@ where
     );
 }
 
+/// RFC-ACDP-0018 §8.2 delivery leases: `claim_due_subscriptions` hands each
+/// due row to exactly one claimant, even when claimants race; a leased,
+/// caught-up, not-yet-due or disabled row is not claimed; a lapsed lease is
+/// claimable again; and `finish_subscription_attempt` writes only for the
+/// lease holder.
+///
+/// The suite's clock is decades in the past, so the only due rows are this
+/// run's own (every other fixture is due in 2026): a shared Postgres
+/// database's other rows are never claimed, and the assertions look at this
+/// run's ids alone.
+pub async fn assert_subscription_claims<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use crate::{CreateSubscriptionOutcome, SubscriptionProgress};
+    use acdp::types::change::SubscriptionStatus;
+    use std::collections::HashSet;
+
+    const T0: i64 = 1_000_000;
+    const HEAD: u64 = 1_000;
+    const LEASE: i64 = 60_000;
+    let owner = unique_owner(label);
+    let mut ids = Vec::new();
+    let mut add = |n: u32, last_hinted_seq: u64| {
+        let mut new = subscription_fixture(&owner, n);
+        new.created_at_ms = T0 - 1;
+        new.last_hinted_seq = last_hinted_seq;
+        ids.push(new.subscription_id.clone());
+        new
+    };
+    let racing: Vec<_> = (0..8).map(|n| add(n, 5)).collect();
+    let caught_up = add(20, HEAD);
+    let mut all = racing.clone();
+    all.push(caught_up.clone());
+    for new in &all {
+        assert_eq!(
+            store.create_subscription(new, 100).await.expect("create"),
+            CreateSubscriptionOutcome::Created,
+            "{label}"
+        );
+    }
+    let ours: HashSet<String> = ids.iter().cloned().collect();
+    let racing_ids: HashSet<String> = racing.iter().map(|n| n.subscription_id.clone()).collect();
+
+    // Concurrent claimants, each taking at most 3: every due row goes to
+    // exactly one of them, and the caught-up row to none.
+    let mut tasks = Vec::new();
+    for _ in 0..6 {
+        let store = Arc::clone(store);
+        tasks.push(tokio::spawn(async move {
+            store
+                .claim_due_subscriptions(T0, HEAD, T0 + LEASE, 3)
+                .await
+                .expect("claim")
+        }));
+    }
+    let mut claimed = Vec::new();
+    for t in tasks {
+        claimed.extend(t.await.expect("join"));
+    }
+    let mine: Vec<_> = claimed
+        .into_iter()
+        .filter(|r| ours.contains(&r.subscription_id))
+        .collect();
+    let mut seen = HashSet::new();
+    for r in &mine {
+        assert!(
+            seen.insert(r.subscription_id.clone()),
+            "{label}: {} claimed twice",
+            r.subscription_id
+        );
+        assert_eq!(
+            r.lease_until_ms,
+            Some(T0 + LEASE),
+            "{label}: the claim returns its lease"
+        );
+    }
+    assert_eq!(
+        seen, racing_ids,
+        "{label}: every due row is claimed, the caught-up one is not"
+    );
+
+    // Leased rows are not claimed again until the lease lapses.
+    let again = store
+        .claim_due_subscriptions(T0 + 1, HEAD, T0 + 1 + LEASE, 100)
+        .await
+        .expect("claim leased");
+    assert!(
+        again.iter().all(|r| !ours.contains(&r.subscription_id)),
+        "{label}: a leased row is claimed again"
+    );
+
+    let [a, b, c, d, ..] = &racing[..] else {
+        unreachable!()
+    };
+    // Only the lease holder finishes.
+    let healthy = SubscriptionProgress::healthy(HEAD, T0 + 10 * LEASE);
+    assert!(
+        !store
+            .finish_subscription_attempt(&a.subscription_id, T0 + LEASE + 1, &healthy)
+            .await
+            .expect("finish with a stale lease"),
+        "{label}: a foreign lease writes nothing"
+    );
+    assert!(
+        store
+            .finish_subscription_attempt(&a.subscription_id, T0 + LEASE, &healthy)
+            .await
+            .expect("finish"),
+        "{label}: the holder finishes"
+    );
+    let got = store
+        .get_subscription(&owner, &a.subscription_id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(got.last_hinted_seq, HEAD, "{label}");
+    assert_eq!(got.next_attempt_at_ms, T0 + 10 * LEASE, "{label}");
+    assert_eq!(
+        got.lease_until_ms, None,
+        "{label}: finishing releases the lease"
+    );
+    assert!(
+        !store
+            .finish_subscription_attempt(&a.subscription_id, T0 + LEASE, &healthy)
+            .await
+            .expect("finish twice"),
+        "{label}: a released lease cannot finish again"
+    );
+
+    // A failure keeps the position and schedules a retry; the retry is due
+    // only when its time comes.
+    let failing = SubscriptionProgress {
+        last_hinted_seq: 5,
+        status: SubscriptionStatus::Active,
+        next_attempt_at_ms: T0 + 2 * LEASE,
+        failing_since_ms: Some(T0),
+        attempts: 1,
+    };
+    assert!(store
+        .finish_subscription_attempt(&b.subscription_id, T0 + LEASE, &failing)
+        .await
+        .expect("finish failing"));
+    let got = store
+        .get_subscription(&owner, &b.subscription_id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(
+        (got.last_hinted_seq, got.failing_since_ms, got.attempts),
+        (5, Some(T0), 1),
+        "{label}: failure history round-trips"
+    );
+
+    // Disabled rows are never claimed.
+    let mut c_rec = store
+        .get_subscription(&owner, &c.subscription_id)
+        .await
+        .expect("get")
+        .expect("exists");
+    c_rec.failing_since_ms = Some(T0 - 5);
+    assert!(store
+        .finish_subscription_attempt(
+            &c.subscription_id,
+            T0 + LEASE,
+            &SubscriptionProgress::disabled(&c_rec, T0)
+        )
+        .await
+        .expect("disable"));
+    let got = store
+        .get_subscription(&owner, &c.subscription_id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(got.status, SubscriptionStatus::Disabled, "{label}");
+    assert_eq!(
+        got.failing_since_ms,
+        Some(T0 - 5),
+        "{label}: kept for the operator"
+    );
+    let counts = store.subscription_counts().await.expect("counts");
+    assert!(
+        counts.disabled >= 1 && counts.active >= 1,
+        "{label}: {counts:?}"
+    );
+
+    // After every lease lapses: `d` (never finished) and `b` (its retry now
+    // due) are claimable; `a` (caught up and not yet due), `c` (disabled)
+    // and the caught-up row are not.
+    let later = T0 + 2 * LEASE;
+    let reclaimed: HashSet<String> = store
+        .claim_due_subscriptions(later, HEAD, later + LEASE, 100)
+        .await
+        .expect("reclaim")
+        .into_iter()
+        .map(|r| r.subscription_id)
+        .filter(|id| ours.contains(id))
+        .collect();
+    assert!(
+        reclaimed.contains(&d.subscription_id),
+        "{label}: a lapsed lease is claimable"
+    );
+    assert!(
+        reclaimed.contains(&b.subscription_id),
+        "{label}: a due retry is claimable"
+    );
+    for (who, id) in [
+        ("caught up", &a.subscription_id),
+        ("disabled", &c.subscription_id),
+        ("at head", &caught_up.subscription_id),
+    ] {
+        assert!(!reclaimed.contains(id), "{label}: {who} row claimed");
+    }
+    // The first claim's holder lost `d` to the reclaim.
+    assert!(
+        !store
+            .finish_subscription_attempt(&d.subscription_id, T0 + LEASE, &healthy)
+            .await
+            .expect("finish lost lease"),
+        "{label}: a lapsed lease cannot finish over its successor"
+    );
+
+    for id in &ids {
+        store
+            .delete_subscription(&owner, id)
+            .await
+            .expect("cleanup");
+    }
+}
+
 #[cfg(test)]
 mod lifecycle_probe_tests {
     use super::*;

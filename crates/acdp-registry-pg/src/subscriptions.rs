@@ -10,7 +10,7 @@ use acdp::error::AcdpError;
 use acdp::types::change::SubscriptionStatus;
 use acdp_registry_store::subscriptions::{
     filter_json, parse_filter, parse_status, status_str, CreateSubscriptionOutcome,
-    NewSubscription, SubscriptionRecord,
+    NewSubscription, SubscriptionCounts, SubscriptionProgress, SubscriptionRecord,
 };
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
@@ -101,6 +101,80 @@ pub(crate) async fn delete(
             .await
             .map_err(db_err("delete"))?;
     Ok(done.rows_affected() > 0)
+}
+
+/// Lease up to `limit` due subscriptions in one statement. `FOR UPDATE SKIP LOCKED` in the subselect makes concurrent claimants on
+/// other replicas skip rows already being leased instead of waiting on them.
+pub(crate) async fn claim_due(
+    pool: &PgPool,
+    now_ms: i64,
+    head: u64,
+    lease_until_ms: i64,
+    limit: u32,
+) -> Result<Vec<SubscriptionRecord>, AcdpError> {
+    let rows = sqlx::query(&format!(
+        "UPDATE subscriptions SET lease_until_ms = $1 \
+         WHERE subscription_id IN (\
+           SELECT subscription_id FROM subscriptions \
+           WHERE status = 'active' AND next_attempt_at_ms <= $2 \
+             AND (lease_until_ms IS NULL OR lease_until_ms < $3) \
+             AND last_hinted_seq < $4 \
+           ORDER BY next_attempt_at_ms LIMIT $5 FOR UPDATE SKIP LOCKED) \
+         RETURNING {COLUMNS}"
+    ))
+    .bind(lease_until_ms)
+    .bind(now_ms)
+    .bind(now_ms)
+    .bind(i64::try_from(head).unwrap_or(i64::MAX))
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await
+    .map_err(db_err("claim"))?;
+    rows.iter().map(record).collect()
+}
+
+/// Write an attempt's outcome and release the lease, if `lease_until_ms`
+/// is still the row's lease.
+pub(crate) async fn finish_attempt(
+    pool: &PgPool,
+    subscription_id: &str,
+    lease_until_ms: i64,
+    p: &SubscriptionProgress,
+) -> Result<bool, AcdpError> {
+    let done = sqlx::query(
+        "UPDATE subscriptions SET last_hinted_seq = $1, status = $2, \
+         next_attempt_at_ms = $3, failing_since_ms = $4, attempts = $5, \
+         lease_until_ms = NULL \
+         WHERE subscription_id = $6 AND lease_until_ms = $7",
+    )
+    .bind(i64::try_from(p.last_hinted_seq).unwrap_or(i64::MAX))
+    .bind(status_str(p.status))
+    .bind(p.next_attempt_at_ms)
+    .bind(p.failing_since_ms)
+    .bind(i32::try_from(p.attempts).unwrap_or(i32::MAX))
+    .bind(subscription_id)
+    .bind(lease_until_ms)
+    .execute(pool)
+    .await
+    .map_err(db_err("finish"))?;
+    Ok(done.rows_affected() > 0)
+}
+
+pub(crate) async fn counts(pool: &PgPool) -> Result<SubscriptionCounts, AcdpError> {
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT status, COUNT(*) FROM subscriptions GROUP BY status")
+            .fetch_all(pool)
+            .await
+            .map_err(db_err("count"))?;
+    let mut out = SubscriptionCounts::default();
+    for (status, n) in rows {
+        let n = u64::try_from(n).unwrap_or(0);
+        match parse_status(&status)? {
+            SubscriptionStatus::Active => out.active = n,
+            SubscriptionStatus::Disabled => out.disabled = n,
+        }
+    }
+    Ok(out)
 }
 
 fn record(r: &PgRow) -> Result<SubscriptionRecord, AcdpError> {

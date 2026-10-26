@@ -388,6 +388,8 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_changes_pruned_total` | counter | — | Feed rows deleted by the retention prune task. |
 | `acdp_registry_changes_head_seq` | gauge | — | Feed head `seq` after the last prune pass. |
 | `acdp_registry_changes_pruned_through` | gauge | — | Highest pruned `seq`; a cursor below it is `cursor_expired`. |
+| `acdp_registry_hint_deliveries_total` | counter | `outcome` | RFC-ACDP-0018 hint attempts. `outcome` is `delivered`, `nothing_visible` (matching entries the owner cannot see; the position advanced, nothing sent), `failed` (non-2xx, redirect, timeout, connect error), `ssrf_refused` (the host no longer resolves to public unicast only), `disabled` (the attempt that disabled the subscription: 72 h of failure, a secret that no longer opens, or an unreadable stored owner), `lease_lost` (the subscription was deleted or taken over meanwhile; nothing recorded) or `error` (a store or evaluation error, or the attempt overran its 20 s bound; nothing recorded, retried once the lease lapses). An address refused at connect time, after the pre-check passed, counts as `failed`. |
+| `acdp_registry_hint_subscriptions` | gauge | `status` | Subscriptions by `status` (`active`, `disabled`), refreshed after every worker pass. |
 | `acdp_registry_subscription_requests_total` | counter | `op`, `outcome` | RFC-ACDP-0018 `/subscriptions` requests. `op` is `create`, `get` or `delete`; `outcome` is `ok` or the wire code (`schema_violation`, `not_found`, `not_authorized`, `not_implemented`, …). |
 
 > **`scope` changed meaning for global challenge rejections (H-A/P4).** Until
@@ -792,6 +794,26 @@ This section records what this registry does:
   (`Cache-Control: private`).
 - **Delete.** `DELETE` is `204`. The slot it held counts toward the limit
   until then; a disabled subscription still holds one.
+- **Hints.** A background worker on every replica POSTs an
+  `acdp-change-hint/1` body (`Content-Type: application/json`, header
+  `ACDP-Signature: t=<unix seconds>,v1=<hex HMAC-SHA-256>`) to the
+  `callback_url` when the feed holds an entry past the subscription's last
+  hint that matches its filter **and that the owner's own `GET /changes`
+  would return**. A change the owner cannot see sends nothing. Every change
+  since the last hint is covered by one hint, and a subscription is hinted
+  at most once a second. The hint carries no change content: the receiver
+  calls `GET /changes` itself. Each delivery re-resolves the host and
+  refuses it unless every address is public unicast (a lookup has 5 s);
+  the connection's own lookup is checked the same way, so an answer that
+  rebinds in between is refused too. It follows no redirect, gives up after
+  10 s and never reads the response body. Any non-2xx, a redirect, a
+  timeout or a refused address is a failure: retries back off from one
+  minute, doubling to an hourly ceiling, and changes in the meantime
+  coalesce into the next hint. A subscription still failing 72 hours after
+  its first failure is disabled, `GET` then shows `"status": "disabled"`,
+  and it is never tried again; the owner deletes and re-creates it. A
+  delivered hint ends the failure run. Replicas share the work through
+  60-second store leases, so a hint is delivered by one replica.
 
 ---
 

@@ -553,3 +553,10 @@ async fn subscription_limit_holds_under_concurrent_creates() {
     let (plain, _tmp) = store().await;
     parity::assert_subscription_limit(&plain, "sqlite").await;
 }
+
+/// RFC-ACDP-0018 §8.2: delivery leases hand each due row to one claimant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn subscription_claims_have_one_holder() {
+    let (plain, _tmp) = store().await;
+    parity::assert_subscription_claims(&plain, "sqlite").await;
+}

@@ -8,6 +8,7 @@ pub mod callback;
 pub mod changes_key;
 pub mod extract;
 pub mod handlers;
+pub mod hints;
 pub mod log;
 pub mod metrics;
 pub mod playground;
@@ -55,7 +56,13 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
     // FEAT-06/FEAT-10: `from_fn_with_state` middleware (the `/auth/*` limiter)
     // and the `/metrics` route both need the shared state up front, so build
     // the `Arc` here rather than only at `.with_state` time.
-    let state = Arc::new(state);
+    build_router_shared(Arc::new(state))
+}
+
+/// [`build_router`] over state the caller also holds, such as the hint
+/// worker ([`hints::spawn_hint_worker`]), which must see the same
+/// `hints_notify` the handlers wake.
+pub fn build_router_shared<S: ExtendedRegistryStore + 'static>(state: Arc<AppState<S>>) -> Router {
     let admin = admin_router::<S>();
     let auth_enabled = state.config.auth.enabled;
     let metrics_enabled = state.metrics.is_some();

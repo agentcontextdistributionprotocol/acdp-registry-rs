@@ -704,7 +704,15 @@ points at the feed, and subscription secrets are sealed under a key derived
 from the `[changes]` master key), `auth.enabled = true` (every subscription
 has an authenticated owner), and `max_subscriptions_per_requester >= 1`.
 Rotating the `[changes]` key makes existing subscription secrets
-unreadable, so their hints stop; owners re-create them.
+unreadable: the worker disables each such subscription at its next
+delivery, and owners re-create them.
+
+With `[events]` enabled every replica runs the hint worker (see
+[HTTP-API.md](HTTP-API.md#post-subscriptions-get-subscriptionsid-delete-subscriptionsid-acdp-050)
+and [OPERATIONS.md](OPERATIONS.md#change-hints)). Its delivery policy is
+fixed, not configured: retries from one minute doubling to hourly, disable
+after 72 hours of failure, 10 s per request, 16 deliveries in flight per
+replica.
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|

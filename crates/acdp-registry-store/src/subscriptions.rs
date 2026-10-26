@@ -73,6 +73,51 @@ pub enum CreateSubscriptionOutcome {
     LimitReached,
 }
 
+/// Where one delivery attempt leaves a subscription. Written back by
+/// `finish_subscription_attempt`, which also releases the lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubscriptionProgress {
+    pub last_hinted_seq: u64,
+    pub status: SubscriptionStatus,
+    pub next_attempt_at_ms: i64,
+    pub failing_since_ms: Option<i64>,
+    pub attempts: u32,
+}
+
+impl SubscriptionProgress {
+    /// Caught up to `seq`, no failure outstanding, next due at
+    /// `next_attempt_at_ms`.
+    pub fn healthy(seq: u64, next_attempt_at_ms: i64) -> Self {
+        Self {
+            last_hinted_seq: seq,
+            status: SubscriptionStatus::Active,
+            next_attempt_at_ms,
+            failing_since_ms: None,
+            attempts: 0,
+        }
+    }
+
+    /// `sub` disabled where it stands: its position and failure history are
+    /// kept for the operator.
+    pub fn disabled(sub: &SubscriptionRecord, now_ms: i64) -> Self {
+        Self {
+            last_hinted_seq: sub.last_hinted_seq,
+            status: SubscriptionStatus::Disabled,
+            next_attempt_at_ms: now_ms,
+            failing_since_ms: Some(sub.failing_since_ms.unwrap_or(now_ms)),
+            attempts: sub.attempts,
+        }
+    }
+}
+
+/// How many subscriptions are in each status, for the
+/// `acdp_registry_hint_subscriptions{status}` gauge.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SubscriptionCounts {
+    pub active: u64,
+    pub disabled: u64,
+}
+
 impl SubscriptionRecord {
     /// The record as `GET /subscriptions/{id}` serves it: without `secret`.
     /// A record that no longer forms a valid subscription is a

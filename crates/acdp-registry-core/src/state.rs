@@ -96,6 +96,12 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     pub callback_policy: acdp::safe_http::SsrfPolicy,
     /// How a callback host is resolved for those checks.
     pub callback_resolver: Arc<dyn crate::callback::CallbackResolver>,
+    /// Woken after every commit that appends to the change feed, so the
+    /// hint worker runs a pass at once instead of at its next poll.
+    pub hints_notify: Arc<tokio::sync::Notify>,
+    /// Extra trust anchors for hint delivery, on top of the webpki roots
+    /// (tests: a private CA for a local receiver). Empty in production.
+    pub hint_extra_roots: Vec<reqwest::Certificate>,
 }
 
 impl<S: ExtendedRegistryStore> AppStateInner<S> {
@@ -149,6 +155,22 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
     ) -> Self {
         self.callback_resolver = resolver;
         self
+    }
+
+    /// Also trust the PEM certificate `root` for hint delivery, beside the
+    /// webpki roots (tests: an in-process HTTPS receiver).
+    pub fn with_hint_root_pem(mut self, root: &[u8]) -> Result<Self, reqwest::Error> {
+        self.hint_extra_roots
+            .push(reqwest::Certificate::from_pem(root)?);
+        Ok(self)
+    }
+
+    /// Wake the hint worker: the change feed has grown. Cheap, and a no-op
+    /// beyond a stored permit when no worker is waiting.
+    pub fn notify_hints(&self) {
+        if self.config.events.enabled {
+            self.hints_notify.notify_one();
+        }
     }
 
     /// Replace the callback SSRF policy (tests).
@@ -276,6 +298,8 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             changes,
             callback_policy: acdp::safe_http::SsrfPolicy::default(),
             callback_resolver: Arc::new(crate::callback::SystemResolver),
+            hints_notify: Arc::new(tokio::sync::Notify::new()),
+            hint_extra_roots: Vec::new(),
         }
     }
 }

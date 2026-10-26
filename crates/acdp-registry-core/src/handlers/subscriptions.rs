@@ -140,16 +140,13 @@ pub(crate) async fn check_callback<S: ExtendedRegistryStore + 'static>(
         .ok_or_else(|| refuse("no host".into()))?
         .to_owned();
     let port = parsed.port_or_known_default().unwrap_or(443);
-    let resolved = match state.callback_resolver.lookup(&host, port).await {
-        Ok(addrs) if addrs.is_empty() => Err(format!("'{host}' does not resolve")),
-        Ok(addrs) => acdp::safe_http::reject_if_any_forbidden(policy, &host, &addrs)
-            .map_err(|e| e.to_string()),
-        Err(e) => Err(e.to_string()),
-    };
-    resolved.map_err(|detail| {
-        tracing::info!(%host, %detail, "subscription callback_url refused at resolution");
-        refuse(UNRESOLVABLE.into())
-    })
+    crate::callback::resolve_allowed(policy, state.callback_resolver.as_ref(), &host, port)
+        .await
+        .map(drop)
+        .map_err(|detail| {
+            tracing::info!(%host, %detail, "subscription callback_url refused at resolution");
+            refuse(UNRESOLVABLE.into())
+        })
 }
 
 /// The one message for every resolution-time refusal (see [`check_callback`]).

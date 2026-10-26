@@ -517,6 +517,32 @@ impl ExtendedRegistryStore for SqliteStore {
         crate::subscriptions::delete(&self.pool, owner_did, subscription_id).await
     }
 
+    async fn claim_due_subscriptions(
+        &self,
+        now_ms: i64,
+        head: u64,
+        lease_until_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<acdp_registry_store::SubscriptionRecord>, AcdpError> {
+        crate::subscriptions::claim_due(&self.pool, now_ms, head, lease_until_ms, limit).await
+    }
+
+    async fn finish_subscription_attempt(
+        &self,
+        subscription_id: &str,
+        lease_until_ms: i64,
+        progress: &acdp_registry_store::SubscriptionProgress,
+    ) -> Result<bool, AcdpError> {
+        crate::subscriptions::finish_attempt(&self.pool, subscription_id, lease_until_ms, progress)
+            .await
+    }
+
+    async fn subscription_counts(
+        &self,
+    ) -> Result<acdp_registry_store::SubscriptionCounts, AcdpError> {
+        crate::subscriptions::counts(&self.pool).await
+    }
+
     // ── Transparency log reads (RFC-ACDP-0012) ─────────────────────────
 
     async fn log_tree_size(&self) -> Result<u64, AcdpError> {

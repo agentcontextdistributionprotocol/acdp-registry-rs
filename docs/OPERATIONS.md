@@ -305,6 +305,46 @@ lifecycle commit takes, so several replicas starting together fill each event ex
   above zero, not on its rate. During a Postgres rolling upgrade, events that 0.5.5 replicas still
   accept have no receipt until the next append or restart, so the incomplete count rises then too.
 
+## Change hints
+
+With `[events]` enabled each replica runs a hint worker. It wakes after
+every commit that can grow the change feed and every 15 seconds for
+retries, claims due subscriptions with a 60-second lease (Postgres:
+`FOR UPDATE SKIP LOCKED`, so replicas split the work rather than duplicate
+it), evaluates each one exactly as the owner's `GET /changes`, and POSTs
+one signed hint covering every new visible change.
+On SIGTERM the worker stops claiming, finishes the batch in flight (the
+process waits up to the 60-second lease for it) and exits. A replica that
+dies mid-delivery leaves only a lease, which lapses; another replica (or
+the restarted one) tries again, so a receiver can, rarely, see a hint
+twice. Hints are idempotent by design: the receiver reads the feed
+from its own cursor.
+
+What to watch:
+
+- `acdp_registry_hint_deliveries_total{outcome="failed"}` or
+  `{outcome="ssrf_refused"}` rising: a receiver is down, or its host now
+  resolves somewhere private, no longer resolves, or its nameserver does
+  not answer within 5 seconds (all `ssrf_refused`; the warn log says
+  which). The subscription retries with backoff (one
+  minute doubling to hourly) and disables itself after 72 hours of
+  failure.
+- `acdp_registry_hint_subscriptions{status="disabled"}` above zero:
+  disabled subscriptions are kept, still count toward their owner's
+  `max_subscriptions_per_requester`, and are never retried. The owner
+  deletes and re-creates one to resume; there is no operator re-enable.
+- `{outcome="disabled"}` in a burst after a `[changes]` key rotation:
+  every subscription sealed under the old key is disabled at its next
+  attempt (see [Key rotation](#key-rotation)).
+- `{outcome="lease_lost"}`: the subscription was deleted, or its lease
+  taken over, while the attempt ran. Occasional is normal; steady means
+  replicas are stalling past the 60-second lease (each attempt is bounded
+  at 20 seconds, a batch at 40).
+- `{outcome="error"}` above zero: a store or evaluation error, or an
+  attempt that overran its bound; the warn log names the subscription.
+  Nothing is recorded and the subscription is retried after its lease
+  lapses.
+
 ## Webhooks
 
 Receivers verify `X-ACDP-Signature` (GitHub-compatible HMAC-SHA256 over the raw

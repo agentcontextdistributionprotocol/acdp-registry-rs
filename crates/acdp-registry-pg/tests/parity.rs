@@ -432,3 +432,11 @@ async fn subscription_limit_holds_under_concurrent_creates() {
     let plain = store(&url).await;
     parity::assert_subscription_limit(&plain, "pg").await;
 }
+
+/// RFC-ACDP-0018 §8.2: delivery leases hand each due row to one claimant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn subscription_claims_have_one_holder() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    parity::assert_subscription_claims(&plain, "pg").await;
+}

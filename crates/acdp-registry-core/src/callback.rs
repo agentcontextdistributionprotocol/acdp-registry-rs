@@ -8,6 +8,7 @@
 //! to a private address without touching real DNS.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use acdp::error::AcdpError;
 use async_trait::async_trait;
@@ -18,6 +19,30 @@ pub trait CallbackResolver: Send + Sync {
     /// Every address `host:port` resolves to. An empty answer is not an
     /// error here; callers refuse it.
     async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, AcdpError>;
+}
+
+/// Bound on one callback-host lookup: a subscriber's own nameserver that
+/// never answers must not hold a request or a delivery slot.
+pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Resolve `host:port` (within [`LOOKUP_TIMEOUT`]) and refuse the whole
+/// answer if it is empty or any address is outside what `policy` allows. The `Err` detail names the
+/// offending address: log it, never send it to a client.
+pub async fn resolve_allowed(
+    policy: &acdp::safe_http::SsrfPolicy,
+    resolver: &dyn CallbackResolver,
+    host: &str,
+    port: u16,
+) -> Result<Vec<SocketAddr>, String> {
+    let addrs = tokio::time::timeout(LOOKUP_TIMEOUT, resolver.lookup(host, port))
+        .await
+        .map_err(|_| format!("DNS lookup for '{host}' timed out"))?
+        .map_err(|e| e.to_string())?;
+    if addrs.is_empty() {
+        return Err(format!("'{host}' does not resolve"));
+    }
+    acdp::safe_http::reject_if_any_forbidden(policy, host, &addrs).map_err(|e| e.to_string())?;
+    Ok(addrs)
 }
 
 /// The system resolver (`getaddrinfo` through tokio).

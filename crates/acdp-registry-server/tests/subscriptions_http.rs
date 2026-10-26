@@ -344,7 +344,10 @@ async fn rec007_f_ssrf_at_creation() {
     for host in ["internal", "mixed", "metadata", "v6local", "unknown"] {
         let url = format!("https://{host}.example.com/h");
         let r = create(&h.router, Some(&owner), request(agent_filter(1), &url)).await;
-        let msg = r.body["error"]["message"].as_str().expect("error.message").to_owned();
+        let msg = r.body["error"]["message"]
+            .as_str()
+            .expect("error.message")
+            .to_owned();
         for leak in ["10.0.0.5", "192.168.1.9", "169.254", "fd00", "resolve to a"] {
             assert!(!msg.contains(leak), "{url}: {msg}");
         }

@@ -711,6 +711,12 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         }
     }
 
+    // A superseding or key-revocation publish appended a feed entry. A
+    // spurious wake-up (plain publish) costs one empty claim.
+    if !is_replay {
+        state.notify_hints();
+    }
+
     // A replay is not a new publication: no second `context.published` (the
     // control plane dedupes on the event id, and a replay would mint a fresh one).
     if let Some(emitter) = state.webhook.as_ref().filter(|_| !is_replay) {
@@ -1627,6 +1633,8 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
     // fires when `charge` drops at the end of this function; did:key: it
     // fired above).
     let ctx = outcome.into_context();
+    // The commit appended a feed entry (§5.3): hint subscribers now.
+    state.notify_hints();
 
     if let Some(emitter) = &state.webhook {
         let webhook_tenant = stored_tenant.filter(|t| t != "default");

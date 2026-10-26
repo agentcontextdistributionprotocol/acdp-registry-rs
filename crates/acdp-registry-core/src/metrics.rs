@@ -47,6 +47,8 @@ pub const CHANGES_PRUNED_TOTAL: &str = "acdp_registry_changes_pruned_total";
 pub const CHANGES_HEAD_SEQ: &str = "acdp_registry_changes_head_seq";
 pub const CHANGES_PRUNED_THROUGH: &str = "acdp_registry_changes_pruned_through";
 pub const SUBSCRIPTION_REQUESTS_TOTAL: &str = "acdp_registry_subscription_requests_total";
+pub const HINT_DELIVERIES_TOTAL: &str = "acdp_registry_hint_deliveries_total";
+pub const HINT_SUBSCRIPTIONS: &str = "acdp_registry_hint_subscriptions";
 
 /// Process-global recorder handle. `metrics-exporter-prometheus` installs a
 /// single global recorder; a second install returns an error. A `OnceLock`
@@ -212,6 +214,19 @@ pub fn record_changes_request(outcome: &'static str, rows_scanned: u64) {
 /// `get` or `delete`; `outcome` is `ok` or the wire code.
 pub fn record_subscription_request(op: &'static str, outcome: &'static str) {
     metrics::counter!(SUBSCRIPTION_REQUESTS_TOTAL, "op" => op, "outcome" => outcome).increment(1);
+}
+
+/// One change-hint delivery attempt (RFC-ACDP-0018 §8.2). `outcome` is a
+/// `hints::HintOutcome` label: `delivered`, `nothing_visible`, `failed`,
+/// `ssrf_refused`, `disabled`, `lease_lost` or `error`.
+pub fn record_hint_delivery(outcome: &'static str) {
+    metrics::counter!(HINT_DELIVERIES_TOTAL, "outcome" => outcome).increment(1);
+}
+
+/// Subscriptions per status, sampled by the hint worker.
+pub fn record_hint_subscriptions(active: u64, disabled: u64) {
+    metrics::gauge!(HINT_SUBSCRIPTIONS, "status" => "active").set(active as f64);
+    metrics::gauge!(HINT_SUBSCRIPTIONS, "status" => "disabled").set(disabled as f64);
 }
 
 /// One retention-prune pass: rows deleted, and the feed's markers after it.

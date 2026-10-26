@@ -42,7 +42,8 @@ use acdp_registry_store::event_receipts::{
 };
 use acdp_registry_store::{
     CreateSubscriptionOutcome, EventReceiptMinter, ExtendedRegistryStore, FeedHead, FeedPage,
-    FeedQuery, FeedRow, NewSubscription, Page, StoredReceipt, SubscriptionRecord,
+    FeedQuery, FeedRow, NewSubscription, Page, StoredReceipt, SubscriptionCounts,
+    SubscriptionProgress, SubscriptionRecord,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -451,6 +452,70 @@ impl ExtendedRegistryStore for MemoryStore {
             state.subscriptions.remove(subscription_id);
         }
         Ok(owned)
+    }
+
+    async fn claim_due_subscriptions(
+        &self,
+        now_ms: i64,
+        head: u64,
+        lease_until_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<SubscriptionRecord>, AcdpError> {
+        let mut state = self.lock()?;
+        let mut due: Vec<&mut SubscriptionRecord> = state
+            .subscriptions
+            .values_mut()
+            .filter(|s| {
+                s.status == acdp::types::change::SubscriptionStatus::Active
+                    && s.next_attempt_at_ms <= now_ms
+                    && s.lease_until_ms.is_none_or(|l| l < now_ms)
+                    && s.last_hinted_seq < head
+            })
+            .collect();
+        due.sort_by_key(|s| s.next_attempt_at_ms);
+        Ok(due
+            .into_iter()
+            .take(limit as usize)
+            .map(|s| {
+                s.lease_until_ms = Some(lease_until_ms);
+                s.clone()
+            })
+            .collect())
+    }
+
+    async fn finish_subscription_attempt(
+        &self,
+        subscription_id: &str,
+        lease_until_ms: i64,
+        progress: &SubscriptionProgress,
+    ) -> Result<bool, AcdpError> {
+        let mut state = self.lock()?;
+        let Some(s) = state
+            .subscriptions
+            .get_mut(subscription_id)
+            .filter(|s| s.lease_until_ms == Some(lease_until_ms))
+        else {
+            return Ok(false);
+        };
+        s.last_hinted_seq = progress.last_hinted_seq;
+        s.status = progress.status;
+        s.next_attempt_at_ms = progress.next_attempt_at_ms;
+        s.failing_since_ms = progress.failing_since_ms;
+        s.attempts = progress.attempts;
+        s.lease_until_ms = None;
+        Ok(true)
+    }
+
+    async fn subscription_counts(&self) -> Result<SubscriptionCounts, AcdpError> {
+        let state = self.lock()?;
+        let mut out = SubscriptionCounts::default();
+        for s in state.subscriptions.values() {
+            match s.status {
+                acdp::types::change::SubscriptionStatus::Active => out.active += 1,
+                acdp::types::change::SubscriptionStatus::Disabled => out.disabled += 1,
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -1010,6 +1075,13 @@ mod tests {
     async fn subscription_limit_holds_under_concurrent_creates() {
         let plain = Arc::new(MemoryStore::new());
         parity::assert_subscription_limit(&plain, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §8.2: delivery leases hand each due row to one claimant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn subscription_claims_have_one_holder() {
+        let plain = Arc::new(MemoryStore::new());
+        parity::assert_subscription_claims(&plain, "memory").await;
     }
 
     /// RFC-ACDP-0018 §5.4: prefix pruning and the marker.
