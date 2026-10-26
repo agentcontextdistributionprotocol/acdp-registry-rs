@@ -467,7 +467,21 @@ jobs:
   # 5.3 s vs 1.5 s, measured locally). 9cffe36 replaced that listener with a
   # refused connection; the re-run above is after that fix. A test that waits on
   # a real network timeout is the thing to look for when this cap is next hit.
-    timeout-minutes: 180
+  # Raised to 330 at 390 (RFC-ACDP-0018, #471). The first 390 run
+  # (40264143579) was CANCELLED at 180 after 161 mutants: 66.6 s per mutant
+  # against 22 s at 370, so 390 would have needed ~433 min. Two causes, both
+  # measured. (1) Tests, again the pattern above: rec004 D wrote ~600 feed
+  # entries (changes_http 54.4 s per mutant) and two hint tests waited out the
+  # real 10 s request and 5 s lookup bounds (hints_e2e 10.3 s). Both now run
+  # under test-only knobs that can only lower a bound (with_hint_timeouts,
+  # with_changes_min_scan_rows): changes_http 0.2 s, hints_e2e 2.2 s locally.
+  # (2) Build: 36.7 s per mutant on that runner, where a local incremental
+  # rebuild after a context.rs edit went 11 s -> 14.5 s with the new crates and
+  # test binaries; debug info is not the cost (14.5 vs 13 s without it). The
+  # build share is the scope's real price, so per the rule above the cap rises
+  # rather than the globs narrowing. 330 stays under the hosted 360 job limit.
+  # RE-DERIVE from the re-run's cargo-mutants clock and tighten if it allows.
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master

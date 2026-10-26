@@ -49,8 +49,11 @@ use crate::tenant_trust::PeerIp;
 pub const REFILL_MAX_SCANS: usize = 6;
 
 /// The smallest store page a scan asks for, so a small `limit` behind many
-/// hidden rows does not cost one round trip per visible entry.
-const MIN_SCAN_ROWS: u32 = 100;
+/// hidden rows does not cost one round trip per visible entry. A test may
+/// lower it with
+/// [`AppStateInner::with_changes_min_scan_rows`](crate::state::AppStateInner::with_changes_min_scan_rows)
+/// to reach the scan budget with a dozen rows instead of hundreds.
+pub const MIN_SCAN_ROWS: u32 = 100;
 
 /// The `limit` used when the request has none (§5.1).
 const DEFAULT_LIMIT: u64 = 100;
@@ -235,7 +238,7 @@ pub async fn evaluate_changes<S: ExtendedRegistryStore + 'static>(
         kinds: req.filter.kind.clone(),
         scan_limit: u32::try_from(req.limit)
             .unwrap_or(u32::MAX)
-            .max(MIN_SCAN_ROWS),
+            .max(state.changes_min_scan_rows),
     };
 
     let target = usize::try_from(req.limit).unwrap_or(usize::MAX);

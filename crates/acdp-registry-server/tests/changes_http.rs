@@ -624,19 +624,28 @@ async fn rec004_superseded_visible_only_with_its_successor() {
 }
 
 /// rec-004 D: more hidden entries than one request's scan budget
-/// (`REFILL_MAX_SCANS` × 100 rows). The anonymous reader gets an empty page
+/// (`REFILL_MAX_SCANS` store pages). The anonymous reader gets an empty page
 /// with `has_more: true` — not the end — and the next page reaches the
-/// public retraction behind them.
+/// public retraction behind them. The store page is lowered to `limit` (2)
+/// so the budget is 12 rows, not the production 600: the refill loop is the
+/// same, and this test runs once per mutant in the mutation ratchet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rec004_empty_page_is_not_the_end() {
     use acdp_registry_core::handlers::REFILL_MAX_SCANS;
-    let mut base = config(true);
-    // ~600 lifecycle events from one agent inside a minute.
-    base.limits.publish_rate_per_minute = 0;
+    const LIMIT: u64 = 2;
+    let base = config(true);
     let (cfg, caps) = common::with_anonymous_public_reads(base, caps(), true);
-    let h = SeededHarness::new(cfg, caps, AUTHORITY).await;
+    let mut h = SeededHarness::new(cfg.clone(), caps, AUTHORITY).await;
+    use acdp_registry_core::handlers::MIN_SCAN_ROWS;
+    let raised = h.rebuild_shared_with(cfg.clone(), |s| s.with_changes_min_scan_rows(u32::MAX));
+    assert_eq!(
+        raised.changes_min_scan_rows, MIN_SCAN_ROWS,
+        "a test can only lower it"
+    );
+    let lowered = h.rebuild_shared_with(cfg, |s| s.with_changes_min_scan_rows(0));
+    assert_eq!(lowered.changes_min_scan_rows, 1);
     let (hidden, _) = publish_ctx(&h, 56, "rec004 hidden churn", Visibility::Private).await;
-    let budget = REFILL_MAX_SCANS as u64 * 100;
+    let budget = REFILL_MAX_SCANS as u64 * LIMIT;
     for _ in 0..=budget / 2 {
         retract(&h, 56, &hidden).await;
         lifecycle(&h, 56, &hidden, "republish", "republished").await;
@@ -645,7 +654,7 @@ async fn rec004_empty_page_is_not_the_end() {
     retract(&h, 57, &public).await;
     let tail = budget + 3;
 
-    let first = page(&h.router, "limit=100", None).await;
+    let first = page(&h.router, &format!("limit={LIMIT}"), None).await;
     assert!(first.changes.is_empty(), "{:?}", seqs(&first));
     assert!(
         first.has_more,
@@ -654,7 +663,7 @@ async fn rec004_empty_page_is_not_the_end() {
     assert_eq!(key().decode_cursor(&first.next_cursor), Ok(budget));
     let next = page(
         &h.router,
-        &format!("limit=100&since={}", enc(&first.next_cursor)),
+        &format!("limit={LIMIT}&since={}", enc(&first.next_cursor)),
         None,
     )
     .await;

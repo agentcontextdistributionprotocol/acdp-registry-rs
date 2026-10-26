@@ -140,13 +140,19 @@ pub(crate) async fn check_callback<S: ExtendedRegistryStore + 'static>(
         .ok_or_else(|| refuse("no host".into()))?
         .to_owned();
     let port = parsed.port_or_known_default().unwrap_or(443);
-    crate::callback::resolve_allowed(policy, state.callback_resolver.as_ref(), &host, port)
-        .await
-        .map(drop)
-        .map_err(|detail| {
-            tracing::info!(%host, %detail, "subscription callback_url refused at resolution");
-            refuse(UNRESOLVABLE.into())
-        })
+    crate::callback::resolve_allowed(
+        policy,
+        state.callback_resolver.as_ref(),
+        &host,
+        port,
+        state.hint_timeouts.lookup,
+    )
+    .await
+    .map(drop)
+    .map_err(|detail| {
+        tracing::info!(%host, %detail, "subscription callback_url refused at resolution");
+        refuse(UNRESOLVABLE.into())
+    })
 }
 
 /// The one message for every resolution-time refusal (see [`check_callback`]).

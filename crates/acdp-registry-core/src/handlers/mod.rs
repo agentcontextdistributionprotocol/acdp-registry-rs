@@ -9,7 +9,8 @@ mod subscriptions;
 
 pub use auth::{issue_challenge, issue_token, revoke_token};
 pub use changes::{
-    changes, evaluate_changes, parse_request, ChangesRequest, Since, REFILL_MAX_SCANS,
+    changes, evaluate_changes, parse_request, ChangesRequest, Since, MIN_SCAN_ROWS,
+    REFILL_MAX_SCANS,
 };
 pub(crate) use context::version_at_least;
 pub use context::{current, lineage, publish, republish, retract, retrieve, retrieve_body, search};

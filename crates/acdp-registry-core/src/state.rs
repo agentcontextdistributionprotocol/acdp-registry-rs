@@ -102,6 +102,13 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// Extra trust anchors for hint delivery, on top of the webpki roots
     /// (tests: a private CA for a local receiver). Empty in production.
     pub hint_extra_roots: Vec<reqwest::Certificate>,
+    /// Callback lookup and hint delivery bounds; the production constants
+    /// unless a test shortened them with [`Self::with_hint_timeouts`].
+    pub hint_timeouts: crate::hints::HintTimeouts,
+    /// The smallest store page a `/changes` scan asks for:
+    /// [`MIN_SCAN_ROWS`](crate::handlers::MIN_SCAN_ROWS) unless a
+    /// test lowered it with [`Self::with_changes_min_scan_rows`].
+    pub changes_min_scan_rows: u32,
 }
 
 impl<S: ExtendedRegistryStore> AppStateInner<S> {
@@ -171,6 +178,23 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
         if self.config.events.enabled {
             self.hints_notify.notify_one();
         }
+    }
+
+    /// Shorten the callback lookup and hint delivery bounds (tests: a
+    /// timeout path in milliseconds). Each is capped at its production
+    /// value, so this can never loosen §8.3.
+    #[must_use]
+    pub fn with_hint_timeouts(mut self, timeouts: crate::hints::HintTimeouts) -> Self {
+        self.hint_timeouts = timeouts.capped();
+        self
+    }
+
+    /// Lower the smallest `/changes` store page (tests: exhaust the refill
+    /// budget with a few rows). Clamped to `1..=MIN_SCAN_ROWS`.
+    #[must_use]
+    pub fn with_changes_min_scan_rows(mut self, rows: u32) -> Self {
+        self.changes_min_scan_rows = rows.clamp(1, crate::handlers::MIN_SCAN_ROWS);
+        self
     }
 
     /// Replace the callback SSRF policy (tests).
@@ -300,6 +324,8 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             callback_resolver: Arc::new(crate::callback::SystemResolver),
             hints_notify: Arc::new(tokio::sync::Notify::new()),
             hint_extra_roots: Vec::new(),
+            hint_timeouts: crate::hints::HintTimeouts::default(),
+            changes_min_scan_rows: crate::handlers::MIN_SCAN_ROWS,
         }
     }
 }

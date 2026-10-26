@@ -87,6 +87,44 @@ pub const DISABLE_AFTER_MS: i64 = 72 * 3_600_000;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Whole-request bound (§8.3: at most 10 s).
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The bounds one delivery runs under. Production uses the constants
+/// ([`callback::LOOKUP_TIMEOUT`](crate::callback::LOOKUP_TIMEOUT),
+/// [`CONNECT_TIMEOUT`], [`REQUEST_TIMEOUT`]); a test may shorten them with
+/// [`AppStateInner::with_hint_timeouts`](crate::state::AppStateInner::with_hint_timeouts)
+/// so a timeout path costs milliseconds, never lengthen them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HintTimeouts {
+    /// One callback-host DNS lookup, at subscription and at delivery.
+    pub lookup: Duration,
+    /// TCP + TLS connect.
+    pub connect: Duration,
+    /// The whole request.
+    pub request: Duration,
+}
+
+impl Default for HintTimeouts {
+    fn default() -> Self {
+        Self {
+            lookup: crate::callback::LOOKUP_TIMEOUT,
+            connect: CONNECT_TIMEOUT,
+            request: REQUEST_TIMEOUT,
+        }
+    }
+}
+
+impl HintTimeouts {
+    /// Each bound the smaller of `self`'s and the production one's.
+    #[must_use]
+    pub fn capped(self) -> Self {
+        let d = Self::default();
+        Self {
+            lookup: self.lookup.min(d.lookup),
+            connect: self.connect.min(d.connect),
+            request: self.request.min(d.request),
+        }
+    }
+}
 /// Deliveries in flight at once per replica.
 const MAX_IN_FLIGHT: usize = 16;
 
@@ -465,12 +503,12 @@ async fn deliver<S: ExtendedRegistryStore + 'static>(
     }) else {
         return Delivery::Refused("callback_url has no host".into());
     };
-    // Bounded by `callback::LOOKUP_TIMEOUT` inside.
     if let Err(why) = resolve_allowed(
         &state.callback_policy,
         state.callback_resolver.as_ref(),
         &host,
         port,
+        state.hint_timeouts.lookup,
     )
     .await
     {
@@ -506,12 +544,13 @@ fn hint_client<S: ExtendedRegistryStore + 'static>(
         .https_only(true)
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(state.hint_timeouts.connect)
+        .timeout(state.hint_timeouts.request)
         .pool_max_idle_per_host(0)
         .dns_resolver(Arc::new(PolicyResolver {
             policy: state.callback_policy.clone(),
             inner: Arc::clone(&state.callback_resolver),
+            lookup: state.hint_timeouts.lookup,
         }));
     for root in &state.hint_extra_roots {
         b = b.add_root_certificate(root.clone());
@@ -526,19 +565,20 @@ fn hint_client<S: ExtendedRegistryStore + 'static>(
 struct PolicyResolver {
     policy: acdp::safe_http::SsrfPolicy,
     inner: Arc<dyn CallbackResolver>,
+    lookup: Duration,
 }
 
 impl reqwest::dns::Resolve for PolicyResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let policy = self.policy.clone();
         let inner = Arc::clone(&self.inner);
+        let lookup = self.lookup;
         let host = name.as_str().to_owned();
         Box::pin(async move {
             // Port 0: the connector substitutes the URL's port.
-            let addrs: Vec<SocketAddr> =
-                resolve_allowed(&policy, inner.as_ref(), &host, 0)
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+            let addrs: Vec<SocketAddr> = resolve_allowed(&policy, inner.as_ref(), &host, 0, lookup)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
             let addrs: reqwest::dns::Addrs = Box::new(addrs.into_iter());
             Ok(addrs)
         })
@@ -593,6 +633,28 @@ mod tests {
         assert!(!failed_long_enough(0, DISABLE_AFTER_MS - 1));
         assert!(failed_long_enough(0, DISABLE_AFTER_MS));
         assert!(failed_long_enough(5, DISABLE_AFTER_MS + 5));
+    }
+
+    #[test]
+    fn hint_timeouts_shorten_but_never_lengthen_the_bounds() {
+        let prod = HintTimeouts::default();
+        assert_eq!(prod.lookup, crate::callback::LOOKUP_TIMEOUT);
+        assert_eq!(
+            (prod.connect, prod.request),
+            (CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+        );
+        let short = HintTimeouts {
+            lookup: Duration::from_millis(1),
+            connect: Duration::from_millis(2),
+            request: Duration::from_millis(3),
+        };
+        assert_eq!(short.capped(), short);
+        let long = HintTimeouts {
+            lookup: Duration::from_secs(60),
+            connect: Duration::from_secs(60),
+            request: Duration::from_secs(60),
+        };
+        assert_eq!(long.capped(), prod);
     }
 
     #[test]

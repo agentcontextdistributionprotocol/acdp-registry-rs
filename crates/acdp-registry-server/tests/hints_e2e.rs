@@ -34,7 +34,7 @@ use acdp::types::primitives::{ContextType, Visibility};
 use acdp_registry_core::callback::{CallbackResolver, StaticResolver};
 use acdp_registry_core::changes_key::ChangesKey;
 use acdp_registry_core::hints::{
-    retry_delay_ms, run_hint_pass, spawn_hint_worker, PassStats, DISABLE_AFTER_MS,
+    retry_delay_ms, run_hint_pass, spawn_hint_worker, HintTimeouts, PassStats, DISABLE_AFTER_MS,
     HINT_MIN_INTERVAL_MS, REQUEST_TIMEOUT, SIGNATURE_HEADER,
 };
 use acdp_registry_core::AppStateInner;
@@ -224,6 +224,15 @@ impl Receiver {
     }
 }
 
+/// Delivery bounds for the harness: short, so a timeout path costs seconds
+/// rather than the production 5 s lookup and 10 s request (a mutation run
+/// pays it once per mutant), yet ample for a loopback receiver.
+const TEST_TIMEOUTS: HintTimeouts = HintTimeouts {
+    lookup: Duration::from_secs(2),
+    connect: Duration::from_secs(2),
+    request: Duration::from_secs(2),
+};
+
 /// A harness whose state trusts the fixture CA and resolves the receiver's
 /// host to loopback (or as `resolver` says).
 async fn harness_with(resolver: StaticResolver) -> (SeededHarness, State) {
@@ -232,6 +241,7 @@ async fn harness_with(resolver: StaticResolver) -> (SeededHarness, State) {
     let state = h.rebuild_shared_with(cfg, |s| {
         s.with_callback_resolver(Arc::new(resolver))
             .with_callback_policy(loopback_policy())
+            .with_hint_timeouts(TEST_TIMEOUTS)
             .with_hint_root_pem(didweb::ca_pem().as_bytes())
             .expect("fixture CA")
     });
@@ -252,6 +262,7 @@ fn replica(h: &mut SeededHarness, resolver: impl CallbackResolver + 'static) -> 
     h.rebuild_shared_with(config(), |s| {
         s.with_callback_resolver(Arc::new(resolver))
             .with_callback_policy(loopback_policy())
+            .with_hint_timeouts(TEST_TIMEOUTS)
             .with_hint_root_pem(didweb::ca_pem().as_bytes())
             .expect("fixture CA")
     })
@@ -707,7 +718,7 @@ async fn a_lookup_that_never_answers_is_bounded() {
     let stats = pass(&hanging, now_ms()).await;
     assert_eq!(stats.ssrf_refused, 1, "{stats:?}");
     assert!(
-        started.elapsed() < acdp_registry_core::callback::LOOKUP_TIMEOUT + Duration::from_secs(3),
+        started.elapsed() < TEST_TIMEOUTS.lookup + Duration::from_secs(3),
         "{:?}",
         started.elapsed()
     );
@@ -726,7 +737,7 @@ async fn a_slow_receiver_times_out_as_a_failure() {
     assert_eq!(stats.failed, 1, "{stats:?}");
     let took = started.elapsed();
     assert!(
-        took >= REQUEST_TIMEOUT && took < REQUEST_TIMEOUT + Duration::from_secs(4),
+        took >= TEST_TIMEOUTS.request && took < TEST_TIMEOUTS.request + Duration::from_secs(4),
         "{took:?}"
     );
     assert_eq!(

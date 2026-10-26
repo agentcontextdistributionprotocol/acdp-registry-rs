@@ -25,7 +25,7 @@ pub trait CallbackResolver: Send + Sync {
 /// never answers must not hold a request or a delivery slot.
 pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Resolve `host:port` (within [`LOOKUP_TIMEOUT`]) and refuse the whole
+/// Resolve `host:port` within `timeout` (production: [`LOOKUP_TIMEOUT`]) and refuse the whole
 /// answer if it is empty or any address is outside what `policy` allows. The `Err` detail names the
 /// offending address: log it, never send it to a client.
 pub async fn resolve_allowed(
@@ -33,8 +33,9 @@ pub async fn resolve_allowed(
     resolver: &dyn CallbackResolver,
     host: &str,
     port: u16,
+    timeout: Duration,
 ) -> Result<Vec<SocketAddr>, String> {
-    let addrs = tokio::time::timeout(LOOKUP_TIMEOUT, resolver.lookup(host, port))
+    let addrs = tokio::time::timeout(timeout, resolver.lookup(host, port))
         .await
         .map_err(|_| format!("DNS lookup for '{host}' timed out"))?
         .map_err(|e| e.to_string())?;
