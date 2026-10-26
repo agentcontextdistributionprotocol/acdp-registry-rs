@@ -11,6 +11,7 @@ pub mod fulltext;
 pub mod lifecycle;
 pub mod log;
 pub mod rate_limit;
+pub mod subscriptions;
 
 /// Cross-backend parity assertions shared by every backend's test suite.
 /// Gated so nothing here ships in a normal build; see the module docs for
@@ -32,6 +33,7 @@ pub use cursor::{decode_cursor, encode_cursor};
 pub use event_receipts::{EventReceiptMinter, StoredReceipt, SweepReport};
 pub use log::{build_leaf_record, LogEntryRecord};
 pub use rate_limit::{LimitDecision, SharedLimitScope, SharedRateLimitBackend};
+pub use subscriptions::{CreateSubscriptionOutcome, NewSubscription, SubscriptionRecord};
 
 /// Cursor-keyed page returned by [`ExtendedRegistryStore::list_contexts`].
 #[derive(Debug, Clone)]
@@ -317,6 +319,52 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
             }
         }
         Ok(out)
+    }
+
+    // ── Change-hint subscriptions (RFC-ACDP-0018 §8) ─────────────────
+    //
+    // Every lookup is scoped by the owner DID: a subscription another
+    // requester holds is indistinguishable from one that does not exist.
+    // Defaults return `NotImplemented`; a deployment MUST NOT advertise
+    // `acdp-registry-events` against such a backend.
+
+    /// Insert `new` unless its owner already holds `max_per_owner`
+    /// subscriptions (active or disabled). The count and the insert are
+    /// atomic, so concurrent creates never exceed the limit.
+    async fn create_subscription(
+        &self,
+        new: &NewSubscription,
+        max_per_owner: u64,
+    ) -> Result<CreateSubscriptionOutcome, AcdpError> {
+        let _ = (new, max_per_owner);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    /// `owner_did`'s subscription `subscription_id`, if it exists.
+    async fn get_subscription(
+        &self,
+        owner_did: &str,
+        subscription_id: &str,
+    ) -> Result<Option<SubscriptionRecord>, AcdpError> {
+        let _ = (owner_did, subscription_id);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    /// Delete `owner_did`'s subscription `subscription_id`. `false` when
+    /// there was none.
+    async fn delete_subscription(
+        &self,
+        owner_did: &str,
+        subscription_id: &str,
+    ) -> Result<bool, AcdpError> {
+        let _ = (owner_did, subscription_id);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
     }
 
     // ── Witness cosignature aggregation (ACDP 0.4, RFC-ACDP-0015 §6.1) ─

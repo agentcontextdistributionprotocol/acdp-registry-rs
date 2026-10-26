@@ -67,9 +67,10 @@ choice, this registry's docs state what it actually does: for example, it
 enforces its own per-agent publish budget rather than plugging a limiter into
 `RegistryServer` (see [ARCHITECTURE.md](ARCHITECTURE.md#publish-pipeline)),
 and it can advertise the profiles listed in
-[advertisable-profiles.json](advertisable-profiles.json), except the two
-RFC-ACDP-0018 profiles (`acdp-registry-changes`, `acdp-registry-events`),
-which startup refuses until `GET /changes` and `/subscriptions` are served.
+[advertisable-profiles.json](advertisable-profiles.json). The two
+RFC-ACDP-0018 profiles need their features on: `acdp-registry-changes` needs
+`[changes]`, and `acdp-registry-events` needs `[events]` (see
+[CONFIGURATION.md](CONFIGURATION.md)).
 
 ### Link convention
 

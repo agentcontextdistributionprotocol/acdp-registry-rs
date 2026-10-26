@@ -216,11 +216,10 @@ The binary validates config before serving and refuses to boot on a misconfig
   `acdp-registry-federated`, `acdp-registry-receipts`,
   `acdp-registry-head-receipts`, `acdp-registry-transparency-log`,
   `acdp-registry-lifecycle`, `acdp-registry-changes`,
-  `acdp-registry-events`). `acdp-registry-events` (RFC-ACDP-0018 §8) is on
-  the allowlist but currently refused at startup, because this build does not
-  serve `/subscriptions` yet. `acdp-registry-changes` is advertised
-  automatically when `[changes] enabled = true` (see
-  [`[changes]`](#changes-acdp-050)); listing it without enabling the feed is
+  `acdp-registry-events`). `acdp-registry-changes` and
+  `acdp-registry-events` are advertised automatically when `[changes]` and
+  `[events]` are enabled (see [`[changes]`](#changes-acdp-050) and
+  [`[events]`](#events-acdp-050)); listing either without enabling it is
   refused.
   This is checked before any other
   `registry.profiles`-dependent guard below, so a typo or an out-of-scope
@@ -276,7 +275,7 @@ values for illustration. Env var = `ACDP_REGISTRY_` + the bracketed path.
 | `bind` | string | `127.0.0.1` | Bind address. Non-loopback needs TLS/auth or `allow_public_bind`. |
 | `allow_public_bind` | bool | `false` | Opt-in to bind a public interface without TLS/auth. |
 | `base_url` | string | `https://{authority}` | Public URL advertised to consumers / federation control plane. |
-| `profiles` | string[] | `["acdp-registry-core","acdp-registry-discovery"]` | Advertised in capabilities. Must be a subset of the nine `acdp-registry-*` profiles the pinned spec defines (`acdp-registry-events` is currently refused: `/subscriptions` is not served yet; `acdp-registry-changes` needs `[changes] enabled = true`) — any other value (including `acdp-log-witness`, which is not a registry profile) fails startup. |
+| `profiles` | string[] | `["acdp-registry-core","acdp-registry-discovery"]` | Advertised in capabilities. Must be a subset of the nine `acdp-registry-*` profiles the pinned spec defines (`acdp-registry-changes` needs `[changes] enabled = true`, `acdp-registry-events` needs `[events] enabled = true`) — any other value (including `acdp-log-witness`, which is not a registry profile) fails startup. |
 | `cross_registry_resolution` | bool | `true` | Forward foreign `ctx_id`s to their home registry; `false` returns 404 instead. |
 
 #### `[registry.tls]`
@@ -690,6 +689,27 @@ protocol allows; nothing is misread.
 | `max_change_filters` | u64 | `100` | Total `ctx_id`/`lineage_id`/`agent_id`/`kind` values per request; advertised. |
 | `max_changes_page` | u64 | `100` | Largest `limit`; advertised as `limits.max_changes_page`. |
 | `prune_interval_seconds` | u64 | `3600` | How often the background task deletes entries older than `retention_seconds` plus a one-hour clock-skew margin (in batches of 1000). Runs whether or not `enabled` is set. |
+
+### `[events]` *(ACDP 0.5.0)*
+
+Change-hint subscriptions
+([RFC-ACDP-0018 §8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/rfcs/RFC-ACDP-0018-retraction-recall.md#8-change-hints-normative)):
+`/subscriptions` and the `acdp-registry-events` profile. When disabled (the
+default) every `/subscriptions` request answers `501 not_implemented`. See
+[HTTP-API.md](HTTP-API.md#post-subscriptions-get-subscriptionsid-delete-subscriptionsid-acdp-050)
+for the wire behaviour.
+
+Prerequisites (enforced at startup): `[changes] enabled = true` (a hint
+points at the feed, and subscription secrets are sealed under a key derived
+from the `[changes]` master key), `auth.enabled = true` (every subscription
+has an authenticated owner), and `max_subscriptions_per_requester >= 1`.
+Rotating the `[changes]` key makes existing subscription secrets
+unreadable, so their hints stop; owners re-create them.
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `false` | Serve `/subscriptions` and advertise `acdp-registry-events` plus `limits.max_subscriptions_per_requester`. |
+| `max_subscriptions_per_requester` | u64 | `10` | Most subscriptions one requester DID may hold, active or disabled; advertised. |
 
 ### `[[witnesses]]` *(ACDP 0.4.0)*
 

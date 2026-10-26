@@ -159,6 +159,7 @@ fn config(playground: bool) -> RegistryConfig {
         lifecycle: Default::default(),
         log: Default::default(),
         changes: Default::default(),
+        events: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -8703,6 +8704,17 @@ const DATA_PLANE_ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("GET", "/log/checkpoint", "/log/checkpoint"),
     ("GET", "/changes", "/changes"),
+    ("POST", "/subscriptions", "/subscriptions"),
+    (
+        "GET",
+        "/subscriptions/00000000-0000-4000-8000-000000000000",
+        "/subscriptions/{subscription_id}",
+    ),
+    (
+        "DELETE",
+        "/subscriptions/00000000-0000-4000-8000-000000000000",
+        "/subscriptions/{subscription_id}",
+    ),
     ("GET", "/log/proof", "/log/proof"),
     ("GET", "/log/entries", "/log/entries"),
 ];

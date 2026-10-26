@@ -89,6 +89,13 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// is false or the key fails to load — `GET /changes` then answers
     /// 501 `not_implemented`.
     pub changes: Option<Arc<crate::changes_key::ChangesKey>>,
+    /// RFC-ACDP-0006 §7 policy every subscription `callback_url` is held
+    /// to, at creation and at each delivery (RFC-ACDP-0018 §8.3). The
+    /// production default; tests may loosen it with
+    /// [`Self::with_callback_policy`].
+    pub callback_policy: acdp::safe_http::SsrfPolicy,
+    /// How a callback host is resolved for those checks.
+    pub callback_resolver: Arc<dyn crate::callback::CallbackResolver>,
 }
 
 impl<S: ExtendedRegistryStore> AppStateInner<S> {
@@ -120,6 +127,33 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             UnavailablePostureConfig::Deny => UnavailablePosture::Deny,
         };
         self.auth_limit_backend = Some(Arc::new(LayeredRateLimiter::new(l1, l2, posture)));
+        self
+    }
+
+    /// The changes key, when this registry serves `acdp-registry-events`:
+    /// `None` answers `/subscriptions` with 501. Startup validation
+    /// requires `changes.enabled` alongside `events.enabled`, so the key is
+    /// present whenever events is configured and loads.
+    pub fn events_key(&self) -> Option<&crate::changes_key::ChangesKey> {
+        if self.config.events.enabled {
+            self.changes.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Replace the callback resolver (tests).
+    pub fn with_callback_resolver(
+        mut self,
+        resolver: Arc<dyn crate::callback::CallbackResolver>,
+    ) -> Self {
+        self.callback_resolver = resolver;
+        self
+    }
+
+    /// Replace the callback SSRF policy (tests).
+    pub fn with_callback_policy(mut self, policy: acdp::safe_http::SsrfPolicy) -> Self {
+        self.callback_policy = policy;
         self
     }
 
@@ -240,6 +274,8 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             registry_did_document,
             log,
             changes,
+            callback_policy: acdp::safe_http::SsrfPolicy::default(),
+            callback_resolver: Arc::new(crate::callback::SystemResolver),
         }
     }
 }

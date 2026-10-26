@@ -539,3 +539,17 @@ async fn migration_017_creates_the_change_feed() {
         .await;
     assert!(res.is_err(), "changes_meta holds exactly one row");
 }
+
+/// RFC-ACDP-0018 §8.1: subscription CRUD is owner-scoped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscription_crud_is_owner_scoped() {
+    let (plain, _tmp) = store().await;
+    parity::assert_subscription_crud(&plain, "sqlite").await;
+}
+
+/// RFC-ACDP-0018 §8.1: concurrent creates never exceed the per-owner limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn subscription_limit_holds_under_concurrent_creates() {
+    let (plain, _tmp) = store().await;
+    parity::assert_subscription_limit(&plain, "sqlite").await;
+}

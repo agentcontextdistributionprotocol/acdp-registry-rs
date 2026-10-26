@@ -37,6 +37,10 @@ pub struct RegistryConfig {
     /// RFC-ACDP-0018 change feed (`GET /changes`). Off by default.
     #[serde(default)]
     pub changes: ChangesConfig,
+    /// RFC-ACDP-0018 §8 change-hint subscriptions (`/subscriptions`). Off
+    /// by default; needs `changes` and `auth`.
+    #[serde(default)]
+    pub events: EventsConfig,
     /// Transparency-log witnesses this registry polls and whose verified
     /// cosignatures it aggregates onto its checkpoint responses
     /// (RFC-ACDP-0015 §6.1). Empty (the default) disables aggregation.
@@ -251,6 +255,7 @@ impl RegistryConfig {
             lifecycle: LifecycleConfig::default(),
             log: LogConfig::default(),
             changes: ChangesConfig::default(),
+            events: EventsConfig::default(),
             witnesses: Vec::new(),
         }
     }
@@ -317,11 +322,9 @@ impl RegistrySection {
 /// the allowlist `registry.profiles` (and `RegistrySection::profiles`) is
 /// checked against at startup (`validate_config` in
 /// `acdp-registry-server/src/main.rs`) — anything outside it is refused
-/// rather than served in the capabilities document. Interim:
-/// `acdp-registry-events` (RFC-ACDP-0018 §8) is on the list but
-/// `validate_config` still refuses it, because `/subscriptions` is not
-/// served yet; `acdp-registry-changes` is accepted only with
-/// `[changes] enabled = true`.
+/// rather than served in the capabilities document.
+/// `acdp-registry-changes` is accepted only with `[changes] enabled = true`,
+/// and `acdp-registry-events` only with `[events] enabled = true`.
 ///
 /// Deliberately excludes `acdp-log-witness`: a witness is NOT a registry
 /// (RFC-ACDP-0015 §6.1) — a registry MAY aggregate cosignatures under
@@ -1268,6 +1271,37 @@ impl Default for ChangesConfig {
             prune_interval_seconds: default_changes_prune_interval_seconds(),
         }
     }
+}
+
+/// RFC-ACDP-0018 §8 change-hint subscriptions (`[events]`).
+///
+/// Serving `acdp-registry-events` requires `changes.enabled` (subscription
+/// secrets are sealed under the changes key, and a hint points at the feed)
+/// and `auth.enabled` (every subscription belongs to an authenticated
+/// requester). Checked at startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Advertised as `limits.max_subscriptions_per_requester`; creating one
+    /// more is `400 schema_violation`. Disabled subscriptions count. At
+    /// least 1.
+    #[serde(default = "default_max_subscriptions_per_requester")]
+    pub max_subscriptions_per_requester: u64,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_subscriptions_per_requester: default_max_subscriptions_per_requester(),
+        }
+    }
+}
+
+fn default_max_subscriptions_per_requester() -> u64 {
+    10
 }
 
 fn default_changes_key_id() -> u8 {

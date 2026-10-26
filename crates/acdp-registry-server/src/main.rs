@@ -539,18 +539,7 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
     if cfg.changes.enabled {
         validate_changes(cfg)?;
     }
-    // The change-hint profile (§8) is not served by this build yet.
-    if cfg
-        .registry
-        .profiles
-        .iter()
-        .any(|p| p == "acdp-registry-events")
-    {
-        anyhow::bail!(
-            "registry.profiles advertises 'acdp-registry-events' but this build does not \
-             serve the RFC-ACDP-0018 §8 subscription surface. Remove the profile."
-        );
-    }
+    validate_events(cfg)?;
 
     // ACDP 0.3.0 / RFC-ACDP-0012 §11: the transparency-log profile's
     // prerequisite is `acdp-registry-receipts` — load-bearing twice over:
@@ -1644,6 +1633,46 @@ fn validate_changes_retention(c: &acdp_registry_types::ChangesConfig) -> anyhow:
     Ok(())
 }
 
+/// The `acdp-registry-events` prerequisites (RFC-ACDP-0018 §8 and the
+/// profile row): the profile is advertised exactly when `events.enabled`,
+/// which needs the change feed (secrets are sealed under its key; a hint
+/// points at it) and authentication (every subscription has an owner).
+fn validate_events(cfg: &RegistryConfig) -> anyhow::Result<()> {
+    let e = &cfg.events;
+    if cfg
+        .registry
+        .profiles
+        .iter()
+        .any(|p| p == "acdp-registry-events")
+        && !e.enabled
+    {
+        anyhow::bail!(
+            "registry.profiles advertises 'acdp-registry-events' but events.enabled is \
+             false. Advertising the profile commits the registry to serve /subscriptions \
+             (RFC-ACDP-0018 §8) — set events.enabled=true or remove the profile."
+        );
+    }
+    if !e.enabled {
+        return Ok(());
+    }
+    if !cfg.changes.enabled {
+        anyhow::bail!(
+            "events.enabled=true requires changes.enabled=true: acdp-registry-events \
+             requires acdp-registry-changes (RFC-ACDP-0018 §8; a hint points at the feed)."
+        );
+    }
+    if !cfg.auth.enabled {
+        anyhow::bail!(
+            "events.enabled=true requires auth.enabled=true: every subscription belongs to \
+             an authenticated requester (RFC-ACDP-0018 §8.1)."
+        );
+    }
+    if e.max_subscriptions_per_requester == 0 {
+        anyhow::bail!("events.max_subscriptions_per_requester must be at least 1.");
+    }
+    Ok(())
+}
+
 /// The `changes.enabled` prerequisites (RFC-ACDP-0018 §5.4, §9 and the
 /// `acdp-registry-changes` profile row).
 fn validate_changes(cfg: &RegistryConfig) -> anyhow::Result<()> {
@@ -1732,6 +1761,10 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
             if cfg.changes.enabled && !profiles.iter().any(|p| p == changes_profile) {
                 profiles.push(changes_profile.into());
             }
+            let events_profile = "acdp-registry-events";
+            if cfg.events.enabled && !profiles.iter().any(|p| p == events_profile) {
+                profiles.push(events_profile.into());
+            }
             profiles
         },
         limits: Limits {
@@ -1754,7 +1787,11 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
                 .enabled
                 .then_some(cfg.changes.max_change_filters),
             max_changes_page: cfg.changes.enabled.then_some(cfg.changes.max_changes_page),
-            max_subscriptions_per_requester: None,
+            // §9: MUST be present with acdp-registry-events.
+            max_subscriptions_per_requester: cfg
+                .events
+                .enabled
+                .then_some(cfg.events.max_subscriptions_per_requester),
         },
         read_authentication_methods: if cfg.auth.enabled {
             vec![READ_AUTH_METHOD_BEARER_JWT.into()]
@@ -3560,13 +3597,73 @@ mod tests {
     }
 
     #[test]
-    fn rfc0018_events_profile_is_refused_until_served() {
-        let mut cfg = changes_cfg();
+    fn rfc0018_events_profile_without_events_enabled_is_refused() {
+        let mut cfg = events_cfg();
+        cfg.events.enabled = false;
         cfg.registry.profiles = vec!["acdp-registry-events".into()];
         let msg = validate_config(&cfg)
-            .expect_err("acdp-registry-events must be refused")
+            .expect_err("advertising events without serving it must be refused")
             .to_string();
-        assert!(msg.contains("acdp-registry-events"), "{msg}");
+        assert!(msg.contains("events.enabled is"), "{msg}");
+    }
+
+    #[test]
+    fn events_requires_changes() {
+        let mut cfg = events_cfg();
+        cfg.changes.enabled = false;
+        let msg = validate_config(&cfg)
+            .expect_err("events needs changes")
+            .to_string();
+        assert!(msg.contains("requires changes.enabled=true"), "{msg}");
+    }
+
+    #[test]
+    fn events_requires_auth() {
+        let mut cfg = events_cfg();
+        cfg.auth.enabled = false;
+        let msg = validate_config(&cfg)
+            .expect_err("events needs auth")
+            .to_string();
+        assert!(msg.contains("requires auth.enabled=true"), "{msg}");
+    }
+
+    #[test]
+    fn events_refuses_a_zero_subscription_limit() {
+        let mut cfg = events_cfg();
+        cfg.events.max_subscriptions_per_requester = 0;
+        let msg = validate_config(&cfg).expect_err("zero limit").to_string();
+        assert!(msg.contains("max_subscriptions_per_requester"), "{msg}");
+    }
+
+    #[test]
+    fn events_enabled_is_accepted_and_advertised_with_its_limit() {
+        let mut cfg = events_cfg();
+        cfg.events.max_subscriptions_per_requester = 4;
+        validate_config(&cfg).expect("valid events config");
+        let caps = build_capabilities(&cfg);
+        assert!(caps.profiles.iter().any(|p| p == "acdp-registry-events"));
+        assert!(caps.profiles.iter().any(|p| p == "acdp-registry-changes"));
+        assert_eq!(caps.limits.max_subscriptions_per_requester, Some(4));
+        // Advertising it explicitly as well does not duplicate it.
+        cfg.registry.profiles = vec!["acdp-registry-events".into()];
+        validate_config(&cfg).expect("explicit profile");
+        let caps = build_capabilities(&cfg);
+        assert_eq!(
+            caps.profiles
+                .iter()
+                .filter(|p| *p == "acdp-registry-events")
+                .count(),
+            1
+        );
+    }
+
+    /// `changes_cfg` plus auth and `[events]`.
+    fn events_cfg() -> RegistryConfig {
+        let mut cfg = changes_cfg();
+        cfg.auth.enabled = true;
+        cfg.auth.jwt_secret = "x".repeat(48);
+        cfg.events.enabled = true;
+        cfg
     }
 
     /// A config `validate_changes` accepts: lifecycle on, a receipt key,

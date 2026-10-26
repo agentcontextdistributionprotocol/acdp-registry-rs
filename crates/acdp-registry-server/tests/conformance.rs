@@ -751,6 +751,7 @@ fn config() -> RegistryConfig {
         lifecycle: Default::default(),
         log: Default::default(),
         changes: Default::default(),
+        events: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -9769,7 +9770,8 @@ const EXCUSED: &[(&str, &str)] = &[
          and rec003_filters_registry_side runs rec-003, against the shipped binary \
          with acdp-registry-changes advertised (EXERCISED_FIXTURES); rec-004 (it \
          needs per-requester bearers) and rec-008 are exercised by \
-         tests/changes_http.rs and the store tests. rec-006, and rec-007 \
+         tests/changes_http.rs and the store tests; rec-007 scenarios A, B and F by \
+         tests/subscriptions_http.rs. rec-006, and rec-007 \
          scenarios D-E, are acdp-consumer-recall: the consumer's verification of entries \
          and hints it receives (RFC-ACDP-0018 \u{a7}7, \u{a7}8.2 receiver duty), which no \
          harness configuration would make this registry responsible for. None of the \
@@ -18023,11 +18025,6 @@ fn served_full_features_toml() -> String {
     )
 }
 
-/// Advertisable profiles the startup guard still refuses, because the
-/// RFC-ACDP-0018 §8 subscription surface is not served yet. Emptied when
-/// /subscriptions lands.
-const RFC0018_NOT_YET_SERVED: &[&str] = &["acdp-registry-events"];
-
 /// #385: the WHOLE `/.well-known/acdp.json` the shipped binary serves, with
 /// read auth OFF and ON and with every profile it can advertise switched on,
 /// satisfies the pinned `acdp-capabilities.schema.json`.
@@ -18037,9 +18034,9 @@ const RFC0018_NOT_YET_SERVED: &[&str] = &["acdp-registry-events"];
 ///   * auth on, default profiles: `read_authentication_methods` present (the
 ///     field #372 found shipping a hyphenated id);
 ///   * auth on with EVERY entry of `REGISTRY_ADVERTISABLE_PROFILES` listed
-///     (minus `RFC0018_NOT_YET_SERVED`, which startup still refuses) and
-///     its backing feature enabled (receipt key, head receipts, lifecycle,
-///     log, change feed): the widest `profiles` array the binary can serve.
+///     and its backing feature enabled (receipt key, head receipts,
+///     lifecycle, log, change feed, subscriptions): the widest `profiles`
+///     array the binary can serve.
 ///
 /// Synthetic negatives run against the same validator, on one-field edits of a
 /// served document that just passed, so a validator that accepts everything
@@ -18058,14 +18055,7 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
     let schema = PinnedSchema::load(&root, "acdp-capabilities.schema.json");
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // acdp-registry-events is advertisable but refused at startup until
-    // this build serves /subscriptions (validate_config); leave it out of
-    // the all-profiles case until then.
-    let served_profiles: Vec<&str> = REGISTRY_ADVERTISABLE_PROFILES
-        .iter()
-        .copied()
-        .filter(|p| !RFC0018_NOT_YET_SERVED.contains(p))
-        .collect();
+    let served_profiles: Vec<&str> = REGISTRY_ADVERTISABLE_PROFILES.to_vec();
     let all_profiles = served_profiles
         .iter()
         .map(|p| format!("\"{p}\""))
@@ -18077,8 +18067,10 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
         (
             "all-profiles",
             format!("profiles = [{all_profiles}]"),
+            // `[events]` needs `auth.enabled` (§8.1), so it is added here
+            // rather than in the shared feature tables.
             format!(
-                "{}\n{}",
+                "{}\n{}\n[events]\nenabled = true\n",
                 served_auth_toml(true),
                 served_full_features_toml()
             ),
@@ -18116,9 +18108,21 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
     let expected: std::collections::BTreeSet<&str> = served_profiles.iter().copied().collect();
     assert_eq!(
         advertised, expected,
-        "the all-profiles registry must advertise exactly REGISTRY_ADVERTISABLE_PROFILES \
-         (less RFC0018_NOT_YET_SERVED)"
+        "the all-profiles registry must advertise exactly REGISTRY_ADVERTISABLE_PROFILES"
     );
+    // §9: each RFC-ACDP-0018 profile brings its limits.
+    let limits = &served["all-profiles"]["limits"];
+    for limit in [
+        "change_retention_seconds",
+        "max_change_filters",
+        "max_changes_page",
+        "max_subscriptions_per_requester",
+    ] {
+        assert!(
+            limits.get(limit).is_some(),
+            "limits.{limit} missing: {limits}"
+        );
+    }
 
     let on = &served["auth-on"];
     let mut hyphenated = on.clone();

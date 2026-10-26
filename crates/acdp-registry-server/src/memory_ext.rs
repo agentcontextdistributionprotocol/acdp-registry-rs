@@ -41,8 +41,8 @@ use acdp_registry_store::event_receipts::{
     attach_event_receipts, plan_event_receipts, receipt_value,
 };
 use acdp_registry_store::{
-    EventReceiptMinter, ExtendedRegistryStore, FeedHead, FeedPage, FeedQuery, FeedRow, Page,
-    StoredReceipt,
+    CreateSubscriptionOutcome, EventReceiptMinter, ExtendedRegistryStore, FeedHead, FeedPage,
+    FeedQuery, FeedRow, NewSubscription, Page, StoredReceipt, SubscriptionRecord,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -57,6 +57,8 @@ type ReceiptMap = HashMap<String, HashMap<String, EventReceipt>>;
 struct State {
     receipts: ReceiptMap,
     feed: Feed,
+    /// RFC-ACDP-0018 §8 subscriptions, by id.
+    subscriptions: HashMap<String, SubscriptionRecord>,
 }
 
 /// The RFC-ACDP-0018 feed: rows in seq order, never reordered.
@@ -384,6 +386,71 @@ impl ExtendedRegistryStore for MemoryStore {
         }
         feed.rows.drain(..n);
         Ok(n as u64)
+    }
+
+    async fn create_subscription(
+        &self,
+        new: &NewSubscription,
+        max_per_owner: u64,
+    ) -> Result<CreateSubscriptionOutcome, AcdpError> {
+        let mut state = self.lock()?;
+        let held = state
+            .subscriptions
+            .values()
+            .filter(|s| s.owner_did == new.owner_did)
+            .count();
+        if held as u64 >= max_per_owner {
+            return Ok(CreateSubscriptionOutcome::LimitReached);
+        }
+        state.subscriptions.insert(
+            new.subscription_id.clone(),
+            SubscriptionRecord {
+                subscription_id: new.subscription_id.clone(),
+                owner_did: new.owner_did.clone(),
+                tenant_id: new.tenant_id.clone(),
+                filter: new.filter.clone(),
+                callback_url: new.callback_url.clone(),
+                secret_ct: new.secret_ct.clone(),
+                secret_key_id: new.secret_key_id,
+                status: acdp::types::change::SubscriptionStatus::Active,
+                created_at_ms: new.created_at_ms,
+                last_hinted_seq: new.last_hinted_seq,
+                next_attempt_at_ms: new.created_at_ms,
+                failing_since_ms: None,
+                attempts: 0,
+                lease_until_ms: None,
+            },
+        );
+        Ok(CreateSubscriptionOutcome::Created)
+    }
+
+    async fn get_subscription(
+        &self,
+        owner_did: &str,
+        subscription_id: &str,
+    ) -> Result<Option<SubscriptionRecord>, AcdpError> {
+        Ok(self
+            .lock()?
+            .subscriptions
+            .get(subscription_id)
+            .filter(|s| s.owner_did == owner_did)
+            .cloned())
+    }
+
+    async fn delete_subscription(
+        &self,
+        owner_did: &str,
+        subscription_id: &str,
+    ) -> Result<bool, AcdpError> {
+        let mut state = self.lock()?;
+        let owned = state
+            .subscriptions
+            .get(subscription_id)
+            .is_some_and(|s| s.owner_did == owner_did);
+        if owned {
+            state.subscriptions.remove(subscription_id);
+        }
+        Ok(owned)
     }
 }
 
@@ -929,6 +996,20 @@ mod tests {
     async fn change_feed_concurrent_idempotent_supersede() {
         let plain = Arc::new(MemoryStore::new());
         parity::assert_change_feed_concurrent_idempotent_supersede(&plain, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §8.1: subscription CRUD is owner-scoped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn subscription_crud_is_owner_scoped() {
+        let plain = Arc::new(MemoryStore::new());
+        parity::assert_subscription_crud(&plain, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §8.1: concurrent creates never exceed the per-owner limit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn subscription_limit_holds_under_concurrent_creates() {
+        let plain = Arc::new(MemoryStore::new());
+        parity::assert_subscription_limit(&plain, "memory").await;
     }
 
     /// RFC-ACDP-0018 §5.4: prefix pruning and the marker.

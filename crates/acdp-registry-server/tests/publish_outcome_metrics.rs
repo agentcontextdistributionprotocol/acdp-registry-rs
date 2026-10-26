@@ -127,6 +127,7 @@ fn config(playground: bool) -> RegistryConfig {
         lifecycle: Default::default(),
         log: Default::default(),
         changes: Default::default(),
+        events: Default::default(),
         witnesses: Vec::new(),
     }
 }

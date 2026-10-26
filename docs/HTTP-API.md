@@ -26,6 +26,9 @@ The complete inbound surface of `acdp-registry`. Routes are assembled in
 | GET  | `/log/proof`                     | optional bearer | always (501 unless `log.enabled`) |
 | GET  | `/log/entries`                   | optional bearer | always (501 unless `log.enabled`) |
 | GET  | `/changes`                       | optional bearer | always (501 unless `changes.enabled`) |
+| POST | `/subscriptions`                 | bearer      | always (501 unless `events.enabled`) |
+| GET  | `/subscriptions/{subscription_id}` | bearer    | always (501 unless `events.enabled`) |
+| DELETE | `/subscriptions/{subscription_id}` | bearer  | always (501 unless `events.enabled`) |
 | POST | `/auth/challenge`                | none        | `auth.enabled` |
 | POST | `/auth/token`                    | challenge signature | `auth.enabled` |
 | POST | `/auth/token/revoke`             | bearer      | `auth.enabled` |
@@ -385,6 +388,7 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_changes_pruned_total` | counter | — | Feed rows deleted by the retention prune task. |
 | `acdp_registry_changes_head_seq` | gauge | — | Feed head `seq` after the last prune pass. |
 | `acdp_registry_changes_pruned_through` | gauge | — | Highest pruned `seq`; a cursor below it is `cursor_expired`. |
+| `acdp_registry_subscription_requests_total` | counter | `op`, `outcome` | RFC-ACDP-0018 `/subscriptions` requests. `op` is `create`, `get` or `delete`; `outcome` is `ok` or the wire code (`schema_violation`, `not_found`, `not_authorized`, `not_implemented`, …). |
 
 > **`scope` changed meaning for global challenge rejections (H-A/P4).** Until
 > this change, a `/auth/challenge` rejection caused by the process-global
@@ -751,6 +755,44 @@ registry does with them:
   restart from `since` absent or `head`. A cursor that does not decode or
   authenticate is `400 invalid_cursor`.
 
+### `POST /subscriptions`, `GET /subscriptions/{id}`, `DELETE /subscriptions/{id}` *(ACDP 0.5.0)*
+
+Change-hint subscriptions (profile `acdp-registry-events`), normative in
+[RFC-ACDP-0018 §8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/rfcs/RFC-ACDP-0018-retraction-recall.md#8-change-hints-normative).
+This section records what this registry does:
+
+- **Gate.** Mounted always; without `events.enabled = true` every request is
+  `501 not_implemented`, before authentication. Enabling it needs the change
+  feed and `auth.enabled` (see [CONFIGURATION.md](CONFIGURATION.md#events-acdp-050)).
+- **Ownership.** Every request needs a bearer; an anonymous one is
+  `403 not_authorized`. A subscription belongs to the DID that created it.
+  Another requester's id, an id that does not exist and an id that is not a
+  UUID are all `404 not_found`, so an id discloses nothing.
+- **Create.** The body is an
+  [`acdp-subscription-request`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/schemas/json/acdp-subscription-request.schema.json):
+  a `filter` with the `GET /changes` semantics (at least one member, no
+  empty or duplicate values, at most `max_change_filters` values in total)
+  and an `https` `callback_url`. The `callback_url` is refused unless it is
+  `https`, names a host rather than an IP literal, and every address that
+  host resolves to is public unicast (RFC-ACDP-0006 §7). A public IP
+  literal is refused too: stricter than §8.3, which constrains only the
+  resolved address. A refusal at resolution gives one fixed message, so the
+  response never reveals what a name resolves to. A bad `filter`, a
+  refused `callback_url` and a requester already holding
+  `max_subscriptions_per_requester` subscriptions are each
+  `400 schema_violation` with `details.field` set to `filter`,
+  `callback_url` or `limits.max_subscriptions_per_requester`. Other
+  malformed bodies are `400 schema_violation`. Success is `201` with the
+  subscription, `status: "active"`, and a `secret` of 32 random bytes in
+  base64, sent with `Cache-Control: no-store`. The secret appears in this
+  response only. The registry stores it sealed (AES-256-GCM under a key
+  derived from the `[changes]` key, bound to the subscription id), never in
+  plaintext. A new subscription hints only for changes after its creation.
+- **Read.** `GET` returns the same object without `secret`
+  (`Cache-Control: private`).
+- **Delete.** `DELETE` is `204`. The slot it held counts toward the limit
+  until then; a disabled subscription still holds one.
+
 ---
 
 ## Auth
@@ -1103,7 +1145,7 @@ This page documents only what **this registry** answers and when.
 | 415 | `unsupported_media_type` | A body-bearing request (`POST /contexts`, the lifecycle and admin lifecycle routes, `/auth/*`) whose `Content-Type` is present but neither `application/json` nor `application/*+json` (parameters such as `charset` are ignored). An absent `Content-Type` is accepted on those routes except `/auth/*`, where it is also a 415. How to treat an absent header is registry choice under RFC-ACDP-0007 §4.1; this is ours. |
 | 429 | `rate_limited` | A rate-limit bucket drained (`/auth/*`, challenge, publish or lifecycle; see [Rate limits](#rate-limits-429)), or the shared `/auth/*` backend unavailable under `backend_unavailable = "deny"`; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
-| 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*`, `/changes` and lifecycle endpoints when their profiles are not enabled). |
+| 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*`, `/changes`, `/subscriptions` and lifecycle endpoints when their profiles are not enabled). |
 | 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (on publish, and on `POST /auth/token` since 0.5.1). A foreign registry refused by the SSRF policy is also `cross_registry_resolution_failed`, and so is one that serves a context document this registry cannot parse (not JSON, an unknown or missing field); a refused DID host is not (it is 400 `key_resolution_failed`). |
 | 502 | `invalid_witness_cosignature` | A witness cosignature failed verification (RFC-ACDP-0015 §6.1). Like `invalid_log_proof`, a 502 because it is normally another party's artifact that failed. |
 | 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Normally raised when validating an *upstream's* proofs (federation), which is why it is a 502. **It is also reachable from this registry's own `/log/proof`**: for a retrieval-authorized requester the handler echoes the leaf via `record.leaf()` (`log_proof` in `crates/acdp-registry-core/src/handlers/log.rs`), and a stored leaf that no longer parses under the closed schema surfaces as `invalid_log_proof` from here, not from a peer (`LogEntryRecord::leaf` in `crates/acdp-registry-store/src/log.rs`, with the reject cases pinned by that module's own tests). If you see it and you are not federating, suspect your own `log_leaves` table. The other `/log/*` failures are `schema_violation`, `not_found`, or `not_implemented`; there is no `log_unavailable`. |

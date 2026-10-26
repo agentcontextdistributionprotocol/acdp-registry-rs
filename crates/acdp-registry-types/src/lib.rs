@@ -10,10 +10,10 @@ pub mod event;
 
 pub use auth::{AuthChallenge, BearerClaims, TokenRequest, TokenResponse};
 pub use config::{
-    AuthConfig, ChangesConfig, CorsConfig, LifecycleConfig, LimitsConfig, LogConfig, MetricsConfig,
-    PlaygroundConfig, RateLimitConfig, ReceiptConfig, RegistryConfig, RegistrySection,
-    RetiredReceiptKey, StorageBackend, StorageConfig, TenantAgentBinding, TenantHeaderTrust,
-    WebhookConfig, WitnessConfig, REGISTRY_ADVERTISABLE_PROFILES,
+    AuthConfig, ChangesConfig, CorsConfig, EventsConfig, LifecycleConfig, LimitsConfig, LogConfig,
+    MetricsConfig, PlaygroundConfig, RateLimitConfig, ReceiptConfig, RegistryConfig,
+    RegistrySection, RetiredReceiptKey, StorageBackend, StorageConfig, TenantAgentBinding,
+    TenantHeaderTrust, WebhookConfig, WitnessConfig, REGISTRY_ADVERTISABLE_PROFILES,
 };
 pub use error::RegistryError;
 pub use event::WebhookEvent;

@@ -225,6 +225,18 @@ No parser is case-insensitive on the scheme token. `extract_bearer` hardcodes
 two casings, so `BEARER …` and `BeArEr …` are unrecognised by **all three**;
 one parser is merely more permissive than the others, not more conformant.
 
+### Owner-scoped routes: `/subscriptions`
+
+`POST /subscriptions`, `GET /subscriptions/{id}` and `DELETE
+/subscriptions/{id}` (RFC-ACDP-0018 §8.1) require a validated bearer. An
+anonymous caller is `403 not_authorized`, whatever
+`anonymous_public_reads` says. Each subscription belongs to the DID in the
+bearer that created it (its `sub`), and every lookup is filtered by that
+DID. Another requester's subscription id is `404 not_found`, the same as an
+id that does not exist. That is why `[events]` requires
+`auth.enabled = true` at startup. See
+[HTTP-API.md](HTTP-API.md#post-subscriptions-get-subscriptionsid-delete-subscriptionsid-acdp-050).
+
 ### Unrecognised means anonymous on the ordinary routes
 
 `caller_from_headers` (`crates/acdp-registry-core/src/handlers/context.rs`)

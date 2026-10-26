@@ -43,6 +43,19 @@ table and a one-row `changes_meta` marker.**
 - **Rollback, SQLite:** unchanged. Restore the pre-upgrade file, as for any release that adds a
   migration.
 
+**It also adds migration 018 (both backends): a `subscriptions` table for RFC-ACDP-0018 change
+hints.**
+
+- **Who is affected:** nobody until `[events] enabled = true`, which needs `[changes]` and
+  `auth.enabled`. Listing `acdp-registry-events` in `registry.profiles` without it now fails
+  startup with a message naming `events.enabled` (it used to fail because the profile was not
+  served).
+- **Rolling out subscriptions:** enable `[events]` only after every replica runs this release, as
+  for the feed. Every replica must hold the same `[changes]` key: subscription secrets are sealed
+  under it.
+- **Rollback:** as for 017. Older binaries never read the table; subscriptions created meanwhile
+  stay stored and inert.
+
 ---
 
 ## 0.5.6

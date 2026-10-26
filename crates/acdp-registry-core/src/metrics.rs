@@ -46,6 +46,7 @@ pub const CHANGES_ROWS_SCANNED_TOTAL: &str = "acdp_registry_changes_rows_scanned
 pub const CHANGES_PRUNED_TOTAL: &str = "acdp_registry_changes_pruned_total";
 pub const CHANGES_HEAD_SEQ: &str = "acdp_registry_changes_head_seq";
 pub const CHANGES_PRUNED_THROUGH: &str = "acdp_registry_changes_pruned_through";
+pub const SUBSCRIPTION_REQUESTS_TOTAL: &str = "acdp_registry_subscription_requests_total";
 
 /// Process-global recorder handle. `metrics-exporter-prometheus` installs a
 /// single global recorder; a second install returns an error. A `OnceLock`
@@ -205,6 +206,12 @@ pub fn record_witness_cosignature(outcome: &'static str) {
 pub fn record_changes_request(outcome: &'static str, rows_scanned: u64) {
     metrics::counter!(CHANGES_REQUESTS_TOTAL, "outcome" => outcome).increment(1);
     metrics::counter!(CHANGES_ROWS_SCANNED_TOTAL).increment(rows_scanned);
+}
+
+/// One `/subscriptions` request (RFC-ACDP-0018 §8.1). `op` is `create`,
+/// `get` or `delete`; `outcome` is `ok` or the wire code.
+pub fn record_subscription_request(op: &'static str, outcome: &'static str) {
+    metrics::counter!(SUBSCRIPTION_REQUESTS_TOTAL, "op" => op, "outcome" => outcome).increment(1);
 }
 
 /// One retention-prune pass: rows deleted, and the feed's markers after it.

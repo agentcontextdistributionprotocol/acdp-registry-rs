@@ -3042,6 +3042,219 @@ where
 /// `Ok(false)` default actually fails it. Also the falsification for
 /// [`assert_lifecycle_retry_requires_identical_signature`]: a store that
 /// ignores signatures must fail it.
+/// A subscription row for owner `owner`, unique per call. Ids are v4
+/// UUIDs built from the clock and a counter, so a shared Postgres database
+/// never sees one twice.
+fn subscription_fixture(owner: &str, n: u32) -> crate::NewSubscription {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+    let k = NEXT.fetch_add(1, Ordering::Relaxed) ^ nanos.rotate_left(17);
+    let hex = format!("{:016x}{:016x}", nanos, k);
+    let id = format!(
+        "{}-{}-4{}-a{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[13..16],
+        &hex[17..20],
+        &hex[20..32]
+    );
+    let filter: acdp::types::change::WatchFilter = serde_json::from_value(serde_json::json!({
+        "agent_id": [format!("did:web:producer-{n}.example")],
+        "kind": ["lifecycle"],
+    }))
+    .expect("fixture filter");
+    crate::NewSubscription {
+        subscription_id: id,
+        owner_did: owner.to_owned(),
+        tenant_id: Some("tenant-a".into()),
+        filter,
+        callback_url: format!("https://hooks.example.com/acdp/{n}"),
+        secret_ct: vec![n as u8; 60],
+        secret_key_id: 3,
+        created_at_ms: 1_790_985_602_000 + i64::from(n),
+        last_hinted_seq: 57 + u64::from(n),
+    }
+}
+
+/// An owner DID no other run of the suite shares.
+fn unique_owner(label: &str) -> String {
+    format!(
+        "did:web:owner-{label}-{}.example",
+        Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    )
+}
+
+/// RFC-ACDP-0018 §8.1: subscription create / get / delete, owner-scoped.
+///
+/// A stored row round-trips every member, including the sealed secret
+/// bytes and their key id; another owner can neither read nor delete it;
+/// deletion is reported once.
+pub async fn assert_subscription_crud<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use crate::CreateSubscriptionOutcome;
+    use acdp::types::change::SubscriptionStatus;
+
+    let owner = unique_owner(label);
+    let other = unique_owner(&format!("{label}-other"));
+    let new = subscription_fixture(&owner, 7);
+    assert_eq!(
+        store.create_subscription(&new, 10).await.expect("create"),
+        CreateSubscriptionOutcome::Created,
+        "{label}"
+    );
+    let got = store
+        .get_subscription(&owner, &new.subscription_id)
+        .await
+        .expect("get")
+        .unwrap_or_else(|| panic!("{label}: the owner reads its subscription"));
+    assert_eq!(got.subscription_id, new.subscription_id, "{label}");
+    assert_eq!(got.owner_did, owner, "{label}");
+    assert_eq!(got.tenant_id, new.tenant_id, "{label}");
+    assert_eq!(got.filter, new.filter, "{label}");
+    assert_eq!(got.callback_url, new.callback_url, "{label}");
+    assert_eq!(
+        got.secret_ct, new.secret_ct,
+        "{label}: sealed bytes verbatim"
+    );
+    assert_eq!(got.secret_key_id, 3, "{label}");
+    assert_eq!(got.status, SubscriptionStatus::Active, "{label}");
+    assert_eq!(got.created_at_ms, new.created_at_ms, "{label}");
+    assert_eq!(got.last_hinted_seq, new.last_hinted_seq, "{label}");
+    assert_eq!(
+        got.next_attempt_at_ms, new.created_at_ms,
+        "{label}: due at creation"
+    );
+    assert_eq!(got.failing_since_ms, None, "{label}");
+    assert_eq!(got.attempts, 0, "{label}");
+    assert_eq!(got.lease_until_ms, None, "{label}");
+    let sub = got
+        .to_subscription()
+        .expect("a stored row is a valid subscription");
+    assert_eq!(sub.secret, None, "{label}: GET form carries no secret");
+
+    assert_eq!(
+        store
+            .get_subscription(&other, &new.subscription_id)
+            .await
+            .expect("get other"),
+        None,
+        "{label}: another owner cannot read it"
+    );
+    assert!(
+        !store
+            .delete_subscription(&other, &new.subscription_id)
+            .await
+            .expect("delete other"),
+        "{label}: another owner cannot delete it"
+    );
+    assert!(
+        store
+            .get_subscription(&owner, &new.subscription_id)
+            .await
+            .expect("get after foreign delete")
+            .is_some(),
+        "{label}: a foreign delete leaves it in place"
+    );
+    assert_eq!(
+        store
+            .get_subscription(&owner, "not-a-uuid")
+            .await
+            .expect("get malformed"),
+        None,
+        "{label}"
+    );
+    assert!(
+        store
+            .delete_subscription(&owner, &new.subscription_id)
+            .await
+            .expect("delete"),
+        "{label}: the owner deletes it"
+    );
+    assert!(
+        !store
+            .delete_subscription(&owner, &new.subscription_id)
+            .await
+            .expect("delete again"),
+        "{label}: deletion is reported once"
+    );
+    assert_eq!(
+        store
+            .get_subscription(&owner, &new.subscription_id)
+            .await
+            .expect("get after delete"),
+        None,
+        "{label}"
+    );
+}
+
+/// RFC-ACDP-0018 §8.1 `max_subscriptions_per_requester`: concurrent creates
+/// by one owner never exceed the limit, one owner's count does not consume
+/// another's, and a delete frees a slot.
+pub async fn assert_subscription_limit<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use crate::CreateSubscriptionOutcome;
+
+    const MAX: u64 = 3;
+    const RACERS: u32 = 12;
+    let owner = unique_owner(label);
+    let mut tasks = Vec::new();
+    for n in 0..RACERS {
+        let store = Arc::clone(store);
+        let new = subscription_fixture(&owner, n);
+        tasks.push(tokio::spawn(async move {
+            let outcome = store.create_subscription(&new, MAX).await.expect("create");
+            (new.subscription_id, outcome)
+        }));
+    }
+    let mut created = Vec::new();
+    for t in tasks {
+        let (id, outcome) = t.await.expect("join");
+        if outcome == CreateSubscriptionOutcome::Created {
+            created.push(id);
+        }
+    }
+    assert_eq!(
+        created.len() as u64,
+        MAX,
+        "{label}: exactly the limit is created under a race"
+    );
+
+    let other = unique_owner(&format!("{label}-other"));
+    assert_eq!(
+        store
+            .create_subscription(&subscription_fixture(&other, 99), MAX)
+            .await
+            .expect("other owner"),
+        CreateSubscriptionOutcome::Created,
+        "{label}: the limit is per owner"
+    );
+    assert_eq!(
+        store
+            .create_subscription(&subscription_fixture(&owner, 100), MAX)
+            .await
+            .expect("over"),
+        CreateSubscriptionOutcome::LimitReached,
+        "{label}"
+    );
+    assert!(store
+        .delete_subscription(&owner, &created[0])
+        .await
+        .expect("delete"));
+    assert_eq!(
+        store
+            .create_subscription(&subscription_fixture(&owner, 101), MAX)
+            .await
+            .expect("after delete"),
+        CreateSubscriptionOutcome::Created,
+        "{label}: a delete frees a slot"
+    );
+}
+
 #[cfg(test)]
 mod lifecycle_probe_tests {
     use super::*;

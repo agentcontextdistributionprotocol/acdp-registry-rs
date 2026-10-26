@@ -5,5 +5,6 @@
 
 mod changes;
 pub mod store;
+mod subscriptions;
 
 pub use store::SqliteStore;

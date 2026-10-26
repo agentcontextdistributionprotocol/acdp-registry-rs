@@ -416,3 +416,19 @@ async fn change_feed_seq_order_is_commit_order() {
     let minting = minting(&plain, 88);
     parity::assert_change_feed_commit_order(&plain, &minting, "pg").await;
 }
+
+/// RFC-ACDP-0018 §8.1: subscription CRUD is owner-scoped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscription_crud_is_owner_scoped() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    parity::assert_subscription_crud(&plain, "pg").await;
+}
+
+/// RFC-ACDP-0018 §8.1: concurrent creates never exceed the per-owner limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn subscription_limit_holds_under_concurrent_creates() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    parity::assert_subscription_limit(&plain, "pg").await;
+}

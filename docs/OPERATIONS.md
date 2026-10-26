@@ -557,3 +557,21 @@ Receipt-key rotation has its own procedure and a retention rule that must not be
 violated — a removed key invalidates every receipt it ever signed. It is
 documented in [RECEIPTS.md](RECEIPTS.md#the-key-retention-rule-read-before-rotating),
 not here.
+
+### Changes key
+
+The `[changes]` master key (see
+[CONFIGURATION.md](CONFIGURATION.md#changes-acdp-050)) does two jobs: it
+authenticates `GET /changes` cursors, and it seals every subscription
+`secret` at rest (AES-256-GCM, bound to the subscription id). The plaintext
+secret is never stored, so a database dump alone cannot forge hints.
+Rotating the key (new key, new `key_id`) has two effects:
+
+- every outstanding cursor becomes `cursor_expired`, and consumers resync;
+- every existing subscription's secret can no longer be opened. The hint
+  worker disables such a subscription the first time it tries to sign for
+  it, and `GET /subscriptions/{id}` then shows `status: "disabled"`. Owners
+  must delete it and create a new one, which gets a new secret.
+
+Every replica needs the same key and `key_id`. Keep the key out of the
+database backup set: a backup together with the key opens every secret.

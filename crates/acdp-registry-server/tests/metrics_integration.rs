@@ -115,6 +115,7 @@ fn metrics_config() -> RegistryConfig {
         lifecycle: Default::default(),
         log: Default::default(),
         changes: Default::default(),
+        events: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -702,6 +703,45 @@ async fn metrics_is_never_cacheable() {
             "/metrics 405 arm ({method}) must be no-store -- it is emitted by the \
              router before any handler runs, so a handler-set header would miss it",
         );
+    }
+}
+
+/// RFC-ACDP-0018 §8.1: every `/subscriptions` request is counted under its
+/// verb and outcome. `[events]` on without a change feed answers 501, which
+/// is enough to pin the series' name and labels without minting bearers.
+#[tokio::test]
+async fn subscription_requests_are_counted_by_op_and_outcome() {
+    let mut cfg = metrics_config();
+    cfg.events.enabled = true;
+    let h = harness(cfg).await;
+    let id = "/subscriptions/00000000-0000-4000-8000-000000000000";
+    for (method, uri) in [("POST", "/subscriptions"), ("GET", id), ("DELETE", id)] {
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/acdp+json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{method} {uri}");
+    }
+    let (_, _, text) = scrape(&h.router).await;
+    for op in ["create", "get", "delete"] {
+        let n = metric_sum(
+            &text,
+            &[
+                "acdp_registry_subscription_requests_total{",
+                &format!("op=\"{op}\""),
+                "outcome=\"not_implemented\"",
+            ],
+        );
+        assert!(n >= 1.0, "{op} not counted:\n{text}");
     }
 }
 

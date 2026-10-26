@@ -382,6 +382,23 @@ impl SeededHarness {
         ));
     }
 
+    /// Rebuild `router` from the SAME server against `cfg`, letting the
+    /// caller adjust the `AppState` first (e.g. inject a
+    /// `CallbackResolver` so a test host resolves to a chosen address).
+    pub fn rebuild_state_with(
+        &mut self,
+        cfg: RegistryConfig,
+        f: impl FnOnce(AppStateInner<SqliteStore>) -> AppStateInner<SqliteStore>,
+    ) {
+        self.router = build_router(f(AppStateInner::new(
+            self.server.clone(),
+            self.auth.clone(),
+            None,
+            cfg,
+            None,
+        )));
+    }
+
     /// Direct access to the underlying store, bypassing the HTTP surface
     /// and every publish-time check the SDK's `commit_proven`/validator
     /// pipeline runs — including checks a fixture's own precondition would
