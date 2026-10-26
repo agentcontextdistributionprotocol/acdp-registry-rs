@@ -9739,9 +9739,11 @@ const EXCUSED: &[(&str, &str)] = &[
          the Phase 14 lc ruling -- see the block comment above rcpt's entry.",
     ),    (
         "chain",
-        "applies_to_profiles = [acdp-consumer-chain] on all 10 fixtures (RFC-ACDP-0017, \
-         spec pin 093279a), and none carries an endpoint or a vectors array. Two grounds, \
-         split by fixture. chain-001..008 and chain-010 are rot-shaped: offline \
+        "applies_to_profiles = [acdp-consumer-chain] on all 11 fixtures (RFC-ACDP-0017, \
+         spec pin 093279a; chain-011 added at 1511b08), and none carries an endpoint; \
+         only chain-011 carries a vectors array, of consumer known-answer tests. Two \
+         grounds, split by fixture. chain-001..008, chain-010 and chain-011 are \
+         rot-shaped: offline \
          derived_from walks, as-of verdicts, drift and verdict digests are the \
          CONSUMER's evaluation of a bundle it holds (RFC-ACDP-0017 \u{a7}8-\u{a7}9), so no \
          harness configuration change would make this registry responsible for them. \
@@ -10173,11 +10175,12 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// before the `9deb7e7` bump (rev-003, rev-004 added; rev-002 only modified,
 /// not counted again) and 146 after; 147 after the `6d5cdb8` bump (sig-004
 /// added); 169 after the `093279a` bump (chain-001..010 added, RFC-ACDP-0017);
-/// 177 after the `81bbe3f` bump (rec-001..008 added, RFC-ACDP-0018).
+/// 177 after the `81bbe3f` bump (rec-001..008 added, RFC-ACDP-0018); 178 after
+/// the `1511b08` bump (chain-011 added, RFC-ACDP-0017 Final).
 /// A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 177;
+const TOTAL_FIXTURES_AT_PIN: usize = 178;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this

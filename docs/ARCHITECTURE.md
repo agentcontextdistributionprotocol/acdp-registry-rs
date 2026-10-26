@@ -175,7 +175,7 @@ request-id pair, `SetRequestId` must be applied last so it runs first, because
 
 The protocol-critical part of `POST /contexts` is **not** implemented here — it
 is `acdp`'s `RegistryServer`, which implements the ordered algorithm of
-[RFC-ACDP-0003 §2.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/rfcs/RFC-ACDP-0003-publish.md#21-registry-processing).
+[RFC-ACDP-0003 §2.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/1511b08f95f91dd30096414e881baaa5f84e1264/rfcs/RFC-ACDP-0003-publish.md#21-registry-processing).
 The steps and their one invariant are specified there and explained in
 [acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/registry.md#the-publish-pipeline--the-one-rule);
 this page does not restate them. We reuse it unchanged and add storage
