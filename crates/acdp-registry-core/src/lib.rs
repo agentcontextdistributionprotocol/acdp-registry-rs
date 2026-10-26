@@ -67,7 +67,7 @@ pub fn build_router_shared<S: ExtendedRegistryStore + 'static>(state: Arc<AppSta
     let auth_enabled = state.config.auth.enabled;
     let metrics_enabled = state.metrics.is_some();
     let body_limit = state.config.limits.max_payload_bytes;
-    let cors = build_cors_layer(&state.config.registry.cors.allowed_origins);
+    let cors = build_cors_layer(&state.config.registry.cors);
 
     // ACDP data + capabilities + auth endpoints. RFC-ACDP-0007 §4 requires
     // `application/acdp+json` on EVERY response from these endpoints (success
@@ -592,18 +592,37 @@ async fn charge_auth_limit(
     }
 }
 
-/// SEC-02: build a CORS layer driven by `[registry.cors] allowed_origins`.
+/// SEC-02: build a CORS layer driven by `[registry.cors]`.
 ///
-/// Default (empty list) sends no CORS headers — third-party origins
-/// cannot make cross-origin authenticated requests using a visitor's
-/// stored bearer token. `CorsLayer::permissive()` (the prior default)
-/// unconditionally set `Access-Control-Allow-Origin: *`, which was
-/// inappropriate for a registry that serves restricted/private contexts.
-fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
-    if allowed_origins.is_empty() {
+/// Default (empty `allowed_origins`, `public_reads = false`) sends no CORS
+/// headers — third-party origins cannot make cross-origin authenticated
+/// requests using a visitor's stored bearer token. `CorsLayer::permissive()`
+/// (the prior default) unconditionally set `Access-Control-Allow-Origin: *`
+/// AND allowed every request header, which was inappropriate for a registry
+/// that serves restricted/private contexts.
+///
+/// `public_reads` is the narrow form of `*`: `GET`/`HEAD` only, no
+/// credentials, and no non-safelisted request header, so a preflight for a
+/// request carrying `Authorization` fails and the browser never sends it.
+/// Every cross-origin request is then anonymous and the store's own
+/// visibility rules decide what it sees. `validate_config` rejects setting
+/// both forms, since one layer cannot apply two policies.
+fn build_cors_layer(cfg: &acdp_registry_types::CorsConfig) -> CorsLayer {
+    if cfg.public_reads {
+        return CorsLayer::new()
+            .allow_origin(AllowOrigin::any())
+            .allow_methods([Method::GET, Method::HEAD])
+            .expose_headers([
+                axum::http::header::LOCATION,
+                HeaderName::from_static("x-request-id"),
+            ])
+            .max_age(std::time::Duration::from_secs(600));
+    }
+    if cfg.allowed_origins.is_empty() {
         return CorsLayer::new();
     }
-    let parsed: Vec<HeaderValue> = allowed_origins
+    let parsed: Vec<HeaderValue> = cfg
+        .allowed_origins
         .iter()
         .filter_map(|o| HeaderValue::from_str(o).ok())
         .collect();

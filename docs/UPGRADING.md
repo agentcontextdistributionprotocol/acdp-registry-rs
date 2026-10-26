@@ -21,6 +21,19 @@ belongs in the per-crate changelogs.
 
 ---
 
+## Unreleased
+
+**No upgrade steps.** New opt-in key `registry.cors.public_reads` (default `false`): any origin may
+make anonymous `GET`/`HEAD` reads, with no credentials and no `Authorization` header allowed
+cross-origin. Nothing changes unless you set it. It cannot be combined with
+`registry.cors.allowed_origins`; a config with both is refused at startup.
+
+- **Rollback:** safe once the key is gone. An older binary refuses to start with it present
+  (`deny_unknown_fields`), from TOML or from `ACDP_REGISTRY_REGISTRY__CORS__PUBLIC_READS` (even
+  `false`), so remove both before rolling back.
+
+---
+
 ## 0.6.1
 
 **No operator-visible upgrade steps.** The server binary's behavior, configuration, schema and API

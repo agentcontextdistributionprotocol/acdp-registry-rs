@@ -55,7 +55,8 @@ All requests pass through, outermost first: a media-type backstop that stamps
 (`x-request-id`, a UUIDv4 minted if absent, propagated downstream, and present
 on **every** response including the ones the middleware generates itself); an
 envelope backstop that gives a `413` the RFC-ACDP-0007 §4 error body; the CORS
-layer (off unless `registry.cors.allowed_origins` is populated); a
+layer (off unless `registry.cors.allowed_origins` is populated or
+`registry.cors.public_reads` is set, see [CONFIGURATION](CONFIGURATION.md#registrycors)); a
 `RequestBodyLimitLayer` capped at `limits.max_payload_bytes` (so even
 unauthenticated `/auth/*` calls can't push oversized JSON); a 30 s
 `TimeoutLayer`; and `TraceLayer`. When `metrics.enabled`, a request-metrics

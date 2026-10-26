@@ -161,6 +161,14 @@ fn current_unix_seconds() -> i64 {
 /// FEAT-09: pre-bind config validation. Each check matches a runtime
 /// requirement that would otherwise be discovered lazily.
 fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
+    // One CORS layer applies one policy: the any-origin anonymous-read form
+    // and a credentialed origin list cannot both be in force.
+    if cfg.registry.cors.public_reads && !cfg.registry.cors.allowed_origins.is_empty() {
+        anyhow::bail!(
+            "registry.cors.public_reads and registry.cors.allowed_origins are mutually \
+             exclusive: set one or the other."
+        );
+    }
     if cfg.auth.enabled {
         match cfg.auth.jwt_signing_alg.as_str() {
             "HS256" | "" => {}
@@ -1921,6 +1929,25 @@ mod tests {
             err.to_string().contains("requires storage.backend"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn cors_public_reads_and_an_origin_list_are_refused_together() {
+        let mut both = RegistryConfig::defaults();
+        both.registry.cors.public_reads = true;
+        both.registry.cors.allowed_origins = vec!["https://ui.test".into()];
+        let err = validate_config(&both).expect_err("refused at startup");
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+
+        // Either form alone is not refused by this rule.
+        for (public_reads, origins) in [(true, vec![]), (false, vec!["https://ui.test".into()])] {
+            let mut one = RegistryConfig::defaults();
+            one.registry.cors.public_reads = public_reads;
+            one.registry.cors.allowed_origins = origins;
+            if let Err(e) = validate_config(&one) {
+                assert!(!e.to_string().contains("mutually exclusive"), "{e}");
+            }
+        }
     }
 
     #[test]
