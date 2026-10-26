@@ -49,7 +49,7 @@ env:
   # or deleted -- the survivor count falls with it, and a `<=` budget would read
   # that as an improvement. This assertion is what makes the budget below mean
   # anything.
-  MUTANTS_EXPECTED_SCOPE: "370"
+  MUTANTS_EXPECTED_SCOPE: "390"
 
   # The ONE committed ledger that a drifted survivor line is paired against, to
   # recover its identity (enclosing function + fn-relative offset + column, and
@@ -61,12 +61,29 @@ env:
   # which would trip the classifier's own duplicate-name assertion on every run.
   # docs/mutation-runs/README.md indexes which ledgers are CURRENT, in prose;
   # this variable is the machine-readable half of that index.
-  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/run40232497328-scope-370-outcomes.json"
+  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/run40283754611-scope-390-outcomes.json"
 
   # Surviving mutants at that sha. Each is enumerated with its own written reason
   # below; this number is the machine-readable half of that list. It ratchets DOWN
   # as survivors are killed and must never be raised without a reason recorded in
   # the same commit.
+  #
+  # SCOPE 370 -> 390 (#471, RFC-ACDP-0018 retraction recall). NOT a budget
+  # change: the floor stays 8 and the survivor SET is the same eight mutants,
+  # four on shifted lines (context.rs :1248:16 -> :1254:16, timeout :1284:12 ->
+  # :1290:12; store.rs :1128:35 -> :1233:35, :1451:35 -> :1556:35, :2052:5 ->
+  # :2170:5 -- the same-transaction feed append moved commit_publish down).
+  # context.rs 136 -> 137 (the hint wake-up after a publish) and store.rs 153 ->
+  # 172 (feed appends in commit_publish / lifecycle / key revocation); log.rs 65
+  # and receipt.rs 16 unchanged. Measured by run 40283754611 (workflow_dispatch
+  # on feat/rfc0018-retraction-recall): 390 / 250 caught / 9 missed / 130
+  # unviable / 1 timeout, `end_time` present, 237.8 min. Its outcomes.json is
+  # committed unchanged as the new MUTANTS_PRIOR_LEDGER. The NINTH miss in its
+  # missed.txt, context.rs:716:8 `delete !` on `if !is_replay {
+  # state.notify_hints() }`, is KILLED in the same commit by
+  # hints_e2e::a_superseding_publish_wakes_the_worker (verified locally by
+  # applying the mutant: no hint within 10 s), so it is not pinned; the next
+  # run records it caught.
   #
   # SCOPE 350 -> 370 (#461, RFC-ACDP-0017 event receipts). The floor RISES 7 -> 8,
   # and the reason is recorded at the new entry in MUTANTS_SURVIVORS below:
@@ -304,12 +321,12 @@ env:
     # same root either way and append-only makes any (size -> root) pair
     # immutable. Only WHICH sizes get cached changes.
     crates/acdp-registry-core/src/handlers/log.rs:132:18: replace == with != in root_for
-    # context.rs:1248:16 -- every row reaching this retain already belongs to the
+    # context.rs:1254:16 (was :1248:16 until #471) -- every row reaching this retain already belongs to the
     # caller's tenant (H-H-w moved the predicate into the SQL), so skipping the
     # block removes nothing. The retain's OWN `t == tenant` was CAUGHT at the
     # same site: two mutations, opposite verdicts, the signature of a redundant
-    # guard. Its sibling `delete !` at :1284:12 is the budgeted TIMEOUT.
-    crates/acdp-registry-core/src/handlers/context.rs:1248:16: delete ! in run_search_with_refill
+    # guard. Its sibling `delete !` at :1290:12 is the budgeted TIMEOUT.
+    crates/acdp-registry-core/src/handlers/context.rs:1254:16: delete ! in run_search_with_refill
     # context.rs:85:9 and :86:9 -- search returns only PUBLIC rows to every
     # requester (probed with an anonymous caller, an audience member and the
     # row's own producer), so `?visibility=public` selects everything already
@@ -337,7 +354,7 @@ env:
     # same site, `> with <` and `> with ==`, were EQUIVALENT-labelled by U-544 and
     # KILLED by U-552 once probed with a SUPERSEDING request, so this entry is what
     # is left after that correction rather than an inherited assumption.
-    crates/acdp-registry-sqlite/src/store.rs:1128:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
+    crates/acdp-registry-sqlite/src/store.rs:1233:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
     # store.rs:1330:35 -- UNREACHABLE BY DESIGN, not a coverage gap. It sits inside
     # the `if inserted == 0` branch (store.rs:1297), reached only when a concurrent
     # publish claims the same idempotency key between this transaction's step-1
@@ -367,9 +384,12 @@ env:
     # #371 committed run 36417581090's report, which records :1317:35; runs 37222567772
     # (scope 358) and 37248684286 (scope 354) record :1330:35 and :1007:35; run
     # 40232497328 (scope 370, #461) records :1451:35 and :1128:35 -- the same two
+    # mutants, moved down by the event-receipt mint in commit_publish; run
+    # 40283754611 (scope 390, #471) records :1556:35 and :1233:35, moved again by
+    # the same-transaction feed append. Earlier wording, kept:
     # mutants, moved down by the event-receipt mint in commit_publish.
-    crates/acdp-registry-sqlite/src/store.rs:1451:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
-    # store.rs:2052:5 -- EQUIVALENT (#461). `end_sweep_tx` closes an
+    crates/acdp-registry-sqlite/src/store.rs:1556:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
+    # store.rs:2170:5 (was :2052:5 until #471) -- EQUIVALENT (#461). `end_sweep_tx` closes an
     # event-receipt sweep transaction that wrote NOTHING, via an explicit
     # ROLLBACK. Replacing it with `Ok(())` drops the Transaction instead, and
     # sqlx-core's `Transaction::drop` queues the same ROLLBACK on the connection,
@@ -377,7 +397,7 @@ env:
     # row differs either way; only the instant the write lock is released moves,
     # and no test can observe that without racing the pool. The explicit call is
     # kept because it surfaces a rollback error instead of swallowing it.
-    crates/acdp-registry-sqlite/src/store.rs:2052:5: replace end_sweep_tx -> Result<(), AcdpError> with Ok(())
+    crates/acdp-registry-sqlite/src/store.rs:2170:5: replace end_sweep_tx -> Result<(), AcdpError> with Ok(())
 
   # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
   # unconditional `timeout != 0` until U-504, on the stated reasoning that "a
@@ -385,18 +405,18 @@ env:
   # That reasoning is about SLOW TESTS and it still holds. It does not cover a
   # mutant that provably cannot terminate, and the new scope contains exactly one:
   #
-  #   handlers/context.rs:1284:12  `delete !` on `if !should_refill { break; }` in
-  #     run_search_with_refill (was cited :1277:12, :1292:12, :1258:12, then
-  #     :1270:12; #295 shifted it +15, #341 -32, #432 +12 and #435 +14). Inverting it breaks when the loop SHOULD refill and loops forever when it should not
+  #   handlers/context.rs:1290:12  `delete !` on `if !should_refill { break; }` in
+  #     run_search_with_refill (was cited :1277:12, :1292:12, :1258:12, :1270:12,
+  #     then :1284:12; #295 shifted it +15, #341 -32, #432 +12, #435 +14, #471 +6). Inverting it breaks when the loop SHOULD refill and loops forever when it should not
   #     -- which is every unfiltered search in the suite. Non-termination cannot be
   #     converted into a fast assertion failure by any test: the binary hangs and
   #     the verdict is TIMEOUT. Re-measured at 8768b07 in shard 4/8: still exactly
   #     one timeout, still this mutant, 300s. Runs 36417581090 (346 scope),
   #     37222567772 (358 scope) and 37248684286 (354 scope) record
   #     it at :1258:12 in their committed ledgers; run 37972268890 (353 scope) records :1270:12 and run 39071836771 (350 scope)
-  #     :1284:12: still exactly one, this mutant. The
-  #     sibling `delete !` at :1248:16 (was :1222:16, :1206:16,
-  #     :1223:16, :1238:16, then :1234:16) is the MISSED equivalent above -- two `delete !` mutants in
+  #     :1284:12, run 40283754611 (390 scope) :1290:12: still exactly one, this mutant. The
+  #     sibling `delete !` at :1254:16 (was :1222:16, :1206:16,
+  #     :1223:16, :1238:16, :1234:16, then :1248:16) is the MISSED equivalent above -- two `delete !` mutants in
   #     one function with different verdicts, which is why both are cited by
   #     expression and not by line alone.
   #
@@ -480,7 +500,9 @@ jobs:
   # test binaries; debug info is not the cost (14.5 vs 13 s without it). The
   # build share is the scope's real price, so per the rule above the cap rises
   # rather than the globs narrowing. 330 stays under the hosted 360 job limit.
-  # RE-DERIVE from the re-run's cargo-mutants clock and tighten if it allows.
+  # Re-derived at 390: run 40283754611 took 237.8 min (cargo-mutants' own
+  # clock) with the faster tests, leaving 28% headroom under 330 -- about the
+  # 20% runner spread seen before, so the cap stands; do not tighten it.
     timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7

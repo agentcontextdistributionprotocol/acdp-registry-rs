@@ -31,6 +31,27 @@ hold entries from several releases. Use the commands.
 
 ## Entries
 
+### RFC-ACDP-0018 retraction recall: `/changes` and change hints
+
+The registry now serves both RFC-ACDP-0018 profiles. `acdp-registry-changes` is `GET /changes`: an
+append-only, registry-wide feed of lifecycle, superseded and key-revocation entries.
+`acdp-registry-events` is `/subscriptions` plus signed `acdp-change-hint/1` deliveries. Each feed
+entry is written in the same store transaction as the change it records (§5.3, rec-008), in all three
+stores. Visibility is a per-requester post-filter that never ends a page early (§5.5). Cursors are
+sealed feed positions, so they carry nothing about the requester's view. Subscription secrets are
+encrypted at rest under `[changes]`'s key, because signing a hint needs the secret itself, which a
+hash cannot give back. Design calls and their verdicts are in `DECISIONS.md` ("RFC-ACDP-0018
+retraction recall — 2026-10-25").
+
+The mutation ratchet re-pin is worth recording on its own. The first 390-mutant run hit its 180-minute
+cap after 161 mutants: 66.6 s per mutant against 22 s at scope 370. Part of that was the pattern the
+cap's comment already warns about, tests waiting out real bounds. rec004 D wrote ~600 feed entries,
+and two hint tests sat out the 10 s request and 5 s lookup timeouts. Test-only knobs that can only
+lower a bound (`with_hint_timeouts`, `with_changes_min_scan_rows`) brought those binaries from 54 s
+and 10 s to 0.2 s and 2.2 s. The rest was build cost, the scope's real price, so the cap rose to 330
+rather than narrowing `examine_globs`. Run 40283754611 then took 237.8 min. Its one new miss, the
+publish path's `notify_hints` wake-up, is killed by a new test rather than pinned.
+
 ### RFC-ACDP-0017 event receipts (§10) and receipted lineage members (§11)
 
 A registry that advertises lifecycle and receipts at `acdp_version` 0.5.0 now signs an

@@ -982,6 +982,76 @@ async fn a_commit_wakes_the_worker() {
     assert_eq!(v.subscription_id, sub.subscription_id);
 }
 
+/// A superseding publish wakes the worker too: the publish path, not only
+/// the lifecycle path, signals the commit that grew the feed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_superseding_publish_wakes_the_worker() {
+    let rx = Receiver::spawn().await;
+    let (h, state) = harness().await;
+    let (status, v) = call(
+        &h.router,
+        "POST",
+        "/subscriptions",
+        &bearer_for(OWNER),
+        Some(json!({
+            "filter": {"agent_id": [did_of(PRODUCER)], "kind": ["superseded"]},
+            "callback_url": rx.url(),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let producer = Producer::new_did_key(SigningKey::from_bytes(&[PRODUCER; 32]));
+    let req = producer
+        .publish_request()
+        .title("v1")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v1) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::CREATED, "{v1}");
+    let v1 = v1["ctx_id"].as_str().unwrap().to_string();
+    let (status, prev) = call(
+        &h.router,
+        "GET",
+        &format!("/contexts/{}/body", pct_encode_path_segment(&v1)),
+        &bearer_for(OWNER),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{prev}");
+    let prev: acdp::types::body::Body = serde_json::from_value(prev).unwrap();
+
+    let (stop, stop_rx) = tokio::sync::watch::channel(false);
+    let worker = spawn_hint_worker(Arc::clone(&state), Duration::from_secs(3600), stop_rx);
+    // Let the worker's start-up pass (and the plain publish's wake-up)
+    // finish, so only the superseding commit can wake it again.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(rx.seen().is_empty());
+    let req = producer
+        .supersede_body(&prev)
+        .title("v2")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v2) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::CREATED, "{v2}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while rx.seen().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no hint within 10 s of the superseding publish"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), worker)
+        .await
+        .expect("the worker stops on the shutdown signal")
+        .unwrap();
+}
+
 /// With the events profile off, a pass does nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_pass_without_the_events_profile() {
