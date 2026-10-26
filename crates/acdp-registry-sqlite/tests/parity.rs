@@ -425,3 +425,138 @@ async fn event_receipt_sweep_matches_the_cross_backend_contract() {
     let raw = Slots(Arc::clone(&plain));
     parity::assert_event_receipt_sweep(&plain, &minting, &raw, pubkey, "sqlite").await;
 }
+
+fn minting(plain: &Arc<SqliteStore>, seed: u8) -> Arc<SqliteStore> {
+    let signer = acdp::types::ReceiptSigner::new(
+        acdp::crypto::SigningKey::from_bytes(&[seed; 32]),
+        "did:web:reg.test",
+        "did:web:reg.test#receipt-key-1",
+    )
+    .expect("signer");
+    Arc::new(
+        plain
+            .as_ref()
+            .clone()
+            .with_event_receipt_minter(Arc::new(signer)),
+    )
+}
+
+/// RFC-ACDP-0018 §4/§5.3: the feed rows every durable backend appends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_feed_matches_the_cross_backend_contract() {
+    let (plain, _tmp) = store().await;
+    let minting = minting(&plain, 90);
+    parity::assert_change_feed(&plain, &minting, "sqlite").await;
+}
+
+/// RFC-ACDP-0018 §4: one row per receipted event, matching registry_state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_feed_lifecycle_rows_match_registry_state() {
+    let (plain, _tmp) = store().await;
+    let minting = minting(&plain, 87);
+    parity::assert_change_feed_lifecycle_sequence(&plain, &minting, "sqlite").await;
+}
+
+/// RFC-ACDP-0018 §5.3: racing keyed retries append one row, never fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn change_feed_concurrent_idempotent_supersede() {
+    let (plain, _tmp) = store().await;
+    parity::assert_change_feed_concurrent_idempotent_supersede(&plain, "sqlite").await;
+}
+
+/// RFC-ACDP-0018 §5.4: prefix pruning and the marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_feed_prune_matches_the_cross_backend_contract() {
+    let (plain, _tmp) = store().await;
+    let minting = minting(&plain, 89);
+    parity::assert_change_feed_prune(&plain, &minting, "sqlite").await;
+}
+
+/// RFC-ACDP-0018 §5.3 (rec-008): a failed append rolls back its publish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_feed_rolls_back_with_its_change() {
+    let (plain, _tmp) = store().await;
+    parity::assert_change_feed_rolls_back_with_its_change(&plain, "sqlite").await;
+}
+
+/// RFC-ACDP-0018 §5.2: seq order is commit order under concurrent writers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn change_feed_seq_order_is_commit_order() {
+    let (plain, _tmp) = store().await;
+    let minting = minting(&plain, 88);
+    parity::assert_change_feed_commit_order(&plain, &minting, "sqlite").await;
+}
+
+/// Migration 017: the feed tables, their indexes, the seeded marker row and
+/// the shape CHECKs exist, and re-running the migrations is a no-op.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_017_creates_the_change_feed() {
+    let (store, _tmp) = store().await;
+    store
+        .migrate()
+        .await
+        .expect("re-running the migrations is a no-op");
+    let names: Vec<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_master WHERE type = 'index' \
+         AND name LIKE 'idx_changes_%' ORDER BY name",
+    )
+    .fetch_all(store.pool())
+    .await
+    .expect("read sqlite_master");
+    let found: Vec<&str> = names.iter().map(|(n,)| n.as_str()).collect();
+    assert_eq!(
+        found,
+        vec![
+            "idx_changes_agent",
+            "idx_changes_ctx",
+            "idx_changes_lineage"
+        ]
+    );
+    let marker: Vec<(i64, i64)> = sqlx::query_as("SELECT id, pruned_through FROM changes_meta")
+        .fetch_all(store.pool())
+        .await
+        .expect("read changes_meta");
+    assert_eq!(marker, vec![(1, 0)], "one marker row, starting at 0");
+    for (kind, event, superseded_by) in [
+        ("lifecycle", None::<&str>, None::<&str>),
+        ("superseded", None, None),
+        ("key_revocation", Some("{}"), None),
+        ("other", None, None),
+    ] {
+        let res = sqlx::query(
+            "INSERT INTO changes (kind, ctx_id, lineage_id, agent_id, superseded_by, \
+             event, receipt, appended_at_ms) VALUES (?, 'c', 'l', 'a', ?, ?, '{}', 0)",
+        )
+        .bind(kind)
+        .bind(superseded_by)
+        .bind(event)
+        .execute(store.pool())
+        .await;
+        assert!(res.is_err(), "a malformed {kind} row must be refused");
+    }
+    let res = sqlx::query("INSERT INTO changes_meta (id, pruned_through) VALUES (2, 0)")
+        .execute(store.pool())
+        .await;
+    assert!(res.is_err(), "changes_meta holds exactly one row");
+}
+
+/// RFC-ACDP-0018 §8.1: subscription CRUD is owner-scoped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscription_crud_is_owner_scoped() {
+    let (plain, _tmp) = store().await;
+    parity::assert_subscription_crud(&plain, "sqlite").await;
+}
+
+/// RFC-ACDP-0018 §8.1: concurrent creates never exceed the per-owner limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn subscription_limit_holds_under_concurrent_creates() {
+    let (plain, _tmp) = store().await;
+    parity::assert_subscription_limit(&plain, "sqlite").await;
+}
+
+/// RFC-ACDP-0018 §8.2: delivery leases hand each due row to one claimant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn subscription_claims_have_one_holder() {
+    let (plain, _tmp) = store().await;
+    parity::assert_subscription_claims(&plain, "sqlite").await;
+}

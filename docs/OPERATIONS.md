@@ -270,7 +270,8 @@ reaches it unimpeded; gate it with `metrics.bearer_token` (or network policy)
 when the endpoint is reachable from untrusted networks. Beyond HTTP
 request-rate/latency/status by route, the registry exports domain counters
 (publishes by outcome, receipts minted, log leaves appended, lifecycle events,
-witness cosignatures, rate-limit rejections). Full metric list:
+witness cosignatures, rate-limit rejections, change-feed requests and prunes,
+subscription requests, hint deliveries by outcome, hint backlog age). Full metric list:
 [HTTP-API.md · `GET /metrics`](HTTP-API.md#get-metrics-feat-10).
 
 ## Event receipt sweep
@@ -304,6 +305,55 @@ lifecycle commit takes, so several replicas starting together fill each event ex
   restarts for the same contexts: alert on the incomplete count, or on the skipped count staying
   above zero, not on its rate. During a Postgres rolling upgrade, events that 0.5.5 replicas still
   accept have no receipt until the next append or restart, so the incomplete count rises then too.
+
+## Change hints
+
+With `[events]` enabled each replica runs a hint worker. It wakes after
+every commit that can grow the change feed and every 15 seconds for
+retries, claims due subscriptions with a 60-second lease (Postgres:
+`FOR UPDATE SKIP LOCKED`, so replicas split the work rather than duplicate
+it), evaluates each one exactly as the owner's `GET /changes`, and POSTs
+one signed hint covering every new visible change.
+On SIGTERM the worker stops claiming, finishes the batch in flight (the
+process waits up to the 60-second lease for it, so give the container a
+stop grace of at least 60 s, or accept that a kill inside it is the
+crash case below) and exits. A replica that
+dies mid-delivery leaves only a lease, which lapses; another replica (or
+the restarted one) tries again, so a receiver can, rarely, see a hint
+twice. Hints are idempotent by design: the receiver reads the feed
+from its own cursor.
+
+What to watch:
+
+- `acdp_registry_hint_deliveries_total{outcome="failed"}` or
+  `{outcome="ssrf_refused"}` rising: a receiver is down, or its host now
+  resolves somewhere private, no longer resolves, or its nameserver does
+  not answer within 5 seconds (all `ssrf_refused`; the warn log says
+  which). The subscription retries with backoff (one
+  minute doubling to hourly) and disables itself after 72 hours of
+  failure.
+- `acdp_registry_hint_oldest_due_seconds` climbing: a subscription owed a
+  hint has been due that long without one being recorded — the worker is
+  behind (every replica's batch is full) or deliveries keep failing; a
+  receiver in backoff counts from its retry time, not from the change.
+- `acdp_registry_hint_subscriptions{status="disabled"}` above zero:
+  disabled subscriptions are kept, still count toward their owner's
+  `max_subscriptions_per_requester`, and are never retried. The owner
+  deletes and re-creates one to resume; there is no operator re-enable.
+- `{outcome="unknown_key"}` after a `[changes]` key rotation (or on one
+  replica with the wrong `key_id`): subscriptions sealed under the old key
+  are retried, and disabled once they have failed for 72 hours. Restoring
+  the old key within that window loses nothing (see [Changes key](#changes-key)).
+  `{outcome="disabled"}` in a burst instead means the key changed but
+  `key_id` did not: every secret then fails to open as corrupt.
+- `{outcome="lease_lost"}`: the subscription was deleted, or its lease
+  taken over, while the attempt ran. Occasional is normal; steady means
+  replicas are stalling past the 60-second lease (each attempt is bounded
+  at 20 seconds, a batch at 40).
+- `{outcome="error"}` above zero: a store or evaluation error, or an
+  attempt that overran its bound; the warn log names the subscription.
+  Nothing is recorded and the subscription is retried after its lease
+  lapses.
 
 ## Webhooks
 
@@ -363,7 +413,16 @@ first boot against it; there is no online restore path.
    without the profile, so the binary logs at `ERROR` and exits non-zero. Set
    the flag to match the backup — see
    [CONFIGURATION.md `[lifecycle]`](CONFIGURATION.md#lifecycle-acdp-030).
-5. **Verify readiness, not liveness.** `GET /healthz` reports storage
+5. **If `[changes]` is enabled, rotate its key after restoring an older
+   backup.** The restore rolls the feed's `seq` back. A cursor issued past
+   the restored head is refused (`cursor_expired`) only until new changes
+   push the head past it; from then on it is accepted, and a consumer
+   holding one silently skips the entries that reuse those numbers. Rotating (new key,
+   new `key_id`, see [Changes key](#changes-key)) turns every outstanding
+   cursor into `cursor_expired`, which makes consumers resync. Existing
+   subscriptions stop receiving hints and are disabled 72 hours later;
+   owners re-create them.
+6. **Verify readiness, not liveness.** `GET /healthz` reports storage
    readiness and answers `503` if the backend is not usable; `GET /livez` says
    only that the process is up and will answer `200` against a broken database.
    Check `/healthz`.
@@ -383,13 +442,14 @@ signing key over relying on a restored revocation list.
 ## Capacity
 
 There is no autoscaling story here and no built-in load shedding beyond the
-rate limiter. Four bounds are worth knowing before they find you:
+rate limiter. Five bounds are worth knowing before they find you:
 
 | Bound | Where | What happens at the limit |
 |-------|-------|---------------------------|
 | Webhook queue | `webhook.queue_capacity` | The queue is bounded and delivery is fire-and-forget. When it is full the event is **dropped** with a `warn` log (`webhook queue full; event dropped`) — the publish itself still succeeds. There is no Prometheus gauge for depth; `GET /admin/status` reports `queue_in_flight` and `queue_capacity`, and that plus the warn log is the whole signal. |
 | Transparency log proofs | `[log]` | Tree computation is **O(n) per request** over the stored leaf hashes (only the current head root is cached). `/log/proof` and `/log/checkpoint` therefore get steadily more expensive as the log grows, and they are unauthenticated for hash-only queries. Rate-limit them deliberately rather than discovering the cost. |
 | Search page size | clamped in both stores | A caller-supplied `limit` is clamped to 100. A page can also come back **shorter** than requested when the request uses `?visibility=`, which is applied after the query (tenant scoping is not: it runs in SQL) — see [MULTI-TENANCY.md](MULTI-TENANCY.md#how-the-binding-is-stored-and-filtered) on the refill cap. Short is not "end of results"; page until `next_cursor` is absent. |
+| Change feed | `[changes]` | Rows accumulate at one per lifecycle event, supersession and key revocation, whenever a `[receipt]` key is configured — served or not — and are pruned once older than `retention_seconds` plus a one-hour margin (the cutoff is this replica's clock, Postgres stamps rows with the database's) every `prune_interval_seconds` (default 3600; 1000 rows per batch, repeated until caught up). The prune task runs even with `changes.enabled = false`. A `GET /changes` request reads at most six scan batches of `max(limit, 100)` rows, so a requester who can see little of the feed gets short pages with `has_more: true` rather than an unbounded scan. Losing or rotating `[changes]` key material expires every outstanding cursor (consumers resync); it never corrupts the feed. |
 | Storage pool | `storage.max_connections` (default 20) | Requests queue on the sqlx pool. `/healthz` issues a storage health query of its own, so it reports `degraded` + `503` once the pool can no longer serve one — which is the intended behaviour for a load balancer, and the reason `/livez` exists separately and never touches storage. |
 
 Sizing the webhook queue is a trade between memory and loss: it holds whole
@@ -412,7 +472,7 @@ changed**: rows removed, reordered, or rewritten. The realistic causes are a
 database restore that rolled the log back, a partial restore that mixed two
 datasets, or direct writes to the log table.
 
-**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/093279a99e98815fbb948e8d20652c1d5fca0585/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
+**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
 (pinned spec): a registry whose tree is lost **MUST NOT serve a reconstructed
 history under the same `log_id`**; it MUST start a new instantiation with a new
 `<instance>` component, and SHOULD publish an operational notice. "Serve" here
@@ -556,3 +616,28 @@ Receipt-key rotation has its own procedure and a retention rule that must not be
 violated — a removed key invalidates every receipt it ever signed. It is
 documented in [RECEIPTS.md](RECEIPTS.md#the-key-retention-rule-read-before-rotating),
 not here.
+
+### Changes key
+
+The `[changes]` master key (see
+[CONFIGURATION.md](CONFIGURATION.md#changes-acdp-050)) does two jobs: it
+authenticates `GET /changes` cursors, and it seals every subscription
+`secret` at rest (AES-256-GCM, bound to the subscription id). The plaintext
+secret is never stored, so a database dump alone cannot forge hints.
+Rotating the key (new key, new `key_id`) has two effects:
+
+- every outstanding cursor becomes `cursor_expired`, and consumers resync;
+- every existing subscription's secret can no longer be opened. The hint
+  worker sends nothing for it and retries on the normal backoff
+  (`outcome="unknown_key"`), so putting the old key back within 72 hours
+  (a rollback, a replica deployed with the wrong key) resumes it with
+  nothing lost. After 72 hours it is disabled, `GET /subscriptions/{id}`
+  shows `status: "disabled"`, and the owner must delete it and create a new
+  one, which gets a new secret.
+
+Always change `key_id` together with the key. A new key under the same
+`key_id` cannot be told apart from a tampered secret, so every
+subscription is disabled at once.
+
+Every replica needs the same key and `key_id`. Keep the key out of the
+database backup set: a backup together with the key opens every secret.

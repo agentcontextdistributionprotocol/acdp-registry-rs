@@ -382,6 +382,42 @@ impl SeededHarness {
         ));
     }
 
+    /// Rebuild `router` from the SAME server against `cfg`, letting the
+    /// caller adjust the `AppState` first (e.g. inject a
+    /// `CallbackResolver` so a test host resolves to a chosen address).
+    pub fn rebuild_state_with(
+        &mut self,
+        cfg: RegistryConfig,
+        f: impl FnOnce(AppStateInner<SqliteStore>) -> AppStateInner<SqliteStore>,
+    ) {
+        self.router = build_router(f(AppStateInner::new(
+            self.server.clone(),
+            self.auth.clone(),
+            None,
+            cfg,
+            None,
+        )));
+    }
+
+    /// [`Self::rebuild_state_with`], also returning the state the router
+    /// serves, for a test that drives a background worker (the change-hint
+    /// worker) against the same state the handlers use.
+    pub fn rebuild_shared_with(
+        &mut self,
+        cfg: RegistryConfig,
+        f: impl FnOnce(AppStateInner<SqliteStore>) -> AppStateInner<SqliteStore>,
+    ) -> Arc<AppStateInner<SqliteStore>> {
+        let state = Arc::new(f(AppStateInner::new(
+            self.server.clone(),
+            self.auth.clone(),
+            None,
+            cfg,
+            None,
+        )));
+        self.router = acdp_registry_core::build_router_shared(Arc::clone(&state));
+        state
+    }
+
     /// Direct access to the underlying store, bypassing the HTTP surface
     /// and every publish-time check the SDK's `commit_proven`/validator
     /// pipeline runs — including checks a fixture's own precondition would
@@ -507,18 +543,24 @@ pub fn producer(prefix: &str, seed: u8) -> Producer {
 /// negative offset yields an already-expired token (the harness signer's
 /// leeway is 30s).
 pub fn forged_bearer(sub: &str, jti: &str, exp_offset_seconds: i64) -> String {
+    forged_bearer_for(AUTHORITY, sub, jti, exp_offset_seconds)
+}
+
+/// [`forged_bearer`] for a harness built with another `authority`.
+#[allow(dead_code)]
+pub fn forged_bearer_for(authority: &str, sub: &str, jti: &str, exp_offset_seconds: i64) -> String {
     let secret = JwtSecret::from_bytes(&[42u8; 32]);
-    let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
+    let signer = JwtSigner::new(secret, format!("did:web:{authority}"), authority.into(), 30);
     let now = chrono::Utc::now().timestamp();
     let claims = BearerClaims {
-        iss: format!("did:web:{AUTHORITY}"),
+        iss: format!("did:web:{authority}"),
         sub: sub.to_string(),
-        aud: AUTHORITY.into(),
+        aud: authority.into(),
         jti: jti.to_string(),
         iat: now - 60,
         exp: now + exp_offset_seconds,
         acdp: AcdpClaims {
-            registry: AUTHORITY.into(),
+            registry: authority.into(),
             key_id: format!("{sub}#key-1"),
         },
         tenant: None,

@@ -1,5 +1,5 @@
 {
-  "description": "Profile ids a registry built from this tree may advertise in [registry].profiles. Mirrors REGISTRY_ADVERTISABLE_PROFILES in crates/acdp-registry-types/src/config.rs; a unit test keeps the two identical.",
+  "description": "Profile ids a registry built from this tree may advertise in [registry].profiles. Mirrors REGISTRY_ADVERTISABLE_PROFILES in crates/acdp-registry-types/src/config.rs; a unit test keeps the two identical. acdp-registry-changes requires [changes] enabled and acdp-registry-events requires [events] enabled.",
   "profiles": [
     "acdp-registry-core",
     "acdp-registry-discovery",
@@ -7,6 +7,8 @@
     "acdp-registry-receipts",
     "acdp-registry-head-receipts",
     "acdp-registry-transparency-log",
-    "acdp-registry-lifecycle"
+    "acdp-registry-lifecycle",
+    "acdp-registry-changes",
+    "acdp-registry-events"
   ]
 }

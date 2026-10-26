@@ -82,6 +82,48 @@ top of the upstream sync trait:
   batch of ids the caller may *retrieve* (RFC-ACDP-0008 §4.5 retrieve rules,
   not search rules, plus the tenant gate), in one query on the SQL backends.
   `/log/entries` uses it to decide which leaves to echo.
+- The RFC-ACDP-0018 change feed — `changes_page`, `changes_head`,
+  `prune_changes`, `producers_of`. See [Change feed](#change-feed) below.
+- RFC-ACDP-0018 §8 change-hint subscriptions (`subscriptions`, migration
+  018) — `create_subscription`, `get_subscription`, `delete_subscription`
+  (all owner-scoped), `claim_due_subscriptions` and
+  `finish_subscription_attempt` (a lease, so two replicas never deliver the
+  same subscription at once), `subscription_counts`. The hint worker in
+  `acdp-registry-core/src/hints.rs` drives them.
+
+### Change feed
+
+The feed is one append-only table (`changes`, migration 017) plus a one-row
+marker (`changes_meta.pruned_through`). Which changes append which rows is
+decided in one place, the pure functions in
+`acdp-registry-store/src/changes.rs` (`lifecycle_append`,
+`feed_appends_for_publish`). Each backend's `changes.rs` holds only the SQL.
+`store.rs` gains only the calls to it.
+
+- **Atomic with the change (§5.3, rec-008).** A lifecycle event appends its
+  `lifecycle` row inside the event's own transaction, on the Applied path
+  only. An accepted publish appends `superseded` (for its predecessor) and
+  `key_revocation` rows inside the publish transaction, on the Inserted path
+  only. An idempotent replay, a lost race or a refused commit appends
+  nothing, and a failed append rolls the whole change back. Without a
+  receipt minter nothing is appended: the store never invents evidence.
+- **`seq` order is commit order.** SQLite gets this from its single writer
+  (`BEGIN IMMEDIATE`). Postgres takes `pg_advisory_xact_lock(FEED_APPEND_LOCK_KEY)`
+  before drawing the identity value, as the transaction's last statements,
+  so the lock order is always rows, then the log lock, then the feed lock.
+  The lock is held only for the final insert and the commit. The memory
+  store appends under the same mutex as its receipts.
+- **Reads** run in one snapshot (a deferred read transaction on SQLite;
+  REPEATABLE READ, READ ONLY on Postgres), so the rows, `head` and
+  `pruned_through` agree.
+- **Pruning** deletes only a prefix of `seq` older than the cutoff. It moves
+  `pruned_through` in the same transaction, so a cursor below the marker is
+  detectably expired, never silently short.
+- **Bypass writers.** `put` and `mark_superseded` write contexts without
+  touching the feed. They exist for tests and fixtures; no server path
+  calls them.
+- **Memory backend.** The feed is lost on restart, so the memory backend
+  cannot advertise the profile.
 
 The sync `RegistryStore` methods inherited from `acdp` are required so the
 upstream `RegistryServer` publish algorithm (see
@@ -133,7 +175,7 @@ request-id pair, `SetRequestId` must be applied last so it runs first, because
 
 The protocol-critical part of `POST /contexts` is **not** implemented here — it
 is `acdp`'s `RegistryServer`, which implements the ordered algorithm of
-[RFC-ACDP-0003 §2.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/093279a99e98815fbb948e8d20652c1d5fca0585/rfcs/RFC-ACDP-0003-publish.md#21-registry-processing).
+[RFC-ACDP-0003 §2.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/rfcs/RFC-ACDP-0003-publish.md#21-registry-processing).
 The steps and their one invariant are specified there and explained in
 [acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/registry.md#the-publish-pipeline--the-one-rule);
 this page does not restate them. We reuse it unchanged and add storage

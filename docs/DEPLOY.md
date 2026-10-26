@@ -200,6 +200,13 @@ public key in `/.well-known/did.json`.
 - **Changing `registry.authority` changes the registry's DID.** Receipts
   already issued keep naming the old DID, so treat the hostname as permanent.
 
+If `[changes]` is enabled, its master key (`openssl rand -base64 32`, a
+different value from the receipt seed) is a secret too: inject it as
+`ACDP_REGISTRY_CHANGES__KEY_B64` or point `changes.key_path` at a file, give
+every replica the same value, and back it up apart from the database. Losing
+it expires every outstanding cursor and disables every subscription (see
+[OPERATIONS.md · Changes key](OPERATIONS.md#changes-key)).
+
 `auth.jwt_secret` signs bearer tokens, not receipts. It is checked at boot even
 when auth is off (base64, at least 32 bytes, not `changeme`), so set a real one.
 

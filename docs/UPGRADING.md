@@ -21,6 +21,50 @@ belongs in the per-crate changelogs.
 
 ---
 
+## Unreleased
+
+**This release adds migration 017 (both backends): the RFC-ACDP-0018 change feed, a new `changes`
+table and a one-row `changes_meta` marker.**
+
+- **No backfill.** The feed starts empty at the upgrade. Changes accepted before it never appear on
+  it. A registry that mints receipts appends a row for every lifecycle event, superseding publish
+  and key revocation from then on, in the same transaction as the change. Without a receipt minter
+  nothing is appended.
+- **Who is affected:** nobody, until the change-feed profile is advertised. The table is written but
+  not served by this migration alone. The prune task runs on every registry, so
+  `changes.retention_seconds` (at least 2592000) and `changes.prune_interval_seconds` (at least 1)
+  are now validated at startup even with `changes.enabled = false`.
+- **Rolling out the feed:** set `changes.enabled = true` (the profile is advertised automatically,
+  and serving needs a 32-byte master key in `ACDP_REGISTRY_CHANGES__KEY_B64` or `changes.key_path`,
+  distinct from the receipt seed and the same on every replica) only in a **separate
+  deploy, after every replica runs this release**. A replica on the older binary accepts changes
+  without appending feed rows, so a feed advertised during a mixed rollout silently misses them.
+- **Rollback, Postgres:** safe to 0.5.6. The migrator tolerates the newer applied version, and
+  older binaries never touch the new tables. Changes accepted while the older binary runs are not
+  in the feed; a consumer polling it after the roll-forward does not see them.
+- **Rollback, SQLite:** unchanged. Restore the pre-upgrade file, as for any release that adds a
+  migration.
+
+**It also adds migration 018 (both backends): a `subscriptions` table for RFC-ACDP-0018 change
+hints.**
+
+- **Who is affected:** nobody until `[events] enabled = true`, which needs `[changes]` and
+  `auth.enabled`. Listing `acdp-registry-events` in `registry.profiles` without it now fails
+  startup with a message naming `events.enabled` (it used to fail because the profile was not
+  served).
+- **Rolling out subscriptions:** enable `[events]` only after every replica runs this release, as
+  for the feed. Every replica must hold the same `[changes]` key: subscription secrets are sealed
+  under it.
+- **Rollback:** as for 017. Older binaries never read the table; subscriptions created meanwhile
+  stay stored and inert.
+
+**Cross-registry proxy (no migration):** with `registry.cross_registry_resolution` on, a foreign
+context whose `registry_state.event_receipts` fails the acdp 0.17 closed schema is now answered
+`502 cross_registry_resolution_failed`; it used to be served with the field passed through
+untouched. Only malformed origins are affected, and rolling back restores the old passthrough.
+
+---
+
 ## 0.5.6
 
 **This release adds migration 016 (both backends): a nullable `receipt` column on

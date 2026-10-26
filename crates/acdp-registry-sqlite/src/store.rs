@@ -248,6 +248,27 @@ impl ExtendedRegistryStore for SqliteStore {
         Ok(rows.into_iter().collect())
     }
 
+    /// One `IN (…)` query per chunk instead of the default's `get` per id.
+    async fn producers_of(
+        &self,
+        ctx_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>, AcdpError> {
+        let mut out = std::collections::HashMap::with_capacity(ctx_ids.len());
+        for chunk in ctx_ids.chunks(VISIBLE_CTX_IDS_CHUNK) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql =
+                format!("SELECT ctx_id, agent_id FROM contexts WHERE ctx_id IN ({placeholders})");
+            let mut q = sqlx::query_as::<_, (String, String)>(&sql);
+            for id in chunk {
+                q = q.bind(*id);
+            }
+            out.extend(q.fetch_all(&self.pool).await.map_err(map_sqlx_err)?);
+        }
+        Ok(out)
+    }
+
     /// One query for a whole page's worth of retrieval-visibility checks,
     /// replacing N blocking `retrieve` round-trips.
     ///
@@ -453,6 +474,76 @@ impl ExtendedRegistryStore for SqliteStore {
         }
     }
 
+    // ── Change feed (RFC-ACDP-0018) ────────────────────────────────────
+
+    async fn changes_page(
+        &self,
+        query: &acdp_registry_store::FeedQuery,
+    ) -> Result<acdp_registry_store::FeedPage, AcdpError> {
+        crate::changes::page(&self.pool, query).await
+    }
+
+    async fn changes_head(&self) -> Result<acdp_registry_store::FeedHead, AcdpError> {
+        crate::changes::head(&self.pool).await
+    }
+
+    async fn prune_changes(&self, older_than_ms: i64, batch: u32) -> Result<u64, AcdpError> {
+        crate::changes::prune(&self.pool, older_than_ms, batch).await
+    }
+
+    // ── Change-hint subscriptions (RFC-ACDP-0018 §8) ───────────────────
+
+    async fn create_subscription(
+        &self,
+        new: &acdp_registry_store::NewSubscription,
+        max_per_owner: u64,
+    ) -> Result<acdp_registry_store::CreateSubscriptionOutcome, AcdpError> {
+        crate::subscriptions::create(&self.pool, new, max_per_owner).await
+    }
+
+    async fn get_subscription(
+        &self,
+        owner_did: &str,
+        subscription_id: &str,
+    ) -> Result<Option<acdp_registry_store::SubscriptionRecord>, AcdpError> {
+        crate::subscriptions::get(&self.pool, owner_did, subscription_id).await
+    }
+
+    async fn delete_subscription(
+        &self,
+        owner_did: &str,
+        subscription_id: &str,
+    ) -> Result<bool, AcdpError> {
+        crate::subscriptions::delete(&self.pool, owner_did, subscription_id).await
+    }
+
+    async fn claim_due_subscriptions(
+        &self,
+        now_ms: i64,
+        head: u64,
+        lease_until_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<acdp_registry_store::SubscriptionRecord>, AcdpError> {
+        crate::subscriptions::claim_due(&self.pool, now_ms, head, lease_until_ms, limit).await
+    }
+
+    async fn finish_subscription_attempt(
+        &self,
+        subscription_id: &str,
+        lease_until_ms: i64,
+        progress: &acdp_registry_store::SubscriptionProgress,
+    ) -> Result<bool, AcdpError> {
+        crate::subscriptions::finish_attempt(&self.pool, subscription_id, lease_until_ms, progress)
+            .await
+    }
+
+    async fn subscription_counts(
+        &self,
+        head: u64,
+    ) -> Result<acdp_registry_store::SubscriptionCounts, AcdpError> {
+        crate::subscriptions::counts(&self.pool, head).await
+    }
+
     // ── Transparency log reads (RFC-ACDP-0012) ─────────────────────────
 
     async fn log_tree_size(&self) -> Result<u64, AcdpError> {
@@ -637,6 +728,8 @@ const SEARCH_VISIBILITY_SQLITE: &str = " AND (\
 // ── RegistryStore (sync, drives async sqlx via block_on) ─────────────────────
 
 impl RegistryStore for SqliteStore {
+    /// Raw insert for tests and fixtures. Bypasses the RFC-ACDP-0018 change
+    /// feed: no server path calls it (publishes go through `commit_publish`).
     fn put(&self, body: Body) -> Result<(), AcdpError> {
         self.block_on(async {
             let mut tx = self
@@ -919,6 +1012,15 @@ impl RegistryStore for SqliteStore {
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sqlx_err)?;
+            // RFC-ACDP-0018 §5.3: the feed row commits with the event.
+            crate::changes::append_lifecycle(
+                &mut tx,
+                &event,
+                &ctx.body,
+                plan.as_ref().map(|p| &p.new),
+                now.timestamp_millis(),
+            )
+            .await?;
             tx.commit()
                 .await
                 .map_err(|e| AcdpError::RegistryInternal(format!("tx commit: {e}")))?;
@@ -951,6 +1053,9 @@ impl RegistryStore for SqliteStore {
         })
     }
 
+    /// Raw status flip for tests and fixtures. Bypasses the RFC-ACDP-0018
+    /// change feed: no server path calls it (supersession happens inside
+    /// `commit_publish`, which appends the `superseded` row).
     fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), AcdpError> {
         self.block_on(async {
             sqlx::query("UPDATE contexts SET status = 'superseded' WHERE ctx_id = ?")
@@ -1463,6 +1568,18 @@ impl RegistryStore for SqliteStore {
                 }
             }
 
+            // RFC-ACDP-0018 §5.3: the feed rows commit with the publish,
+            // after every path that could still discard it.
+            crate::changes::append_publish(
+                &mut tx,
+                &body,
+                response.registry_receipt.as_ref(),
+                req.supersedes.as_ref(),
+                // Read under the write lock, not at entry: a row's age must
+                // not include the busy wait, or it prunes early.
+                Utc::now().timestamp_millis(),
+            )
+            .await?;
             tx.commit()
                 .await
                 .map_err(|e| AcdpError::RegistryInternal(format!("tx commit: {e}")))?;
@@ -1867,6 +1984,7 @@ fn full_context(body: Body, status: Status, receipt: Option<serde_json::Value>) 
         registry_state: RegistryState {
             status,
             lifecycle_events: None,
+            event_receipts: None,
             extensions: Default::default(),
         },
         registry_receipt: receipt,
@@ -3195,7 +3313,26 @@ mod tests {
         );
 
         // v1 under a real tenant, with a real receipt minter.
-        let minter = |_: &acdp::types::body::Body| Ok(serde_json::json!({"kind": "test-receipt"}));
+        // A real signer: a key-revocation successor appends a feed row, and the
+        // feed refuses to persist a receipt the read path could not serve.
+        fn minter(
+            body: &acdp::types::body::Body,
+        ) -> Result<serde_json::Value, acdp::error::AcdpError> {
+            let receipt = acdp::types::ReceiptSigner::new(
+                SigningKey::from_bytes(&[93u8; 32]),
+                "did:web:reg.test",
+                "did:web:reg.test#receipt-key-1",
+            )?
+            .mint(
+                &body.ctx_id,
+                &body.lineage_id,
+                &body.origin_registry,
+                body.created_at,
+                &body.content_hash,
+                &format!("sha256:{}", "c".repeat(64)),
+            )?;
+            serde_json::to_value(receipt).map_err(acdp::error::AcdpError::from)
+        }
         let v1 = p
             .publish_request()
             .title("v1-tenanted")
@@ -3622,17 +3759,28 @@ mod tests {
             AgentDid::new("did:web:agents.test:rcpt".to_string()),
             "did:web:agents.test:rcpt#key-1".to_string(),
         );
-        // Minter mirroring the shape acdp's ReceiptSigner emits, built
-        // from the body the store hands back — so equality below proves
-        // the store invoked it against the FINAL assigned identifiers.
-        let minter = |body: &acdp::types::body::Body| {
-            Ok(serde_json::json!({
-                "ctx_id": body.ctx_id.as_str(),
-                "lineage_id": body.lineage_id.as_str(),
-                "origin_registry": body.origin_registry,
-                "content_hash": body.content_hash.0,
-            }))
-        };
+        // A real ReceiptSigner over the body the store hands back — so
+        // equality below proves the store invoked it against the FINAL
+        // assigned identifiers. (A supersession appends a feed row, and the
+        // feed refuses a receipt the read path could not serve.)
+        fn minter(
+            body: &acdp::types::body::Body,
+        ) -> Result<serde_json::Value, acdp::error::AcdpError> {
+            let receipt = acdp::types::ReceiptSigner::new(
+                SigningKey::from_bytes(&[94u8; 32]),
+                "did:web:reg.test",
+                "did:web:reg.test#receipt-key-1",
+            )?
+            .mint(
+                &body.ctx_id,
+                &body.lineage_id,
+                &body.origin_registry,
+                body.created_at,
+                &body.content_hash,
+                &format!("sha256:{}", "c".repeat(64)),
+            )?;
+            serde_json::to_value(receipt).map_err(acdp::error::AcdpError::from)
+        }
 
         let publish = |req: acdp::types::publish::PublishRequest| {
             let s = store.clone();

@@ -2,6 +2,9 @@
 //! resolve, with every read going through `acdp::client::CrossRegistryResolver`
 //! configured the way Seam's `seam-context-acdp` configures it (SSRF policy,
 //! an authority allowlist, and fail-closed RFC-ACDP-0014 revocation discovery).
+//! When the registry advertises `acdp-registry-changes` (RFC-ACDP-0018), the
+//! retraction must also appear on `GET /changes` and pass
+//! `acdp::client::verify_change`.
 //!
 //! Two subcommands:
 //!
@@ -24,13 +27,16 @@
 use std::time::Duration;
 
 use acdp::client::{
-    CrossRegistryResolver, DiscoveryFailurePolicy, RegistryClient, RevocationCache,
-    RevocationDiscovery, RevocationPolicy,
+    verify_change, ChangeEffect, ChangeVerdict, CrossRegistryResolver, DiscoveryFailurePolicy,
+    RegistryClient, RevocationCache, RevocationDiscovery, RevocationPolicy, Since,
+    VerificationPolicy,
 };
 use acdp::crypto::SigningKey;
 use acdp::did::key::DidKeyMaterial;
+use acdp::did::WebResolver;
 use acdp::producer::Producer;
 use acdp::safe_http::SsrfPolicy;
+use acdp::types::change::{ChangeKind, WatchFilter};
 use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
 use acdp::types::primitives::{AgentDid, ContextType, CtxId, Visibility};
 use acdp::types::EventReceipt;
@@ -185,10 +191,9 @@ async fn resolve_and_report(
         "status": serde_json::to_value(&rs.status)?,
         "retraction": retraction(rs, lifecycle_advertised),
         "lifecycle_events": rs.lifecycle_events.as_ref().map(|e| e.len()),
-        "event_receipts": match rs.event_receipts() {
+        "event_receipts": match &rs.event_receipts {
             None => Value::Null,
-            Some(Ok(r)) => json!(r.len()),
-            Some(Err(e)) => json!({ "error": e.to_string() }),
+            Some(r) => json!(r.len()),
         },
         "receipt_verified": v.verified_receipt().is_some(),
         "receipt_key_status": format!("{:?}", v.receipt_key_status()),
@@ -196,6 +201,91 @@ async fn resolve_and_report(
         "revocation_verdict": format!("{:?}", v.revocation_verdict()),
         "title": v.body().title,
     }))
+}
+
+/// RFC-ACDP-0018: the feed head before the retraction, or `None` when the
+/// registry does not advertise `acdp-registry-changes` (then `/changes`
+/// must answer 501 `not_implemented`, or 404 from a build that predates
+/// the route, which is all that is checked).
+async fn changes_head(
+    http: &reqwest::Client,
+    client: &RegistryClient,
+    base_url: &str,
+    advertised: bool,
+) -> Result<Option<String>> {
+    if !advertised {
+        let status = http
+            .get(format!("{base_url}/changes?since=head"))
+            .send()
+            .await?
+            .status();
+        ensure!(
+            status == reqwest::StatusCode::NOT_IMPLEMENTED
+                || status == reqwest::StatusCode::NOT_FOUND,
+            "acdp-registry-changes is not advertised but GET /changes returned {status}"
+        );
+        println!("changes: not advertised (GET /changes is {status}); feed probe skipped");
+        return Ok(None);
+    }
+    let head = client
+        .changes(&Since::Head, &WatchFilter::new(), None)
+        .await
+        .context("GET /changes?since=head")?;
+    Ok(Some(head.next_cursor))
+}
+
+/// RFC-ACDP-0018 §5.3: the retraction's lifecycle entry, read from the
+/// pre-retraction head with a `ctx_id` watch, verified by the §7
+/// procedure. The entry commits with the event, so it is there on the
+/// first read; the retries only absorb a replica's read lag.
+async fn verify_retraction_entry(
+    client: &RegistryClient,
+    cursor: String,
+    ctx: &CtxId,
+) -> Result<Value> {
+    let filter = WatchFilter::new().ctx_id(ctx.clone());
+    let mut since = Since::Cursor(cursor);
+    for attempt in 0..5 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let page = client
+            .changes(&since, &filter, None)
+            .await
+            .context("GET /changes from the pre-retraction head")?;
+        let found = page
+            .changes
+            .iter()
+            .find(|c| c.kind() == ChangeKind::Lifecycle && c.ctx_id() == ctx);
+        if let Some(change) = found {
+            let verdict = verify_change(
+                client,
+                &WebResolver::new(),
+                change,
+                None,
+                &VerificationPolicy::default(),
+            )
+            .await
+            .context("verify_change could not decide the entry")?;
+            let retracted = match &verdict {
+                ChangeVerdict::Verified(ChangeEffect::Lifecycle { retracted, .. }) => *retracted,
+                other => bail!("the retraction entry did not verify as lifecycle: {other:?}"),
+            };
+            ensure!(
+                retracted,
+                "the verified entry does not read retracted: {verdict:?}"
+            );
+            return Ok(json!({
+                "seq": change.seq(),
+                "kind": "lifecycle",
+                "ctx_id": ctx.as_str(),
+                "verified": true,
+                "retracted": retracted,
+            }));
+        }
+        since = Since::Cursor(page.next_cursor);
+    }
+    bail!("no lifecycle entry for {ctx} on GET /changes after 5 reads")
 }
 
 async fn run(base_url: &str, producer_did: &str) -> Result<()> {
@@ -260,6 +350,16 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
         })
         .is_some_and(|version| version >= (0, 5));
     println!("capabilities: {}", serde_json::to_string(&caps)?);
+
+    // 1b. RFC-ACDP-0018: remember the feed head before anything changes.
+    let feed_client = RegistryClient::new(base_url)?;
+    let changes_cursor = changes_head(
+        &http,
+        &feed_client,
+        base_url,
+        profiles.contains(&"acdp-registry-changes"),
+    )
+    .await?;
 
     // 2. Publish a public context signed by the did:web producer.
     let producer = Producer::new_ed25519(seed()?, AgentDid::parse(producer_did)?, key_id.clone());
@@ -360,6 +460,12 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
         receipts.len(),
         serde_json::to_string(&receipts)?
     );
+
+    // 4c. RFC-ACDP-0018 §5.3: the retraction is on the change feed.
+    if let Some(cursor) = changes_cursor {
+        let entry = verify_retraction_entry(&feed_client, cursor, &ctx).await?;
+        println!("changes entry: {entry}");
+    }
 
     // 5. Resolve again: the body is still served, the retraction is visible.
     let after = resolve_and_report(&resolver(ctx.authority()), &ctx, lifecycle_advertised).await?;

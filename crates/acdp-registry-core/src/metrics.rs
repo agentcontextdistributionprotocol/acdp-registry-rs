@@ -41,6 +41,15 @@ pub const WITNESS_COSIGNATURES_TOTAL: &str = "acdp_registry_witness_cosignatures
 pub const RATE_LIMIT_REJECTIONS_TOTAL: &str = "acdp_registry_rate_limit_rejections_total";
 pub const RATE_LIMIT_SHARED_TOTAL: &str = "acdp_registry_rate_limit_shared_total";
 pub const RATE_LIMIT_SHARED_SECONDS: &str = "acdp_registry_rate_limit_shared_seconds";
+pub const CHANGES_REQUESTS_TOTAL: &str = "acdp_registry_changes_requests_total";
+pub const CHANGES_ROWS_SCANNED_TOTAL: &str = "acdp_registry_changes_rows_scanned_total";
+pub const CHANGES_PRUNED_TOTAL: &str = "acdp_registry_changes_pruned_total";
+pub const CHANGES_HEAD_SEQ: &str = "acdp_registry_changes_head_seq";
+pub const CHANGES_PRUNED_THROUGH: &str = "acdp_registry_changes_pruned_through";
+pub const SUBSCRIPTION_REQUESTS_TOTAL: &str = "acdp_registry_subscription_requests_total";
+pub const HINT_DELIVERIES_TOTAL: &str = "acdp_registry_hint_deliveries_total";
+pub const HINT_SUBSCRIPTIONS: &str = "acdp_registry_hint_subscriptions";
+pub const HINT_OLDEST_DUE_SECONDS: &str = "acdp_registry_hint_oldest_due_seconds";
 
 /// Process-global recorder handle. `metrics-exporter-prometheus` installs a
 /// single global recorder; a second install returns an error. A `OnceLock`
@@ -192,6 +201,47 @@ pub fn record_lifecycle_event(event: &'static str, outcome: &'static str) {
 /// verified and stored, `rejected` when it failed verification.
 pub fn record_witness_cosignature(outcome: &'static str) {
     metrics::counter!(WITNESS_COSIGNATURES_TOTAL, "outcome" => outcome).increment(1);
+}
+
+/// One `GET /changes` request (RFC-ACDP-0018 §5) with its outcome (`ok` or
+/// a wire error code such as `cursor_expired`), and the feed rows it
+/// scanned — scanned, not returned, so post-filter visibility cost shows.
+pub fn record_changes_request(outcome: &'static str, rows_scanned: u64) {
+    metrics::counter!(CHANGES_REQUESTS_TOTAL, "outcome" => outcome).increment(1);
+    metrics::counter!(CHANGES_ROWS_SCANNED_TOTAL).increment(rows_scanned);
+}
+
+/// One `/subscriptions` request (RFC-ACDP-0018 §8.1). `op` is `create`,
+/// `get` or `delete`; `outcome` is `ok` or the wire code.
+pub fn record_subscription_request(op: &'static str, outcome: &'static str) {
+    metrics::counter!(SUBSCRIPTION_REQUESTS_TOTAL, "op" => op, "outcome" => outcome).increment(1);
+}
+
+/// One change-hint delivery attempt (RFC-ACDP-0018 §8.2). `outcome` is a
+/// `hints::HintOutcome` label: `delivered`, `nothing_visible`, `failed`,
+/// `ssrf_refused`, `unknown_key`, `disabled`, `lease_lost` or `error`.
+pub fn record_hint_delivery(outcome: &'static str) {
+    metrics::counter!(HINT_DELIVERIES_TOTAL, "outcome" => outcome).increment(1);
+}
+
+/// Subscriptions per status, sampled by the hint worker.
+pub fn record_hint_subscriptions(active: u64, disabled: u64) {
+    metrics::gauge!(HINT_SUBSCRIPTIONS, "status" => "active").set(active as f64);
+    metrics::gauge!(HINT_SUBSCRIPTIONS, "status" => "disabled").set(disabled as f64);
+}
+
+/// Hint backlog age, sampled by the hint worker: how long the oldest
+/// subscription owed a hint has been due, or 0 when none is overdue.
+pub fn record_hint_backlog(oldest_due_at_ms: Option<i64>, now_ms: i64) {
+    let overdue_ms = oldest_due_at_ms.map_or(0, |due| now_ms.saturating_sub(due).max(0));
+    metrics::gauge!(HINT_OLDEST_DUE_SECONDS).set(overdue_ms as f64 / 1000.0);
+}
+
+/// One retention-prune pass: rows deleted, and the feed's markers after it.
+pub fn record_changes_prune(deleted: u64, head: u64, pruned_through: u64) {
+    metrics::counter!(CHANGES_PRUNED_TOTAL).increment(deleted);
+    metrics::gauge!(CHANGES_HEAD_SEQ).set(head as f64);
+    metrics::gauge!(CHANGES_PRUNED_THROUGH).set(pruned_through as f64);
 }
 
 /// The `scope` label on [`RATE_LIMIT_REJECTIONS_TOTAL`]: which bound rejected

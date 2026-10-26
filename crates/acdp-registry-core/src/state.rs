@@ -85,6 +85,30 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// and the head-root cache. `None` when `log.enabled` is false —
     /// the `/log/*` endpoints then answer 501 `not_implemented`.
     pub log: Option<Arc<crate::log::LogState>>,
+    /// RFC-ACDP-0018 change-feed cursor key. `None` when `changes.enabled`
+    /// is false or the key fails to load — `GET /changes` then answers
+    /// 501 `not_implemented`.
+    pub changes: Option<Arc<crate::changes_key::ChangesKey>>,
+    /// RFC-ACDP-0006 §7 policy every subscription `callback_url` is held
+    /// to, at creation and at each delivery (RFC-ACDP-0018 §8.3). The
+    /// production default; tests may loosen it with
+    /// [`Self::with_callback_policy`].
+    pub callback_policy: acdp::safe_http::SsrfPolicy,
+    /// How a callback host is resolved for those checks.
+    pub callback_resolver: Arc<dyn crate::callback::CallbackResolver>,
+    /// Woken after every commit that appends to the change feed, so the
+    /// hint worker runs a pass at once instead of at its next poll.
+    pub hints_notify: Arc<tokio::sync::Notify>,
+    /// Extra trust anchors for hint delivery, on top of the webpki roots
+    /// (tests: a private CA for a local receiver). Empty in production.
+    pub hint_extra_roots: Vec<reqwest::Certificate>,
+    /// Callback lookup and hint delivery bounds; the production constants
+    /// unless a test shortened them with [`Self::with_hint_timeouts`].
+    pub hint_timeouts: crate::hints::HintTimeouts,
+    /// The smallest store page a `/changes` scan asks for:
+    /// [`MIN_SCAN_ROWS`](crate::handlers::MIN_SCAN_ROWS) unless a
+    /// test lowered it with [`Self::with_changes_min_scan_rows`].
+    pub changes_min_scan_rows: u32,
 }
 
 impl<S: ExtendedRegistryStore> AppStateInner<S> {
@@ -116,6 +140,66 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             UnavailablePostureConfig::Deny => UnavailablePosture::Deny,
         };
         self.auth_limit_backend = Some(Arc::new(LayeredRateLimiter::new(l1, l2, posture)));
+        self
+    }
+
+    /// The changes key, when this registry serves `acdp-registry-events`:
+    /// `None` answers `/subscriptions` with 501. Startup validation
+    /// requires `changes.enabled` alongside `events.enabled`, so the key is
+    /// present whenever events is configured and loads.
+    pub fn events_key(&self) -> Option<&crate::changes_key::ChangesKey> {
+        if self.config.events.enabled {
+            self.changes.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Replace the callback resolver (tests).
+    pub fn with_callback_resolver(
+        mut self,
+        resolver: Arc<dyn crate::callback::CallbackResolver>,
+    ) -> Self {
+        self.callback_resolver = resolver;
+        self
+    }
+
+    /// Also trust the PEM certificate `root` for hint delivery, beside the
+    /// webpki roots (tests: an in-process HTTPS receiver).
+    pub fn with_hint_root_pem(mut self, root: &[u8]) -> Result<Self, reqwest::Error> {
+        self.hint_extra_roots
+            .push(reqwest::Certificate::from_pem(root)?);
+        Ok(self)
+    }
+
+    /// Wake the hint worker: the change feed has grown. Cheap, and a no-op
+    /// beyond a stored permit when no worker is waiting.
+    pub fn notify_hints(&self) {
+        if self.config.events.enabled {
+            self.hints_notify.notify_one();
+        }
+    }
+
+    /// Shorten the callback lookup and hint delivery bounds (tests: a
+    /// timeout path in milliseconds). Each is capped at its production
+    /// value, so this can never loosen §8.3.
+    #[must_use]
+    pub fn with_hint_timeouts(mut self, timeouts: crate::hints::HintTimeouts) -> Self {
+        self.hint_timeouts = timeouts.capped();
+        self
+    }
+
+    /// Lower the smallest `/changes` store page (tests: exhaust the refill
+    /// budget with a few rows). Clamped to `1..=MIN_SCAN_ROWS`.
+    #[must_use]
+    pub fn with_changes_min_scan_rows(mut self, rows: u32) -> Self {
+        self.changes_min_scan_rows = rows.clamp(1, crate::handlers::MIN_SCAN_ROWS);
+        self
+    }
+
+    /// Replace the callback SSRF policy (tests).
+    pub fn with_callback_policy(mut self, policy: acdp::safe_http::SsrfPolicy) -> Self {
+        self.callback_policy = policy;
         self
     }
 
@@ -165,6 +249,17 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             .ok()
             .flatten()
             .map(Arc::new);
+        // Change feed (RFC-ACDP-0018). Same posture as the log: the binary's
+        // validate_config refuses a bad key at startup; here a failure
+        // serves 501s rather than panicking.
+        let changes = if config.changes.enabled {
+            crate::changes_key::load_changes_key(&config.changes, &config.receipt)
+                .map_err(|e| tracing::error!(error = %e, "change feed unavailable"))
+                .ok()
+                .map(Arc::new)
+        } else {
+            None
+        };
         // FEAT-06: per-IP + global `/auth/*` limiter. Reuses the fixed-window
         // `AgentRateLimiter`, keyed by client IP. A `0` global budget maps to
         // the `u32::MAX` "disabled" sentinel; the per-IP check is skipped by
@@ -224,6 +319,13 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             metrics,
             registry_did_document,
             log,
+            changes,
+            callback_policy: acdp::safe_http::SsrfPolicy::default(),
+            callback_resolver: Arc::new(crate::callback::SystemResolver),
+            hints_notify: Arc::new(tokio::sync::Notify::new()),
+            hint_extra_roots: Vec::new(),
+            hint_timeouts: crate::hints::HintTimeouts::default(),
+            changes_min_scan_rows: crate::handlers::MIN_SCAN_ROWS,
         }
     }
 }

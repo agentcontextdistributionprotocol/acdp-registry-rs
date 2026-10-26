@@ -741,6 +741,7 @@ async fn admin_lifecycle_transition<S: ExtendedRegistryStore + 'static>(
     .await
     .map_err(|e| RegistryError::Internal(format!("join: {e}")))?
     .map_err(RegistryError::Acdp)?;
+    state.notify_hints();
 
     // 7. Webhook — same downstream notification as the producer path, with
     //    `actor` = the registry DID so a control plane attributes the

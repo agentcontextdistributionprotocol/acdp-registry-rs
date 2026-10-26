@@ -34,6 +34,13 @@ pub struct RegistryConfig {
     pub lifecycle: LifecycleConfig,
     #[serde(default)]
     pub log: LogConfig,
+    /// RFC-ACDP-0018 change feed (`GET /changes`). Off by default.
+    #[serde(default)]
+    pub changes: ChangesConfig,
+    /// RFC-ACDP-0018 §8 change-hint subscriptions (`/subscriptions`). Off
+    /// by default; needs `changes` and `auth`.
+    #[serde(default)]
+    pub events: EventsConfig,
     /// Transparency-log witnesses this registry polls and whose verified
     /// cosignatures it aggregates onto its checkpoint responses
     /// (RFC-ACDP-0015 §6.1). Empty (the default) disables aggregation.
@@ -247,6 +254,8 @@ impl RegistryConfig {
             receipt: ReceiptConfig::default(),
             lifecycle: LifecycleConfig::default(),
             log: LogConfig::default(),
+            changes: ChangesConfig::default(),
+            events: EventsConfig::default(),
             witnesses: Vec::new(),
         }
     }
@@ -314,6 +323,8 @@ impl RegistrySection {
 /// checked against at startup (`validate_config` in
 /// `acdp-registry-server/src/main.rs`) — anything outside it is refused
 /// rather than served in the capabilities document.
+/// `acdp-registry-changes` is accepted only with `[changes] enabled = true`,
+/// and `acdp-registry-events` only with `[events] enabled = true`.
 ///
 /// Deliberately excludes `acdp-log-witness`: a witness is NOT a registry
 /// (RFC-ACDP-0015 §6.1) — a registry MAY aggregate cosignatures under
@@ -327,7 +338,7 @@ impl RegistrySection {
 /// (`acdp-registry-server/tests/conformance.rs`) is what keeps it honest —
 /// it recomputes the same prefix-derived set directly from the pinned
 /// spec's `registries/profiles.json` and asserts exact equality, so a
-/// future spec change (e.g. an eighth registry profile) turns CI red
+/// future spec change (e.g. a tenth registry profile) turns CI red
 /// instead of silently drifting out of sync with this list.
 /// The same set is published as data in `docs/advertisable-profiles.json`; the
 /// test `advertisable_profiles_json_matches_const` fails if the two diverge.
@@ -339,6 +350,8 @@ pub const REGISTRY_ADVERTISABLE_PROFILES: &[&str] = &[
     "acdp-registry-head-receipts",
     "acdp-registry-transparency-log",
     "acdp-registry-lifecycle",
+    "acdp-registry-changes",
+    "acdp-registry-events",
 ];
 
 fn default_bind() -> String {
@@ -1192,6 +1205,119 @@ impl Default for LogConfig {
 
 fn default_log_instance() -> String {
     "1".into()
+}
+
+/// RFC-ACDP-0018 change feed: `GET /changes` and the
+/// `acdp-registry-changes` profile.
+///
+/// The feed rows themselves are appended whenever a receipt key is
+/// configured (they commit with the change they record, §5.3); this
+/// section governs only whether they are SERVED and how long they are
+/// kept. When `enabled` is false (the default) `GET /changes` answers
+/// `not_implemented` (HTTP 501).
+///
+/// Serving needs a 32-byte master key, supplied through exactly one of
+/// `key_b64` (standard base64; env `ACDP_REGISTRY_CHANGES__KEY_B64`) or
+/// `key_path` (a file holding that base64 string). HKDF-SHA-256 expands it
+/// into the cursor and subscription-secret keys
+/// (`acdp-registry-core::changes_key`). It MUST differ from the receipt
+/// signing seed. Every replica serving the same store needs the same key
+/// and `key_id`: a cursor issued under a key id the registry no longer
+/// holds answers `cursor_expired`, so changing `key_id` (a rotation)
+/// forces consumers to resync rather than misreading positions.
+///
+/// Startup validation also requires the `lifecycle` profile, a receipt
+/// key, a durable store, `retention_seconds` >= 2592000 (30 days, §5.4)
+/// and both page/filter limits >= 100 (§9).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangesConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Standard base64 of the raw 32-byte master key. Empty = unset.
+    #[serde(default)]
+    pub key_b64: String,
+    /// File containing the base64 master key. `None` = unset.
+    #[serde(default)]
+    pub key_path: Option<PathBuf>,
+    /// Key id stamped into every cursor this registry issues.
+    #[serde(default = "default_changes_key_id")]
+    pub key_id: u8,
+    /// How long a feed entry is kept, advertised as
+    /// `limits.change_retention_seconds`.
+    #[serde(default = "default_change_retention_seconds")]
+    pub retention_seconds: u64,
+    /// Advertised as `limits.max_change_filters`.
+    #[serde(default = "default_changes_min_limit")]
+    pub max_change_filters: u64,
+    /// Advertised as `limits.max_changes_page`; also the largest `limit`.
+    #[serde(default = "default_changes_min_limit")]
+    pub max_changes_page: u64,
+    /// How often the prune task deletes entries older than the retention.
+    #[serde(default = "default_changes_prune_interval_seconds")]
+    pub prune_interval_seconds: u64,
+}
+
+impl Default for ChangesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            key_b64: String::new(),
+            key_path: None,
+            key_id: default_changes_key_id(),
+            retention_seconds: default_change_retention_seconds(),
+            max_change_filters: default_changes_min_limit(),
+            max_changes_page: default_changes_min_limit(),
+            prune_interval_seconds: default_changes_prune_interval_seconds(),
+        }
+    }
+}
+
+/// RFC-ACDP-0018 §8 change-hint subscriptions (`[events]`).
+///
+/// Serving `acdp-registry-events` requires `changes.enabled` (subscription
+/// secrets are sealed under the changes key, and a hint points at the feed)
+/// and `auth.enabled` (every subscription belongs to an authenticated
+/// requester). Checked at startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Advertised as `limits.max_subscriptions_per_requester`; creating one
+    /// more is `400 schema_violation`. Disabled subscriptions count. At
+    /// least 1.
+    #[serde(default = "default_max_subscriptions_per_requester")]
+    pub max_subscriptions_per_requester: u64,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_subscriptions_per_requester: default_max_subscriptions_per_requester(),
+        }
+    }
+}
+
+fn default_max_subscriptions_per_requester() -> u64 {
+    10
+}
+
+fn default_changes_key_id() -> u8 {
+    1
+}
+
+fn default_change_retention_seconds() -> u64 {
+    2_592_000
+}
+
+fn default_changes_min_limit() -> u64 {
+    100
+}
+
+fn default_changes_prune_interval_seconds() -> u64 {
+    3600
 }
 
 /// One transparency-log **witness** (RFC-ACDP-0015 §6.1) this registry

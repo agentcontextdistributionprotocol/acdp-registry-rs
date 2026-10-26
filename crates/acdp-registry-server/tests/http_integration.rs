@@ -99,6 +99,10 @@ fn caps() -> CapabilitiesDocument {
             max_embedded_bytes: 65_536,
             idempotency_key_ttl_seconds: Some(86_400),
             max_publish_per_minute: None,
+            change_retention_seconds: None,
+            max_change_filters: None,
+            max_changes_page: None,
+            max_subscriptions_per_requester: None,
         },
         read_authentication_methods: vec![],
         anonymous_public_reads: true,
@@ -154,6 +158,8 @@ fn config(playground: bool) -> RegistryConfig {
         receipt: Default::default(),
         lifecycle: Default::default(),
         log: Default::default(),
+        changes: Default::default(),
+        events: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -2840,6 +2846,8 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
     });
     // RFC-ACDP-0017 §10: the origin's event receipts ride in
     // `registry_state` beside its events and must survive the proxy.
+    // Shape-valid (acdp 0.17 parses the closed schema) but never verified:
+    // the proxy forwards it, it does not check the signature.
     let origin_state = json!({
         "status": "superseded",
         "lifecycle_events": [signed_event_envelope(seed, &ctx_id, "retracted", None)["event"]],
@@ -2847,8 +2855,8 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
             "receipt_type": "acdp-event-receipt/1",
             "registry_did": format!("did:web:{upstream}"),
             "ctx_id": ctx_id,
-            "event_id": "opaque-to-the-proxy",
-            "event_hash": "sha256:00",
+            "event_id": "00000000-0000-4000-8000-000000000000",
+            "event_hash": format!("sha256:{}", "0".repeat(64)),
             "index": 0,
             "accepted_at": "2026-05-02T08:00:01.000Z",
             "signature": {
@@ -2862,6 +2870,12 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
         "body": raw,
         "registry_state": origin_state,
     });
+    // The same document with one receipt that breaks the closed schema:
+    // served once `malformed` flips, after the verbatim checks below.
+    let mut bad_wire = wire.clone();
+    bad_wire["registry_state"]["event_receipts"] = json!([{ "bogus": 1 }]);
+    let malformed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let serve_malformed = malformed.clone();
     let app = axum::Router::new()
         .route(
             "/.well-known/acdp.json",
@@ -2873,7 +2887,13 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
         )
         .route(
             "/contexts/{id}",
-            get(move || async move { axum::Json(wire) }),
+            get(move || async move {
+                if serve_malformed.load(std::sync::atomic::Ordering::SeqCst) {
+                    axum::Json(bad_wire)
+                } else {
+                    axum::Json(wire)
+                }
+            }),
         );
     let addr = didweb::spawn_tls_server(app).await;
 
@@ -2897,6 +2917,21 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
     let v = body_to_json(resp).await;
     assert_eq!(status, StatusCode::OK, "body = {v}");
     assert_eq!(v["body"], raw, "proxied body must be the origin's bytes");
+
+    // acdp 0.17 parses `event_receipts` against the closed schema, so an
+    // otherwise valid origin document with a malformed receipt is an
+    // upstream fault (502), not a passthrough.
+    malformed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let resp = h
+        .router
+        .clone()
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let bad_status = resp.status();
+    let bad = body_to_json(resp).await;
+    assert_eq!(bad_status, StatusCode::BAD_GATEWAY, "body = {bad}");
+    assert_eq!(bad["error"]["code"], "cross_registry_resolution_failed");
     assert_eq!(v["registry_state"]["status"], "superseded");
     assert_eq!(
         v["registry_state"], origin_state,
@@ -8695,6 +8730,18 @@ const DATA_PLANE_ROUTES: &[(&str, &str, &str)] = &[
         "/lineages/{lineage_id}/current",
     ),
     ("GET", "/log/checkpoint", "/log/checkpoint"),
+    ("GET", "/changes", "/changes"),
+    ("POST", "/subscriptions", "/subscriptions"),
+    (
+        "GET",
+        "/subscriptions/00000000-0000-4000-8000-000000000000",
+        "/subscriptions/{subscription_id}",
+    ),
+    (
+        "DELETE",
+        "/subscriptions/00000000-0000-4000-8000-000000000000",
+        "/subscriptions/{subscription_id}",
+    ),
     ("GET", "/log/proof", "/log/proof"),
     ("GET", "/log/entries", "/log/entries"),
 ];

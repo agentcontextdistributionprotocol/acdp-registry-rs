@@ -172,9 +172,9 @@ rejected with `403 not_authorized`.
 ### Spec conformance (`bearer_jwt`)
 
 This flow is the `bearer_jwt` read-authentication method, registered in the spec's
-[`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/093279a99e98815fbb948e8d20652c1d5fca0585/registries/auth-methods.md)
+[`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/registries/auth-methods.md)
 with its requirements in
-[RFC-ACDP-0008 §6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/093279a99e98815fbb948e8d20652c1d5fca0585/rfcs/RFC-ACDP-0008-security.md#62-read-authentication).
+[RFC-ACDP-0008 §6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162/rfcs/RFC-ACDP-0008-security.md#62-read-authentication).
 Where this registry meets each one:
 
 | Requirement (RFC-ACDP-0008 §6.2) | Here |
@@ -224,6 +224,18 @@ the endpoint is open and no header shape is rejected.
 No parser is case-insensitive on the scheme token. `extract_bearer` hardcodes
 two casings, so `BEARER …` and `BeArEr …` are unrecognised by **all three**;
 one parser is merely more permissive than the others, not more conformant.
+
+### Owner-scoped routes: `/subscriptions`
+
+`POST /subscriptions`, `GET /subscriptions/{id}` and `DELETE
+/subscriptions/{id}` (RFC-ACDP-0018 §8.1) require a validated bearer. An
+anonymous caller is `403 not_authorized`, whatever
+`anonymous_public_reads` says. Each subscription belongs to the DID in the
+bearer that created it (its `sub`), and every lookup is filtered by that
+DID. Another requester's subscription id is `404 not_found`, the same as an
+id that does not exist. That is why `[events]` requires
+`auth.enabled = true` at startup. See
+[HTTP-API.md](HTTP-API.md#post-subscriptions-get-subscriptionsid-delete-subscriptionsid-acdp-050).
 
 ### Unrecognised means anonymous on the ordinary routes
 

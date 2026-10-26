@@ -1,15 +1,22 @@
 //! Axum handlers for every ACDP HTTP endpoint.
 
 mod auth;
+mod changes;
 mod context;
 mod log;
 mod meta;
+mod subscriptions;
 
 pub use auth::{issue_challenge, issue_token, revoke_token};
+pub use changes::{
+    changes, evaluate_changes, parse_request, ChangesRequest, Since, MIN_SCAN_ROWS,
+    REFILL_MAX_SCANS,
+};
 pub(crate) use context::version_at_least;
 pub use context::{current, lineage, publish, republish, retract, retrieve, retrieve_body, search};
 pub use log::{log_checkpoint, log_entries, log_proof};
 pub use meta::{capabilities, health, jwks, livez, registry_did_document};
+pub use subscriptions::{create_subscription, delete_subscription, get_subscription};
 
 mod admin;
 #[cfg(feature = "playground")]

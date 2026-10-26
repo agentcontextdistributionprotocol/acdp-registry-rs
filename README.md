@@ -5,7 +5,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-blue)](Cargo.toml)
 
 Reference **registry** implementation for the
-[Agent Context Distribution Protocol](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/093279a99e98815fbb948e8d20652c1d5fca0585)
+[Agent Context Distribution Protocol](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/81bbe3f3955f7a89e6cf6d73d8d4bec1173d7162)
 v0.1.0 through v0.5.0. Implements the `acdp-registry-core` and
 `acdp-registry-discovery` profiles on top of
 [`acdp`](https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/acdp-v0.15.1) —
@@ -15,7 +15,9 @@ atomically-persisted publish receipts, RFC-ACDP-0010 — self-certifying
 `did:key` producers, and a self-hosted `/.well-known/did.json`,
 see [docs/RECEIPTS.md](docs/RECEIPTS.md)), the 0.3.0 lifecycle,
 transparency-log, and head-receipt profiles, and 0.4.0 witness cosignature
-aggregation (RFC-ACDP-0015). Version-gated `anchors` acceptance
+aggregation (RFC-ACDP-0015), and the 0.5.0 retraction recall profiles
+(RFC-ACDP-0018: the `acdp-registry-changes` feed at `GET /changes`, and
+`acdp-registry-events` signed change hints via `/subscriptions`). Version-gated `anchors` acceptance
 (RFC-ACDP-0016, Draft) is unconditional — every deployment advertises
 `acdp_version >= 0.5.0` and accepts well-formed anchors on every publish,
 see [docs/HTTP-API.md](docs/HTTP-API.md).
@@ -43,6 +45,10 @@ see [docs/HTTP-API.md](docs/HTTP-API.md).
 - **Transparency log** — RFC-ACDP-0012 append-only Merkle log with signed
   checkpoints, inclusion/consistency proofs, and RFC-ACDP-0015 witness
   cosignature aggregation.
+- **Retraction recall** — RFC-ACDP-0018 change feed (retractions,
+  supersessions, key revocations, each with its receipt evidence) behind
+  durable encrypted cursors, plus signed, content-free change hints to
+  subscriber callbacks.
 - **HMAC-signed webhooks** — `context.published`, `context.retrieved`,
   `context.retracted`, `context.republished`, `search.executed`.
 - **Abuse controls & observability** — per-IP and global `/auth/*` rate
@@ -196,6 +202,10 @@ Selected routes (the full surface, including request/response shapes, is in
 | GET    | `/log/checkpoint`                 | Signed transparency-log checkpoint (RFC-ACDP-0012). |
 | GET    | `/log/proof`                      | Inclusion / consistency proofs. |
 | GET    | `/log/entries`                    | Log leaves (visibility-filtered). |
+| GET    | `/changes`                        | Change feed: retractions, supersessions, key revocations (RFC-ACDP-0018; when `changes.enabled`). |
+| POST   | `/subscriptions`                  | Create a change-hint subscription; the secret is shown once (RFC-ACDP-0018 §8; when `events.enabled`). |
+| GET    | `/subscriptions/{id}`             | Read your own subscription, without its secret (when `events.enabled`). |
+| DELETE | `/subscriptions/{id}`             | Delete your own subscription (when `events.enabled`). |
 | POST   | `/auth/challenge`                 | Issue a nonce for DID challenge-response (when `auth.enabled`). |
 | POST   | `/auth/token`                     | Verify signed challenge → JWT (when `auth.enabled`). |
 | POST   | `/auth/token/revoke`              | Revoke your own token by `jti` (when `auth.enabled`). |

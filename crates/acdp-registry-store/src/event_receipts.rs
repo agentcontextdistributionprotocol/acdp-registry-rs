@@ -357,15 +357,10 @@ pub fn attach_event_receipts(
             );
             metrics::counter!(EVENT_RECEIPTS_INCOMPLETE_TOTAL).increment(1);
         }
-        // `set_event_receipts(vec![])` removes the member.
-        let _ = ctx.registry_state.set_event_receipts(Vec::new());
+        ctx.registry_state.event_receipts = None;
         return;
     }
-    let receipts: Vec<EventReceipt> = receipts.into_iter().flatten().collect();
-    if let Err(e) = ctx.registry_state.set_event_receipts(receipts) {
-        tracing::error!(ctx_id = %ctx.body.ctx_id, error = %e, "encode event_receipts");
-        let _ = ctx.registry_state.set_event_receipts(Vec::new());
-    }
+    ctx.registry_state.event_receipts = Some(receipts.into_iter().flatten().collect());
 }
 
 #[cfg(test)]
@@ -492,6 +487,7 @@ mod tests {
             registry_state: acdp::types::RegistryState {
                 status: acdp::types::primitives::Status::Active,
                 lifecycle_events: (n > 0).then_some(events),
+                event_receipts: None,
                 extensions: serde_json::Map::new(),
             },
             registry_receipt: None,
@@ -580,7 +576,7 @@ mod tests {
         let mut c = ctx_with_events(2);
         let rs = vec![Some(receipt_for(&c, 0)), Some(receipt_for(&c, 1))];
         attach_event_receipts(&mut c, rs, true);
-        assert_eq!(c.registry_state.event_receipts().unwrap().unwrap().len(), 2);
+        assert_eq!(c.registry_state.event_receipts.clone().unwrap().len(), 2);
     }
 
     #[test]
@@ -594,11 +590,9 @@ mod tests {
         ] {
             let mut c = fixture.clone();
             // A stale member from an earlier overlay must be removed too.
-            c.registry_state
-                .set_event_receipts(vec![r0.clone(), r1.clone()])
-                .unwrap();
+            c.registry_state.event_receipts = Some(vec![r0.clone(), r1.clone()]);
             attach_event_receipts(&mut c, receipts, true);
-            assert!(c.registry_state.event_receipts().is_none());
+            assert!(c.registry_state.event_receipts.is_none());
         }
     }
 
@@ -606,7 +600,7 @@ mod tests {
     fn attach_omits_the_member_when_there_are_no_events() {
         let mut c = ctx_with_events(0);
         attach_event_receipts(&mut c, vec![], true);
-        assert!(c.registry_state.event_receipts().is_none());
+        assert!(c.registry_state.event_receipts.is_none());
         assert!(!serde_json::to_string(&c)
             .unwrap()
             .contains("event_receipts"));

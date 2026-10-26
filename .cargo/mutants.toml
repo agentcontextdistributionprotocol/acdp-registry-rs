@@ -89,21 +89,28 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 370 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 390 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
-# MEASURED by mutants.yml run 40232497328 (workflow_dispatch on feat/rfc0017-event-receipts
-# bf24e1a; re-pin for RFC-ACDP-0017 event receipts), whose outcomes.json is committed as
-# docs/mutation-runs/run40232497328-scope-370-outcomes.json.
+# MEASURED by mutants.yml run 40283754611 (workflow_dispatch on feat/rfc0018-retraction-recall;
+# re-pin for RFC-ACDP-0018 retraction recall), whose outcomes.json is committed as
+# docs/mutation-runs/run40283754611-scope-390-outcomes.json.
 # The command that reproduces the split:
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
-#     crates/acdp-registry-core/src/handlers/context.rs   136
+#     crates/acdp-registry-core/src/handlers/context.rs   137
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs             16
-#     crates/acdp-registry-sqlite/src/store.rs            153
+#     crates/acdp-registry-sqlite/src/store.rs            172
 #     ----------------------------------------------------------
-#     total                                               370
+#     total                                               390
+#
+# 370 -> 390 (#471, RFC-ACDP-0018 retraction recall): context.rs 136 -> 137 (the hint
+# wake-up after a publish) and store.rs 153 -> 172 (same-transaction feed appends). The
+# eight survivors and the timeout are the same mutants on shifted lines (:1254, :1290;
+# store.rs :1233, :1556, :2170). One new MISSED, context.rs:716:8 `delete !` on the
+# publish wake-up, is killed by hints_e2e::a_superseding_publish_wakes_the_worker in the
+# same commit; caught 239 -> 250, unviable 122 -> 130, timeout 1 unchanged.
 #
 # 350 -> 370 (#461, RFC-ACDP-0017 event receipts): receipt.rs 9 -> 16 (event-receipt
 # mint/verify) and store.rs 140 -> 153 (receipt persistence + the startup sweep that

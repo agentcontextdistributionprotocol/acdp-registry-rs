@@ -4609,3 +4609,72 @@ fn the_sibling_link_guard_rejects_what_it_must_and_ignores_what_it_should() {
         is_crate_version("0.14.3") && !is_crate_version("latest") && !is_crate_version("^0.14")
     );
 }
+
+/// Lines of `src` that call a feed-bypassing store writer: `put` or
+/// `mark_superseded`, as a method (`.put(`) or a path (`::put(`). Line
+/// comments are skipped. The memory wrapper's delegation to its inner
+/// store (`self.inner.<writer>(`) is the trait impl itself, not a caller.
+fn feed_bypass_calls(src: &str) -> Vec<usize> {
+    src.lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let code = line.split("//").next().unwrap_or("");
+            ["put(", "mark_superseded("].iter().any(|w| {
+                code.match_indices(w).any(|(at, _)| {
+                    let before = &code[..at];
+                    (before.ends_with('.') || before.ends_with("::"))
+                        && !before.ends_with("self.inner.")
+                })
+            })
+        })
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+/// **RFC-ACDP-0018 §5.3 — no production caller writes a change without its
+/// feed row.** `RegistryStore::put` and `mark_superseded` write contexts and
+/// supersession status directly, bypassing `commit_publish` /
+/// `commit_lifecycle_event` and therefore the change feed. They exist for
+/// tests and imports; if the server or core crates ever call
+/// them, a change would reach `registry_state` with no `/changes` entry.
+#[test]
+fn no_production_caller_bypasses_the_change_feed() {
+    assert!(feed_bypass_calls("let x = map.get(k);\nself.inner.put(body)\n").is_empty());
+    assert_eq!(
+        feed_bypass_calls("a();\nstore.put(body)?;\n// store.put(x)\nS::mark_superseded(&id);\n"),
+        vec![2, 4],
+        "a method call and a path call are hits; a comment is not"
+    );
+    assert!(
+        feed_bypass_calls("fn put(&self) {}\nlet output(x);\n").is_empty(),
+        "a definition and a longer identifier are not calls"
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/<crate>/ is two levels below the workspace root")
+        .to_path_buf();
+    let mut hits = Vec::new();
+    // The crates that hold a `RegistryStore` (auth and webhook do not; auth's
+    // `put` is its challenge store).
+    for krate in ["acdp-registry-server", "acdp-registry-core"] {
+        let mut files = Vec::new();
+        rust_source_files_with_paths(&root.join("crates").join(krate).join("src"), &mut files);
+        assert!(!files.is_empty(), "{krate}/src has sources");
+        for (path, text) in files {
+            let text = strip_cfg_test(&text).unwrap_or(text);
+            // Line numbers are of the cfg(test)-stripped text, so the hit
+            // carries the line itself.
+            for line in feed_bypass_calls(&text) {
+                let code = text.lines().nth(line - 1).unwrap_or("").trim();
+                hits.push(format!("{}: {code}", path.display()));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "production code calls a feed-bypassing store writer (use commit_publish / \
+         commit_lifecycle_event): {hits:?}"
+    );
+}

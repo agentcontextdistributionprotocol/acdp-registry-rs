@@ -59,6 +59,10 @@ fn base_caps() -> CapabilitiesDocument {
             max_embedded_bytes: 65_536,
             idempotency_key_ttl_seconds: Some(86_400),
             max_publish_per_minute: None,
+            change_retention_seconds: None,
+            max_change_filters: None,
+            max_changes_page: None,
+            max_subscriptions_per_requester: None,
         },
         read_authentication_methods: vec![],
         anonymous_public_reads: true,
@@ -100,6 +104,8 @@ fn base_config() -> RegistryConfig {
         receipt: Default::default(),
         lifecycle: Default::default(),
         log: Default::default(),
+        changes: Default::default(),
+        events: Default::default(),
         witnesses: Vec::new(),
     }
 }

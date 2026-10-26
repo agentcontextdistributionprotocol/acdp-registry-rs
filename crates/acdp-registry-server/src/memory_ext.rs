@@ -14,6 +14,13 @@
 //! lifecycle commit and every read that overlays receipts, so a read never
 //! sees an event without the receipt committed with it. Lock order is
 //! wrapper, then inner, everywhere.
+//!
+//! The RFC-ACDP-0018 change feed lives under the same mutex: every publish
+//! and lifecycle commit holds it across the inner commit and the feed push,
+//! so a feed read never sees a change without its row or a row without its
+//! change (rec-008), and `seq` order is commit order. The feed is lost on
+//! restart like everything else here, so this backend cannot advertise the
+//! changes profile; it exists for tests and demos.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -27,8 +34,17 @@ use acdp::types::primitives::{AgentDid, ContentHash, CtxId, LineageId};
 use acdp::types::publish::PublishResponse;
 use acdp::types::search::{SearchParams, SearchResponse};
 use acdp::types::EventReceipt;
-use acdp_registry_store::event_receipts::{attach_event_receipts, plan_event_receipts};
-use acdp_registry_store::{EventReceiptMinter, ExtendedRegistryStore, Page, StoredReceipt};
+use acdp_registry_store::changes::{
+    feed_appends_for_publish, lifecycle_append, FeedAppend, Predecessor,
+};
+use acdp_registry_store::event_receipts::{
+    attach_event_receipts, plan_event_receipts, receipt_value,
+};
+use acdp_registry_store::{
+    CreateSubscriptionOutcome, EventReceiptMinter, ExtendedRegistryStore, FeedHead, FeedPage,
+    FeedQuery, FeedRow, NewSubscription, Page, StoredReceipt, SubscriptionCounts,
+    SubscriptionProgress, SubscriptionRecord,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
@@ -36,6 +52,51 @@ use chrono::{DateTime, Utc};
 /// can never drift onto a different event; the position is checked against
 /// the receipt's own `index` on every read.
 type ReceiptMap = HashMap<String, HashMap<String, EventReceipt>>;
+
+/// Everything the wrapper adds to the inner store, under one mutex.
+#[derive(Default)]
+struct State {
+    receipts: ReceiptMap,
+    feed: Feed,
+    /// RFC-ACDP-0018 §8 subscriptions, by id.
+    subscriptions: HashMap<String, SubscriptionRecord>,
+}
+
+/// The RFC-ACDP-0018 feed: rows in seq order, never reordered.
+#[derive(Default)]
+struct Feed {
+    rows: Vec<FeedRow>,
+    /// The last seq assigned; positions are never reused.
+    last_seq: u64,
+    pruned_through: u64,
+}
+
+impl Feed {
+    fn push(&mut self, appends: impl IntoIterator<Item = FeedAppend>) {
+        let now_ms = Utc::now().timestamp_millis();
+        for a in appends {
+            self.last_seq += 1;
+            self.rows.push(FeedRow {
+                seq: self.last_seq,
+                kind: a.kind,
+                ctx_id: a.ctx_id,
+                lineage_id: a.lineage_id,
+                agent_id: a.agent_id,
+                superseded_by: a.superseded_by,
+                event: a.event,
+                receipt: a.receipt,
+                appended_at_ms: now_ms,
+            });
+        }
+    }
+
+    fn head(&self) -> FeedHead {
+        FeedHead {
+            head: self.last_seq,
+            pruned_through: self.pruned_through,
+        }
+    }
+}
 
 /// Adapter that delegates the protocol store to `acdp::registry::InMemoryStore`
 /// while implementing the registry's extension trait.
@@ -45,7 +106,7 @@ type ReceiptMap = HashMap<String, HashMap<String, EventReceipt>>;
 #[derive(Default, Clone)]
 pub struct MemoryStore {
     inner: Arc<InMemoryStore>,
-    receipts: Arc<Mutex<ReceiptMap>>,
+    state: Arc<Mutex<State>>,
     event_receipt_minter: Option<Arc<dyn EventReceiptMinter>>,
 }
 
@@ -61,8 +122,8 @@ impl MemoryStore {
         self
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, ReceiptMap>, AcdpError> {
-        self.receipts
+    fn lock(&self) -> Result<MutexGuard<'_, State>, AcdpError> {
+        self.state
             .lock()
             .map_err(|_| AcdpError::RegistryInternal("event receipt map lock poisoned".into()))
     }
@@ -103,10 +164,11 @@ impl MemoryStore {
     /// receipt minted for an event the inner store then refuses is dropped.
     fn commit_with_receipts(
         &self,
-        map: &mut ReceiptMap,
+        state: &mut State,
         minter: &dyn EventReceiptMinter,
         event: &LifecycleEvent,
     ) -> Result<LifecycleCommitOutcome, AcdpError> {
+        let map = &mut state.receipts;
         // Missing context, replay and event_id reuse all go straight to the
         // inner store, which owns those answers; nothing is minted for them.
         let Some(ctx) = self.inner.get(&event.ctx_id)? else {
@@ -127,6 +189,9 @@ impl MemoryStore {
             event,
             Utc::now(),
         )?;
+        // Derived before the inner commit too: that append cannot be rolled
+        // back, so nothing that can fail may run after it.
+        let row = lifecycle_append(event, &ctx.body, Some(&receipt_value(&plan.new)?))?;
         let outcome = self.inner.commit_lifecycle_event(event)?;
         if matches!(outcome, LifecycleCommitOutcome::Applied(_)) {
             let entry = map.entry(event.ctx_id.as_str().to_string()).or_default();
@@ -135,6 +200,8 @@ impl MemoryStore {
                 entry.insert(r.event_id.clone(), r);
             }
             entry.insert(plan.new.event_id.clone(), plan.new);
+            state.feed.push(row);
+            return Ok(self.overlay_outcome(&state.receipts, outcome));
         }
         Ok(self.overlay_outcome(map, outcome))
     }
@@ -160,24 +227,27 @@ impl RegistryStore for MemoryStore {
         self.inner.put(body)
     }
     fn get(&self, ctx_id: &CtxId) -> Result<Option<FullContext>, AcdpError> {
-        let map = self.lock()?;
-        Ok(self.inner.get(ctx_id)?.map(|c| self.overlay(&map, c)))
+        let state = self.lock()?;
+        Ok(self
+            .inner
+            .get(ctx_id)?
+            .map(|c| self.overlay(&state.receipts, c)))
     }
     fn lineage(&self, lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError> {
-        let map = self.lock()?;
+        let state = self.lock()?;
         Ok(self
             .inner
             .lineage(lineage_id)?
             .into_iter()
-            .map(|c| self.overlay(&map, c))
+            .map(|c| self.overlay(&state.receipts, c))
             .collect())
     }
     fn current(&self, lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError> {
-        let map = self.lock()?;
+        let state = self.lock()?;
         Ok(self
             .inner
             .current(lineage_id)?
-            .map(|c| self.overlay(&map, c)))
+            .map(|c| self.overlay(&state.receipts, c)))
     }
     fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), AcdpError> {
         self.inner.mark_superseded(ctx_id)
@@ -207,7 +277,36 @@ impl RegistryStore for MemoryStore {
         self.inner.idempotency_evict_expired(now)
     }
     fn commit_publish(&self, commit: PublishCommit<'_>) -> Result<PublishCommitOutcome, AcdpError> {
-        self.inner.commit_publish(commit)
+        // Under the wrapper lock so the feed rows land in commit order and
+        // no reader sees the publish without them.
+        let mut state = self.lock()?;
+        let supersedes = commit.req.supersedes.clone();
+        let outcome = self.inner.commit_publish(commit)?;
+        // The new body only exists once the inner store has built it, so the
+        // derivation runs after the commit. It cannot fail on a receipt this
+        // registry just minted; if it ever did, the publish stands without
+        // its rows and the error says so.
+        if let PublishCommitOutcome::Inserted(resp) = &outcome {
+            if resp.registry_receipt.is_some() {
+                let body = self.inner.get(&resp.ctx_id)?.ok_or_else(|| {
+                    AcdpError::RegistryInternal("published context vanished".into())
+                })?;
+                let predecessor = match &supersedes {
+                    Some(prev) => self.inner.get(prev)?.map(|c| Predecessor {
+                        ctx_id: prev.as_str().to_string(),
+                        agent_id: c.body.agent_id.as_str().to_string(),
+                    }),
+                    None => None,
+                };
+                let rows = feed_appends_for_publish(
+                    &body.body,
+                    resp.registry_receipt.as_ref(),
+                    predecessor.as_ref(),
+                )?;
+                state.feed.push(rows);
+            }
+        }
+        Ok(outcome)
     }
     fn commit_lifecycle_event(
         &self,
@@ -218,9 +317,9 @@ impl RegistryStore for MemoryStore {
         // implementation (RFC-ACDP-0013). The lock is taken even without a
         // minter, so a non-minting clone cannot append between a minting
         // clone's plan and its commit.
-        let mut map = self.lock()?;
+        let mut state = self.lock()?;
         match self.event_receipt_minter.clone() {
-            Some(minter) => self.commit_with_receipts(&mut map, minter.as_ref(), event),
+            Some(minter) => self.commit_with_receipts(&mut state, minter.as_ref(), event),
             None => self.inner.commit_lifecycle_event(event),
         }
     }
@@ -255,6 +354,176 @@ impl ExtendedRegistryStore for MemoryStore {
         Err(AcdpError::RegistryInternal(
             "list_contexts is not supported by the memory backend; use SQLite or Postgres".into(),
         ))
+    }
+
+    async fn changes_page(&self, query: &FeedQuery) -> Result<FeedPage, AcdpError> {
+        let state = self.lock()?;
+        let feed = &state.feed;
+        let start = feed.rows.partition_point(|r| r.seq <= query.after);
+        let rows = feed.rows[start..]
+            .iter()
+            .filter(|r| query.matches(r))
+            .take(query.limit() as usize)
+            .cloned()
+            .collect();
+        Ok(FeedPage::from_scan(query, rows, feed.head()))
+    }
+
+    async fn changes_head(&self) -> Result<FeedHead, AcdpError> {
+        Ok(self.lock()?.feed.head())
+    }
+
+    async fn prune_changes(&self, older_than_ms: i64, batch: u32) -> Result<u64, AcdpError> {
+        let mut state = self.lock()?;
+        let feed = &mut state.feed;
+        let n = feed
+            .rows
+            .iter()
+            .take(batch.max(1) as usize)
+            .take_while(|r| r.appended_at_ms < older_than_ms)
+            .count();
+        if n > 0 {
+            feed.pruned_through = feed.pruned_through.max(feed.rows[n - 1].seq);
+        }
+        feed.rows.drain(..n);
+        Ok(n as u64)
+    }
+
+    async fn create_subscription(
+        &self,
+        new: &NewSubscription,
+        max_per_owner: u64,
+    ) -> Result<CreateSubscriptionOutcome, AcdpError> {
+        let mut state = self.lock()?;
+        let held = state
+            .subscriptions
+            .values()
+            .filter(|s| s.owner_did == new.owner_did)
+            .count();
+        if held as u64 >= max_per_owner {
+            return Ok(CreateSubscriptionOutcome::LimitReached);
+        }
+        state.subscriptions.insert(
+            new.subscription_id.clone(),
+            SubscriptionRecord {
+                subscription_id: new.subscription_id.clone(),
+                owner_did: new.owner_did.clone(),
+                tenant_id: new.tenant_id.clone(),
+                filter: new.filter.clone(),
+                callback_url: new.callback_url.clone(),
+                secret_ct: new.secret_ct.clone(),
+                secret_key_id: new.secret_key_id,
+                status: acdp::types::change::SubscriptionStatus::Active,
+                created_at_ms: new.created_at_ms,
+                last_hinted_seq: new.last_hinted_seq,
+                next_attempt_at_ms: new.created_at_ms,
+                failing_since_ms: None,
+                attempts: 0,
+                lease_until_ms: None,
+            },
+        );
+        Ok(CreateSubscriptionOutcome::Created)
+    }
+
+    async fn get_subscription(
+        &self,
+        owner_did: &str,
+        subscription_id: &str,
+    ) -> Result<Option<SubscriptionRecord>, AcdpError> {
+        Ok(self
+            .lock()?
+            .subscriptions
+            .get(subscription_id)
+            .filter(|s| s.owner_did == owner_did)
+            .cloned())
+    }
+
+    async fn delete_subscription(
+        &self,
+        owner_did: &str,
+        subscription_id: &str,
+    ) -> Result<bool, AcdpError> {
+        let mut state = self.lock()?;
+        let owned = state
+            .subscriptions
+            .get(subscription_id)
+            .is_some_and(|s| s.owner_did == owner_did);
+        if owned {
+            state.subscriptions.remove(subscription_id);
+        }
+        Ok(owned)
+    }
+
+    async fn claim_due_subscriptions(
+        &self,
+        now_ms: i64,
+        head: u64,
+        lease_until_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<SubscriptionRecord>, AcdpError> {
+        let mut state = self.lock()?;
+        let mut due: Vec<&mut SubscriptionRecord> = state
+            .subscriptions
+            .values_mut()
+            .filter(|s| {
+                s.status == acdp::types::change::SubscriptionStatus::Active
+                    && s.next_attempt_at_ms <= now_ms
+                    && s.lease_until_ms.is_none_or(|l| l < now_ms)
+                    && s.last_hinted_seq < head
+            })
+            .collect();
+        due.sort_by_key(|s| s.next_attempt_at_ms);
+        Ok(due
+            .into_iter()
+            .take(limit as usize)
+            .map(|s| {
+                s.lease_until_ms = Some(lease_until_ms);
+                s.clone()
+            })
+            .collect())
+    }
+
+    async fn finish_subscription_attempt(
+        &self,
+        subscription_id: &str,
+        lease_until_ms: i64,
+        progress: &SubscriptionProgress,
+    ) -> Result<bool, AcdpError> {
+        let mut state = self.lock()?;
+        let Some(s) = state
+            .subscriptions
+            .get_mut(subscription_id)
+            .filter(|s| s.lease_until_ms == Some(lease_until_ms))
+        else {
+            return Ok(false);
+        };
+        s.last_hinted_seq = progress.last_hinted_seq;
+        s.status = progress.status;
+        s.next_attempt_at_ms = progress.next_attempt_at_ms;
+        s.failing_since_ms = progress.failing_since_ms;
+        s.attempts = progress.attempts;
+        s.lease_until_ms = None;
+        Ok(true)
+    }
+
+    async fn subscription_counts(&self, head: u64) -> Result<SubscriptionCounts, AcdpError> {
+        let state = self.lock()?;
+        let mut out = SubscriptionCounts::default();
+        for s in state.subscriptions.values() {
+            match s.status {
+                acdp::types::change::SubscriptionStatus::Active => {
+                    out.active += 1;
+                    if s.last_hinted_seq < head {
+                        out.oldest_due_at_ms = Some(
+                            out.oldest_due_at_ms
+                                .map_or(s.next_attempt_at_ms, |o| o.min(s.next_attempt_at_ms)),
+                        );
+                    }
+                }
+                acdp::types::change::SubscriptionStatus::Disabled => out.disabled += 1,
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -777,6 +1046,70 @@ mod tests {
         parity::assert_lifecycle_event_receipts(&plain, &minting, pubkey, "memory").await;
     }
 
+    /// RFC-ACDP-0018 §4/§5.3: the feed rows every durable backend appends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn change_feed_matches_the_cross_backend_contract() {
+        let plain = Arc::new(MemoryStore::new());
+        let (signer, _) = receipt_signer(90);
+        let minting = Arc::new(plain.as_ref().clone().with_event_receipt_minter(signer));
+        parity::assert_change_feed(&plain, &minting, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §4: one row per receipted event, matching registry_state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn change_feed_lifecycle_rows_match_registry_state() {
+        let plain = Arc::new(MemoryStore::new());
+        let (signer, _) = receipt_signer(87);
+        let minting = Arc::new(plain.as_ref().clone().with_event_receipt_minter(signer));
+        parity::assert_change_feed_lifecycle_sequence(&plain, &minting, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §5.3: racing keyed retries append one row, never fail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn change_feed_concurrent_idempotent_supersede() {
+        let plain = Arc::new(MemoryStore::new());
+        parity::assert_change_feed_concurrent_idempotent_supersede(&plain, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §8.1: subscription CRUD is owner-scoped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn subscription_crud_is_owner_scoped() {
+        let plain = Arc::new(MemoryStore::new());
+        parity::assert_subscription_crud(&plain, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §8.1: concurrent creates never exceed the per-owner limit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn subscription_limit_holds_under_concurrent_creates() {
+        let plain = Arc::new(MemoryStore::new());
+        parity::assert_subscription_limit(&plain, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §8.2: delivery leases hand each due row to one claimant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn subscription_claims_have_one_holder() {
+        let plain = Arc::new(MemoryStore::new());
+        parity::assert_subscription_claims(&plain, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §5.4: prefix pruning and the marker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn change_feed_prune_matches_the_cross_backend_contract() {
+        let plain = Arc::new(MemoryStore::new());
+        let (signer, _) = receipt_signer(89);
+        let minting = Arc::new(plain.as_ref().clone().with_event_receipt_minter(signer));
+        parity::assert_change_feed_prune(&plain, &minting, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §5.2: seq order is commit order under concurrent writers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn change_feed_seq_order_is_commit_order() {
+        let plain = Arc::new(MemoryStore::new());
+        let (signer, _) = receipt_signer(88);
+        let minting = Arc::new(plain.as_ref().clone().with_event_receipt_minter(signer));
+        parity::assert_change_feed_commit_order(&plain, &minting, "memory").await;
+    }
+
     struct FailingMinter;
 
     impl EventReceiptMinter for FailingMinter {
@@ -825,28 +1158,32 @@ mod tests {
             panic!("first retract must apply")
         };
         let first =
-            serde_json::to_value(first.registry_state.event_receipts().unwrap().unwrap()).unwrap();
+            serde_json::to_value(first.registry_state.event_receipts.clone().unwrap()).unwrap();
         let LifecycleCommitOutcome::IdempotentReplay(again) =
             minting.commit_lifecycle_event(&event).unwrap()
         else {
             panic!("identical retry must replay")
         };
         assert_eq!(
-            serde_json::to_value(again.registry_state.event_receipts().unwrap().unwrap()).unwrap(),
+            serde_json::to_value(again.registry_state.event_receipts.clone().unwrap()).unwrap(),
             first
         );
         minting
             .commit_lifecycle_event(&retract_event(&resp.ctx_id, did(12)))
             .expect_err("double retract");
-        let map = plain.receipts.lock().unwrap();
-        assert_eq!(map[resp.ctx_id.as_str()].len(), 1, "a refusal minted");
+        let map = plain.state.lock().unwrap();
+        assert_eq!(
+            map.receipts[resp.ctx_id.as_str()].len(),
+            1,
+            "a refusal minted"
+        );
         drop(map);
         assert!(plain
             .get(&resp.ctx_id)
             .unwrap()
             .unwrap()
             .registry_state
-            .event_receipts()
+            .event_receipts
             .is_none());
     }
 
@@ -859,7 +1196,7 @@ mod tests {
             .commit_lifecycle_event(&retract_event(&ghost, did(13)))
             .expect_err("unknown ctx_id");
         assert!(matches!(err, AcdpError::NotFound(_)), "{err:?}");
-        assert!(minting.receipts.lock().unwrap().is_empty());
+        assert!(minting.state.lock().unwrap().receipts.is_empty());
     }
 
     /// A stored receipt whose index does not match the event's position is
@@ -874,18 +1211,19 @@ mod tests {
             .commit_lifecycle_event(&retract_event(&resp.ctx_id, did(14)))
             .unwrap();
         let read = |s: &MemoryStore| s.get(&resp.ctx_id).unwrap().unwrap();
-        assert!(read(&minting).registry_state.event_receipts().is_some());
+        assert!(read(&minting).registry_state.event_receipts.is_some());
         for r in plain
-            .receipts
+            .state
             .lock()
             .unwrap()
+            .receipts
             .get_mut(resp.ctx_id.as_str())
             .unwrap()
             .values_mut()
         {
             r.index += 1;
         }
-        assert!(read(&minting).registry_state.event_receipts().is_none());
+        assert!(read(&minting).registry_state.event_receipts.is_none());
     }
 
     /// A poisoned receipt map is an internal error on reads and commits,
@@ -896,7 +1234,7 @@ mod tests {
         let resp = commit(&plain, &request(&producer(15), "poison"));
         let clone = plain.clone();
         let _ = std::thread::spawn(move || {
-            let _guard = clone.receipts.lock().unwrap();
+            let _guard = clone.state.lock().unwrap();
             panic!("poison the receipt map");
         })
         .join();

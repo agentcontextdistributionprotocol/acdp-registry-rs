@@ -15,6 +15,13 @@ does it. It runs these steps in order:
    retracted. A context with no events omits `lifecycle_events`, so the
    retraction reads `unknown` at this step.
 4. Posts a producer-signed `retracted` lifecycle event (RFC-ACDP-0013).
+   When the registry advertises `acdp-registry-changes` (RFC-ACDP-0018), it
+   reads from the `GET /changes?since=head` cursor saved after step 1 with a
+   `ctx_id` watch (up to 5 reads, 1 s apart) and fails unless the retraction's
+   lifecycle entry is there and `acdp::client::verify_change` returns
+   `Verified` and reads it `retracted`. It prints the entry's `seq`. When the
+   profile is not advertised, `GET /changes` must answer 501 (or 404 from a
+   build that predates the route) and the check is skipped.
 5. Resolves again. Fails unless the context now reads `retracted` and the
    receipt still verifies.
 

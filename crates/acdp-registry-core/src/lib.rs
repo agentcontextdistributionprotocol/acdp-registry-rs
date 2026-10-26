@@ -4,8 +4,11 @@
 //! `acdp-registry-core` itself has no compile-time dependency on a
 //! specific storage crate — the binary picks one via Cargo features.
 
+pub mod callback;
+pub mod changes_key;
 pub mod extract;
 pub mod handlers;
+pub mod hints;
 pub mod log;
 pub mod metrics;
 pub mod playground;
@@ -53,7 +56,13 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
     // FEAT-06/FEAT-10: `from_fn_with_state` middleware (the `/auth/*` limiter)
     // and the `/metrics` route both need the shared state up front, so build
     // the `Arc` here rather than only at `.with_state` time.
-    let state = Arc::new(state);
+    build_router_shared(Arc::new(state))
+}
+
+/// [`build_router`] over state the caller also holds, such as the hint
+/// worker ([`hints::spawn_hint_worker`]), which must see the same
+/// `hints_notify` the handlers wake.
+pub fn build_router_shared<S: ExtendedRegistryStore + 'static>(state: Arc<AppState<S>>) -> Router {
     let admin = admin_router::<S>();
     let auth_enabled = state.config.auth.enabled;
     let metrics_enabled = state.metrics.is_some();
@@ -104,6 +113,19 @@ pub fn build_router<S: ExtendedRegistryStore + 'static>(state: AppState<S>) -> R
         .route("/log/checkpoint", get(handlers::log_checkpoint::<S>))
         .route("/log/proof", get(handlers::log_proof::<S>))
         .route("/log/entries", get(handlers::log_entries::<S>))
+        // Change feed (RFC-ACDP-0018 §5). Always mounted: without
+        // `acdp-registry-changes` the handler answers 501. Per-requester
+        // visibility, so it belongs in this `private` group.
+        .route("/changes", get(handlers::changes::<S>))
+        // Change-hint subscriptions (RFC-ACDP-0018 §8.1). Always mounted:
+        // without `acdp-registry-events` the handlers answer 501. Owner-scoped,
+        // so `private`; the create response overrides that with `no-store`
+        // because it carries the secret.
+        .route("/subscriptions", post(handlers::create_subscription::<S>))
+        .route(
+            "/subscriptions/{subscription_id}",
+            get(handlers::get_subscription::<S>).delete(handlers::delete_subscription::<S>),
+        )
         // #205 (wire half of #190). These responses depend on WHO is asking --
         // §4.5 visibility, tenant scoping, and the per-requester leaf echo on
         // `/log/*` -- so a shared cache must never reuse one requester's copy

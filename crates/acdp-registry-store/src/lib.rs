@@ -4,12 +4,14 @@
 //! protocol-level store contract — paginated listing, a backend health
 //! check, and migration runner.
 
+pub mod changes;
 pub mod cursor;
 pub mod event_receipts;
 pub mod fulltext;
 pub mod lifecycle;
 pub mod log;
 pub mod rate_limit;
+pub mod subscriptions;
 
 /// Cross-backend parity assertions shared by every backend's test suite.
 /// Gated so nothing here ships in a normal build; see the module docs for
@@ -26,10 +28,15 @@ use acdp::types::search::{SearchParams, SearchResponse};
 use acdp_registry_types::config::RESERVED_TENANT;
 use async_trait::async_trait;
 
+pub use changes::{FeedAppend, FeedHead, FeedPage, FeedQuery, FeedRow};
 pub use cursor::{decode_cursor, encode_cursor};
 pub use event_receipts::{EventReceiptMinter, StoredReceipt, SweepReport};
 pub use log::{build_leaf_record, LogEntryRecord};
 pub use rate_limit::{LimitDecision, SharedLimitScope, SharedRateLimitBackend};
+pub use subscriptions::{
+    CreateSubscriptionOutcome, NewSubscription, SubscriptionCounts, SubscriptionProgress,
+    SubscriptionRecord,
+};
 
 /// Cursor-keyed page returned by [`ExtendedRegistryStore::list_contexts`].
 #[derive(Debug, Clone)]
@@ -253,6 +260,157 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
         let _ = (start, end);
         Err(AcdpError::NotImplemented(
             "this backend does not implement the transparency log (RFC-ACDP-0012)".into(),
+        ))
+    }
+
+    // ── Change feed (RFC-ACDP-0018) ──────────────────────────────────
+    //
+    // Rows are APPENDED only inside `RegistryStore::commit_publish` and
+    // `RegistryStore::commit_lifecycle_event` (same transaction as the
+    // change, §5.3 / rec-008 — there is deliberately no standalone append
+    // API). Defaults return `NotImplemented`; a deployment MUST NOT
+    // advertise `acdp-registry-changes` against such a backend.
+
+    /// One feed scan, in a single read snapshot: the matching rows past
+    /// `query.after` (at most `query.limit()`) plus the head markers they
+    /// were read against.
+    async fn changes_page(&self, query: &FeedQuery) -> Result<FeedPage, AcdpError> {
+        let _ = query;
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement the change feed (RFC-ACDP-0018)".into(),
+        ))
+    }
+
+    /// The feed's head and prune markers.
+    async fn changes_head(&self) -> Result<FeedHead, AcdpError> {
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement the change feed (RFC-ACDP-0018)".into(),
+        ))
+    }
+
+    /// Delete up to `batch` of the oldest rows appended before
+    /// `older_than_ms`, stopping at the first younger row so only a seq
+    /// prefix is ever removed, and advance `pruned_through` to the last
+    /// deleted seq in the same transaction (§5.4). Returns the number of
+    /// rows deleted.
+    async fn prune_changes(&self, older_than_ms: i64, batch: u32) -> Result<u64, AcdpError> {
+        let _ = (older_than_ms, batch);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement the change feed (RFC-ACDP-0018)".into(),
+        ))
+    }
+
+    /// The producer (`body.agent_id`) of each of `ctx_ids` that exists,
+    /// for the §6 rule that a `ctx_id` watch also matches key revocations
+    /// of that context's producer. Callers pass only ids that already
+    /// passed [`Self::visible_ctx_ids`], so this applies no visibility of
+    /// its own. Unknown or unparseable ids are omitted.
+    ///
+    /// Like [`Self::visible_ctx_ids`]'s default this goes through the
+    /// synchronous `RegistryStore::get` once per id.
+    async fn producers_of(
+        &self,
+        ctx_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>, AcdpError> {
+        let mut out = std::collections::HashMap::with_capacity(ctx_ids.len());
+        for id in ctx_ids {
+            let Ok(parsed) = CtxId::parse((*id).to_string()) else {
+                continue;
+            };
+            if let Some(ctx) = self.get(&parsed)? {
+                out.insert((*id).to_string(), ctx.body.agent_id.as_str().to_string());
+            }
+        }
+        Ok(out)
+    }
+
+    // ── Change-hint subscriptions (RFC-ACDP-0018 §8) ─────────────────
+    //
+    // Every lookup is scoped by the owner DID: a subscription another
+    // requester holds is indistinguishable from one that does not exist.
+    // Defaults return `NotImplemented`; a deployment MUST NOT advertise
+    // `acdp-registry-events` against such a backend.
+
+    /// Insert `new` unless its owner already holds `max_per_owner`
+    /// subscriptions (active or disabled). The count and the insert are
+    /// atomic, so concurrent creates never exceed the limit.
+    async fn create_subscription(
+        &self,
+        new: &NewSubscription,
+        max_per_owner: u64,
+    ) -> Result<CreateSubscriptionOutcome, AcdpError> {
+        let _ = (new, max_per_owner);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    /// `owner_did`'s subscription `subscription_id`, if it exists.
+    async fn get_subscription(
+        &self,
+        owner_did: &str,
+        subscription_id: &str,
+    ) -> Result<Option<SubscriptionRecord>, AcdpError> {
+        let _ = (owner_did, subscription_id);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    /// Delete `owner_did`'s subscription `subscription_id`. `false` when
+    /// there was none.
+    async fn delete_subscription(
+        &self,
+        owner_did: &str,
+        subscription_id: &str,
+    ) -> Result<bool, AcdpError> {
+        let _ = (owner_did, subscription_id);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    /// Lease up to `limit` subscriptions that are due a hint attempt:
+    /// active, `next_attempt_at_ms <= now_ms`, not leased (or the lease has
+    /// lapsed), and behind `head`. Each returned record carries
+    /// `lease_until_ms`. The claim commits before returning, so no
+    /// transaction is held across delivery, and concurrent claimants never
+    /// receive the same row.
+    async fn claim_due_subscriptions(
+        &self,
+        now_ms: i64,
+        head: u64,
+        lease_until_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<SubscriptionRecord>, AcdpError> {
+        let _ = (now_ms, head, lease_until_ms, limit);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    /// Record the outcome of an attempt and release the lease, only if
+    /// `subscription_id` still holds the lease `lease_until_ms`. `false`
+    /// when it does not (deleted, or claimed again after the lease lapsed):
+    /// nothing is written.
+    async fn finish_subscription_attempt(
+        &self,
+        subscription_id: &str,
+        lease_until_ms: i64,
+        progress: &SubscriptionProgress,
+    ) -> Result<bool, AcdpError> {
+        let _ = (subscription_id, lease_until_ms, progress);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    /// Subscriptions per status, across all owners, plus the earliest due
+    /// time among active subscriptions with `last_hinted_seq < head`.
+    async fn subscription_counts(&self, head: u64) -> Result<SubscriptionCounts, AcdpError> {
+        let _ = head;
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
         ))
     }
 
@@ -896,6 +1054,7 @@ mod default_visible_ctx_ids_tests {
             registry_state: RegistryState {
                 status,
                 lifecycle_events,
+                event_receipts: None,
                 extensions: serde_json::Map::new(),
             },
             registry_receipt: None,
