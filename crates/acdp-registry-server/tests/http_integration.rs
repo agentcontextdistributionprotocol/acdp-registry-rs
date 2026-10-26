@@ -2870,6 +2870,12 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
         "body": raw,
         "registry_state": origin_state,
     });
+    // The same document with one receipt that breaks the closed schema:
+    // served once `malformed` flips, after the verbatim checks below.
+    let mut bad_wire = wire.clone();
+    bad_wire["registry_state"]["event_receipts"] = json!([{ "bogus": 1 }]);
+    let malformed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let serve_malformed = malformed.clone();
     let app = axum::Router::new()
         .route(
             "/.well-known/acdp.json",
@@ -2881,7 +2887,13 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
         )
         .route(
             "/contexts/{id}",
-            get(move || async move { axum::Json(wire) }),
+            get(move || async move {
+                if serve_malformed.load(std::sync::atomic::Ordering::SeqCst) {
+                    axum::Json(bad_wire)
+                } else {
+                    axum::Json(wire)
+                }
+            }),
         );
     let addr = didweb::spawn_tls_server(app).await;
 
@@ -2905,6 +2917,21 @@ async fn cross_registry_proxy_serves_the_origin_body_verbatim() {
     let v = body_to_json(resp).await;
     assert_eq!(status, StatusCode::OK, "body = {v}");
     assert_eq!(v["body"], raw, "proxied body must be the origin's bytes");
+
+    // acdp 0.17 parses `event_receipts` against the closed schema, so an
+    // otherwise valid origin document with a malformed receipt is an
+    // upstream fault (502), not a passthrough.
+    malformed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let resp = h
+        .router
+        .clone()
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let bad_status = resp.status();
+    let bad = body_to_json(resp).await;
+    assert_eq!(bad_status, StatusCode::BAD_GATEWAY, "body = {bad}");
+    assert_eq!(bad["error"]["code"], "cross_registry_resolution_failed");
     assert_eq!(v["registry_state"]["status"], "superseded");
     assert_eq!(
         v["registry_state"], origin_state,

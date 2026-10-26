@@ -58,6 +58,11 @@ hints.**
 - **Rollback:** as for 017. Older binaries never read the table; subscriptions created meanwhile
   stay stored and inert.
 
+**Cross-registry proxy (no migration):** with `registry.cross_registry_resolution` on, a foreign
+context whose `registry_state.event_receipts` fails the acdp 0.17 closed schema is now answered
+`502 cross_registry_resolution_failed`; it used to be served with the field passed through
+untouched. Only malformed origins are affected, and rolling back restores the old passthrough.
+
 ---
 
 ## 0.5.6

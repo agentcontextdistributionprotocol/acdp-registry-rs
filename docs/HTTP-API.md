@@ -390,7 +390,7 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_changes_pruned_total` | counter | — | Feed rows deleted by the retention prune task. |
 | `acdp_registry_changes_head_seq` | gauge | — | Feed head `seq` after the last prune pass. |
 | `acdp_registry_changes_pruned_through` | gauge | — | Highest pruned `seq`; a cursor below it is `cursor_expired`. |
-| `acdp_registry_hint_deliveries_total` | counter | `outcome` | RFC-ACDP-0018 hint attempts. `outcome` is `delivered`, `nothing_visible` (matching entries the owner cannot see; the position advanced, nothing sent), `failed` (non-2xx, redirect, timeout, connect error), `ssrf_refused` (the host no longer resolves to public unicast only), `disabled` (the attempt that disabled the subscription: 72 h of failure, a secret that no longer opens, or an unreadable stored owner), `lease_lost` (the subscription was deleted or taken over meanwhile; nothing recorded) or `error` (a store or evaluation error, or the attempt overran its 20 s bound; nothing recorded, retried once the lease lapses). An address refused at connect time, after the pre-check passed, counts as `failed`. |
+| `acdp_registry_hint_deliveries_total` | counter | `outcome` | RFC-ACDP-0018 hint attempts. `outcome` is `delivered`, `nothing_visible` (matching entries the owner cannot see; the position advanced, nothing sent), `failed` (non-2xx, redirect, timeout, connect error), `ssrf_refused` (the host no longer resolves to public unicast only), `unknown_key` (the secret is sealed under a `[changes]` `key_id` this replica does not hold; nothing sent, retried like a failure), `disabled` (the attempt that disabled the subscription: 72 h of failure, a corrupt secret, an unreadable stored owner, or no tenant while `auth.require_tenant` is set), `lease_lost` (the subscription was deleted or taken over meanwhile; nothing recorded) or `error` (a store or evaluation error, or the attempt overran its 20 s bound; nothing recorded, retried once the lease lapses). An address refused at connect time, after the pre-check passed, counts as `failed`. |
 | `acdp_registry_hint_subscriptions` | gauge | `status` | Subscriptions by `status` (`active`, `disabled`), refreshed after every worker pass. |
 | `acdp_registry_hint_oldest_due_seconds` | gauge | — | Seconds the oldest active subscription behind the feed head has been due (its `next_attempt_at` to now), `0` when none is overdue; refreshed after every worker pass. |
 | `acdp_registry_subscription_requests_total` | counter | `op`, `outcome` | RFC-ACDP-0018 `/subscriptions` requests. `op` is `create`, `get` or `delete`; `outcome` is `ok` or the wire code (`schema_violation`, `not_found`, `not_authorized`, `not_implemented`, …). |
@@ -728,7 +728,7 @@ registry does with them:
   the new version's retrieval) serves.
 - **Parameters.** `since` is absent (start at the oldest retained entry),
   `head` (start at the current head; returns `changes: []`), or a cursor from
-  an earlier `next_cursor`; an empty `since=` is `400 invalid_cursor`. `limit` is `1..=max_changes_page` (default 100).
+  an earlier `next_cursor`; an empty `since=` is `400 invalid_cursor`. `limit` is a positive integer (default 100); one above `max_changes_page` is clamped to it.
   `ctx_id`, `lineage_id`, `agent_id` and `kind` repeat; the three id filters
   OR together and `kind` ANDs with them, and a `ctx_id` watch also matches
   `key_revocation` entries for that context's producer. More than

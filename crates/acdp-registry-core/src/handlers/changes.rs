@@ -8,8 +8,10 @@
 //! Error semantics (§5.1, §5.4):
 //! - too many filter values, an unknown or empty `kind`, a malformed id,
 //!   a repeated `since` / `limit` → `schema_violation` (400);
-//! - a `limit` that is not an integer in 1..=`limits.max_changes_page` →
-//!   `schema_violation` with `details.field = "limit"`;
+//! - a `limit` that is not a positive integer → `schema_violation` with
+//!   `details.field = "limit"`; one above `limits.max_changes_page` is
+//!   clamped to it (§5.1 only requires accepting values up to the max;
+//!   `next_cursor` / `has_more` carry the rest, as on search);
 //! - a cursor that does not decode, or whose tag fails under a known key
 //!   → `invalid_cursor` (400);
 //! - a cursor under an unknown key, above the head, or below the oldest
@@ -80,8 +82,8 @@ fn limit_violation(max: u64, raw: &str) -> RegistryError {
     RegistryError::FieldViolation {
         field: "limit",
         message: format!(
-            "limit must be an integer from 1 to limits.max_changes_page {max} (got '{raw}') \
-             (RFC-ACDP-0018 §5.1)"
+            "limit must be a positive integer, at most limits.max_changes_page {max} \
+             is served (got '{raw}') (RFC-ACDP-0018 §5.1)"
         ),
     }
 }
@@ -119,7 +121,8 @@ pub fn parse_request(
     let limit = match limit {
         None => DEFAULT_LIMIT.min(max_changes_page),
         Some(raw) => match raw.parse::<u64>() {
-            Ok(n) if (1..=max_changes_page).contains(&n) => n,
+            Ok(n) if n >= 1 => n.min(max_changes_page),
+            Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => max_changes_page,
             _ => return Err(limit_violation(max_changes_page, &raw)),
         },
     };
@@ -387,7 +390,7 @@ mod tests {
 
     #[test]
     fn limit_bounds_name_the_field() {
-        for bad in ["0", "101", "-1", "1.5", "x", ""] {
+        for bad in ["0", "-1", "1.5", "x", "", "+-1"] {
             let e = parse(&format!("limit={bad}")).expect_err(bad);
             assert_eq!(e.wire_code(), "schema_violation", "{bad}");
             assert!(
@@ -397,6 +400,9 @@ mod tests {
         }
         assert_eq!(parse("limit=1").unwrap().limit, 1);
         assert_eq!(parse("limit=100").unwrap().limit, 100);
+        // Above the page maximum (100 in these tests): clamped, not refused.
+        assert_eq!(parse("limit=101").unwrap().limit, 100);
+        assert_eq!(parse("limit=99999999999999999999999").unwrap().limit, 100);
     }
 
     #[test]

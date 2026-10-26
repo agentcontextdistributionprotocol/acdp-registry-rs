@@ -703,9 +703,12 @@ Prerequisites (enforced at startup): `[changes] enabled = true` (a hint
 points at the feed, and subscription secrets are sealed under a key derived
 from the `[changes]` master key), `auth.enabled = true` (every subscription
 has an authenticated owner), and `max_subscriptions_per_requester >= 1`.
-Rotating the `[changes]` key makes existing subscription secrets
-unreadable: the worker disables each such subscription at its next
-delivery, and owners re-create them.
+Rotating the `[changes]` key (new key and new `key_id`) makes existing
+subscription secrets unreadable: the worker retries each such subscription
+and disables it after 72 hours, so restoring the old key within that window
+loses nothing; otherwise owners re-create them. A new key under the same
+`key_id` disables them at once (see
+[OPERATIONS.md](OPERATIONS.md#changes-key)).
 
 With `[events]` enabled every replica runs the hint worker (see
 [HTTP-API.md](HTTP-API.md#post-subscriptions-get-subscriptionsid-delete-subscriptionsid-acdp-050)

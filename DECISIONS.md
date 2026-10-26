@@ -4696,3 +4696,57 @@ Noted, not changed: receipts are signed for `did:web:<current authority>` withou
 `origin_registry`. One line in `DEFERRED.md`.
 
 **Resulting status:** 0 open declarations for this plan. No follow-up blocks `/ship`.
+
+## RFC-ACDP-0018 retraction recall — 2026-10-25
+
+All five entries for plans/rfc0018-retraction-recall.md were settled. P1, P3, P4 and P6 were analysed by Opus. P5 touches a
+trust boundary (subscriber HMAC secrets at rest, owner scoping), so Fable analysed it first. Fable found no one-way door: the
+stored format carries `secret_key_id`, the AAD label is versioned (`…/v1|`), and production has `[events]` disabled with no
+rows. All five entries are therefore **decided by Opus** (reversible tier).
+
+- **P1, strict 502 on a malformed `event_receipts` — CONFIRMED.**
+  - It matches how a malformed `lifecycle_events` entry is already handled (RFC-ACDP-0013), the proxy never relays bytes it
+    knows break the schema, and the 502 blames the origin.
+  - Spec tension: RFC-ACDP-0017 §10.3 step 1 treats a schema-invalid receipt as absent. If acdp-rs makes `de_event_receipts`
+    tolerant per element, follow the SDK.
+  - Closed here: the promised UPGRADING note was missing, and no test covered a malformed receipt. A 502 case was added to
+    `cross_registry_proxy_serves_the_origin_body_verbatim`.
+- **P3 (a)–(d) — CONFIRMED.**
+  - (a) `clock_timestamp()` is read after the feed advisory lock, so `appended_at_ms` is monotone in `seq`, and prune stops at
+    the first young row.
+  - (b) The per-id `producers_of` default is the safe fallback, because a NotImplemented default would silently break §6
+    key-revocation matching. Parity covers all three stores.
+  - (c) Replaying the winner is what RFC-ACDP-0003 §6.2 and idem-006 require; the old 409 was non-conformant. The lookup is
+    scoped to the caller's `agent_id`.
+  - (d) `check_servable` runs the read path's `Change` constructors before the INSERT, and conformance_gate guards the
+    bypass writers.
+- **P4.**
+  - (a) **CHANGED to clamp.** A `limit` above `max_changes_page` is now served at the maximum. §5.1 is silent above the max,
+    search already clamps, and the SDK passes `limit` through unchanged, so refusing broke `.limit(500)` here only.
+    `next_cursor` and `has_more` carry the rest. 0, negative and non-integer values stay `schema_violation` with
+    `details.field = "limit"`.
+  - (b)–(g) CONFIRMED.
+    - (g) is what RFC-ACDP-0008 requires.
+    - A cursor under an unknown key, or above the head, answers `cursor_expired`, sending the consumer into the §7 resync.
+      The spec does not pin this case.
+  - (h) DEFERRED. Trigger: the conformance replay gains per-requester bearers, or rec-004/rec-008 gain HTTP vectors.
+- **P5 (a)–(l) — CONFIRMED, with one change.**
+  - Fable checked the crypto: HKDF info labels separate the cursor, nonce-PRF and seal subkeys; the 96-bit nonce is random,
+    one per seal; the AAD binds each secret to its subscription id; plaintext is zeroized.
+  - (d) CHANGED: the worker now disables a subscription stored with no tenant once `auth.require_tenant` is set. Evaluating
+    it with no tenant clause would see across tenants, while the owner's own `GET /changes` is refused.
+  - DEFERRED: a retired-key ring for `[changes]` (precedent: `receipt.retired_keys`). It needs no schema change. Trigger:
+    before the first production `[events] enabled = true`, or the first planned `[changes]` rotation with live
+    subscriptions.
+- **P6 (a)–(k) — CONFIRMED, with one change.**
+  - The HTTP client meets §8.3's 10 s rule (5 s connect, 10 s request). The 20 s `ATTEMPT_TIMEOUT` is only an outer bound.
+    Never reading the body is stricter than the 1 KiB ceiling.
+  - (g) CHANGED: a secret sealed under an unknown `key_id` (a rotation, a rollback, a replica on the wrong key) is retried on
+    the normal backoff (`outcome="unknown_key"`) and disabled only after 72 h. Restoring the key within that window loses
+    nothing, and a later keyring becomes a drop-in. A secret that fails to open under the right `key_id` is corrupt and
+    still disables at once. OPERATIONS now says to change `key_id` together with the key.
+  - (k) OPERATIONS now asks for a stop grace of at least 60 s.
+
+**Resulting status:** 0 open declarations for this plan. 2 entries confirmed as written, 3 confirmed with a small change
+(P4 (a) clamp, P5 (d) tenant guard, P6 (g) unknown key retried), and 2 deferrals with triggers. None needed the owner, and no
+follow-up blocks `/ship`.

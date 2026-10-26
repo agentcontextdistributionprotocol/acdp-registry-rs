@@ -315,7 +315,9 @@ retries, claims due subscriptions with a 60-second lease (Postgres:
 it), evaluates each one exactly as the owner's `GET /changes`, and POSTs
 one signed hint covering every new visible change.
 On SIGTERM the worker stops claiming, finishes the batch in flight (the
-process waits up to the 60-second lease for it) and exits. A replica that
+process waits up to the 60-second lease for it, so give the container a
+stop grace of at least 60 s, or accept that a kill inside it is the
+crash case below) and exits. A replica that
 dies mid-delivery leaves only a lease, which lapses; another replica (or
 the restarted one) tries again, so a receiver can, rarely, see a hint
 twice. Hints are idempotent by design: the receiver reads the feed
@@ -338,9 +340,12 @@ What to watch:
   disabled subscriptions are kept, still count toward their owner's
   `max_subscriptions_per_requester`, and are never retried. The owner
   deletes and re-creates one to resume; there is no operator re-enable.
-- `{outcome="disabled"}` in a burst after a `[changes]` key rotation:
-  every subscription sealed under the old key is disabled at its next
-  attempt (see [Key rotation](#key-rotation)).
+- `{outcome="unknown_key"}` after a `[changes]` key rotation (or on one
+  replica with the wrong `key_id`): subscriptions sealed under the old key
+  are retried, and disabled once they have failed for 72 hours. Restoring
+  the old key within that window loses nothing (see [Changes key](#changes-key)).
+  `{outcome="disabled"}` in a burst instead means the key changed but
+  `key_id` did not: every secret then fails to open as corrupt.
 - `{outcome="lease_lost"}`: the subscription was deleted, or its lease
   taken over, while the attempt ran. Occasional is normal; steady means
   replicas are stalling past the 60-second lease (each attempt is bounded
@@ -415,7 +420,8 @@ first boot against it; there is no online restore path.
    holding one silently skips the entries that reuse those numbers. Rotating (new key,
    new `key_id`, see [Changes key](#changes-key)) turns every outstanding
    cursor into `cursor_expired`, which makes consumers resync. Existing
-   subscriptions are disabled by the rotation and owners re-create them.
+   subscriptions stop receiving hints and are disabled 72 hours later;
+   owners re-create them.
 6. **Verify readiness, not liveness.** `GET /healthz` reports storage
    readiness and answers `503` if the backend is not usable; `GET /livez` says
    only that the process is up and will answer `200` against a broken database.
@@ -622,9 +628,16 @@ Rotating the key (new key, new `key_id`) has two effects:
 
 - every outstanding cursor becomes `cursor_expired`, and consumers resync;
 - every existing subscription's secret can no longer be opened. The hint
-  worker disables such a subscription the first time it tries to sign for
-  it, and `GET /subscriptions/{id}` then shows `status: "disabled"`. Owners
-  must delete it and create a new one, which gets a new secret.
+  worker sends nothing for it and retries on the normal backoff
+  (`outcome="unknown_key"`), so putting the old key back within 72 hours
+  (a rollback, a replica deployed with the wrong key) resumes it with
+  nothing lost. After 72 hours it is disabled, `GET /subscriptions/{id}`
+  shows `status: "disabled"`, and the owner must delete it and create a new
+  one, which gets a new secret.
+
+Always change `key_id` together with the key. A new key under the same
+`key_id` cannot be told apart from a tampered secret, so every
+subscription is disabled at once.
 
 Every replica needs the same key and `key_id`. Keep the key out of the
 database backup set: a backup together with the key opens every secret.

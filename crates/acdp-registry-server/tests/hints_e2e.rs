@@ -735,8 +735,54 @@ async fn a_slow_receiver_times_out_as_a_failure() {
     );
 }
 
-/// A subscription whose secret no longer opens (the changes key was
-/// rotated away) can never be signed for: it is disabled, nothing sent.
+/// A secret sealed under a `key_id` this replica does not hold (a
+/// rotation, a rollback, a replica on the wrong key) is retried, not
+/// disabled: nothing is sent, the key coming back resumes delivery, and
+/// only 72 h of it disables the subscription.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_key_retries_then_disables() {
+    let rx = Receiver::spawn().await;
+    let (mut h, state) = harness().await;
+    let sub = subscribe(&h, &rx.url()).await;
+    retracted(&h, "rotated", Visibility::Public).await;
+    let mut cfg = config();
+    cfg.changes.key_b64 = b64(&[10u8; 32]);
+    cfg.changes.key_id = cfg.changes.key_id.wrapping_add(1);
+    let rotated = h.rebuild_shared_with(cfg, |s| {
+        s.with_callback_resolver(Arc::new(receiver_resolver()))
+            .with_callback_policy(loopback_policy())
+            .with_hint_root_pem(didweb::ca_pem().as_bytes())
+            .expect("fixture CA")
+    });
+    let t0 = now_ms();
+    let stats = pass(&rotated, t0).await;
+    assert_eq!(stats.unknown_key, 1, "{stats:?}");
+    assert!(rx.seen().is_empty());
+    assert_eq!(
+        subscription_status(&h, &sub.subscription_id).await,
+        SubscriptionStatus::Active
+    );
+    // The original key back (a rollback): the retry delivers.
+    let stats = pass(&state, t0 + 3_600_000).await;
+    assert_eq!(stats.delivered, 1, "{stats:?}");
+    assert_eq!(rx.seen().len(), 1);
+
+    // Under the unknown key for 72 h: disabled.
+    retracted(&h, "rotated again", Visibility::Public).await;
+    let t1 = t0 + 3_600_000 + HINT_MIN_INTERVAL_MS;
+    assert_eq!(pass(&rotated, t1).await.unknown_key, 1);
+    let stats = pass(&rotated, t1 + DISABLE_AFTER_MS).await;
+    assert_eq!(stats.disabled, 1, "{stats:?}");
+    assert_eq!(rx.seen().len(), 1);
+    assert_eq!(
+        subscription_status(&h, &sub.subscription_id).await,
+        SubscriptionStatus::Disabled
+    );
+}
+
+/// A secret that fails to open under the right `key_id` (tampered, or a
+/// new key installed without a new `key_id`) can never be signed for: it
+/// is disabled at once, nothing sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreadable_secret_disables_the_subscription() {
     let rx = Receiver::spawn().await;
@@ -831,6 +877,32 @@ async fn an_unreadable_owner_disables_the_subscription() {
         .unwrap()
         .unwrap();
     assert_eq!(row.status, SubscriptionStatus::Disabled);
+}
+
+/// A subscription created without a tenant, once `auth.require_tenant` is
+/// set: its owner's own `GET /changes` would now be refused, so it is
+/// disabled rather than evaluated across every tenant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tenantless_subscription_disables_under_require_tenant() {
+    let rx = Receiver::spawn().await;
+    let (mut h, _state) = harness().await;
+    let sub = subscribe(&h, &rx.url()).await;
+    retracted(&h, "tenantless", Visibility::Public).await;
+    let mut cfg = config();
+    cfg.auth.require_tenant = true;
+    let strict = h.rebuild_shared_with(cfg, |s| {
+        s.with_callback_resolver(Arc::new(receiver_resolver()))
+            .with_callback_policy(loopback_policy())
+            .with_hint_root_pem(didweb::ca_pem().as_bytes())
+            .expect("fixture CA")
+    });
+    let stats = pass(&strict, now_ms()).await;
+    assert_eq!(stats.disabled, 1, "{stats:?}");
+    assert!(rx.seen().is_empty());
+    assert_eq!(
+        subscription_status(&h, &sub.subscription_id).await,
+        SubscriptionStatus::Disabled
+    );
 }
 
 // ─── replicas and the worker ────────────────────────────────────────────────

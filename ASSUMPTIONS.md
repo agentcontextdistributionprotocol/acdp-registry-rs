@@ -5015,7 +5015,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - Chose: accept the SDK's strict parse; document in UPGRADING.
 - Alternatives: lenient raw passthrough (would need hand-rolled RegistryState parsing).
 - Blast radius: low; reversible; only malformed upstreams.
-- Status: UNCONFIRMED
+- Status: CONFIRMED (2026-10-25) by Opus at /reconcile; the missing UPGRADING note and a 502 test for a malformed receipt were added. See DECISIONS.md "RFC-ACDP-0018 retraction recall".
 
 ## RFC-ACDP-0018 retraction recall, Phase 3 (2026-10-25)
 - Plan: plans/rfc0018-retraction-recall.md
@@ -5023,7 +5023,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - Chose: as above. The bypass writers `put` and `mark_superseded` stay for tests and imports, and a conformance_gate scan guards them.
 - Alternatives: (a) `now()`, as planned; (b) NotImplemented; (c) leave the 409.
 - Blast radius: low and reversible. (a) shifts retention by at most the transaction length. (c) changes the outcome only for a racing retry under the same key and content hash.
-- Status: UNCONFIRMED
+- Status: CONFIRMED (2026-10-25) by Opus at /reconcile, (a)–(d) as written. See DECISIONS.md "RFC-ACDP-0018 retraction recall".
 
 ## RFC-ACDP-0018 retraction recall, Phase 4 (2026-10-25)
 - Plan: plans/rfc0018-retraction-recall.md
@@ -5031,7 +5031,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - Chose: as above.
 - Alternatives: (a) clamp to the maximum; (b) no ceiling; (d) an unbounded scan; (e) `cursor_expired` on a `since`-less request; (f) prune only when the feed is served, which grows the table forever on registries that never enable it.
 - Blast radius: low and reversible. Every choice is server-side only and loosening one later breaks no conforming client.
-- Status: UNCONFIRMED
+- Status: (a) CHANGED (2026-10-25) by Opus at /reconcile: a `limit` above `max_changes_page` is now clamped to it, not refused; 0, negative and non-integer values stay `schema_violation`. (b)–(g) CONFIRMED. (h) deferred until the conformance replay can carry per-requester bearers. See DECISIONS.md "RFC-ACDP-0018 retraction recall".
 
 ## RFC-ACDP-0018 retraction recall, Phase 5 (2026-10-25)
 - Plan: plans/rfc0018-retraction-recall.md
@@ -5039,7 +5039,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - Chose: as above.
 - Alternatives: (a) a separate `[events]` key, which means a second secret to custody; (b) excluding disabled subscriptions, which lets a failing receiver accumulate rows without bound; (f) 400 for a malformed id.
 - Blast radius: low and reversible. Everything is server-side. (a) only changes where the key comes from, and a later split keeps the sealed format through `secret_key_id`.
-- Status: UNCONFIRMED
+- Status: CONFIRMED (2026-10-25) by Opus at /reconcile after a Fable analysis found no one-way door. (d) gained a worker guard (a tenantless subscription is disabled once `auth.require_tenant` is set). A keyring for retired `[changes]` keys is deferred. See DECISIONS.md "RFC-ACDP-0018 retraction recall".
 - Addendum (P9): (l) Diverges from amendment A14. `/subscriptions` is mounted in the data group (`Cache-Control: private`, `Vary`), not a separate `no-store` group. Only `POST /subscriptions`, the one response that carries the secret, overrides to `no-store`. GET and DELETE never carry the secret, are owner-scoped, and the data group's `Vary: authorization` already stops a shared cache reusing them across requesters; §8 sets no cache requirement. Reversible by moving the routes to a `no-store` group.
 
 ## RFC-ACDP-0018 retraction recall, Phase 6 (2026-10-25)
@@ -5062,4 +5062,4 @@ underlying settings and code were not touched by this pass, only the record of t
   - (c) a fixed hourly retry, which is slower to recover from a brief outage;
   - (e) disable on the first refusal.
 - Blast radius: low and reversible. These are server-side delivery-policy constants and internal metric names. The wire format and the stored schema are unaffected.
-- Status: UNCONFIRMED
+- Status: (g) CHANGED (2026-10-25) by Opus at /reconcile: a secret sealed under an unknown `key_id` is now retried (`outcome="unknown_key"`) and disabled only after 72 h; a secret that fails to open under the right `key_id` still disables at once. (a)–(f), (h)–(k) CONFIRMED. See DECISIONS.md "RFC-ACDP-0018 retraction recall".

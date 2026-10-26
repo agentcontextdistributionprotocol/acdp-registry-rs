@@ -23,7 +23,11 @@
 //! A failed delivery (non-2xx, a redirect, a timeout, an SSRF refusal)
 //! backs off from one minute, doubling to an hourly cap, so retries run
 //! well past the hour §8.2 asks for. A subscription failing for
-//! [`DISABLE_AFTER_MS`] (72 h) is disabled and `GET` reports it.
+//! [`DISABLE_AFTER_MS`] (72 h) is disabled and `GET` reports it. A secret
+//! sealed under a `[changes]` key id this replica does not hold (a
+//! rotation, a rollback, one replica on the wrong key) is retried on the
+//! same schedule, so restoring the key within 72 h loses nothing; a secret
+//! that fails to open under the right key is corrupt and disables at once.
 //!
 //! Every delivery re-resolves the callback host and refuses the whole
 //! answer if any address is outside public unicast (§8.3, DNS rebinding),
@@ -55,7 +59,7 @@ use acdp_registry_types::RegistryError;
 use zeroize::Zeroize as _;
 
 use crate::callback::{resolve_allowed, CallbackResolver};
-use crate::changes_key::ChangesKey;
+use crate::changes_key::{ChangesKey, SealError};
 use crate::handlers::{evaluate_changes, ChangesRequest, Since};
 use crate::state::AppState;
 
@@ -127,9 +131,13 @@ pub enum HintOutcome {
     Failed,
     /// The SSRF policy refused the callback; scheduled for retry.
     SsrfRefused,
+    /// The secret is sealed under a `[changes]` key id this replica does
+    /// not hold; nothing sent, scheduled for retry.
+    UnknownKey,
     /// The delivery failed and the subscription has now failed for 72 h,
-    /// or it can never be delivered (its secret can no longer be opened,
-    /// its stored owner is unreadable); it is disabled.
+    /// or it can never be delivered (its secret is corrupt, its stored
+    /// owner is unreadable, or it has no tenant while
+    /// `auth.require_tenant` is set); it is disabled.
     Disabled,
     /// The lease was lost (deleted or re-claimed meanwhile); nothing was
     /// written.
@@ -148,6 +156,7 @@ impl HintOutcome {
             Self::NothingVisible => "nothing_visible",
             Self::Failed => "failed",
             Self::SsrfRefused => "ssrf_refused",
+            Self::UnknownKey => "unknown_key",
             Self::Disabled => "disabled",
             Self::LeaseLost => "lease_lost",
             Self::Error => "error",
@@ -163,6 +172,7 @@ pub struct PassStats {
     pub nothing_visible: usize,
     pub failed: usize,
     pub ssrf_refused: usize,
+    pub unknown_key: usize,
     pub disabled: usize,
     pub lease_lost: usize,
     pub errors: usize,
@@ -176,6 +186,7 @@ impl PassStats {
             HintOutcome::NothingVisible => self.nothing_visible += 1,
             HintOutcome::Failed => self.failed += 1,
             HintOutcome::SsrfRefused => self.ssrf_refused += 1,
+            HintOutcome::UnknownKey => self.unknown_key += 1,
             HintOutcome::Disabled => self.disabled += 1,
             HintOutcome::LeaseLost => self.lease_lost += 1,
             HintOutcome::Error => self.errors += 1,
@@ -299,6 +310,17 @@ async fn hint_one<S: ExtendedRegistryStore + 'static>(
             return finish(p, HintOutcome::Disabled).await;
         }
     };
+    if state.config.auth.require_tenant && sub.tenant_id.is_none() {
+        // Created before tenants were required: its owner's own
+        // `GET /changes` is now refused, so evaluating it with no tenant
+        // clause would see across every tenant.
+        tracing::warn!(
+            subscription_id = %sub.subscription_id,
+            "subscription has no tenant and auth.require_tenant is set; disabling it"
+        );
+        let p = SubscriptionProgress::disabled(&sub, now_ms);
+        return finish(p, HintOutcome::Disabled).await;
+    }
     let mut req = ChangesRequest {
         since: Since::Position(sub.last_hinted_seq),
         limit: 1,
@@ -331,13 +353,23 @@ async fn hint_one<S: ExtendedRegistryStore + 'static>(
     let mut secret = match key.open_secret(&sub.subscription_id, sub.secret_key_id, &sub.secret_ct)
     {
         Ok(s) => s,
+        Err(SealError::UnknownKey) => {
+            // Rotated, rolled back, or this replica holds the wrong key:
+            // retry, so restoring the key within 72 h loses nothing.
+            let p = retry_or_disable(&sub, now_ms, "secret sealed under an unknown changes key");
+            let o = if p.status == SubscriptionStatus::Disabled {
+                HintOutcome::Disabled
+            } else {
+                HintOutcome::UnknownKey
+            };
+            return finish(p, o).await;
+        }
         Err(e) => {
-            // The changes key was rotated or lost: this subscription can
-            // never be signed for again.
+            // Tampered or truncated under the right key: never signable.
             tracing::warn!(
                 subscription_id = %sub.subscription_id,
                 error = %e,
-                "change hint secret cannot be opened; disabling the subscription"
+                "change hint secret is corrupt; disabling the subscription"
             );
             let p = SubscriptionProgress::disabled(&sub, now_ms);
             return finish(p, HintOutcome::Disabled).await;
@@ -363,6 +395,18 @@ async fn hint_one<S: ExtendedRegistryStore + 'static>(
         Delivery::Failed(why) => (why, HintOutcome::Failed),
         Delivery::Refused(why) => (why, HintOutcome::SsrfRefused),
     };
+    let p = retry_or_disable(&sub, now_ms, &why);
+    let o = if p.status == SubscriptionStatus::Disabled {
+        HintOutcome::Disabled
+    } else {
+        outcome
+    };
+    finish(p, o).await
+}
+
+/// A failed attempt's progress: backed off, or disabled once failing for
+/// [`DISABLE_AFTER_MS`].
+fn retry_or_disable(sub: &SubscriptionRecord, now_ms: i64, why: &str) -> SubscriptionProgress {
     let failing_since = sub.failing_since_ms.unwrap_or(now_ms);
     let attempts = sub.attempts.saturating_add(1);
     if failed_long_enough(failing_since, now_ms) {
@@ -371,23 +415,21 @@ async fn hint_one<S: ExtendedRegistryStore + 'static>(
             reason = %why,
             "change hints have failed for 72 hours; disabling the subscription"
         );
-        let p = SubscriptionProgress::disabled(&sub, now_ms);
-        return finish(p, HintOutcome::Disabled).await;
+        return SubscriptionProgress::disabled(sub, now_ms);
     }
     tracing::info!(
         subscription_id = %sub.subscription_id,
         attempts,
         reason = %why,
-        "change hint delivery failed; will retry"
+        "change hint attempt failed; will retry"
     );
-    let p = SubscriptionProgress {
+    SubscriptionProgress {
         last_hinted_seq: sub.last_hinted_seq,
         status: SubscriptionStatus::Active,
         next_attempt_at_ms: now_ms + retry_delay_ms(attempts),
         failing_since_ms: Some(failing_since),
         attempts,
-    };
-    finish(p, outcome).await
+    }
 }
 
 /// `registry_authority` is a hostname (§8.2 schema): drop any port.

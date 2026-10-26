@@ -219,7 +219,7 @@ pub fn record_subscription_request(op: &'static str, outcome: &'static str) {
 
 /// One change-hint delivery attempt (RFC-ACDP-0018 §8.2). `outcome` is a
 /// `hints::HintOutcome` label: `delivered`, `nothing_visible`, `failed`,
-/// `ssrf_refused`, `disabled`, `lease_lost` or `error`.
+/// `ssrf_refused`, `unknown_key`, `disabled`, `lease_lost` or `error`.
 pub fn record_hint_delivery(outcome: &'static str) {
     metrics::counter!(HINT_DELIVERIES_TOTAL, "outcome" => outcome).increment(1);
 }

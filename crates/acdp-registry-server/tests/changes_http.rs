@@ -413,18 +413,25 @@ async fn rec001_cursor_errors() {
     }
 }
 
-/// §5.1 request validation: `limit` must be 1..=max_changes_page (named
-/// in `details.field`); repeated scalars and malformed filters are
+/// §5.1 request validation: `limit` must be a positive integer (named in
+/// `details.field`), one above max_changes_page is clamped; repeated scalars and malformed filters are
 /// `schema_violation`; more than `max_change_filters` filters are refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn changes_request_validation() {
     let h = harness(true).await;
-    for q in ["limit=0", "limit=101", "limit=x", "limit=-1"] {
+    for q in ["limit=0", "limit=x", "limit=-1"] {
         let (status, v) = changes(&h.router, q, None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{q}: {v}");
         assert_eq!(v["error"]["code"], "schema_violation", "{q}: {v}");
         assert_eq!(v["error"]["details"]["field"], "limit", "{q}: {v}");
     }
+    let (status, v) = changes(&h.router, "limit=101", None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "limit above the max is clamped: {v}"
+    );
+    assert!(v["next_cursor"].is_string(), "{v}");
     for q in [
         "limit=1&limit=2",
         "since=head&since=head",
