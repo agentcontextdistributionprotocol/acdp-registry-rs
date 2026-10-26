@@ -55,5 +55,5 @@
 # junk (a real one here carries a `.DS_Store`) and a whole-tree digest would then fail a
 # tree that IS at the pin.
 repository: agentcontextdistributionprotocol/agentcontextdistributionprotocol
-ref: 1511b08f95f91dd30096414e881baaa5f84e1264
+ref: 7f64f74a190c09a98aefc7cdda8f4fd21c3782d0
 conformance-digest: rfc6962-sha256:96a125f4f52ff90792a383ee0fa37cf821bf02746c141c63f3a3ed954e76dcc3
