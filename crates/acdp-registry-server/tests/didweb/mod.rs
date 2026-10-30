@@ -59,7 +59,7 @@ pub struct Fixture {
 /// The process-wide chain. Built once: every test in this binary that spawns a
 /// server shares one CA, so a resolver configured from [`ca_pem`] trusts any of
 /// them.
-fn fixture() -> &'static Fixture {
+pub fn fixture() -> &'static Fixture {
     static CHAIN: OnceLock<Fixture> = OnceLock::new();
     CHAIN.get_or_init(|| {
         // The chain is TWO certificates on purpose, and the shape is not

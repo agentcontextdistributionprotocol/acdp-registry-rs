@@ -242,8 +242,8 @@ read §9 before doing it.
    `receipt-key-2` in `assertionMethod`.
 4. Never delete the `retired_keys` entry (see above).
 
-> **Keyless (applies once `keyless.enabled`; startup refuses it in this
-> release).** RFC-ACDP-0021 key attestations are bodies signed with the
+> **Keyless (applies when `keyless.enabled`, which is off by default).**
+> RFC-ACDP-0021 key attestations are bodies signed with the
 > receipt key, so the same rule covers them. Under
 > [RFC-ACDP-0021 §8.1 step 1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/1560e0f389875be8addaa7b7908751e020db50fe/rfcs/RFC-ACDP-0021-keyless-signing.md)
 > (0.5.0-draft.4) an attestation whose signing key has left `assertionMethod`

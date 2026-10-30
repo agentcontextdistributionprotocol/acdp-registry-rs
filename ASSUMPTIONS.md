@@ -5182,3 +5182,34 @@ underlying settings and code were not touched by this pass, only the record of t
   - (g) R13 after the path-binding check.
 - Blast radius: low and reversible. Startup still refuses `keyless.enabled`, so only in-process harnesses reach the keyless branch and R13. The one feature-off change is kl-007 C, which the spec requires.
 - Status: UNCONFIRMED
+
+## RFC-ACDP-0021 keyless, Phase 7 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) **Switch on.** `validate_keyless_at` no longer refuses a coherent `[keyless]`. Every earlier rule still applies: the prerequisites, the field bounds, `acdp_version >= 0.5.0`, and refusing a listed profile while `enabled = false`. The default stays off, and prod config is untouched.
+  - (b) **Test egress hook (deviates from the plan's "the spawned test sends no token traffic").** A real-binary mint needs the binary to reach a loopback HTTPS issuer and DID host, and the production outbound posture forbids exactly that.
+    - The hook is the new `acdp-registry-core/src/test_egress.rs`, behind the feature `test-egress` (= `acdp/test-transport`). It is enabled only by `acdp-registry-server`'s dev-dependency on core.
+    - Resolver 2 unifies dev-dependency features only into builds that compile test targets. What was proven: `cargo tree -e normal,features` shows no `test-egress` for the default features, for `-p acdp-registry-server --no-default-features --features storage-pg`, and for `--workspace --all-features`. `keyless_e2e::test_egress_is_reachable_only_from_dev_dependencies` pins the manifest shape over every `crates/*/Cargo.toml`, the workspace-root `Cargo.toml` and `tools/live-smoke/Cargo.toml`.
+    - `main.rs` calls `test_egress::web_resolver()` and `test_egress::keyless_outbound()` unconditionally. It relies on the gating inside `test_egress.rs`, where both return `None` without the feature, and has no `cfg` of its own.
+    - Even in a test build it does nothing unless `ACDP_TEST_EGRESS` is set, and a set but bad value panics. That variable is added to the conformance gate's documented env list and to CONFIGURATION.md as test-only.
+  - (c) **Family bookkeeping.** `kl` moves from EXCUSED to COVERED (Direct, six fns), with a per-fixture `KL_CONSUMER_ONLY_FIXTURES` for kl-005, kl-006 and kl-008, which are consumer verification. `EXERCISED_FIXTURES_AT_PIN` goes from 14 to 20; `TOTAL_FIXTURES_AT_PIN` stays 202.
+  - (d) **Consumer-side parts of registry fixtures.** These run in no registry test, and are covered by the SDK and by the e2e's `fetch_with_policy`:
+    - kl-001 vectors 2 and 4;
+    - kl-007 A and D;
+    - kl-009 D and E.
+  - (e) **kl-009 A and B** have a prose `behavior` and no `http_status`. The test asserts that the prose still names `key_not_authorized` and `identity_not_authorized`, then asserts 403 with that reason.
+  - (f) **Test support changes.**
+    - `reqwest` (already in the workspace) is a server dev-dependency, used for the e2e's readiness and raw calls. No new crate.
+    - `didweb::fixture()` and `keyless_kit::spawn_outside` are now pub, and `controller_document` is now a free fn.
+  - (g) **Docs.**
+    - The UPGRADING `## Unreleased` entry is rewritten as one entry.
+    - Its rollback note now says 0.7.0 refuses any `[keyless]` section, even with `enabled = false`. Verified against the v0.7.0 tag: that tag has no `keyless` field, and the config uses `deny_unknown_fields`.
+    - README gains a profile matrix.
+  - (h) **Audited send-site list.** `tests/anchors_uri_never_dereferenced.rs` `EXPECTED_SEND_SITES` gains `tests/keyless_e2e.rs`. It is test code whose client calls the registry under test at fixed paths and never reads anchors. Separately, `conformance.rs` now loads `didweb` through `keyless_kit` (`clippy::duplicate_mod`).
+  - (i) **Mutation scope.** There is one new core module, `test_egress.rs`, and `main.rs` call sites for the resolver and JWKS cache changed. Both are feature-gated or None-returning in release builds. The re-pin is Phase 8.
+- Chose: as above.
+- Alternatives:
+  - (b) no spawned-binary mint, covering ON mode in-process only;
+  - (b) a runtime config key for egress, which a production build could reach.
+- Blast radius: moderate and reversible. Keyless is now reachable by config, but off by default, and the off wire is byte-identical (`keyless_off_wire_snapshot`).
+- Status: UNCONFIRMED

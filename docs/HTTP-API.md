@@ -29,7 +29,7 @@ The complete inbound surface of `acdp-registry`. Routes are assembled in
 | POST | `/subscriptions`                 | bearer      | always (501 unless `events.enabled`) |
 | GET  | `/subscriptions/{subscription_id}` | bearer    | always (501 unless `events.enabled`) |
 | DELETE | `/subscriptions/{subscription_id}` | bearer  | always (501 unless `events.enabled`) |
-| POST | `/key-attestations`              | —           | 501 unless `keyless.enabled` (startup refuses it in this release): mint a key attestation (RFC-ACDP-0021 §5) |
+| POST | `/key-attestations`              | —           | 501 unless `keyless.enabled` (off by default): mint a key attestation (RFC-ACDP-0021 §5) |
 | GET  | `/key-attestations`              | —           | 501 unless `keyless.enabled`: list a controller's attestations, newest first (§5.4) |
 | POST | `/auth/challenge`                | none        | `auth.enabled` |
 | POST | `/auth/token`                    | challenge signature | `auth.enabled` |
@@ -388,6 +388,8 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_lifecycle_event_total` | counter | `event`, `outcome` | Retract / republish outcomes. |
 | `acdp_registry_witness_cosignatures_total` | counter | `outcome` | Witness cosignatures `aggregated` / `rejected` / `store_error`. |
 | `acdp_registry_rate_limit_rejections_total` | counter | `scope` | 429s by scope (`auth_per_ip`, `auth_global`, `challenge_per_agent`, `challenge_global`, `publish_per_agent`, `lifecycle_per_agent`, `keyless_per_ip`, `keyless_per_identity`). |
+| `acdp_registry_keyless_key_fetch_total` | counter | `outcome` | RFC-ACDP-0021 issuer key fetches (JWKS, SPIFFE bundle, OIDC discovery): `ok`, `transport`, `bad_status`, `too_large`, `bad_document`, `bad_discovery` or `policy_refused` (the address is outside public unicast). Emitted only with `keyless.enabled`. |
+| `acdp_registry_keyless_key_stale_served_total` | counter | — | Token verifications answered from an issuer key set past its TTL because the refetch failed (stale-if-error, bounded by `keyless.jwks_max_stale_seconds`). |
 | `acdp_registry_rate_limit_shared_total` | counter | `scope`, `outcome` | Round trips to the shared (cluster-wide) `/auth/*` limiter backend: `scope` is `auth_per_ip` or `auth_global`, `outcome` is `allow`, `deny` or `unavailable`. Counts which layer answered; a client-visible 429 still increments the rejections counter above. Emitted only when a shared backend is configured. |
 | `acdp_registry_rate_limit_shared_seconds` | histogram | `scope` | Latency of those round trips. The series to watch to confirm the shared limiter's database load assumption (see `docs/OPERATIONS.md`). |
 | `acdp_registry_changes_requests_total` | counter | `outcome` | RFC-ACDP-0018 `GET /changes` requests: `ok`, or the wire code (`invalid_cursor`, `cursor_expired`, `schema_violation`, …). |
@@ -825,11 +827,15 @@ This section records what this registry does:
 
 ### `POST /key-attestations`, `GET /key-attestations` *(RFC-ACDP-0021)*
 
-Without `keyless.enabled` both answer `501 not_implemented`, decided before
-the request is read (no body or query refusal can precede it). **Startup
-refuses `keyless.enabled = true` in this release**, so a deployed registry
-always answers 501; the behaviour below is reachable only from in-process
-harnesses until keyless publish lands.
+Without `keyless.enabled` (the default) both answer `501 not_implemented`,
+decided before the request is read (no body or query refusal can precede
+it), and the capabilities document carries neither the
+`acdp-registry-keyless` profile nor the `keyless` member. With it, both are
+served as below, and the profile and the `keyless` member
+(`accepted_oidc_issuers`, `accepted_spiffe_trust_domains`,
+`max_attestation_ttl_seconds`) are advertised together (§13.1). See
+[CONFIGURATION.md](CONFIGURATION.md#keyless-acdp-050) and
+[OPERATIONS.md](OPERATIONS.md#keyless-signing).
 
 `POST` takes an `acdp-key-attestation-request/1` body (`Content-Type`
 JSON, under `max_payload_bytes`, no HTTP signature: the workload token
@@ -870,6 +876,34 @@ paged like search (`limit` default 20, at most 100; `cursor` from
 `next_cursor`). Items are `{ctx_id, content_hash, metadata}`. A missing or
 non-`did:web` `controller` is `400 schema_violation`; a bad cursor is
 `400 invalid_cursor`; an unknown controller is an empty page.
+
+#### Keyless publish, supersession and lifecycle events *(RFC-ACDP-0021 §6.3, §7)*
+
+With `keyless.enabled`, `POST /contexts` accepts a body whose
+`signature.key_id` fragment begins `acdp-kl-` and whose `key_attestation`
+names an attestation this registry minted. The body is checked against the
+stored attestation in the publish transaction, and the receipt and
+transparency-log leaf carry the attested `key_fingerprint`. Refusals:
+
+| Failure | HTTP | `code` | `details.reason` |
+|---------|------|--------|------------------|
+| a `key_attestation` member beside a `key_id` that is not `acdp-kl-` | 400 | `schema_violation` | — |
+| an `acdp-kl-` `key_id` with no `key_attestation` | 400 | `key_resolution_failed` | `attestation_missing` |
+| `key_attestation.ctx_id` is on another registry | 400 | `key_resolution_failed` | `attestation_foreign` |
+| nothing (or no attestation) at that `ctx_id` | 400 | `key_resolution_failed` | `attestation_not_found` |
+| `key_attestation.content_hash` is not the stored attestation's | 400 | `key_resolution_failed` | `attestation_mismatch` |
+| `agent_id`, `key_id` or `algorithm` is not the attestation's | 403 | `key_not_authorized` | `attestation_mismatch` |
+| the attestation was retracted (withdrawn, §9.2) | 403 | `key_not_authorized` | `attestation_withdrawn` |
+| the registry's `created_at` is outside `[not_before, not_after)` | 403 | `key_not_authorized` | `outside_attestation_window` |
+| the controller no longer lists the identity (re-checked on publish) | 403 | `key_not_authorized` | `identity_not_authorized` |
+| the signature does not verify under the attested key | 400 | `invalid_signature` | — |
+| a successor's identity may not supersede its predecessor (§7: same identity, or an `org_wide` successor; a non-org-wide keyless body never supersedes a controller-signed one) | 403 | `not_authorized` | `keyless_identity_mismatch` |
+| a lifecycle event (`/retract`, `/republish`) signed under an `acdp-kl-` key id (R13) | 400 | `key_resolution_failed` | `keyless_event_unsupported` |
+
+Without the profile, an `acdp-kl-` key id is an ordinary unresolvable key
+(`400 key_resolution_failed`, no `details`). A registry advertising an
+`acdp_version` below 0.5.0 refuses any `key_attestation` member as
+`400 schema_violation` (kl-007 C); this binary advertises 0.5.0.
 
 ---
 

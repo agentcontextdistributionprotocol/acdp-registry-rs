@@ -78,6 +78,14 @@ not appear in the Reference below:
 | `ACDP_LOG_FORMAT` | `json` or `pretty`. `pretty` is for interactive runs; `json` is what you want behind a log collector. | `json` |
 | `RUST_LOG` | Standard `tracing` filter. When unset the binary uses `info,acdp=info,acdp_registry=info`. | unset |
 
+`ACDP_TEST_EGRESS` is **not an operator setting**. The variable is read only
+by a test build of the binary, one compiled with the `acdp-registry-core`
+`test-egress` feature, which only this repository's `[dev-dependencies]`
+enable. `cargo build`, `cargo build --release` and the published image ignore
+it entirely. The spawned-binary keyless test (`tests/keyless_e2e.rs`) uses it
+to point the binary's DID resolver and keyless issuer-key fetcher at a
+loopback HTTPS host.
+
 ## Startup validation
 
 The binary validates config before serving and refuses to boot on a misconfig
@@ -210,16 +218,17 @@ The binary validates config before serving and refuses to boot on a misconfig
   `[[playground.pinned_keys]]` entry (RFC-ACDP-0010 §7: a receipts registry has
   no unverified publish path).
 - **Profile allowlist (REG-5)** — every entry in `registry.profiles` must be
-  one of the nine *registry* profiles the pinned ACDP spec defines
+  one of the ten *registry* profiles the pinned ACDP spec defines
   (`REGISTRY_ADVERTISABLE_PROFILES` in `crates/acdp-registry-types/src/
   config.rs`: `acdp-registry-core`, `acdp-registry-discovery`,
   `acdp-registry-federated`, `acdp-registry-receipts`,
   `acdp-registry-head-receipts`, `acdp-registry-transparency-log`,
   `acdp-registry-lifecycle`, `acdp-registry-changes`,
-  `acdp-registry-events`). `acdp-registry-changes` and
-  `acdp-registry-events` are advertised automatically when `[changes]` and
-  `[events]` are enabled (see [`[changes]`](#changes-acdp-050) and
-  [`[events]`](#events-acdp-050)); listing either without enabling it is
+  `acdp-registry-events`, `acdp-registry-keyless`). `acdp-registry-changes`,
+  `acdp-registry-events` and `acdp-registry-keyless` are advertised
+  automatically when `[changes]`, `[events]` and `[keyless]` are enabled
+  (see [`[changes]`](#changes-acdp-050), [`[events]`](#events-acdp-050) and
+  [`[keyless]`](#keyless-acdp-050)); listing one without enabling it is
   refused.
   This is checked before any other
   `registry.profiles`-dependent guard below, so a typo or an out-of-scope
@@ -260,6 +269,17 @@ The binary validates config before serving and refuses to boot on a misconfig
 - **Metrics (FEAT-10)** — when `metrics.enabled`, `duration_buckets` must be
   non-empty, positive, finite, and strictly increasing (Prometheus histogram
   bounds).
+- **Keyless (RFC-ACDP-0021)** — nothing in `[keyless]` is read while
+  `enabled = false`. With `enabled = true` the binary refuses to start
+  unless: `lifecycle.enabled = true` and a `[receipt]` signing key are set
+  (an attestation is a receipted body signed with the receipt key, §5.3);
+  `log.enabled = true` (every attestation is logged, §5.2 step 8); the
+  binary's `acdp_version` claim is at least 0.5.0; at least one
+  `[[keyless.oidc_issuers]]` or `[[keyless.spiffe_trust_domains]]` entry
+  exists; and every key passes the bounds in
+  [`[keyless]`](#keyless-acdp-050). Listing `acdp-registry-keyless` in
+  `registry.profiles` with `enabled = false` is refused as a false
+  capability advertisement.
 
 ## Reference
 
@@ -275,7 +295,7 @@ values for illustration. Env var = `ACDP_REGISTRY_` + the bracketed path.
 | `bind` | string | `127.0.0.1` | Bind address. Non-loopback needs TLS/auth or `allow_public_bind`. |
 | `allow_public_bind` | bool | `false` | Opt-in to bind a public interface without TLS/auth. |
 | `base_url` | string | `https://{authority}` | Public URL advertised to consumers / federation control plane. |
-| `profiles` | string[] | `["acdp-registry-core","acdp-registry-discovery"]` | Advertised in capabilities. Must be a subset of the nine `acdp-registry-*` profiles the pinned spec defines (`acdp-registry-changes` needs `[changes] enabled = true`, `acdp-registry-events` needs `[events] enabled = true`) — any other value (including `acdp-log-witness`, which is not a registry profile) fails startup. |
+| `profiles` | string[] | `["acdp-registry-core","acdp-registry-discovery"]` | Advertised in capabilities. Must be a subset of the ten `acdp-registry-*` profiles the pinned spec defines (`acdp-registry-changes` needs `[changes] enabled = true`, `acdp-registry-events` needs `[events] enabled = true`, `acdp-registry-keyless` needs `[keyless] enabled = true`) — any other value (including `acdp-log-witness`, which is not a registry profile) fails startup. |
 | `cross_registry_resolution` | bool | `true` | Forward foreign `ctx_id`s to their home registry; `false` returns 404 instead. |
 
 #### `[registry.tls]`
@@ -722,6 +742,77 @@ replica.
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Serve `/subscriptions` and advertise `acdp-registry-events` plus `limits.max_subscriptions_per_requester`. |
 | `max_subscriptions_per_requester` | u64 | `10` | Most subscriptions one requester DID may hold, active or disabled; advertised. |
+
+### `[keyless]` *(ACDP 0.5.0)*
+
+Keyless signing
+([RFC-ACDP-0021](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/1560e0f389875be8addaa7b7908751e020db50fe/rfcs/RFC-ACDP-0021-keyless-signing.md),
+Draft): `POST`/`GET /key-attestations`, the keyless publish path and the
+`acdp-registry-keyless` profile. A CI job or workload presents its OIDC ID
+token or SPIFFE JWT-SVID and a proof of possession of an ephemeral key; the
+registry checks the token against the issuer's published keys and the
+controller DID document's `AcdpKeylessSigning` service, then mints a
+short-lived attestation (a public `acdp:key-attestation` body under the
+registry DID, signed with the receipt key, receipted and logged). Bodies
+signed with that key then publish under the controller's DID.
+
+**Off by default.** With `enabled = false` (the default) nothing here is
+read, `/key-attestations` answers `501 not_implemented`, the capabilities
+document carries neither the profile nor the `keyless` member, and an
+`acdp-kl-` key id is an ordinary unresolvable key. With `enabled = true` the
+profile and the `keyless` member are advertised together. See
+[HTTP-API.md](HTTP-API.md#post-key-attestations-get-key-attestations-rfc-acdp-0021)
+for the wire behaviour and
+[OPERATIONS.md](OPERATIONS.md#keyless-signing) for running it.
+
+Prerequisites (enforced at startup): `[lifecycle] enabled = true`, a
+configured `[receipt]` key, `[log] enabled = true`, and at least one issuer
+or trust domain (see [Startup validation](#startup-validation)).
+
+The scalars take the usual `ACDP_REGISTRY_KEYLESS__<KEY>` env overrides
+(e.g. `ACDP_REGISTRY_KEYLESS__ENABLED=true`). The two lists are arrays of
+tables, which the env source cannot express: set them in the TOML file.
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `false` | Serve `/key-attestations` and keyless publish; advertise `acdp-registry-keyless` and the `keyless` member. Env `ACDP_REGISTRY_KEYLESS__ENABLED`. |
+| `max_attestation_ttl_seconds` | u32 | `600` | Longest attestation window minted; advertised as `keyless.max_attestation_ttl_seconds`. 60 to 3600. Env `ACDP_REGISTRY_KEYLESS__MAX_ATTESTATION_TTL_SECONDS`. |
+| `jwks_cache_ttl_seconds` | u64 | `300` | How long a fetched issuer key set counts as fresh before it is refetched. 60 to 3600. A response's `Cache-Control: max-age` can shorten it, never below 60 s. When a refetch fails, the copy past its TTL keeps answering (stale-if-error) for up to `jwks_max_stale_seconds` more. Env `ACDP_REGISTRY_KEYLESS__JWKS_CACHE_TTL_SECONDS`. |
+| `jwks_max_stale_seconds` | u64 | `3600` | How long past its TTL a key set is still used while its issuer cannot be reached. At most 604800 (7 days): a stale set may hold keys the issuer withdrew. Env `ACDP_REGISTRY_KEYLESS__JWKS_MAX_STALE_SECONDS`. |
+| `fetch_timeout_ms` | u64 | `5000` | Bound on one JWKS, bundle or discovery fetch. At least 100. Env `ACDP_REGISTRY_KEYLESS__FETCH_TIMEOUT_MS`. |
+| `max_fetch_bytes` | u64 | `65536` | Largest fetched response body read. At least 1024. Env `ACDP_REGISTRY_KEYLESS__MAX_FETCH_BYTES`. |
+| `rate_per_identity_per_minute` | u32 | `10` | `POST /key-attestations` budget per workload identity, charged only once its token verifies; `0` disables it. Env `ACDP_REGISTRY_KEYLESS__RATE_PER_IDENTITY_PER_MINUTE`. |
+| `rate_per_ip_per_minute` | u32 | `30` | `POST /key-attestations` budget per resolved client IP, charged on arrival; `0` disables it. Env `ACDP_REGISTRY_KEYLESS__RATE_PER_IP_PER_MINUTE`. |
+| `[[keyless.oidc_issuers]]` | table[] | none | Accepted OIDC issuers, advertised as `keyless.accepted_oidc_issuers`. File only. |
+| `[[keyless.spiffe_trust_domains]]` | table[] | none | Accepted SPIFFE trust domains, advertised as `keyless.accepted_spiffe_trust_domains`. File only. |
+
+`[[keyless.oidc_issuers]]` entries:
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `issuer` | string | required | Compared byte for byte with the token's `iss`, never normalised (`https://x` and `https://x/` are two issuers). Must match `^https://[^\s#?]+$`, at most 512 characters, no duplicates. |
+| `jwks_uri` | string | unset | `https` URL of the issuer's JWKS. Unset: discovered from `<issuer>/.well-known/openid-configuration`, whose `issuer` must equal the configured one. |
+
+`[[keyless.spiffe_trust_domains]]` entries:
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `trust_domain` | string | required | Must match `^[a-z0-9._-]+$`, at most 255 characters, no duplicates. |
+| `bundle_endpoint` | string | required | `https` URL of the SPIFFE bundle endpoint serving the domain's JWT authorities. |
+| `jwt_issuer` | string | unset | The `iss` the domain's JWT-SVIDs carry, when they carry one. |
+
+```toml
+[keyless]
+enabled = true
+max_attestation_ttl_seconds = 600
+
+[[keyless.oidc_issuers]]
+issuer = "https://token.actions.githubusercontent.com"
+
+[[keyless.spiffe_trust_domains]]
+trust_domain = "prod.example.org"
+bundle_endpoint = "https://spire.prod.example.org/bundle"
+```
 
 ### `[[witnesses]]` *(ACDP 0.4.0)*
 

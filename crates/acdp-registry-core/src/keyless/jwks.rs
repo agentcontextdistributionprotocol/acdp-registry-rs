@@ -50,6 +50,10 @@ pub const FAILURE_BACKOFF_MS: i64 = 30_000;
 pub const MIN_TTL_SECONDS: u64 = 60;
 /// The longest TTL any copy is used for.
 pub const MAX_TTL_SECONDS: u64 = 3600;
+const _: () = assert!(
+    MIN_TTL_SECONDS == acdp_registry_types::config::MIN_KEYLESS_JWKS_CACHE_TTL_SECONDS
+        && MAX_TTL_SECONDS == acdp_registry_types::config::MAX_KEYLESS_JWKS_CACHE_TTL_SECONDS
+);
 
 /// One configured key source, named the way §13.1 advertises it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

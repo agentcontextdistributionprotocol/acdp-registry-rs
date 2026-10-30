@@ -101,6 +101,14 @@ top of the upstream sync trait:
   token. The checks are pure functions in
   `acdp-registry-store/src/key_attestations.rs`, which also fixes the order
   every backend refuses in; each backend's `keyless.rs` holds only the SQL.
+  The HTTP side is `acdp-registry-core/src/keyless/` (token verification,
+  the per-replica issuer-key cache, the pure mint) and
+  `handlers/keyless.rs`; all of it is inert unless `keyless.enabled`. A
+  test-build-only hook, `acdp-registry-core/src/test_egress.rs` (feature
+  `test-egress`, enabled only from `acdp-registry-server`'s
+  dev-dependencies), lets the spawned-binary test point the DID resolver
+  and issuer-key fetcher at a loopback host; a release build compiles it to
+  `None`.
 
 ### Change feed
 

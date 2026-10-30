@@ -1431,6 +1431,19 @@ impl KeylessConfig {
                 self.max_attestation_ttl_seconds
             ));
         }
+        // The cache never holds a fresh copy longer than its ceiling
+        // (`keyless::jwks::MAX_TTL_SECONDS`), nor shorter than a
+        // `max-age` may impose; a value outside that would be silently
+        // clamped, so it is refused instead.
+        if !(MIN_KEYLESS_JWKS_CACHE_TTL_SECONDS..=MAX_KEYLESS_JWKS_CACHE_TTL_SECONDS)
+            .contains(&self.jwks_cache_ttl_seconds)
+        {
+            return Err(format!(
+                "keyless.jwks_cache_ttl_seconds={} must be from \
+                 {MIN_KEYLESS_JWKS_CACHE_TTL_SECONDS} to {MAX_KEYLESS_JWKS_CACHE_TTL_SECONDS}.",
+                self.jwks_cache_ttl_seconds
+            ));
+        }
         // A stale key set may hold keys the issuer has since withdrawn (a
         // compromised key rotated out mid-outage). A week rides out any
         // realistic outage while bounding how long a withdrawn key can
@@ -1513,6 +1526,10 @@ impl KeylessConfig {
     }
 }
 
+/// `keyless.jwks_cache_ttl_seconds` lower bound (the `max-age` floor).
+pub const MIN_KEYLESS_JWKS_CACHE_TTL_SECONDS: u64 = 60;
+/// `keyless.jwks_cache_ttl_seconds` upper bound (the cache's TTL ceiling).
+pub const MAX_KEYLESS_JWKS_CACHE_TTL_SECONDS: u64 = 3600;
 /// `keyless.jwks_max_stale_seconds` upper bound: 7 days.
 pub const MAX_KEYLESS_JWKS_STALE_SECONDS: u64 = 7 * 24 * 3600;
 /// `keyless.fetch_timeout_ms` lower bound.
@@ -1915,6 +1932,23 @@ mod tests {
                 keyless_refusal(&c).contains("keyless.max_attestation_ttl_seconds"),
                 "{ttl}"
             );
+        }
+    }
+
+    #[test]
+    fn keyless_jwks_cache_ttl_outside_60_to_3600_is_refused() {
+        for ttl in [0, 59, 3601, u64::MAX] {
+            let mut c = keyless_ok();
+            c.jwks_cache_ttl_seconds = ttl;
+            assert!(
+                keyless_refusal(&c).contains("keyless.jwks_cache_ttl_seconds"),
+                "{ttl}"
+            );
+        }
+        for ttl in [60, 300, 3600] {
+            let mut c = keyless_ok();
+            c.jwks_cache_ttl_seconds = ttl;
+            assert_eq!(c.validate(), Ok(()), "{ttl}");
         }
     }
 

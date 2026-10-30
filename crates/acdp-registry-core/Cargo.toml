@@ -50,3 +50,15 @@ tracing-subscriber = { workspace = true }
 [features]
 default    = []
 playground = []
+# Test builds only: `test_egress.rs`, the `ACDP_TEST_EGRESS` outbound
+# override the spawned-binary keyless test (`tests/keyless_e2e.rs`) needs.
+# Enabled solely by `acdp-registry-server`'s `[dev-dependencies]` line for
+# this crate. Under `resolver = "2"` dev-dependency features unify only into
+# builds that compile test targets: `cargo tree -e normal,features` shows no
+# `test-egress` for the default features, `-p acdp-registry-server
+# --no-default-features --features storage-pg`, or `--workspace
+# --all-features`. `main.rs` calls `test_egress::*` unconditionally and
+# relies on the gating inside `test_egress.rs` (both fns return `None`
+# without the feature). `tests/keyless_e2e.rs` pins the manifests. Never
+# enable it from `[dependencies]` or a default feature list.
+test-egress = ["acdp/test-transport"]

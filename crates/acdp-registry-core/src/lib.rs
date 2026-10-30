@@ -21,6 +21,7 @@ pub mod receipt;
 pub(crate) mod secure_compare;
 pub mod state;
 pub mod tenant_trust;
+pub mod test_egress;
 pub mod witness;
 
 pub use state::{AppState, AppStateInner};

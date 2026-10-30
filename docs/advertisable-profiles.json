@@ -1,5 +1,5 @@
 {
-  "description": "Registry profile ids the pinned spec defines, the allowlist for [registry].profiles. Mirrors REGISTRY_ADVERTISABLE_PROFILES in crates/acdp-registry-types/src/config.rs; a unit test keeps the two identical. acdp-registry-changes requires [changes] enabled and acdp-registry-events requires [events] enabled. acdp-registry-keyless (RFC-ACDP-0021) is listed because the spec defines it, but this release refuses to advertise it: it is not implemented yet.",
+  "description": "Registry profile ids the pinned spec defines, the allowlist for [registry].profiles. Mirrors REGISTRY_ADVERTISABLE_PROFILES in crates/acdp-registry-types/src/config.rs; a unit test keeps the two identical. acdp-registry-changes requires [changes] enabled and acdp-registry-events requires [events] enabled. acdp-registry-keyless (RFC-ACDP-0021, Draft) requires [keyless] enabled, which is off by default.",
   "profiles": [
     "acdp-registry-core",
     "acdp-registry-discovery",
