@@ -242,17 +242,21 @@ read §9 before doing it.
    `receipt-key-2` in `assertionMethod`.
 4. Never delete the `retired_keys` entry (see above).
 
-> **Keyless warning (applies once `keyless.enabled`; startup refuses it in
-> this release).** RFC-ACDP-0021 key attestations are bodies signed with the
-> receipt key, and consumers check them with strict body-signature
-> verification, which has no historical path: a key that has left
-> `assertionMethod` no longer verifies a body. **Rotating the receipt key
-> therefore invalidates every attestation the old key signed**: consumers
-> refuse them at RFC-ACDP-0021 §8.1 step 1 (`attestation_invalid`), both for
-> windows still open and for the historical verification of keyless bodies
-> that rest on them. Keeping retired keys in `assertionMethod` is not an
-> option, since it would defeat a compromise rotation. Until the spec defines
-> an attester-key lifecycle, rotate only when you accept that loss.
+> **Keyless (applies once `keyless.enabled`; startup refuses it in this
+> release).** RFC-ACDP-0021 key attestations are bodies signed with the
+> receipt key, so the same rule covers them. Under
+> [RFC-ACDP-0021 §8.1 step 1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/1560e0f389875be8addaa7b7908751e020db50fe/rfcs/RFC-ACDP-0021-keyless-signing.md)
+> (0.5.0-draft.4) an attestation whose signing key has left `assertionMethod`
+> but is still in `verificationMethod` keeps verifying through its own
+> receipt. So the procedure above is also the attestation rotation: **rotate
+> by removing the key from `assertionMethod` only** (step 3 does exactly
+> that). **Removing it from `verificationMethod` invalidates every
+> attestation it signed**, both live ones and the historical placement of
+> every keyless body resting on them (`attestation_invalid`). That is the
+> compromise signal and nothing else. After a compromise, producers must
+> obtain fresh attestations under the successor key; past ones cannot be
+> re-issued, so bodies resting on them become unverifiable. Consumers apply
+> this only once their verifier implements draft.4 (`kl-005` M, N).
 
 ## Backfill policy: none
 
