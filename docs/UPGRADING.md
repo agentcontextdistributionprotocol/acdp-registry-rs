@@ -23,7 +23,7 @@ belongs in the per-crate changelogs.
 
 ## Unreleased
 
-**No upgrade steps.** Adopts ACDP spec `546b8c8` (RFC-ACDP-0021 0.5.0-draft.3, plus the `issuer_unreachable` reason token) and restores the
+**No upgrade steps.** Adopts ACDP spec `1560e0f` (RFC-ACDP-0021 0.5.0-draft.4: the `issuer_unreachable` reason token, and attestations that survive a rotation of the attester key; RFC-ACDP-0020 and most of RFC-ACDP-0019 Final) and restores the
 exact `acdp =0.18.2` pin. The binary's behavior is unchanged: `acdp-registry-keyless` is still
 refused at startup, and the Hard Seam is unchanged (no new `KeyAuthorization` or
 `RevocationTrustClass` variant; revocation discovery stays keyed by `agent_id`).
