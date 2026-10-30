@@ -379,8 +379,11 @@ fails unless `acdp = "=X"` in both `Cargo.toml` and `tools/live-smoke/Cargo.toml
 lockfiles hold every crates.io `acdp*` crate at X, and every `[[exemptions.acdp*]]` is at X.
 cargo-vet staying advisory is why it exists: the shared bump automation drops the `=` and
 moves neither live-smoke nor the exemptions, and three such bumps (#476, #485, #497) went
-green on every required check and auto-merged with vet red. A bot bump now arrives red on
-`lint` and is superseded by a PR that moves all of them.
+green on every required check and auto-merged with vet red. Since acdp-ci#47, `bump-acdp.yml` passes
+`extra-manifests: tools/live-smoke`, and the shared bump keeps the `=`, bumps live-smoke in
+lockstep and moves the `[[exemptions.acdp*]]`, so a bot bump arrives consistent. The guard
+stays as the backstop: a bump that still leaves one place behind arrives red on `lint`.
+A new `acdp-*` crate in a release still needs its exemption added by hand.
 
 The workspace's own crates carry `audit-as-crates-io = false` policies. release-plz has
 `publish = false`, so they are not on crates.io; the policies keep `cargo vet` from
