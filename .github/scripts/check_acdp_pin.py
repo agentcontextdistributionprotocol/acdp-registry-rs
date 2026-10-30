@@ -5,13 +5,14 @@ WHY THIS EXISTS. This repository pins `acdp` EXACTLY (`version = "=X.Y.Z"`):
 the registry implements the protocol through the SDK's types and verifiers, so
 a new SDK version is a new protocol surface to adopt deliberately, together
 with `tools/live-smoke` (its own workspace and lockfile) and the cargo-vet
-exemptions for every `acdp*` crate. The shared bump automation
-(acdp-ci's bump-consume.yml) rewrites the version string in Cargo.toml only --
-dropping the `=` -- and moves neither live-smoke nor the exemptions. Because
+exemptions for every `acdp*` crate. Until acdp-ci#47 the shared bump automation
+(acdp-ci's bump-consume.yml) rewrote the version string in Cargo.toml only --
+dropping the `=` -- and moved neither live-smoke nor the exemptions. Because
 `cargo-vet` is advisory here on purpose (docs/MAINTAINING.md), such a bump PR
 went green on every REQUIRED check and auto-merged with vet red, three times
-(#476, #485, #497). This guard runs in the required `lint` job, so a bump that
-leaves any of the coupled places behind cannot auto-merge.
+(#476, #485, #497). The automation now moves all of them (bump-acdp.yml passes
+`extra-manifests: tools/live-smoke`); this guard, in the required `lint` job,
+is the backstop: a bump that leaves any coupled place behind cannot auto-merge.
 
 It fails (exit 1) unless ALL of these hold for one version X:
 

@@ -122,10 +122,23 @@ class Fixtures(unittest.TestCase):
         self.t.exempt = [("acdp", "1.2.3")]
         self.assertFails("no [[exemptions.acdp-types]] at 1.2.3")
 
-    def test_workspace_crates_without_source_are_not_sdk_crates(self):
-        # acdp-registry-core has no source line and no exemption: still passes.
-        rc, err = self.t.write().run()
-        self.assertEqual(rc, 0, err)
+    def test_sourced_acdp_crate_without_exemption_fails(self):
+        # The source line is what makes a crate an SDK crate: the same name with
+        # a crates.io source and no exemption must fail. (The default tree's
+        # source-less acdp-registry-core passing is test_consistent_tree_passes.)
+        self.t.ws_lock[2] = ("acdp-registry-core", "1.2.3", CRATES_IO)
+        self.assertFails("no [[exemptions.acdp-registry-core]] at 1.2.3")
+
+    def test_trailing_comment_on_the_acdp_line_is_read(self):
+        self.t.write()
+        p = os.path.join(self.t.root, "Cargo.toml")
+        with open(p, encoding="utf-8") as f:
+            body = f.read().replace('client"] }', 'client"] }  # pinned exactly', 1)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(body.replace('"=1.2.3"', '"1.2.3"', 1))
+        rc, err = self.t.run()
+        self.assertEqual(rc, 1, err)
+        self.assertIn("is not an exact pin", err)
 
     def test_missing_manifest_is_unreadable(self):
         self.t.write()

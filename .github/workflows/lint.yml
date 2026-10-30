@@ -247,10 +247,10 @@ jobs:
           python3 .github/scripts/required_checks_guard.py --check
 
       # acdp is pinned EXACTLY, together with tools/live-smoke and the cargo-vet
-      # exemptions for every acdp* crate. The shared bump automation drops the `=`
-      # and moves neither, and cargo-vet is advisory here, so such bump PRs
-      # auto-merged green-on-required with vet red (#476, #485, #497). This step
-      # is in the required `lint` job so they no longer can. Unit tests first,
+      # exemptions for every acdp* crate. Before acdp-ci#47 the shared bump
+      # automation dropped the `=` and moved neither, and cargo-vet is advisory
+      # here, so such bump PRs auto-merged green-on-required with vet red (#476,
+      # #485, #497). This step is in the required `lint` job as the backstop. Unit tests first,
       # as above: negative controls before the verdict on the real tree.
       - name: acdp exact-pin guard
         if: '!cancelled()'
