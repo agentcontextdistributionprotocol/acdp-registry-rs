@@ -90,6 +90,17 @@ top of the upstream sync trait:
   `finish_subscription_attempt` (a lease, so two replicas never deliver the
   same subscription at once), `subscription_counts`. The hint worker in
   `acdp-registry-core/src/hints.rs` drives them.
+- RFC-ACDP-0021 key attestations (`key_attestations`, migration 019) —
+  `key_attestation(ctx_id)` (the index row joined to its context, so the
+  status follows a retraction), `key_attestation_token_seen(token_hash)` and
+  `list_key_attestations(controller, filter, cursor, limit)` (newest first,
+  keyset cursor). The index is written only by `commit_publish`, in the
+  publish transaction, which also makes the §6.3 and §7 checks a keyless
+  publish needs (attestation found, not withdrawn, `created_at` in its
+  window, supersession by the same workload identity) and refuses a reused
+  token. The checks are pure functions in
+  `acdp-registry-store/src/key_attestations.rs`, which also fixes the order
+  every backend refuses in; each backend's `keyless.rs` holds only the SQL.
 
 ### Change feed
 

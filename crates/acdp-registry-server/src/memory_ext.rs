@@ -21,8 +21,20 @@
 //! change (rec-008), and `seq` order is commit order. The feed is lost on
 //! restart like everything else here, so this backend cannot advertise the
 //! changes profile; it exists for tests and demos.
+//!
+//! The RFC-ACDP-0021 key-attestation index lives under the same mutex too.
+//! `InMemoryStore::commit_publish` holds its own lock from its first check
+//! through the receipt mint, so nothing this wrapper hands it may call back
+//! into the inner store or this wrapper's lock: that would deadlock. Every
+//! value the keyless checks need (the successor's attestation and whether it
+//! is retracted, the predecessor's attestation row, whether a mint's token
+//! was used) is read under the wrapper lock before the inner commit and
+//! captured by value. The wrapped `predecessor_admission` and
+//! `receipt_minter` closures only compare those values with what the inner
+//! store hands them, at the point it calls them, so this backend refuses in
+//! the same order as the SQL ones (`acdp_registry_store::key_attestations`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use acdp::error::AcdpError;
@@ -39,6 +51,11 @@ use acdp_registry_store::changes::{
 };
 use acdp_registry_store::event_receipts::{
     attach_event_receipts, plan_event_receipts, receipt_value,
+};
+use acdp_registry_store::key_attestations::{
+    self, admit_successor, index_row_for, index_row_for_request, keyless_successor, list_item,
+    predecessor_attestation, predecessor_signer, token_replayed, KeyAttestationFilter,
+    KeyAttestationIndexRow, KeyAttestationRecord, SuccessorAttestation, MAX_LIST_LIMIT,
 };
 use acdp_registry_store::{
     CreateSubscriptionOutcome, EventReceiptMinter, ExtendedRegistryStore, FeedHead, FeedPage,
@@ -60,6 +77,10 @@ struct State {
     feed: Feed,
     /// RFC-ACDP-0018 §8 subscriptions, by id.
     subscriptions: HashMap<String, SubscriptionRecord>,
+    /// RFC-ACDP-0021 key-attestation index rows, by attestation `ctx_id`.
+    key_attestations: HashMap<String, KeyAttestationIndexRow>,
+    /// Every `token_hash` that minted an attestation (the UNIQUE index).
+    attestation_tokens: HashSet<String>,
 }
 
 /// The RFC-ACDP-0018 feed: rows in seq order, never reordered.
@@ -206,6 +227,25 @@ impl MemoryStore {
         Ok(self.overlay_outcome(map, outcome))
     }
 
+    /// The index row at `att` and whether its context is retracted, read
+    /// under the wrapper lock and outside the inner store's critical section.
+    fn successor_snapshot(
+        &self,
+        state: &State,
+        att: &CtxId,
+    ) -> Result<Option<SuccessorAttestation>, AcdpError> {
+        let Some(row) = state.key_attestations.get(att.as_str()).cloned() else {
+            return Ok(None);
+        };
+        let withdrawn = self.inner.get(att)?.is_some_and(|c| {
+            matches!(
+                c.registry_state.status,
+                acdp::types::primitives::Status::Retracted
+            )
+        });
+        Ok(Some(SuccessorAttestation { row, withdrawn }))
+    }
+
     fn overlay_outcome(
         &self,
         map: &ReceiptMap,
@@ -280,30 +320,135 @@ impl RegistryStore for MemoryStore {
         // Under the wrapper lock so the feed rows land in commit order and
         // no reader sees the publish without them.
         let mut state = self.lock()?;
-        let supersedes = commit.req.supersedes.clone();
-        let outcome = self.inner.commit_publish(commit)?;
+        let PublishCommit {
+            req,
+            authority,
+            idempotency,
+            tenant,
+            receipt_minter,
+            predecessor_admission,
+        } = commit;
+        let supersedes = req.supersedes.clone();
+
+        // RFC-ACDP-0021 snapshots, taken now and captured by value (see the
+        // module docs). Nothing is refused here: every refusal happens where
+        // the SQL backends make it, inside the closures below.
+        let mint = index_row_for_request(req, authority);
+        let is_mint = !matches!(mint, Ok(None));
+        let used_token = match &mint {
+            Ok(Some(row)) if state.attestation_tokens.contains(&row.token_hash) => {
+                Some(row.token_hash.clone())
+            }
+            _ => None,
+        };
+        let successor = keyless_successor(req).map(|r| r.ctx_id.clone());
+        let successor_found = match &successor {
+            Some(att) => self.successor_snapshot(&state, att)?,
+            None => None,
+        };
+        let predecessor_row = match (&successor, &supersedes) {
+            (Some(_), Some(prev)) => self
+                .inner
+                .get(prev)?
+                .and_then(|p| predecessor_attestation(&p.body).ok().flatten())
+                .and_then(|att| state.key_attestations.get(att.as_str()).cloned()),
+            _ => None,
+        };
+
+        // Steps 2, 3 and then the caller's own admission, run by the inner
+        // store after its ownership and AlreadySuperseded checks.
+        let keyless_admission = |pred: &Body| -> Result<(), AcdpError> {
+            if let Some(att) = &successor {
+                let found = admit_successor(att, successor_found.as_ref())?;
+                let pred_att = predecessor_attestation(pred)?;
+                let row = predecessor_row
+                    .as_ref()
+                    .filter(|r| pred_att.as_ref().is_some_and(|c| c.as_str() == r.ctx_id));
+                let signer = predecessor_signer(pred_att.as_ref(), row)?;
+                key_attestations::check_supersession(&signer, found)?;
+            }
+            predecessor_admission.map_or(Ok(()), |admit| admit(pred))
+        };
+        // Steps 2 and 5 against the assigned `created_at`, then step 6, then
+        // the real mint.
+        let keyless_minter = receipt_minter.map(|mint| {
+            let (successor, found, used, authority) =
+                (&successor, &successor_found, &used_token, authority);
+            move |body: &Body| {
+                if let Some(att) = successor {
+                    key_attestations::check_window(
+                        admit_successor(att, found.as_ref())?,
+                        body.created_at,
+                    )?;
+                }
+                if let (Some(_), Some(token)) = (index_row_for(body, authority)?, used) {
+                    return Err(token_replayed(token));
+                }
+                mint(body)
+            }
+        });
+        if receipt_minter.is_none() {
+            // Without a minter the inner store shows this wrapper no
+            // assigned body before it commits, and its commit cannot be
+            // undone, so decide now. A keyless deployment always mints
+            // receipts (its startup prerequisites).
+            if successor.is_some() {
+                return Err(AcdpError::RegistryInternal(
+                    "a keyless publish needs a receipt minter on the memory backend".into(),
+                ));
+            }
+            mint?;
+            if let Some(token) = &used_token {
+                return Err(token_replayed(token));
+            }
+        }
+        let wrap_admission = successor.is_some() && supersedes.is_some();
+        let wrap_minter = successor.is_some() || is_mint;
+        let outcome = self.inner.commit_publish(PublishCommit {
+            req,
+            authority,
+            idempotency,
+            tenant,
+            receipt_minter: match &keyless_minter {
+                Some(m) if wrap_minter => Some(m),
+                _ => receipt_minter,
+            },
+            predecessor_admission: if wrap_admission {
+                Some(&keyless_admission)
+            } else {
+                predecessor_admission
+            },
+        })?;
         // The new body only exists once the inner store has built it, so the
         // derivation runs after the commit. It cannot fail on a receipt this
         // registry just minted; if it ever did, the publish stands without
         // its rows and the error says so.
         if let PublishCommitOutcome::Inserted(resp) = &outcome {
-            if resp.registry_receipt.is_some() {
+            if resp.registry_receipt.is_some() || is_mint {
                 let body = self.inner.get(&resp.ctx_id)?.ok_or_else(|| {
                     AcdpError::RegistryInternal("published context vanished".into())
                 })?;
-                let predecessor = match &supersedes {
-                    Some(prev) => self.inner.get(prev)?.map(|c| Predecessor {
-                        ctx_id: prev.as_str().to_string(),
-                        agent_id: c.body.agent_id.as_str().to_string(),
-                    }),
-                    None => None,
-                };
-                let rows = feed_appends_for_publish(
-                    &body.body,
-                    resp.registry_receipt.as_ref(),
-                    predecessor.as_ref(),
-                )?;
-                state.feed.push(rows);
+                // Checked before the commit (the minter above, or the
+                // receipt-less branch), so this insert cannot collide.
+                if let Some(row) = index_row_for(&body.body, authority)? {
+                    state.attestation_tokens.insert(row.token_hash.clone());
+                    state.key_attestations.insert(row.ctx_id.clone(), row);
+                }
+                if resp.registry_receipt.is_some() {
+                    let predecessor = match &supersedes {
+                        Some(prev) => self.inner.get(prev)?.map(|c| Predecessor {
+                            ctx_id: prev.as_str().to_string(),
+                            agent_id: c.body.agent_id.as_str().to_string(),
+                        }),
+                        None => None,
+                    };
+                    let rows = feed_appends_for_publish(
+                        &body.body,
+                        resp.registry_receipt.as_ref(),
+                        predecessor.as_ref(),
+                    )?;
+                    state.feed.push(rows);
+                }
             }
         }
         Ok(outcome)
@@ -387,6 +532,82 @@ impl ExtendedRegistryStore for MemoryStore {
         }
         feed.rows.drain(..n);
         Ok(n as u64)
+    }
+
+    async fn key_attestation(
+        &self,
+        ctx_id: &str,
+    ) -> Result<Option<KeyAttestationRecord>, AcdpError> {
+        let state = self.lock()?;
+        let Some(row) = state.key_attestations.get(ctx_id) else {
+            return Ok(None);
+        };
+        let ctx = self.inner.get(&CtxId(ctx_id.to_string()))?.ok_or_else(|| {
+            AcdpError::RegistryInternal(format!("indexed key attestation '{ctx_id}' vanished"))
+        })?;
+        KeyAttestationRecord::from_parts(
+            ctx_id,
+            ctx.body.content_hash.0.clone(),
+            ctx.registry_state.status.clone(),
+            row.created_at_ms,
+            &ctx.body,
+        )
+        .map(Some)
+    }
+
+    async fn key_attestation_token_seen(&self, token_hash: &str) -> Result<bool, AcdpError> {
+        Ok(self.lock()?.attestation_tokens.contains(token_hash))
+    }
+
+    async fn list_key_attestations(
+        &self,
+        controller: &str,
+        filter: &KeyAttestationFilter,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Page<acdp::types::keyless::KeyAttestationListItem>, AcdpError> {
+        let limit = limit.clamp(1, MAX_LIST_LIMIT) as usize;
+        let anchor = cursor
+            .map(acdp_registry_store::decode_cursor)
+            .transpose()?
+            .flatten()
+            .map(|(at, ctx)| (at.timestamp_millis(), ctx));
+        let state = self.lock()?;
+        let mut rows: Vec<&KeyAttestationIndexRow> = state
+            .key_attestations
+            .values()
+            .filter(|r| r.controller == controller && filter.matches(r))
+            .filter(|r| {
+                anchor.as_ref().is_none_or(|(at, ctx)| {
+                    r.created_at_ms < *at || (r.created_at_ms == *at && r.ctx_id > *ctx)
+                })
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.created_at_ms
+                .cmp(&a.created_at_ms)
+                .then_with(|| a.ctx_id.cmp(&b.ctx_id))
+        });
+        let more = rows.len() > limit;
+        let mut items = Vec::with_capacity(limit);
+        for row in rows.iter().take(limit) {
+            let ctx = self.inner.get(&CtxId(row.ctx_id.clone()))?.ok_or_else(|| {
+                AcdpError::RegistryInternal(format!(
+                    "indexed key attestation '{}' vanished",
+                    row.ctx_id
+                ))
+            })?;
+            items.push(list_item(
+                &row.ctx_id,
+                ctx.body.content_hash.0.clone(),
+                &ctx.body,
+            )?);
+        }
+        let next_cursor = more
+            .then(|| rows.get(limit - 1))
+            .flatten()
+            .map(|r| acdp_registry_store::encode_cursor(r.created_at_ms, &r.ctx_id));
+        Ok(Page { items, next_cursor })
     }
 
     async fn create_subscription(
@@ -1579,5 +1800,192 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(store.count_idempotency_records().await.unwrap(), None);
+    }
+
+    // ── RFC-ACDP-0021 key attestations ──────────────────────────────────────
+
+    /// D4: index derivation, token replay, the corrupt-attestation abort and
+    /// the one-token race. This backend has no transparency log.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn key_attestation_index_and_replay_match_the_cross_backend_contract() {
+        let store = Arc::new(MemoryStore::new());
+        parity::assert_key_attestation_index_and_replay(&store, false, "memory").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn keyless_window_and_withdrawal_match_the_cross_backend_contract() {
+        let store = Arc::new(MemoryStore::new());
+        parity::assert_keyless_window_and_withdrawal(&store, "memory").await;
+    }
+
+    /// Round 2 (b): the wrapped closures refuse in the SQL backends' order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn keyless_refusal_order_matches_the_cross_backend_contract() {
+        let store = Arc::new(MemoryStore::new());
+        parity::assert_keyless_refusal_order(&store, "memory").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn keyless_supersession_table_matches_kl_001_vector_5() {
+        let store = Arc::new(MemoryStore::new());
+        parity::assert_keyless_supersession_table(&store, parity::KL_001_VECTOR_5_CASES, "memory")
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unindexed_keyless_predecessor_fails_closed() {
+        let store = Arc::new(MemoryStore::new());
+        let handle = Arc::clone(&store);
+        parity::assert_unindexed_keyless_predecessor_fails_closed(
+            &store,
+            "memory",
+            |ctx| async move {
+                let removed = handle.lock().unwrap().key_attestations.remove(&ctx);
+                assert!(removed.is_some(), "fixture removes one index row");
+            },
+        )
+        .await;
+    }
+
+    /// Plants the keyless-signed body through the inner store, which runs
+    /// none of this wrapper's keyless checks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_malformed_keyless_predecessor_fails_closed() {
+        let store = Arc::new(MemoryStore::new());
+        let planter = Arc::clone(&store);
+        parity::assert_malformed_keyless_predecessor_fails_closed(
+            &store,
+            "memory",
+            |req| async move {
+                planter
+                    .inner
+                    .commit_publish(PublishCommit {
+                        req: &req,
+                        authority: AUTHORITY,
+                        idempotency: None,
+                        tenant: None,
+                        receipt_minter: None,
+                        predecessor_admission: None,
+                    })
+                    .expect("plant")
+                    .into_response()
+                    .ctx_id
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn key_attestation_listing_matches_the_cross_backend_contract() {
+        let store = Arc::new(MemoryStore::new());
+        parity::assert_key_attestation_listing(&store, "memory").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn key_attestation_record_join_matches_the_cross_backend_contract() {
+        let store = Arc::new(MemoryStore::new());
+        parity::assert_key_attestation_record_join(&store, "memory").await;
+    }
+
+    /// Round 2 (a): the re-entrancy regression. A VALID keyless successor
+    /// superseding a keyless predecessor drives BOTH wrapped closures (the
+    /// admission and the minter) inside `InMemoryStore`'s critical section.
+    /// Either one touching the inner store or the wrapper lock would hang,
+    /// so the commit runs under a timeout and each closure records it ran.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_valid_keyless_supersede_runs_both_closures_without_deadlock() {
+        use parity::keyless_fixtures::*;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let store = Arc::new(MemoryStore::new());
+        let c = controller("memory-deadlock");
+        let id = oidc("repo:example/pipeline:ref:refs/heads/main");
+        let p = mint(&store, &Spec::new(&c, id.clone())).await;
+        let v1 = inserted(commit(&store, signed_under(&p, None), None).await, "v1");
+        let s = mint(&store, &Spec::new(&c, id)).await;
+        let req = signed_under(&s, Some((&v1, 2)));
+
+        let worker = Arc::clone(&store);
+        let task = tokio::task::spawn_blocking(move || {
+            let (admitted, minted) = (AtomicBool::new(false), AtomicBool::new(false));
+            let signer = receipt_signer();
+            let admit = |_: &Body| {
+                admitted.store(true, Ordering::SeqCst);
+                Ok(())
+            };
+            let mint = |body: &Body| {
+                minted.store(true, Ordering::SeqCst);
+                let r = signer.mint(
+                    &body.ctx_id,
+                    &body.lineage_id,
+                    &body.origin_registry,
+                    body.created_at,
+                    &body.content_hash,
+                    &format!("sha256:{}", "c".repeat(64)),
+                )?;
+                serde_json::to_value(r).map_err(AcdpError::from)
+            };
+            let outcome = worker.commit_publish(PublishCommit {
+                req: &req,
+                authority: AUTHORITY,
+                idempotency: None,
+                tenant: None,
+                receipt_minter: Some(&mint),
+                predecessor_admission: Some(&admit),
+            });
+            (outcome, admitted.into_inner(), minted.into_inner())
+        });
+        let (outcome, admitted, minted) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                .await
+                .expect("a keyless supersede must not deadlock the memory store")
+                .expect("task");
+        assert!(
+            matches!(outcome, Ok(PublishCommitOutcome::Inserted(_))),
+            "{outcome:?}"
+        );
+        assert!(admitted, "the wrapped predecessor admission ran");
+        assert!(minted, "the wrapped receipt minter ran");
+        assert_eq!(
+            store.get(&v1).unwrap().unwrap().registry_state.status,
+            Status::Superseded
+        );
+    }
+
+    /// Without a receipt minter the inner store never shows this wrapper the
+    /// assigned `created_at`, so a keyless publish fails closed and a mint
+    /// is checked before the commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn without_a_minter_keyless_fails_closed_and_mints_are_checked_first() {
+        use acdp::types::keyless::KeylessReason;
+        use parity::keyless_fixtures::*;
+
+        let store = MemoryStore::new();
+        let shared = Arc::new(store.clone());
+        let c = controller("memory-no-minter");
+        let spec = Spec::new(
+            &c,
+            spiffe("spiffe://prod.example.com/ns/agents/sa/publisher"),
+        );
+        let m = mint(&shared, &spec).await;
+        let err = commit_with(&store, &signed_under(&m, None), None, None)
+            .expect_err("keyless without a minter");
+        assert!(matches!(err, AcdpError::RegistryInternal(_)), "{err:?}");
+
+        let (replay, _) = Spec {
+            window: past_window(),
+            ..spec.clone()
+        }
+        .request(8);
+        let err = commit_with(&store, &replay, None, None).expect_err("replayed token");
+        assert_eq!(KeylessReason::of(&err), Some(KeylessReason::TokenReplayed));
+
+        let (fresh, _) =
+            Spec::new(&c, spiffe("spiffe://prod.example.com/ns/agents/sa/other")).request(9);
+        let ctx = commit_with(&store, &fresh, None, None)
+            .expect("a fresh mint commits")
+            .into_response()
+            .ctx_id;
+        assert!(store.key_attestation(ctx.as_str()).await.unwrap().is_some());
     }
 }

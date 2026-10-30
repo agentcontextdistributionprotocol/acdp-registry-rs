@@ -560,3 +560,205 @@ async fn subscription_claims_have_one_holder() {
     let (plain, _tmp) = store().await;
     parity::assert_subscription_claims(&plain, "sqlite").await;
 }
+
+// ── RFC-ACDP-0021 key attestations ──────────────────────────────────────────
+
+/// A store with the transparency log on: a mint must add exactly one leaf
+/// and a refused one none.
+async fn log_store() -> (Arc<SqliteStore>, tempfile::TempDir) {
+    let (store, dir) = store().await;
+    (
+        Arc::new(store.as_ref().clone().with_transparency_log()),
+        dir,
+    )
+}
+
+/// D4: index derivation, token replay, the corrupt-attestation abort and
+/// the one-token race (UNIQUE `token_hash` under `BEGIN IMMEDIATE`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn key_attestation_index_and_replay_match_the_cross_backend_contract() {
+    let (store, _tmp) = log_store().await;
+    parity::assert_key_attestation_index_and_replay(&store, true, "sqlite").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyless_window_and_withdrawal_match_the_cross_backend_contract() {
+    let (store, _tmp) = log_store().await;
+    parity::assert_keyless_window_and_withdrawal(&store, "sqlite").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyless_refusal_order_matches_the_cross_backend_contract() {
+    let (store, _tmp) = store().await;
+    parity::assert_keyless_refusal_order(&store, "sqlite").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyless_supersession_table_matches_kl_001_vector_5() {
+    let (store, _tmp) = store().await;
+    parity::assert_keyless_supersession_table(&store, parity::KL_001_VECTOR_5_CASES, "sqlite")
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unindexed_keyless_predecessor_fails_closed() {
+    let (store, _tmp) = store().await;
+    let pool = store.pool().clone();
+    parity::assert_unindexed_keyless_predecessor_fails_closed(&store, "sqlite", |ctx| async move {
+        let done = sqlx::query("DELETE FROM key_attestations WHERE ctx_id = ?")
+            .bind(ctx)
+            .execute(&pool)
+            .await
+            .expect("delete index row");
+        assert_eq!(done.rows_affected(), 1, "fixture DELETE must hit one row");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn key_attestation_listing_matches_the_cross_backend_contract() {
+    let (store, _tmp) = store().await;
+    parity::assert_key_attestation_listing(&store, "sqlite").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn key_attestation_record_join_matches_the_cross_backend_contract() {
+    let (store, _tmp) = store().await;
+    parity::assert_key_attestation_record_join(&store, "sqlite").await;
+}
+
+/// Migration 019: the index table, its two indexes, the UNIQUE token and
+/// the shape CHECKs exist, and re-running the migrations is a no-op.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_019_creates_the_key_attestation_index() {
+    let (store, _tmp) = store().await;
+    store
+        .migrate()
+        .await
+        .expect("re-running the migrations is a no-op");
+    let names: Vec<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_master WHERE type = 'index' \
+         AND name LIKE 'idx_key_attestations_%' ORDER BY name",
+    )
+    .fetch_all(store.pool())
+    .await
+    .expect("read sqlite_master");
+    let found: Vec<&str> = names.iter().map(|(n,)| n.as_str()).collect();
+    assert_eq!(
+        found,
+        vec![
+            "idx_key_attestations_controller",
+            "idx_key_attestations_identity"
+        ]
+    );
+    // Two real contexts for the foreign key, so each refusal below is the
+    // CHECK or UNIQUE it names and not a dangling reference.
+    use parity::keyless_fixtures::{commit, controller, controller_request, inserted};
+    let c = controller("sqlite-019");
+    let a = inserted(
+        commit(&store, controller_request(&c, None), None).await,
+        "a",
+    );
+    let b = inserted(
+        commit(&store, controller_request(&c, None), None).await,
+        "b",
+    );
+    let insert = |ctx: String,
+                  ty: &'static str,
+                  issuer: Option<&'static str>,
+                  window: (i64, i64),
+                  org: i64,
+                  token: &'static str| {
+        let pool = store.pool().clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO key_attestations (ctx_id, controller, identity_type, issuer, \
+                 subject, org_wide, key_id, algorithm, key_fingerprint, not_before_ms, \
+                 not_after_ms, token_hash, created_at_ms) \
+                 VALUES (?, 'c', ?, ?, 's', ?, 'k', 'ed25519', 'f', ?, ?, ?, 0)",
+            )
+            .bind(ctx)
+            .bind(ty)
+            .bind(issuer)
+            .bind(org)
+            .bind(window.0)
+            .bind(window.1)
+            .bind(token)
+            .execute(&pool)
+            .await
+        }
+    };
+    let (a, b) = (a.as_str().to_string(), b.as_str().to_string());
+    for (what, res) in [
+        (
+            "an unknown identity type",
+            insert(a.clone(), "x509", None, (0, 1), 0, "t1").await,
+        ),
+        (
+            "an oidc row without an issuer",
+            insert(a.clone(), "oidc", None, (0, 1), 0, "t1").await,
+        ),
+        (
+            "a spiffe row with an issuer",
+            insert(a.clone(), "spiffe", Some("i"), (0, 1), 0, "t1").await,
+        ),
+        (
+            "an empty window",
+            insert(a.clone(), "spiffe", None, (1, 1), 0, "t1").await,
+        ),
+        (
+            "a non-boolean org_wide",
+            insert(a.clone(), "spiffe", None, (0, 1), 2, "t1").await,
+        ),
+        (
+            "a row with no context",
+            insert(
+                "acdp://reg.test/none".into(),
+                "spiffe",
+                None,
+                (0, 1),
+                0,
+                "t1",
+            )
+            .await,
+        ),
+    ] {
+        assert!(res.is_err(), "{what} must be refused");
+    }
+    insert(a, "oidc", Some("i"), (0, 1), 1, "t1")
+        .await
+        .expect("a well-formed row is accepted (positive control)");
+    let dup = insert(b, "spiffe", None, (0, 1), 0, "t1").await;
+    assert!(dup.is_err(), "token_hash is UNIQUE");
+}
+
+/// Plants a keyless-signed body by publishing a controller-signed copy and
+/// rewriting its stored `signature.key_id` and `key_attestation` member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_malformed_keyless_predecessor_fails_closed() {
+    let (store, _tmp) = store().await;
+    let planter = Arc::clone(&store);
+    parity::assert_malformed_keyless_predecessor_fails_closed(&store, "sqlite", |req| async move {
+        use parity::keyless_fixtures::{commit, inserted};
+        let member = serde_json::to_string(req.key_attestation.as_ref().expect("member"))
+            .expect("member JSON");
+        let key_id = req.signature.key_id.clone();
+        let mut plain = req;
+        plain.signature.key_id = format!("{}#key-1", plain.agent_id.as_str());
+        plain.key_attestation = None;
+        let ctx = inserted(commit(&planter, plain, None).await, "plant");
+        let done = sqlx::query(
+            "UPDATE contexts SET body_json = json_set(body_json, \
+             '$.signature.key_id', ?, '$.key_attestation', json(?)) WHERE ctx_id = ?",
+        )
+        .bind(key_id)
+        .bind(member)
+        .bind(ctx.as_str())
+        .execute(planter.pool())
+        .await
+        .expect("rewrite stored body");
+        assert_eq!(done.rows_affected(), 1, "fixture UPDATE must hit one row");
+        ctx
+    })
+    .await;
+}

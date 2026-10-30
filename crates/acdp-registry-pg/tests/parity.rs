@@ -440,3 +440,112 @@ async fn subscription_claims_have_one_holder() {
     let plain = store(&url).await;
     parity::assert_subscription_claims(&plain, "pg").await;
 }
+
+// ── RFC-ACDP-0021 key attestations ──────────────────────────────────────────
+
+/// An isolated, log-enabled store: the index/replay and window kits count
+/// whole-store contexts and log leaves, so they need a schema of their own.
+async fn isolated_log_store(url: &str, prefix: &str) -> (Arc<PgStore>, PgStore, String) {
+    let (store, admin, schema) = isolated_store(url, prefix).await;
+    (
+        Arc::new(store.as_ref().clone().with_transparency_log()),
+        admin,
+        schema,
+    )
+}
+
+/// D4: index derivation, token replay, the corrupt-attestation abort and
+/// the one-token race (UNIQUE `token_hash`, READ COMMITTED).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn key_attestation_index_and_replay_match_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let (store, admin, schema) = isolated_log_store(&url, "kl_index").await;
+    parity::assert_key_attestation_index_and_replay(&store, true, "pg").await;
+    drop_schema(&admin, &schema).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyless_window_and_withdrawal_match_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let (store, admin, schema) = isolated_log_store(&url, "kl_window").await;
+    parity::assert_keyless_window_and_withdrawal(&store, "pg").await;
+    drop_schema(&admin, &schema).await;
+}
+
+/// Scoped to a run-unique controller, so the shared schema is fine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyless_refusal_order_matches_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    parity::assert_keyless_refusal_order(&store, "pg").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyless_supersession_table_matches_kl_001_vector_5() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    parity::assert_keyless_supersession_table(&store, parity::KL_001_VECTOR_5_CASES, "pg").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unindexed_keyless_predecessor_fails_closed() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    let pool = store.pool().clone();
+    parity::assert_unindexed_keyless_predecessor_fails_closed(&store, "pg", |ctx| async move {
+        let done = sqlx::query("DELETE FROM key_attestations WHERE ctx_id = $1")
+            .bind(ctx)
+            .execute(&pool)
+            .await
+            .expect("delete index row");
+        assert_eq!(done.rows_affected(), 1, "fixture DELETE must hit one row");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn key_attestation_listing_matches_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    parity::assert_key_attestation_listing(&store, "pg").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn key_attestation_record_join_matches_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    parity::assert_key_attestation_record_join(&store, "pg").await;
+}
+
+/// Plants a keyless-signed body by publishing a controller-signed copy and
+/// rewriting its stored `signature.key_id` and `key_attestation` member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_malformed_keyless_predecessor_fails_closed() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    let planter = Arc::clone(&store);
+    parity::assert_malformed_keyless_predecessor_fails_closed(&store, "pg", |req| async move {
+        use parity::keyless_fixtures::{commit, inserted};
+        let member = serde_json::to_value(req.key_attestation.as_ref().expect("member"))
+            .expect("member JSON");
+        let key_id = req.signature.key_id.clone();
+        let mut plain = req;
+        plain.signature.key_id = format!("{}#key-1", plain.agent_id.as_str());
+        plain.key_attestation = None;
+        let ctx = inserted(commit(&planter, plain, None).await, "plant");
+        let done = sqlx::query(
+            "UPDATE contexts SET body_json = jsonb_set(jsonb_set(body_json, \
+             '{signature,key_id}', to_jsonb($1::text)), '{key_attestation}', $2) \
+             WHERE ctx_id = $3",
+        )
+        .bind(key_id)
+        .bind(member)
+        .bind(ctx.as_str())
+        .execute(planter.pool())
+        .await
+        .expect("rewrite stored body");
+        assert_eq!(done.rows_affected(), 1, "fixture UPDATE must hit one row");
+        ctx
+    })
+    .await;
+}
