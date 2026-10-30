@@ -60,7 +60,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use acdp::client::CrossRegistryResolver;
-use acdp::did::{authority_to_did_web, WebResolver};
+use acdp::did::authority_to_did_web;
 use acdp::registry::RegistryServer;
 use acdp::types::capabilities::{CapabilitiesDocument, Limits};
 use acdp_registry_auth::{AuthService, ChallengeStore, JwtSecret, JwtSigner, RevocationStore};
@@ -1248,7 +1248,9 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     if let Some(rev) = revocations.clone() {
         signer = signer.with_revocations(rev);
     }
-    let resolver = Arc::new(WebResolver::new());
+    // `test_egress` is `None` in every production build (the feature is
+    // dev-only); a test build answers it only with `ACDP_TEST_EGRESS` set.
+    let resolver = Arc::new(acdp_registry_core::test_egress::web_resolver().unwrap_or_default());
     let mut auth = AuthService::new(
         cfg.auth.clone(),
         challenges,
@@ -1304,9 +1306,16 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     // (plan §2) — from `cfg.playground`.
     // Fallible: with keyless enabled, an unusable attestation signer is
     // fatal here rather than a quiet 501 behind an advertised profile.
-    let state = AppStateInner::try_new(server, auth, webhook, cfg.clone(), cross_registry)
+    let mut state = AppStateInner::try_new(server, auth, webhook, cfg.clone(), cross_registry)
         .map_err(anyhow::Error::msg)?
         .with_shared_auth_limiter(shared_auth_limiter);
+    if let Some(outbound) = acdp_registry_core::test_egress::keyless_outbound() {
+        state = state.with_keyless_jwks(acdp_registry_core::keyless::JwksCache::new(
+            &cfg.keyless,
+            outbound,
+            acdp_registry_core::keyless::system_clock(),
+        ));
+    }
 
     // RFC-ACDP-0015 §6.1 witness-cosignature aggregation: one background
     // poller per configured witness fetches its cosignature feed over the
@@ -1716,10 +1725,8 @@ fn validate_events(cfg: &RegistryConfig) -> anyhow::Result<()> {
 /// section must pass its field rules and the prerequisites: the attestation
 /// is a receipted, logged body under the registry DID (§5.3), a keyless key
 /// never signs a lifecycle event (§6.3), and the profile is 0.5.0 Draft.
-///
-/// This build does not serve the endpoints yet, so a section that passes
-/// every rule is still refused, rather than advertising a profile whose
-/// `/key-attestations` answer 501.
+/// A section that passes every rule starts the registry with the profile
+/// advertised and `/key-attestations` served.
 fn validate_keyless(cfg: &RegistryConfig) -> anyhow::Result<()> {
     validate_keyless_at(cfg, acdp_version_claim(cfg))
 }
@@ -1760,10 +1767,7 @@ fn validate_keyless_at(cfg: &RegistryConfig, acdp_version: &str) -> anyhow::Resu
              (RFC-ACDP-0021 §5.2 step 8, §5.3)."
         );
     }
-    anyhow::bail!(
-        "keyless.enabled=true: acdp-registry-keyless (RFC-ACDP-0021 POST/GET \
-         /key-attestations) is not yet available in this build. Set keyless.enabled=false."
-    );
+    Ok(())
 }
 
 /// The `changes.enabled` prerequisites (RFC-ACDP-0018 §5.4, §9 and the
@@ -1859,8 +1863,7 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
                 profiles.push(events_profile.into());
             }
             // RFC-ACDP-0021 §13.1: the profile and the `keyless` member go
-            // together. Unreachable until `validate_keyless` admits
-            // `keyless.enabled`.
+            // together, exactly when `keyless.enabled`.
             let keyless_profile = "acdp-registry-keyless";
             if cfg.keyless.enabled && !profiles.iter().any(|p| p == keyless_profile) {
                 profiles.push(keyless_profile.into());
@@ -2000,7 +2003,7 @@ mod tests {
     }
 
     #[test]
-    fn advertising_the_unimplemented_keyless_profile_is_refused() {
+    fn advertising_the_keyless_profile_without_enabling_it_is_refused() {
         let mut cfg = RegistryConfig::defaults();
         cfg.registry.profiles = vec!["acdp-registry-keyless".into()];
         let err = validate_config(&cfg).expect_err("refused at startup");
@@ -2010,8 +2013,8 @@ mod tests {
         );
     }
 
-    /// A config `[keyless]` would accept once the endpoints exist: one issuer,
-    /// a receipt key, lifecycle and the log on.
+    /// A coherent `[keyless]`: one issuer, a receipt key, lifecycle and the
+    /// log on.
     fn keyless_cfg() -> RegistryConfig {
         let mut cfg = RegistryConfig::defaults();
         cfg.keyless.enabled = true;
@@ -2032,25 +2035,19 @@ mod tests {
             .to_string()
     }
 
-    /// Phase 7 flips this: until the endpoints exist, a section passing every
-    /// rule is still refused, and says why.
+    /// RFC-ACDP-0021 Phase 7: a section passing every rule starts, with the
+    /// profile listed by the operator or not.
     #[test]
-    fn a_coherent_keyless_section_is_refused_as_not_yet_available() {
+    fn a_coherent_keyless_section_is_accepted() {
         let cfg = keyless_cfg();
-        assert!(validate_keyless(&cfg)
-            .unwrap_err()
-            .to_string()
-            .contains("not yet available"));
-        // Reached from `validate_config`, with the profile listed or not.
-        let err = validate_config(&cfg).expect_err("refused at startup");
-        assert!(err.to_string().contains("not yet available"), "{err}");
+        validate_keyless(&cfg).expect("a coherent [keyless] is accepted");
+        validate_config(&cfg).expect("and reaches startup");
         let mut listed = keyless_cfg();
         listed
             .registry
             .profiles
             .push("acdp-registry-keyless".into());
-        let err = validate_config(&listed).expect_err("refused at startup");
-        assert!(err.to_string().contains("not yet available"), "{err}");
+        validate_config(&listed).expect("listed by the operator as well");
     }
 
     #[test]
@@ -2106,12 +2103,10 @@ mod tests {
                 "{below}: {err}"
             );
         }
-        // Control: at 0.5.0 the same config gets past the prerequisite.
-        let err = validate_keyless_at(&cfg, "0.5.0").expect_err("still not available");
-        assert!(err.to_string().contains("not yet available"), "{err}");
-        // And the binary's own claim is the 0.5.0 one.
-        let err = validate_keyless(&cfg).expect_err("still not available");
-        assert!(err.to_string().contains("not yet available"), "{err}");
+        // Control: at 0.5.0 the same config is accepted.
+        validate_keyless_at(&cfg, "0.5.0").expect("accepted at 0.5.0");
+        // And the binary's own claim is at least 0.5.0.
+        validate_keyless(&cfg).expect("accepted at the binary's own claim");
     }
 
     /// `build_capabilities` with `[keyless]` on: the profile and the
@@ -2473,7 +2468,7 @@ mod tests {
             AuthConfig::default(),
             challenges,
             signer,
-            Arc::new(WebResolver::new()),
+            Arc::new(acdp::did::WebResolver::new()),
             authority,
         ));
         acdp_registry_core::build_router(AppStateInner::new(server, auth, None, cfg, None))
@@ -2508,7 +2503,7 @@ mod tests {
                 AuthConfig::default(),
                 challenges,
                 signer,
-                Arc::new(WebResolver::new()),
+                Arc::new(acdp::did::WebResolver::new()),
                 authority,
             ));
             AppStateInner::try_new(server, auth, None, cfg, None).map(|_| ())

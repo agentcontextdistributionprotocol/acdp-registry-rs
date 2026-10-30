@@ -23,22 +23,38 @@ belongs in the per-crate changelogs.
 
 ## Unreleased
 
-**No upgrade steps.** Adopts ACDP spec `1560e0f` (RFC-ACDP-0021 0.5.0-draft.4: the `issuer_unreachable` reason token, and attestations that survive a rotation of the attester key; RFC-ACDP-0020 and most of RFC-ACDP-0019 Final) and restores the
-exact `acdp =0.18.2` pin. The binary's behavior is unchanged: `acdp-registry-keyless` is still
-refused at startup, and the Hard Seam is unchanged (no new `KeyAuthorization` or
-`RevocationTrustClass` variant; revocation discovery stays keyed by `agent_id`).
+**No upgrade steps unless you turn on keyless signing, which is off by default.** This release
+adopts ACDP spec `1560e0f` (RFC-ACDP-0021 0.5.0-draft.4; RFC-ACDP-0020 and most of RFC-ACDP-0019
+Final) and restores the exact `acdp =0.18.2` pin. It makes the `acdp-registry-keyless` profile
+(RFC-ACDP-0021, Draft) available: `POST`/`GET /key-attestations`, keyless publish and supersession,
+and the refusal of lifecycle events under keyless key ids. With the default `[keyless] enabled =
+false` the binary behaves exactly as 0.7.0: `/key-attestations` answers `501 not_implemented`, the
+capabilities document is byte-identical (no `keyless` member, no profile), and an `acdp-kl-` key id
+is refused with `key_resolution_failed`.
 
-- **Rollback:** safe. Nothing to migrate.
-
-**It also adds migration 019 (both backends): a `key_attestations` table, the RFC-ACDP-0021
-key-attestation index (one row per minted attestation, with a UNIQUE `token_hash`).**
-
-- **No backfill.** No registry has minted an attestation yet, so the table starts empty and stays
-  empty: nothing writes it until the keyless profile ships and is enabled.
-- **Who is affected:** nobody. Publishes that are not keyless (every publish today) never read it.
-- **Rollback, Postgres:** safe to 0.7.0. The migrator tolerates the newer applied version, and
-  older binaries never touch the table.
-- **Rollback, SQLite:** restore the pre-upgrade file, as for any release that adds a migration.
+- **To enable:** set `[keyless] enabled = true` with at least one `[[keyless.oidc_issuers]]` or
+  `[[keyless.spiffe_trust_domains]]` entry. Startup refuses it without `[lifecycle] enabled = true`,
+  a `[receipt]` key and `[log] enabled = true`, and refuses `acdp-registry-keyless` listed in
+  `registry.profiles` while `enabled = false`. Keys, bounds and env overrides:
+  [CONFIGURATION.md](CONFIGURATION.md#keyless-acdp-050); running it:
+  [OPERATIONS.md](OPERATIONS.md#keyless-signing).
+- **Migration 019 (both backends):** a `key_attestations` table, the key-attestation index (one row
+  per minted attestation, with a UNIQUE `token_hash`). **No backfill**: it starts empty, and only a
+  mint on a keyless-enabled registry writes it. Publishes that are not keyless never read it.
+- **kl-007 C:** a registry advertising an `acdp_version` below 0.5.0 must refuse a body carrying
+  `key_attestation` as `schema_violation`. This binary always advertises 0.5.0, so that branch is
+  reachable only from the conformance harness.
+- **Hard Seam:** unchanged. No new `KeyAuthorization` or `RevocationTrustClass` variant: the
+  registry adds none, and acdp 0.18.2 adds none. Revocation discovery stays keyed by `agent_id`.
+  Attestations are bodies under the registry DID with `context_type` `acdp:key-attestation`, so a
+  consumer's registry-DID revocation search (filtered by `acdp:key-revocation`) is unaffected.
+- **Rollback:** safe to 0.7.0 once the `[keyless]` section is gone. 0.7.0 has no `[keyless]` key and
+  refuses to start with one present (`deny_unknown_fields`), from TOML or from any
+  `ACDP_REGISTRY_KEYLESS__*` variable, even with `enabled = false`, so remove both first.
+  Postgres: the migrator tolerates the newer applied version, and older binaries never touch the
+  table. SQLite: restore the pre-upgrade file, as for any release that adds a migration. If keyless
+  was enabled, attestations and keyless bodies already published stay stored and readable, and
+  0.7.0 refuses further keyless publishes as `key_resolution_failed`.
 
 ---
 

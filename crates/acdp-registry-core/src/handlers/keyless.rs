@@ -4,9 +4,8 @@
 //! [`KeylessState`], which it does only when `keyless.enabled`. That 501 is
 //! decided before anything about the request is read, so a registry
 //! without the profile answers exactly as it did before this module did
-//! anything else (§5.4 and the profile registry's note). Startup still
-//! refuses `keyless.enabled = true`, so in this release only in-process
-//! harnesses reach the rest.
+//! anything else (§5.4 and the profile registry's note). `keyless.enabled`
+//! is off by default.
 //!
 //! `POST` runs §5.2 in order and stops at the first failure:
 //!

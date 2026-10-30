@@ -9,8 +9,7 @@
 //! - [`KeylessState`]: what `POST /key-attestations` holds beyond the
 //!   cache: the attestation signing key, the clock and the two limiters.
 //!   Present only when `keyless.enabled`; without it both
-//!   `/key-attestations` methods answer 501. Startup still refuses
-//!   `enabled = true`, so only in-process harnesses build one.
+//!   `/key-attestations` methods answer 501. `enabled` is off by default.
 
 pub mod jwks;
 pub mod mint;

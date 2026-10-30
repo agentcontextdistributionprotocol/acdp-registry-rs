@@ -37,6 +37,11 @@ const EXPECTED_SEND_SITES: &[&str] = &[
     // `[keyless]` config (or that issuer's discovery document), never from
     // a context, let alone anchors.
     "crates/acdp-registry-core/src/keyless/jwks.rs",
+    // RFC-ACDP-0021 Phase 7, test code: the spawned-binary e2e's own client
+    // calls the registry under test (`/livez`, `/.well-known/*`,
+    // `/contexts/{ctx_id}/retract`) at fixed paths; it never reads a
+    // context's anchors.
+    "crates/acdp-registry-server/tests/keyless_e2e.rs",
 ];
 
 /// This file's own path relative to the workspace root. This exclusion

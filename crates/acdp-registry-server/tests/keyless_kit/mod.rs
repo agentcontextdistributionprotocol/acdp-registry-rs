@@ -125,9 +125,16 @@ impl Outside {
     pub fn set_did_status(&self, status: u16) {
         self.did_status.store(status, Ordering::SeqCst);
     }
+
+    /// Serve `jwks` at `/jwks`.
+    pub fn set_jwks(&self, jwks: Value) {
+        *self.jwks.lock().unwrap() = jwks;
+    }
 }
 
-async fn spawn_outside() -> (Arc<Outside>, SocketAddr) {
+/// Serve the outside parties over HTTPS as `agents.test` (the `didweb`
+/// fixture leaf) on a loopback port.
+pub async fn spawn_outside() -> (Arc<Outside>, SocketAddr) {
     let o = Arc::new(Outside {
         jwks: Mutex::new(json!({ "keys": [] })),
         bundle: Mutex::new(json!({ "keys": [] })),
@@ -161,6 +168,59 @@ async fn spawn_outside() -> (Arc<Outside>, SocketAddr) {
         );
     let addr = didweb::spawn_tls_server(app).await;
     (o, addr)
+}
+
+/// `did`'s DID document: Ed25519 verification methods `<did>#<fragment>`
+/// for `(fragment, seed)` in `keys` (each also in `assertionMethod`), and
+/// an `AcdpKeylessSigning` service listing `listed` (each
+/// `(identity, org_wide)`).
+pub fn controller_document(
+    did: &str,
+    listed: &[(WorkloadIdentity, bool)],
+    keys: &[(&str, u8)],
+) -> Value {
+    let methods: Vec<Value> = keys
+        .iter()
+        .map(|(fragment, seed)| {
+            let key = SigningKey::from_bytes(&[*seed; 32]);
+            let multibase = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes())
+                .strip_prefix("did:key:")
+                .unwrap()
+                .to_string();
+            json!({
+                "id": format!("{did}#{fragment}"),
+                "type": "Ed25519VerificationKey2020",
+                "controller": did,
+                "publicKeyMultibase": multibase,
+            })
+        })
+        .collect();
+    let assertion: Vec<Value> = keys
+        .iter()
+        .map(|(fragment, _)| json!(format!("{did}#{fragment}")))
+        .collect();
+    let identities: Vec<Value> = listed
+        .iter()
+        .map(|(id, org_wide)| {
+            let mut v = serde_json::to_value(id).unwrap();
+            v["org_wide"] = json!(org_wide);
+            v
+        })
+        .collect();
+    json!({
+        "@context": [
+            "https://www.w3.org/ns/did/v1",
+            "https://w3id.org/security/suites/ed25519-2020/v1"
+        ],
+        "id": did,
+        "verificationMethod": methods,
+        "assertionMethod": assertion,
+        "service": [{
+            "id": format!("{did}#keyless"),
+            "type": "AcdpKeylessSigning",
+            "serviceEndpoint": { "identities": identities },
+        }],
+    })
 }
 
 // ── token signers ──────────────────────────────────────────────────────────
@@ -433,51 +493,8 @@ impl Kit {
         keys: &[(&str, u8)],
     ) {
         let name = did.rsplit(':').next().unwrap();
-        let methods: Vec<Value> = keys
-            .iter()
-            .map(|(fragment, seed)| {
-                let key = SigningKey::from_bytes(&[*seed; 32]);
-                let multibase = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes())
-                    .strip_prefix("did:key:")
-                    .unwrap()
-                    .to_string();
-                json!({
-                    "id": format!("{did}#{fragment}"),
-                    "type": "Ed25519VerificationKey2020",
-                    "controller": did,
-                    "publicKeyMultibase": multibase,
-                })
-            })
-            .collect();
-        let assertion: Vec<Value> = keys
-            .iter()
-            .map(|(fragment, _)| json!(format!("{did}#{fragment}")))
-            .collect();
-        let identities: Vec<Value> = listed
-            .iter()
-            .map(|(id, org_wide)| {
-                let mut v = serde_json::to_value(id).unwrap();
-                v["org_wide"] = json!(org_wide);
-                v
-            })
-            .collect();
-        self.outside.set_doc(
-            name,
-            json!({
-                "@context": [
-                    "https://www.w3.org/ns/did/v1",
-                    "https://w3id.org/security/suites/ed25519-2020/v1"
-                ],
-                "id": did,
-                "verificationMethod": methods,
-                "assertionMethod": assertion,
-                "service": [{
-                    "id": format!("{did}#keyless"),
-                    "type": "AcdpKeylessSigning",
-                    "serviceEndpoint": { "identities": identities },
-                }],
-            }),
-        );
+        self.outside
+            .set_doc(name, controller_document(did, listed, keys));
     }
 
     /// DID-document fetches served for `did`.

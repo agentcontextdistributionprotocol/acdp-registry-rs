@@ -355,6 +355,93 @@ What to watch:
   Nothing is recorded and the subscription is retried after its lease
   lapses.
 
+## Keyless signing
+
+RFC-ACDP-0021 keyless signing (`[keyless]`,
+[CONFIGURATION.md](CONFIGURATION.md#keyless-acdp-050); wire behaviour in
+[HTTP-API.md](HTTP-API.md#post-key-attestations-get-key-attestations-rfc-acdp-0021))
+is **off by default**. The profile is a 0.5.0 Draft.
+
+**Enabling.** Set `[keyless] enabled = true` with at least one issuer or
+trust domain. It needs `[lifecycle] enabled = true`, a `[receipt]` key and
+`[log] enabled = true`; startup refuses it otherwise. The table it writes
+(`key_attestations`) comes from migration 019, which this release adds and
+every binary runs at startup whether keyless is on or off. It is additive,
+with no backfill: it starts empty, and only mints write it (see
+[UPGRADING.md](UPGRADING.md#unreleased)). Check `/.well-known/acdp.json`: `profiles` lists
+`acdp-registry-keyless` and the `keyless` member names your issuers. To turn
+it off, set `enabled = false` and restart; attestations already minted stay
+public bodies, and bodies published under them stay stored and verifiable
+by consumers that accept this registry as an attester.
+
+**Issuer allowlist.** `[[keyless.oidc_issuers]]` and
+`[[keyless.spiffe_trust_domains]]` are the only token issuers accepted and
+the only places issuer keys are fetched from; a token from anywhere else is
+`issuer_not_accepted` before any fetch. Issuers are compared byte for byte,
+so list the exact `iss` your provider puts in tokens. Every identity that
+mints must also be listed by its controller, in the controller DID
+document's `AcdpKeylessSigning` service; the registry reads that, not its
+own config, to authorize a mint. Each listing is public (RFC-ACDP-0021
+§15): an attestation is a public body naming the controller, issuer and
+subject, so do not list identities whose names are sensitive.
+
+**Issuer key fetching (JWKS posture).** Keys are fetched over the same
+SSRF-guarded outbound client as witnesses and hints (HTTPS only, public
+unicast addresses only, no redirects), bounded by `fetch_timeout_ms` and
+`max_fetch_bytes`, and cached in process per replica for
+`jwks_cache_ttl_seconds` (60 to 3600; shortened by `Cache-Control: max-age`,
+never below 60 s), one fetch per source at a time. A token naming an unknown
+`kid` forces at most one refetch per source every 30 s. When a refetch
+fails, the old copy keeps answering for up to `jwks_max_stale_seconds`
+past its TTL (stale-if-error), and the source is not retried for 30 s.
+With no usable copy, mints answer `502 key_resolution_unreachable`
+(`issuer_unreachable`) and the client should retry. A stale copy can hold a
+key the issuer has since withdrawn, which is why `jwks_max_stale_seconds`
+is capped at 7 days; shorten it if your issuers rotate keys after
+compromise.
+
+**Clocks.** Attestation windows, token `exp`/`nbf`/`iat` and the publish
+window check (`created_at` inside `[not_before, not_after)`) all use the
+replica's wall clock. Run NTP on every replica: a skewed clock refuses
+valid tokens (`token_invalid`) or publishes (`outside_attestation_window`).
+
+**Rate limits.** `POST /key-attestations` has two budgets, both per
+replica: per client IP (`rate_per_ip_per_minute`, charged on arrival) and
+per workload identity (`rate_per_identity_per_minute`, charged only after
+the token verifies, so a caller without a valid token cannot exhaust an
+identity's budget). Rejections are `429 rate_limited` and count in
+`acdp_registry_rate_limit_rejections_total{scope="keyless_per_ip"}` and
+`{scope="keyless_per_identity"}`. The client IP is resolved as for every
+other limiter (see [Rate limiting](#rate-limiting)).
+
+**Metrics and alerts.** Suggested alerts:
+
+- `acdp_registry_keyless_key_fetch_total{outcome!="ok"}` rising: an issuer's
+  keys cannot be fetched. `policy_refused` means it resolves to a
+  non-public address; `bad_status` or `transport` means it is down.
+- `acdp_registry_keyless_key_stale_served_total` increasing: mints are
+  being verified against a stale key set; the issuer has been unreachable
+  for longer than the TTL.
+- `acdp_registry_rate_limit_rejections_total{scope=~"keyless_.*"}` sustained:
+  a pipeline mints more often than its budget, or something is probing.
+
+**Receipt-key rotation.** Attestations are signed with the receipt key.
+Rotating it by the procedure in
+[RECEIPTS.md](RECEIPTS.md#the-key-retention-rule-read-before-rotating)
+(remove the old key from `assertionMethod` only, keep it in
+`verificationMethod`) keeps every past attestation verifiable through its
+own receipt. Removing a key from `verificationMethod` invalidates every
+attestation it signed; do that only after a compromise.
+
+**Withdrawing an attestation.** To withdraw one (a leaked workload token,
+a compromised pipeline), retract it through the admin lifecycle endpoint,
+`POST /admin/contexts/{ctx_id}/retract` (RFC-ACDP-0021 §9.2). Further
+publishes under it are refused (`attestation_withdrawn`) and consumers
+treat it as a registry-attested revocation of that key. A controller finds
+every attestation minted for an identity with `GET
+/key-attestations?controller=…&issuer=…&subject=…` and revokes each
+fingerprint itself (§9.3).
+
 ## Webhooks
 
 Receivers verify `X-ACDP-Signature` (GitHub-compatible HMAC-SHA256 over the raw

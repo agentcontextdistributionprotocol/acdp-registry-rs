@@ -2,8 +2,9 @@
 //! SQLite store (the memory and pg stores run the A/H/E core from the same
 //! kit: `src/memory_ext.rs`, `tests/pg_integration.rs`).
 //!
-//! The registry is built in-process with `keyless.enabled` (startup still
-//! refuses it), against the kit's loopback HTTPS issuer and DID host. Every
+//! The registry is built in-process with `keyless.enabled`, against the
+//! kit's loopback HTTPS issuer and DID host (the spawned binary is
+//! `tests/keyless_e2e.rs`). Every
 //! §5.2 refusal is checked for its exact `(status, code, details.reason)`,
 //! and the order is checked by requests that fail two steps at once.
 
