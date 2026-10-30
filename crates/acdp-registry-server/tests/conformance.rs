@@ -9484,10 +9484,12 @@ const KNOWN_FAMILIES: &[&str] = &[
     "fed",
     "fp",
     "idem",
+    "kl",
     "lc",
     "lhr",
     "lin",
     "log",
+    "mcp",
     "meta",
     "pub",
     "rate",
@@ -9499,6 +9501,7 @@ const KNOWN_FAMILIES: &[&str] = &[
     "schema",
     "sig",
     "status",
+    "trust",
     "vis",
     "wit",
 ];
@@ -9781,6 +9784,39 @@ const EXCUSED: &[(&str, &str)] = &[
          tests/recall_e2e.rs runs the SDK consumer (acdp::client::verify_change, \
          ChangeFeed) against this registry to prove the entries it serves verify. None of the \
          family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
+    ),
+    (
+        "kl",
+        "RFC-ACDP-0021 keyless signing (Draft), spec pin 75fb0da: 9 fixtures, none carrying \
+         an endpoint (kl-001's vectors array is the golden attestation/publish known-answer \
+         set, not an HTTP exchange). Two grounds, split by fixture. kl-005, kl-006 and \
+         kl-008 apply only to acdp-consumer-keyless: the consumer's verification of keyless \
+         bodies, attester trust and chains, which no harness configuration would make this \
+         registry responsible for. kl-001..004, kl-007 and kl-009 apply to \
+         acdp-registry-keyless, a profile this registry does not implement at this pin: \
+         validate_config refuses to advertise it, and this replay harness advertises only \
+         acdp-registry-core (HARNESS_PROFILES). None of the family is in \
+         acdp-registry-core's required_fixtures or conditional_fixtures.",
+    ),
+    (
+        "mcp",
+        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin 75fb0da: 7 fixtures, all \
+         applies_to_profiles = [acdp-producer-mcp-proxy], none carrying an endpoint \
+         (mcp-001's vectors array is a known-answer set). They are obligations of an MCP \
+         signing proxy, a producer: an acdp:mcp-tool-result body is an ordinary signed \
+         body to this registry, published through the same path as any other. No harness \
+         configuration would make the registry responsible for them, and none is in \
+         acdp-registry-core's required_fixtures or conditional_fixtures.",
+    ),
+    (
+        "trust",
+        "RFC-ACDP-0020 registry trust lists (Draft), spec pin 75fb0da: 7 fixtures, all \
+         applies_to_profiles = [acdp-consumer-trust-list], none carrying an endpoint \
+         (trust-001's vectors array is a known-answer set). Selecting, validating and \
+         applying signed acdp:trust-list bodies is the consumer's evaluation; an \
+         acdp:trust-list body is an ordinary signed body to this registry. No harness \
+         configuration would make the registry responsible for them, and none is in \
+         acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
 ];
 
@@ -10176,11 +10212,12 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// not counted again) and 146 after; 147 after the `6d5cdb8` bump (sig-004
 /// added); 169 after the `093279a` bump (chain-001..010 added, RFC-ACDP-0017);
 /// 177 after the `81bbe3f` bump (rec-001..008 added, RFC-ACDP-0018); 178 after
-/// the `1511b08` bump (chain-011 added, RFC-ACDP-0017 Final).
+/// the `1511b08` bump (chain-011 added, RFC-ACDP-0017 Final); 202 after the
+/// `75fb0da` bump (kl-001..009, mcp-001..007, trust-001..007, rev-007 added).
 /// A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 178;
+const TOTAL_FIXTURES_AT_PIN: usize = 202;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
@@ -18061,7 +18098,14 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
     let schema = PinnedSchema::load(&root, "acdp-capabilities.schema.json");
     let dir = tempfile::tempdir().expect("tempdir");
 
-    let served_profiles: Vec<&str> = REGISTRY_ADVERTISABLE_PROFILES.to_vec();
+    // Every allowlisted profile this release can actually serve:
+    // `acdp-registry-keyless` is a spec profile that validate_config refuses
+    // to advertise until RFC-ACDP-0021 is implemented.
+    let served_profiles: Vec<&str> = REGISTRY_ADVERTISABLE_PROFILES
+        .iter()
+        .copied()
+        .filter(|p| *p != "acdp-registry-keyless")
+        .collect();
     let all_profiles = served_profiles
         .iter()
         .map(|p| format!("\"{p}\""))

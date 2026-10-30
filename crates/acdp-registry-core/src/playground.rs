@@ -121,6 +121,23 @@ pub fn enforce_pinned_signature(
         return Ok(PinOutcome::Unpinned);
     };
 
+    // RFC-ACDP-0021 §4.2/§12: an `acdp-kl-` fragment names a keyless key that
+    // only an attestation can authorize, and no implementation may accept a
+    // keyless-signed body by skipping key resolution -- which is exactly
+    // what a pinned key does. Refuse it the way resolution would.
+    if req
+        .signature
+        .key_id
+        .split_once('#')
+        .is_some_and(|(_, frag)| frag.starts_with(acdp::did::KEYLESS_FRAGMENT_PREFIX))
+    {
+        return Err(RegistryError::Acdp(AcdpError::KeyResolution(format!(
+            "key_id '{}' is a keyless (acdp-kl-) key, which a pinned key cannot authorize \
+             and this registry does not support (RFC-ACDP-0021)",
+            req.signature.key_id
+        ))));
+    }
+
     let alg = PinnedAlgorithm::parse(&pinned.algorithm).ok_or_else(|| {
         RegistryError::Config(format!(
             "pinned algorithm '{}' for {agent_did} is not supported (expected one of: ed25519, ecdsa-p256)",
@@ -441,6 +458,26 @@ mod tests {
         let (req, _) = build_signed_request(key, "did:web:x:agents:alice");
         let outcome = enforce_pinned_signature(&req, &cfg(vec![], false)).unwrap();
         assert_eq!(outcome, PinOutcome::Skipped);
+    }
+
+    #[test]
+    fn pinned_agent_with_a_keyless_key_id_is_refused_as_unresolvable() {
+        let key = SigningKey::generate();
+        let did = "did:web:x:agents:alice";
+        let (mut req, pub_b64) = build_signed_request(key, did);
+        req.signature.key_id = format!("{did}#acdp-kl-0123");
+        let pinned = PinnedAgentKey {
+            agent_did: did.into(),
+            public_key_b64: pub_b64,
+            algorithm: "ed25519".into(),
+            valid_from: None,
+            valid_until: None,
+        };
+        let err = enforce_pinned_signature(&req, &cfg(vec![pinned], false)).unwrap_err();
+        assert!(
+            matches!(err, RegistryError::Acdp(AcdpError::KeyResolution(_))),
+            "{err:?}"
+        );
     }
 
     #[test]
