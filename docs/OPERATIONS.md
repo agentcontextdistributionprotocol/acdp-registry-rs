@@ -472,7 +472,7 @@ changed**: rows removed, reordered, or rewritten. The realistic causes are a
 database restore that rolled the log back, a partial restore that mixed two
 datasets, or direct writes to the log table.
 
-**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/75fb0da5d2baf5c5ce2f1fbf314b845e6cbe161a/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
+**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/bf37195a7b39cb9e5ddac9058511d76d72f3c55a/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
 (pinned spec): a registry whose tree is lost **MUST NOT serve a reconstructed
 history under the same `log_id`**; it MUST start a new instantiation with a new
 `<instance>` component, and SHOULD publish an operational notice. "Serve" here

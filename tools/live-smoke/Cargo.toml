@@ -13,7 +13,7 @@ description = "Publish -> resolve -> retract -> resolve against a live ACDP regi
 # The umbrella crate and feature Seam uses (seam-context-acdp). The version
 # leads Seam's pin on purpose: 0.17.0 adds the RFC-ACDP-0018 recall surface the
 # /changes probe in src/main.rs verifies through.
-acdp       = { version = "=0.18.1", features = ["client"] }
+acdp       = { version = "=0.18.2", features = ["client"] }
 anyhow     = "1"
 base64     = "0.23"
 chrono     = "0.4"
