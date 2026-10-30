@@ -373,6 +373,15 @@ in `Cargo.lock` to be covered by one of:
   not a verdict. A crypto-critical crate may be exempted only at a version on the
   allow-list (see [below](#crypto-critical-crates-may-not-be-quietly-exempted)).
 
+**The `acdp*` exemptions move with the exact `acdp` pin, and a required check enforces it.**
+The `acdp exact-pin guard` step of the required `lint` job (`.github/scripts/check_acdp_pin.py`)
+fails unless `acdp = "=X"` in both `Cargo.toml` and `tools/live-smoke/Cargo.toml`, both
+lockfiles hold every crates.io `acdp*` crate at X, and every `[[exemptions.acdp*]]` is at X.
+cargo-vet staying advisory is why it exists: the shared bump automation drops the `=` and
+moves neither live-smoke nor the exemptions, and three such bumps (#476, #485, #497) went
+green on every required check and auto-merged with vet red. A bot bump now arrives red on
+`lint` and is superseded by a PR that moves all of them.
+
 The workspace's own crates carry `audit-as-crates-io = false` policies. release-plz has
 `publish = false`, so they are not on crates.io; the policies keep `cargo vet` from
 asking about them if that ever changes.
