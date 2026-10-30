@@ -4060,7 +4060,8 @@ where
     );
 }
 
-/// **§6.3 steps 3, 5 and 6 in the store.** Inside the window → Inserted;
+/// **§6.3 steps 3-6 in the store.** Inside the window → Inserted; a
+/// reference that does not bind the request → `attestation_mismatch`;
 /// `created_at` at or past `not_after`, or before `not_before` →
 /// `outside_attestation_window` with nothing persisted; a retracted
 /// attestation → `attestation_withdrawn`; an unindexed one →
@@ -4081,6 +4082,53 @@ where
     inserted(
         commit(store, signed_under(&open, None), None).await,
         &format!("[{label}] inside the window"),
+    );
+
+    // §6.3 step 4, re-checked in the store: a reference to a live, indexed
+    // attestation that does not bind the request (another controller,
+    // another key, another algorithm) is refused with the handler's
+    // `attestation_mismatch` and persists nothing.
+    let bound = keyless_watermark(store, &c, false).await;
+    let other = controller(&format!("{label}-other"));
+    let other_fp = format!("sha256:{}", "e".repeat(64));
+    let mut wrong_alg = signed_under(&open, None);
+    wrong_alg.signature.algorithm = "ecdsa-p256".into();
+    for (req, what) in [
+        (
+            keyless_request(
+                &other,
+                &open.reference(),
+                &acdp::types::keyless::keyless_key_id(&other, &open.attestation.key_fingerprint)
+                    .expect("key id"),
+                None,
+            ),
+            "another controller",
+        ),
+        (
+            keyless_request(
+                &c,
+                &open.reference(),
+                &acdp::types::keyless::keyless_key_id(&c, &other_fp).expect("key id"),
+                None,
+            ),
+            "another key",
+        ),
+        (wrong_alg, "another algorithm"),
+    ] {
+        let err = assert_reason(
+            commit(store, req, None).await,
+            KeylessReason::AttestationMismatch,
+            &format!("[{label}] store binding: {what}"),
+        );
+        assert!(
+            matches!(err, AcdpError::KeyNotAuthorized(_)),
+            "[{label}] {what}: {err:?}"
+        );
+    }
+    assert_eq!(
+        keyless_watermark(store, &c, false).await,
+        bound,
+        "[{label}] an unbound keyless publish persists nothing"
     );
 
     let before = keyless_watermark(store, &c, false).await;

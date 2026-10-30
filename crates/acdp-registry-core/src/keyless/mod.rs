@@ -110,6 +110,9 @@ pub mod reason {
     pub const TOKEN_REPLAYED: &str = "token_replayed";
     /// §5.2 step 6.
     pub const IDENTITY_NOT_AUTHORIZED: &str = "identity_not_authorized";
+    /// §6.3 "Lifecycle events" (R13): a keyless key id signed an
+    /// RFC-ACDP-0013 event. The SDK has no `KeylessReason` for it.
+    pub const KEYLESS_EVENT_UNSUPPORTED: &str = "keyless_event_unsupported";
 }
 
 /// `e` with its keyless `details.reason`, when its message carries one

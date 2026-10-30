@@ -16,8 +16,9 @@
 //!    `supersedes` existence, ownership, coherence and AlreadySuperseded
 //!    checks;
 //! 2. for a keyless successor (§6.3): its attestation must exist
-//!    (`attestation_not_found`) and must not be retracted
-//!    (`attestation_withdrawn`);
+//!    (`attestation_not_found`), must bind the request (`agent_id`, key id
+//!    and algorithm, `attestation_mismatch`, re-checked after the handler)
+//!    and must not be retracted (`attestation_withdrawn`);
 //! 3. for a keyless successor with `supersedes` (§7): the supersession rule
 //!    (`keyless_identity_mismatch`);
 //! 4. the RFC-ACDP-0014 §4 predecessor admission, when the caller passes one;
@@ -32,8 +33,8 @@
 use acdp::error::AcdpError;
 use acdp::types::body::Body;
 use acdp::types::keyless::{
-    is_keyless_key_id, may_supersede, KeyAttestation, KeyAttestationListItem, KeyAttestationRef,
-    KeylessReason, KeylessSigner, WorkloadIdentity, KEY_ATTESTATION_TYPE,
+    is_keyless_key_id, keyless_key_id, may_supersede, KeyAttestation, KeyAttestationListItem,
+    KeyAttestationRef, KeylessReason, KeylessSigner, WorkloadIdentity, KEY_ATTESTATION_TYPE,
 };
 use acdp::types::primitives::{ContentHash, ContextType, CtxId, LineageId, Status};
 use acdp::types::publish::PublishRequest;
@@ -213,14 +214,37 @@ pub struct SuccessorAttestation {
     pub withdrawn: bool,
 }
 
-/// Step 2: the attestation `att_ctx` exists and is not retracted.
+/// Step 2: the attestation `att_ctx` exists, binds `req`, and is not
+/// retracted.
+///
+/// The binding (§6.3 step 4) is the handler's to check first; it is checked
+/// again here, against the indexed row, so a store never admits a request
+/// whose `key_attestation` names an attestation of another controller or
+/// another key. `agent_id` must be the row's `controller`, and
+/// `signature.key_id` and `signature.algorithm` must be the attested ones,
+/// where the key id is re-derived from the attested `key_fingerprint`.
+/// Failure: `key_not_authorized` with `attestation_mismatch`, as at the
+/// handler.
 pub fn admit_successor<'a>(
+    req: &PublishRequest,
     att_ctx: &CtxId,
     found: Option<&'a SuccessorAttestation>,
 ) -> Result<&'a SuccessorAttestation, AcdpError> {
     let found = found.ok_or_else(|| {
         KeylessReason::AttestationNotFound.error(format!("no key attestation at '{att_ctx}'"))
     })?;
+    let row = &found.row;
+    let binds = req.agent_id.as_str() == row.controller
+        && req.signature.algorithm == row.algorithm
+        && req.signature.key_id == row.key_id
+        && keyless_key_id(&row.controller, &row.key_fingerprint)
+            .is_ok_and(|k| k == req.signature.key_id);
+    if !binds {
+        return Err(KeylessReason::AttestationMismatch.error(format!(
+            "agent_id, signature.key_id or signature.algorithm differ from key attestation \
+             '{att_ctx}'"
+        )));
+    }
     if found.withdrawn {
         return Err(KeylessReason::AttestationWithdrawn
             .error(format!("key attestation '{att_ctx}' was retracted")));
@@ -397,9 +421,9 @@ mod tests {
             controller: "did:web:agents.test".into(),
             identity,
             org_wide,
-            key_id: "did:web:agents.test#acdp-kl-00".into(),
+            key_id: format!("did:web:agents.test#acdp-kl-{}", "b".repeat(64)),
             algorithm: "ed25519".into(),
-            key_fingerprint: "sha256:00".into(),
+            key_fingerprint: format!("sha256:{}", "b".repeat(64)),
             not_before_ms: 1_000,
             not_after_ms: 2_000,
             token_hash: "sha256:11".into(),
@@ -440,10 +464,54 @@ mod tests {
         }
     }
 
+    /// A request `row` binds: its controller, key id and algorithm.
+    fn bound_request(row: &KeyAttestationIndexRow) -> PublishRequest {
+        let p = acdp::producer::Producer::new(
+            acdp::crypto::SigningKey::from_bytes(&[7; 32]),
+            acdp::types::primitives::AgentDid::new(row.controller.clone()),
+            format!("{}#key-1", row.controller),
+        );
+        let mut req = p
+            .publish_request()
+            .title("t")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(acdp::types::primitives::Visibility::Public)
+            .build()
+            .expect("request");
+        req.signature.key_id = row.key_id.clone();
+        req
+    }
+
+    #[test]
+    fn the_store_rechecks_that_the_attestation_binds_the_request() {
+        let att = CtxId("acdp://reg.test/x".into());
+        let found = SuccessorAttestation {
+            row: row(oidc("a"), false),
+            withdrawn: false,
+        };
+        assert!(admit_successor(&bound_request(&found.row), &att, Some(&found)).is_ok());
+        let mut other_agent = bound_request(&found.row);
+        other_agent.agent_id =
+            acdp::types::primitives::AgentDid::new("did:web:other.test".to_string());
+        let mut other_key = bound_request(&found.row);
+        other_key.signature.key_id = format!("did:web:agents.test#acdp-kl-{}", "c".repeat(64));
+        let mut other_alg = bound_request(&found.row);
+        other_alg.signature.algorithm = "ecdsa-p256".into();
+        for req in [other_agent, other_key, other_alg] {
+            let err = admit_successor(&req, &att, Some(&found)).expect_err("unbound");
+            assert_eq!(
+                KeylessReason::of(&err),
+                Some(KeylessReason::AttestationMismatch)
+            );
+            assert!(matches!(err, AcdpError::KeyNotAuthorized(_)), "{err:?}");
+        }
+    }
+
     #[test]
     fn a_missing_attestation_is_not_found_and_a_retracted_one_withdrawn() {
         let att = CtxId("acdp://reg.test/x".into());
-        let err = admit_successor(&att, None).expect_err("missing");
+        let req = bound_request(&row(oidc("a"), false));
+        let err = admit_successor(&req, &att, None).expect_err("missing");
         assert_eq!(
             KeylessReason::of(&err),
             Some(KeylessReason::AttestationNotFound)
@@ -453,7 +521,7 @@ mod tests {
             row: row(oidc("a"), false),
             withdrawn: true,
         };
-        let err = admit_successor(&att, Some(&withdrawn)).expect_err("withdrawn");
+        let err = admit_successor(&req, &att, Some(&withdrawn)).expect_err("withdrawn");
         assert_eq!(
             KeylessReason::of(&err),
             Some(KeylessReason::AttestationWithdrawn)

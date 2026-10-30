@@ -359,7 +359,7 @@ impl RegistryStore for MemoryStore {
         // store after its ownership and AlreadySuperseded checks.
         let keyless_admission = |pred: &Body| -> Result<(), AcdpError> {
             if let Some(att) = &successor {
-                let found = admit_successor(att, successor_found.as_ref())?;
+                let found = admit_successor(req, att, successor_found.as_ref())?;
                 let pred_att = predecessor_attestation(pred)?;
                 let row = predecessor_row
                     .as_ref()
@@ -377,7 +377,7 @@ impl RegistryStore for MemoryStore {
             move |body: &Body| {
                 if let Some(att) = successor {
                     key_attestations::check_window(
-                        admit_successor(att, found.as_ref())?,
+                        admit_successor(req, att, found.as_ref())?,
                         body.created_at,
                     )?;
                 }
@@ -2010,5 +2010,15 @@ mod keyless_http_tests {
         store.migrate().await.unwrap();
         let kit = Kit::new(store, Opts::default()).await;
         assert_mint_core(&kit, "memory").await;
+    }
+
+    /// RFC-ACDP-0021 Phase 6: kl-003, kl-004, kl-009 B and kl-007 B on
+    /// this backend (no log, so no leaf half).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keyless_publish_scenarios_on_the_memory_store() {
+        let store = MemoryStore::new();
+        store.migrate().await.unwrap();
+        let kit = Kit::new(store, Opts::default()).await;
+        super::keyless_kit::assert_keyless_publish_core(&kit, "memory").await;
     }
 }

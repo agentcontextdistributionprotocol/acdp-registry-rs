@@ -90,7 +90,7 @@ pub(crate) async fn supersession_gate(
         return Ok(());
     };
     let found = successor(tx, r.ctx_id.as_str()).await?;
-    let succ = admit_successor(&r.ctx_id, found.as_ref())?;
+    let succ = admit_successor(req, &r.ctx_id, found.as_ref())?;
     let body_json: String = predecessor.try_get("body_json").map_err(db_err("decode"))?;
     let att = predecessor_attestation(&decode_body(&body_json)?)?;
     let row = match &att {
@@ -112,7 +112,7 @@ pub(crate) async fn window_gate(
         return Ok(());
     };
     let found = successor(tx, r.ctx_id.as_str()).await?;
-    key_attestations::check_window(admit_successor(&r.ctx_id, found.as_ref())?, created_at)
+    key_attestations::check_window(admit_successor(req, &r.ctx_id, found.as_ref())?, created_at)
 }
 
 /// Step 6: index a just-inserted attestation body. A token that already

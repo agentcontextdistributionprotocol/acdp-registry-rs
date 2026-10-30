@@ -32,10 +32,17 @@ use std::time::Duration;
 use acdp::crypto::{AcdpSigningKey, SigningKey};
 use acdp::did::WebResolver;
 use acdp::producer::keyless::EphemeralKey;
+use acdp::producer::Producer;
 use acdp::registry::RegistryServer;
 use acdp::safe_http::SsrfPolicy;
 use acdp::types::capabilities::{CapabilitiesDocument, Limits};
-use acdp::types::keyless::{IdentityDescriptor, KeyAttestationRequest, WorkloadIdentity};
+use acdp::types::keyless::{
+    keyless_key_id, IdentityDescriptor, KeyAttestation, KeyAttestationRef, KeyAttestationRequest,
+    WorkloadIdentity,
+};
+use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+use acdp::types::primitives::{AgentDid, ContentHash, ContextType, CtxId, Visibility};
+use acdp::types::publish::PublishRequest;
 use acdp_registry_auth::{
     AuthService, ChallengeStore, InMemoryChallengeStore, JwtSecret, JwtSigner,
 };
@@ -230,6 +237,10 @@ pub struct Opts {
     pub forced_refresh: Duration,
     /// `keyless.enabled`; false gives the feature-off 501s.
     pub enabled: bool,
+    /// The advertised `acdp_version` (kl-007 C uses 0.4.0).
+    pub acdp_version: &'static str,
+    /// `[playground] enabled`, unpinned (§12: never accepts a keyless body).
+    pub playground: bool,
 }
 
 impl Default for Opts {
@@ -241,9 +252,14 @@ impl Default for Opts {
             max_ttl: 3600,
             forced_refresh: Duration::from_secs(3600),
             enabled: true,
+            acdp_version: "0.5.0",
+            playground: false,
         }
     }
 }
+
+/// The bearer `/admin/*` accepts (the kl-003 G registry withdrawal).
+pub const ADMIN_TOKEN: &str = "keyless-kit-admin-token";
 
 pub struct Kit {
     pub app: Router,
@@ -254,15 +270,17 @@ pub struct Kit {
     pub spiffe: Signer,
     /// The keyless clock, Unix ms.
     pub clock: Arc<AtomicI64>,
+    /// The registry's DID resolver (tests invalidate its cache).
+    pub resolver: Arc<WebResolver>,
 }
 
-fn caps(log: bool) -> CapabilitiesDocument {
+fn caps(log: bool, acdp_version: &str) -> CapabilitiesDocument {
     let mut profiles = vec!["acdp-registry-core".to_string()];
     if log {
         profiles.push("acdp-registry-transparency-log".into());
     }
     CapabilitiesDocument {
-        acdp_version: "0.5.0".into(),
+        acdp_version: acdp_version.into(),
         registry_did: REGISTRY_DID.into(),
         supported_signature_algorithms: vec!["ed25519".into(), "ecdsa-p256".into()],
         supported_did_methods: vec!["did:web".into(), "did:key".into()],
@@ -300,6 +318,9 @@ impl Kit {
         cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
         cfg.receipt.signing_key_seed_b64 = B64.encode(RECEIPT_SEED);
         cfg.log.enabled = opts.log;
+        cfg.lifecycle.enabled = true;
+        cfg.auth.admin_tokens = vec![ADMIN_TOKEN.into()];
+        cfg.playground.enabled = opts.playground;
         cfg.keyless.enabled = opts.enabled;
         cfg.keyless.max_attestation_ttl_seconds = opts.max_ttl;
         cfg.keyless.oidc_issuers = vec![OidcIssuer {
@@ -318,10 +339,12 @@ impl Kit {
         let signer =
             acdp_registry_core::receipt::build_signer(&cfg.receipt, &cfg.registry.authority)
                 .expect("receipt signer");
-        let server = RegistryServer::try_new(store, caps(opts.log), AUTHORITY)
+        let server = RegistryServer::try_new(store, caps(opts.log, opts.acdp_version), AUTHORITY)
             .unwrap()
             .with_receipt_signer(signer)
-            .expect("receipt signer");
+            .expect("receipt signer")
+            .with_lifecycle()
+            .expect("lifecycle");
         let server = Arc::new(server);
 
         let resolver = Arc::new(
@@ -344,7 +367,7 @@ impl Kit {
             AuthConfig::default(),
             challenges,
             jwt,
-            resolver,
+            resolver.clone(),
             AUTHORITY.into(),
         ));
 
@@ -377,6 +400,7 @@ impl Kit {
             oidc,
             spiffe,
             clock,
+            resolver,
         }
     }
 
@@ -396,7 +420,39 @@ impl Kit {
 
     /// Replace `did`'s listed identities.
     pub fn list(&self, did: &str, listed: &[(WorkloadIdentity, bool)]) {
+        self.list_with_keys(did, listed, &[]);
+    }
+
+    /// [`Self::list`], with Ed25519 verification methods
+    /// `<did>#<fragment>` for `(fragment, seed)` in `keys`, each also in
+    /// `assertionMethod`.
+    pub fn list_with_keys(
+        &self,
+        did: &str,
+        listed: &[(WorkloadIdentity, bool)],
+        keys: &[(&str, u8)],
+    ) {
         let name = did.rsplit(':').next().unwrap();
+        let methods: Vec<Value> = keys
+            .iter()
+            .map(|(fragment, seed)| {
+                let key = SigningKey::from_bytes(&[*seed; 32]);
+                let multibase = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes())
+                    .strip_prefix("did:key:")
+                    .unwrap()
+                    .to_string();
+                json!({
+                    "id": format!("{did}#{fragment}"),
+                    "type": "Ed25519VerificationKey2020",
+                    "controller": did,
+                    "publicKeyMultibase": multibase,
+                })
+            })
+            .collect();
+        let assertion: Vec<Value> = keys
+            .iter()
+            .map(|(fragment, _)| json!(format!("{did}#{fragment}")))
+            .collect();
         let identities: Vec<Value> = listed
             .iter()
             .map(|(id, org_wide)| {
@@ -408,8 +464,13 @@ impl Kit {
         self.outside.set_doc(
             name,
             json!({
-                "@context": ["https://www.w3.org/ns/did/v1"],
+                "@context": [
+                    "https://www.w3.org/ns/did/v1",
+                    "https://w3id.org/security/suites/ed25519-2020/v1"
+                ],
                 "id": did,
+                "verificationMethod": methods,
+                "assertionMethod": assertion,
                 "service": [{
                     "id": format!("{did}#keyless"),
                     "type": "AcdpKeylessSigning",
@@ -696,4 +757,583 @@ pub fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+// ── keyless publish, §7 and R13 (Phase 6) ──────────────────────────────────
+
+/// The Ed25519 key for `seed`.
+pub fn signing_key(seed: u8) -> AcdpSigningKey {
+    AcdpSigningKey::Ed25519(SigningKey::from_bytes(&[seed; 32]))
+}
+
+/// A minted attestation and what a producer needs to sign under it.
+pub struct Minted {
+    pub att: KeyAttestation,
+    pub reference: KeyAttestationRef,
+    /// The ephemeral key's seed.
+    pub seed: u8,
+}
+
+impl Minted {
+    /// `seed`'s key under an attestation no registry minted, naming a
+    /// `ctx_id` that holds nothing: enough for the SDK to build a
+    /// keyless-signed body (the profile-off and pre-0.5.0 scenarios).
+    pub fn unminted(seed: u8, controller: &str) -> Self {
+        Self {
+            att: unminted_attestation(seed, controller),
+            reference: dangling(AUTHORITY),
+            seed,
+        }
+    }
+
+    /// The SDK's keyless producer for this attestation.
+    pub fn producer(&self) -> Producer {
+        self.producer_with(&self.att, self.reference.clone())
+    }
+
+    /// A keyless producer signing with this key, claiming `att` and
+    /// naming `reference` (for the mismatch scenarios).
+    pub fn producer_with(&self, att: &KeyAttestation, reference: KeyAttestationRef) -> Producer {
+        Producer::keyless(signing_key(self.seed), att, reference).expect("keyless producer")
+    }
+}
+
+/// A plain public request from `p`.
+pub fn plain(p: &Producer, title: &str) -> PublishRequest {
+    p.publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("request")
+}
+
+/// A successor of `prev` from `p`.
+pub fn successor(p: &Producer, prev: &acdp::types::body::Body, title: &str) -> PublishRequest {
+    p.supersede_body(prev)
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("successor")
+}
+
+/// The controller's DID-document key `<controller>#key-1` for `seed`.
+pub fn controller_producer(controller: &str, seed: u8) -> Producer {
+    Producer::new(
+        SigningKey::from_bytes(&[seed; 32]),
+        AgentDid::new(controller.to_string()),
+        format!("{controller}#key-1"),
+    )
+}
+
+/// An attestation shape for `seed`'s key under `controller` that no
+/// registry minted: it only lets the SDK build a keyless-signed body.
+pub fn unminted_attestation(seed: u8, controller: &str) -> KeyAttestation {
+    let key = EphemeralKey::from_key(signing_key(seed));
+    let fingerprint = key.fingerprint().unwrap();
+    let now = chrono::Utc::now();
+    KeyAttestation {
+        attestation_version: acdp::types::keyless::ATTESTATION_VERSION.into(),
+        controller: controller.into(),
+        identity: WorkloadIdentity::Oidc {
+            issuer: "https://issuer.example".into(),
+            subject: SUBJECT.into(),
+        },
+        org_wide: false,
+        key_id: keyless_key_id(controller, &fingerprint).unwrap(),
+        algorithm: key.algorithm().into(),
+        public_key_jwk: key.jwk().unwrap(),
+        key_fingerprint: fingerprint,
+        not_before: now,
+        not_after: now + chrono::Duration::seconds(600),
+        token_hash: format!("sha256:{}", "a".repeat(64)),
+    }
+}
+
+/// A reference to a ctx_id on `authority` that holds nothing.
+pub fn dangling(authority: &str) -> KeyAttestationRef {
+    KeyAttestationRef {
+        ctx_id: CtxId(format!("acdp://{authority}/{}", uuid::Uuid::new_v4())),
+        content_hash: ContentHash(format!("sha256:{}", "c".repeat(64))),
+    }
+}
+
+/// A retract envelope for `ctx_id` by `actor`, signed under `#key-1` and
+/// then relabelled `key_id` on the wire: the SDK will not sign under a
+/// keyless key id, and the refusal comes before the signature is read.
+pub fn event_under(ctx_id: &str, actor: &str, key_id: &str, event_type: &str) -> Value {
+    let event = LifecycleEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        CtxId(ctx_id.to_string()),
+        LifecycleEventType::parse(event_type).unwrap(),
+        chrono::Utc::now(),
+        AgentDid::new(actor.to_string()),
+        None,
+    )
+    .unwrap()
+    .sign_with(SigningKey::from_bytes(&[3; 32]), format!("{actor}#key-1"))
+    .unwrap();
+    let mut v = json!({ "event": event });
+    v["event"]["signature"]["key_id"] = json!(key_id);
+    v
+}
+
+impl Kit {
+    /// A controller listing `listed` whose DID document also has the
+    /// Ed25519 `#<fragment>` keys for `(fragment, seed)`.
+    pub fn controller_with_keys(
+        &self,
+        label: &str,
+        listed: &[(WorkloadIdentity, bool)],
+        keys: &[(&str, u8)],
+    ) -> String {
+        let did = self.controller(label, listed);
+        self.list_with_keys(&did, listed, keys);
+        did
+    }
+
+    /// Mint an attestation for `seed`'s Ed25519 key.
+    pub async fn mint(
+        &self,
+        seed: u8,
+        controller: &str,
+        descriptor: IdentityDescriptor,
+        ttl: Option<u32>,
+    ) -> Minted {
+        let key = EphemeralKey::from_key(signing_key(seed));
+        let req = Self::request(&key, controller, descriptor, ttl);
+        let (status, v) = self.post(&req).await;
+        assert_eq!(status, StatusCode::CREATED, "mint: {v}");
+        let body: acdp::types::body::Body = serde_json::from_value(v["body"].clone()).unwrap();
+        let att = KeyAttestation::from_body(&body).unwrap();
+        Minted {
+            reference: KeyAttestationRef {
+                ctx_id: body.ctx_id.clone(),
+                content_hash: body.content_hash.clone(),
+            },
+            att,
+            seed,
+        }
+    }
+
+    async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {
+        let resp = self.app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// `POST /contexts`, with an `Idempotency-Key` when given.
+    pub async fn publish_idem(
+        &self,
+        req: &impl serde::Serialize,
+        idempotency_key: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/contexts")
+            .header("content-type", "application/json");
+        if let Some(k) = idempotency_key {
+            b = b.header("idempotency-key", k);
+        }
+        self.send(
+            b.body(Body::from(serde_json::to_vec(req).unwrap()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// `POST /contexts`.
+    pub async fn publish(&self, req: &impl serde::Serialize) -> (StatusCode, Value) {
+        self.publish_idem(req, None).await
+    }
+
+    /// The stored body at `ctx_id`.
+    pub async fn body_of(&self, ctx_id: &str) -> acdp::types::body::Body {
+        let (s, v) = self.get(&format!("/contexts/{}", urlencode(ctx_id))).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        serde_json::from_value(v["body"].clone()).unwrap()
+    }
+
+    /// `POST /contexts/{ctx_id}/<endpoint>` with `envelope`.
+    pub async fn post_event(
+        &self,
+        ctx_id: &str,
+        endpoint: &str,
+        envelope: &Value,
+    ) -> (StatusCode, Value) {
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/contexts/{}/{endpoint}", urlencode(ctx_id)))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(envelope).unwrap()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// The registry withdraws an attestation (§9.2): an admin retract.
+    pub async fn admin_retract(&self, ctx_id: &str) -> (StatusCode, Value) {
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/admin/contexts/{}/retract", urlencode(ctx_id)))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// The log leaf at `index`.
+    pub async fn leaf(&self, index: u64) -> Value {
+        let (s, v) = self
+            .get(&format!("/log/entries?start={index}&end={}", index + 1))
+            .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        v["entries"][0]["leaf"].clone()
+    }
+}
+
+/// The kl-003 and kl-004 registry scenarios, plus kl-009 B and kl-007 B,
+/// end to end over HTTP. Every store must answer them the same; with the
+/// log, the leaf half of kl-003 A is checked too.
+pub async fn assert_keyless_publish_core(kit: &Kit, label: &str) {
+    let has_log = kit_has_log(kit).await;
+    let same = kit.oidc_identity(SUBJECT);
+    let other_subject = "repo:acme/other:ref:refs/heads/main";
+    let org_subject = "repo:acme/org:ref:refs/heads/main";
+    let controller = kit.controller_with_keys(
+        "pub",
+        &[
+            (same.clone(), false),
+            (kit.oidc_identity(other_subject), false),
+            (kit.oidc_identity(org_subject), true),
+        ],
+        &[("key-1", 40)],
+    );
+
+    // kl-003 A: accepted; the receipt and the leaf carry the attested
+    // fingerprint. An idempotent replay answers 200 from the stored reply.
+    let m = kit
+        .mint(61, &controller, kit.oidc(SUBJECT), Some(600))
+        .await;
+    let p = m.producer();
+    let req = plain(&p, "kl-003 A");
+    let before = if has_log {
+        Some(kit.log_size().await)
+    } else {
+        None
+    };
+    let idem = unique("kl-a");
+    let a = kit.publish_idem(&req, Some(&idem)).await;
+    assert_eq!(a.0, StatusCode::CREATED, "{label} A: {}", a.1);
+    assert_eq!(
+        a.1["registry_receipt"]["key_fingerprint"],
+        json!(m.att.key_fingerprint),
+        "{label} A receipt"
+    );
+    if let Some(n) = before {
+        assert_eq!(kit.log_size().await, n + 1, "{label} A: one leaf");
+        assert_eq!(
+            kit.leaf(n).await["key_fingerprint"],
+            json!(m.att.key_fingerprint),
+            "{label} A leaf"
+        );
+    }
+    let replay = kit.publish_idem(&req, Some(&idem)).await;
+    assert_eq!(replay.0, StatusCode::OK, "{label} A replay: {}", replay.1);
+    assert_eq!(replay.1["ctx_id"], a.1["ctx_id"], "{label} A replay");
+    // The same replay once the window has closed is refused, not answered
+    // from the stored reply: the §6.3 checks run before the commit's
+    // idempotency gate, fail-closed as on the did:web path.
+    let t0 = kit.clock.load(Ordering::SeqCst);
+    kit.clock
+        .store(m.att.not_after.timestamp_millis() + 1_000, Ordering::SeqCst);
+    assert_eq!(
+        wire(&kit.publish_idem(&req, Some(&idem)).await),
+        is(
+            403,
+            "key_not_authorized",
+            Some("outside_attestation_window")
+        ),
+        "{label} A replay after the window"
+    );
+    kit.clock.store(t0, Ordering::SeqCst);
+    let ctx_a = a.1["ctx_id"].as_str().unwrap().to_string();
+
+    // kl-003 C: a keyless key id and no member (signed under the same key;
+    // the signature is outside the content_hash preimage).
+    let mut c = plain(&controller_producer(&controller, 61), "kl-003 C");
+    c.signature.key_id = m.att.key_id.clone();
+    assert_eq!(
+        wire(&kit.publish(&c).await),
+        is(400, "key_resolution_failed", Some("attestation_missing")),
+        "{label} C"
+    );
+
+    // kl-003 D: an attestation on another registry.
+    let foreign = KeyAttestationRef {
+        ctx_id: CtxId(format!(
+            "acdp://other.test/{}",
+            m.reference.ctx_id.as_str().rsplit('/').next().unwrap()
+        )),
+        content_hash: m.reference.content_hash.clone(),
+    };
+    let d = plain(&m.producer_with(&m.att, foreign), "kl-003 D");
+    assert_eq!(
+        wire(&kit.publish(&d).await),
+        is(400, "key_resolution_failed", Some("attestation_foreign")),
+        "{label} D"
+    );
+
+    // §6.3 step 3: nothing there, and an ordinary body is no attestation.
+    let missing = plain(&m.producer_with(&m.att, dangling(AUTHORITY)), "not found");
+    assert_eq!(
+        wire(&kit.publish(&missing).await),
+        is(400, "key_resolution_failed", Some("attestation_not_found")),
+        "{label} not found"
+    );
+    let probe_ref = KeyAttestationRef {
+        ctx_id: CtxId(ctx_a.clone()),
+        content_hash: kit.body_of(&ctx_a).await.content_hash,
+    };
+    let probe = plain(&m.producer_with(&m.att, probe_ref), "probe");
+    assert_eq!(
+        wire(&kit.publish(&probe).await),
+        is(400, "key_resolution_failed", Some("attestation_not_found")),
+        "{label} an ordinary body is not an attestation"
+    );
+
+    // kl-003 E: the pinned bytes differ.
+    let e_ref = KeyAttestationRef {
+        content_hash: ContentHash(format!("sha256:{}", "0".repeat(64))),
+        ..m.reference.clone()
+    };
+    let e = plain(&m.producer_with(&m.att, e_ref), "kl-003 E");
+    assert_eq!(
+        wire(&kit.publish(&e).await),
+        is(400, "key_resolution_failed", Some("attestation_mismatch")),
+        "{label} E"
+    );
+
+    // kl-003 F: another controller claims the attestation.
+    let controller2 = kit.controller("pub2", &[(same.clone(), false)]);
+    let mut att2 = m.att.clone();
+    att2.controller = controller2.clone();
+    att2.key_id = keyless_key_id(&controller2, &m.att.key_fingerprint).unwrap();
+    let f = plain(&m.producer_with(&att2, m.reference.clone()), "kl-003 F");
+    assert_eq!(f.agent_id.as_str(), controller2);
+    assert_eq!(
+        wire(&kit.publish(&f).await),
+        is(403, "key_not_authorized", Some("attestation_mismatch")),
+        "{label} F controller"
+    );
+    // kl-003 F: another key under the attestation.
+    let k62 = EphemeralKey::from_key(signing_key(62));
+    let mut att3 = m.att.clone();
+    att3.key_fingerprint = k62.fingerprint().unwrap();
+    att3.public_key_jwk = k62.jwk().unwrap();
+    att3.key_id = k62.key_id(&controller).unwrap();
+    let other_key = Minted {
+        att: att3.clone(),
+        reference: m.reference.clone(),
+        seed: 62,
+    };
+    let f2 = plain(&other_key.producer(), "kl-003 F key");
+    assert_eq!(
+        wire(&kit.publish(&f2).await),
+        is(403, "key_not_authorized", Some("attestation_mismatch")),
+        "{label} F key"
+    );
+
+    // kl-003 H: the signature is another body's.
+    let mut h = plain(&p, "kl-003 H");
+    h.signature.value = plain(&p, "kl-003 H other").signature.value;
+    let rh = kit.publish(&h).await;
+    assert_eq!(wire(&rh), is(400, "invalid_signature", None), "{label} H");
+    assert!(
+        rh.1["error"].get("details").is_none(),
+        "{label} H: {}",
+        rh.1
+    );
+
+    // kl-003 G: withdrawn by the registry.
+    let mg = kit
+        .mint(66, &controller, kit.oidc(SUBJECT), Some(600))
+        .await;
+    let w = kit.admin_retract(mg.reference.ctx_id.as_str()).await;
+    assert_eq!(w.0, StatusCode::OK, "{label} G retract: {}", w.1);
+    assert_eq!(
+        wire(&kit.publish(&plain(&mg.producer(), "kl-003 G")).await),
+        is(403, "key_not_authorized", Some("attestation_withdrawn")),
+        "{label} G"
+    );
+
+    // kl-003 B: the window. Mint two hours ago (window [-2h, -2h+600 s)).
+    let real = kit.clock.load(Ordering::SeqCst);
+    let past = real - 2 * 3600 * 1000;
+    kit.clock.store(past, Ordering::SeqCst);
+    let mb = kit
+        .mint(67, &controller, kit.oidc(SUBJECT), Some(600))
+        .await;
+    let mb2 = kit
+        .mint(68, &controller, kit.oidc(SUBJECT), Some(600))
+        .await;
+    // The handler's clock still inside the window: only the store's
+    // created_at (real time) refuses — the authoritative check.
+    let rb2 = kit.publish(&plain(&mb2.producer(), "kl-003 B store")).await;
+    assert_eq!(
+        wire(&rb2),
+        is(
+            403,
+            "key_not_authorized",
+            Some("outside_attestation_window")
+        ),
+        "{label} B store"
+    );
+    assert!(
+        rb2.1["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("created_at"),
+        "{label} B: the store refused: {}",
+        rb2.1
+    );
+    // Back to real time: the provisional check refuses first, and before
+    // the signature (order: step 6 before step 8).
+    kit.clock.store(real, Ordering::SeqCst);
+    let rb = kit.publish(&plain(&mb.producer(), "kl-003 B")).await;
+    assert_eq!(
+        wire(&rb),
+        is(
+            403,
+            "key_not_authorized",
+            Some("outside_attestation_window")
+        ),
+        "{label} B"
+    );
+    assert!(
+        rb.1["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("registry's time"),
+        "{label} B: the handler refused: {}",
+        rb.1
+    );
+    let mut bad = plain(&mb.producer(), "kl-003 B bad sig");
+    bad.signature.value = plain(&mb.producer(), "x").signature.value;
+    assert_eq!(
+        wire(&kit.publish(&bad).await),
+        is(
+            403,
+            "key_not_authorized",
+            Some("outside_attestation_window")
+        ),
+        "{label} B before H"
+    );
+
+    // kl-009 B: the controller stops listing the identity while the
+    // attestation is live; once the cached document expires the publish
+    // is refused.
+    let revoked = kit.controller("rev", &[(same.clone(), false)]);
+    let mr = kit.mint(69, &revoked, kit.oidc(SUBJECT), Some(600)).await;
+    kit.list(&revoked, &[]);
+    kit.resolver.invalidate(&revoked);
+    assert_eq!(
+        wire(&kit.publish(&plain(&mr.producer(), "kl-009 B")).await),
+        is(403, "key_not_authorized", Some("identity_not_authorized")),
+        "{label} kl-009 B"
+    );
+
+    // kl-004, from the kl-003 A body (keyless, SUBJECT, not org-wide).
+    let body_a = kit.body_of(&ctx_a).await;
+    let m_other = kit
+        .mint(70, &controller, kit.oidc(other_subject), Some(600))
+        .await;
+    assert_eq!(
+        wire(
+            &kit.publish(&successor(&m_other.producer(), &body_a, "kl-004 A"))
+                .await
+        ),
+        is(403, "not_authorized", Some("keyless_identity_mismatch")),
+        "{label} kl-004 A"
+    );
+    let m_same = kit
+        .mint(71, &controller, kit.oidc(SUBJECT), Some(600))
+        .await;
+    let b = kit
+        .publish(&successor(&m_same.producer(), &body_a, "kl-004 B"))
+        .await;
+    assert_eq!(b.0, StatusCode::CREATED, "{label} kl-004 B: {}", b.1);
+    let body_b = kit.body_of(b.1["ctx_id"].as_str().unwrap()).await;
+    let m_org = kit
+        .mint(72, &controller, kit.oidc(org_subject), Some(600))
+        .await;
+    let cc = kit
+        .publish(&successor(&m_org.producer(), &body_b, "kl-004 C"))
+        .await;
+    assert_eq!(cc.0, StatusCode::CREATED, "{label} kl-004 C: {}", cc.1);
+    let body_c = kit.body_of(cc.1["ctx_id"].as_str().unwrap()).await;
+    let dd = kit
+        .publish(&successor(
+            &controller_producer(&controller, 40),
+            &body_c,
+            "kl-004 D",
+        ))
+        .await;
+    assert_eq!(dd.0, StatusCode::CREATED, "{label} kl-004 D: {}", dd.1);
+    let body_d = kit.body_of(dd.1["ctx_id"].as_str().unwrap()).await;
+    assert_eq!(
+        wire(
+            &kit.publish(&successor(&m_same.producer(), &body_d, "kl-004 E"))
+                .await
+        ),
+        is(403, "not_authorized", Some("keyless_identity_mismatch")),
+        "{label} kl-004 E"
+    );
+
+    // kl-004 F (R13): a keyless-signed event, whatever its target and
+    // identity, org-wide included, on both endpoints.
+    let target_b = body_b.ctx_id.as_str().to_string();
+    let nowhere = dangling(AUTHORITY).ctx_id.as_str().to_string();
+    for (target, key_id, endpoint, event_type) in [
+        (&target_b, &m_same.att.key_id, "retract", "retracted"),
+        (&target_b, &m_org.att.key_id, "retract", "retracted"),
+        (&nowhere, &m_same.att.key_id, "retract", "retracted"),
+        (&target_b, &m_org.att.key_id, "republish", "republished"),
+    ] {
+        let envelope = event_under(target, &controller, key_id, event_type);
+        assert_eq!(
+            wire(&kit.post_event(target, endpoint, &envelope).await),
+            is(
+                400,
+                "key_resolution_failed",
+                Some("keyless_event_unsupported")
+            ),
+            "{label} kl-004 F {target} {endpoint}"
+        );
+    }
+
+    // kl-007 B: a DID document carrying an `acdp-kl-` verification method
+    // does not make the key resolvable.
+    let k73 = EphemeralKey::from_key(signing_key(73));
+    let fragment = k73.key_id(&controller).unwrap();
+    let fragment = fragment.rsplit('#').next().unwrap().to_string();
+    let squatter = kit.controller_with_keys("squat", &[], &[(&fragment, 73), ("key-1", 74)]);
+    let mut sq = plain(&controller_producer(&squatter, 73), "kl-007 B");
+    sq.signature.key_id = format!("{squatter}#{fragment}");
+    let r = kit.publish(&sq).await;
+    assert_eq!(
+        (r.0.as_u16(), r.1["error"]["code"].as_str()),
+        (400, Some("key_resolution_failed")),
+        "{label} kl-007 B: {}",
+        r.1
+    );
 }
