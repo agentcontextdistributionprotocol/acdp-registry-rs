@@ -23,7 +23,7 @@ belongs in the per-crate changelogs.
 
 ## Unreleased
 
-**No upgrade steps.** Adopts ACDP spec `bf37195` (RFC-ACDP-0021 0.5.0-draft.3) and restores the
+**No upgrade steps.** Adopts ACDP spec `546b8c8` (RFC-ACDP-0021 0.5.0-draft.3, plus the `issuer_unreachable` reason token) and restores the
 exact `acdp =0.18.2` pin. The binary's behavior is unchanged: `acdp-registry-keyless` is still
 refused at startup, and the Hard Seam is unchanged (no new `KeyAuthorization` or
 `RevocationTrustClass` variant; revocation discovery stays keyed by `agent_id`).
