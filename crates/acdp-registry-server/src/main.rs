@@ -1302,7 +1302,10 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     // Compose state + router. The constructor seeds `playground` —
     // the live-mutable cell backing `POST /admin/pinned-keys/reload`
     // (plan §2) — from `cfg.playground`.
-    let state = AppStateInner::new(server, auth, webhook, cfg.clone(), cross_registry)
+    // Fallible: with keyless enabled, an unusable attestation signer is
+    // fatal here rather than a quiet 501 behind an advertised profile.
+    let state = AppStateInner::try_new(server, auth, webhook, cfg.clone(), cross_registry)
+        .map_err(anyhow::Error::msg)?
         .with_shared_auth_limiter(shared_auth_limiter);
 
     // RFC-ACDP-0015 §6.1 witness-cosignature aggregation: one background
@@ -2474,6 +2477,54 @@ mod tests {
             authority,
         ));
         acdp_registry_core::build_router(AppStateInner::new(server, auth, None, cfg, None))
+    }
+
+    /// RFC-ACDP-0021: with `keyless.enabled`, a state whose attestation
+    /// signer cannot be built is a startup error (`try_new`, which `serve`
+    /// propagates with `?`), never a logged fallback to 501 behind an
+    /// advertised profile. With keyless off the same config builds.
+    #[cfg(feature = "storage-sqlite")]
+    #[tokio::test]
+    async fn keyless_without_a_usable_signer_is_fatal_at_state_construction() {
+        use acdp_registry_auth::InMemoryChallengeStore;
+        use acdp_registry_sqlite::SqliteStore;
+        use acdp_registry_types::AuthConfig;
+
+        let build = |cfg: RegistryConfig| async move {
+            let store = SqliteStore::connect_in_memory().await.unwrap();
+            store.migrate().await.unwrap();
+            let authority = cfg.registry.authority.clone();
+            let server = Arc::new(
+                RegistryServer::try_new(store, build_capabilities(&cfg), &authority).unwrap(),
+            );
+            let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+            let signer = JwtSigner::new(
+                JwtSecret::from_bytes(&[42u8; 32]),
+                format!("did:web:{authority}"),
+                authority.clone(),
+                30,
+            );
+            let auth = Arc::new(AuthService::new(
+                AuthConfig::default(),
+                challenges,
+                signer,
+                Arc::new(WebResolver::new()),
+                authority,
+            ));
+            AppStateInner::try_new(server, auth, None, cfg, None).map(|_| ())
+        };
+
+        let mut cfg = RegistryConfig::defaults();
+        assert!(
+            cfg.receipt.signing_key_seed_b64.is_empty(),
+            "no receipt key"
+        );
+        assert!(build(cfg.clone()).await.is_ok(), "keyless off builds");
+        cfg.keyless.enabled = true;
+        let err = build(cfg.clone()).await.expect_err("keyless on, no signer");
+        assert!(err.contains("keyless.enabled=true"), "{err}");
+        cfg.receipt.signing_key_seed_b64 = "not base64!".into();
+        assert!(build(cfg).await.is_err(), "keyless on, a bad receipt key");
     }
 
     /// W3-U5: pins the invariant the auth-off `info!` in `serve_with_store`

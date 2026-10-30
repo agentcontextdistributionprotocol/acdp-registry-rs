@@ -307,6 +307,8 @@ rate_limit_scopes! {
     ChallengeGlobal   => "challenge_global",
     PublishPerAgent   => "publish_per_agent",
     LifecyclePerAgent => "lifecycle_per_agent",
+    KeylessPerIp      => "keyless_per_ip",
+    KeylessPerIdentity => "keyless_per_identity",
 }
 
 /// What the shared (cluster-wide) rate-limit backend answered. A closed enum,

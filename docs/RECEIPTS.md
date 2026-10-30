@@ -242,6 +242,18 @@ read §9 before doing it.
    `receipt-key-2` in `assertionMethod`.
 4. Never delete the `retired_keys` entry (see above).
 
+> **Keyless warning (applies once `keyless.enabled`; startup refuses it in
+> this release).** RFC-ACDP-0021 key attestations are bodies signed with the
+> receipt key, and consumers check them with strict body-signature
+> verification, which has no historical path: a key that has left
+> `assertionMethod` no longer verifies a body. **Rotating the receipt key
+> therefore invalidates every attestation the old key signed**: consumers
+> refuse them at RFC-ACDP-0021 §8.1 step 1 (`attestation_invalid`), both for
+> windows still open and for the historical verification of keyless bodies
+> that rest on them. Keeping retired keys in `assertionMethod` is not an
+> option, since it would defeat a compromise rotation. Until the spec defines
+> an attester-key lifecycle, rotate only when you accept that loss.
+
 ## Backfill policy: none
 
 Contexts published before receipts were enabled stay receipt-less, and their

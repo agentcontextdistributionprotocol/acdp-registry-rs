@@ -68,7 +68,10 @@ playground     = ["acdp-registry-core/playground"]
 # uses) so the loopback-permissive policy used by
 # `anchors_uri_never_dereferenced_publish_and_retrieve` (http_integration.rs)
 # is only reachable from test builds, never from the production binary.
-acdp           = { workspace = true, features = ["test-transport"] }
+# RFC-ACDP-0021 Phase 5: `keyless` gives the tests the SDK's
+# `producer::keyless::EphemeralKey` (the client half of POST
+# /key-attestations). Its feature lists are empty: no crate, no vet entry.
+acdp           = { workspace = true, features = ["test-transport", "keyless"] }
 http-body-util = "0.1"
 hex            = { workspace = true }
 serde          = { workspace = true }

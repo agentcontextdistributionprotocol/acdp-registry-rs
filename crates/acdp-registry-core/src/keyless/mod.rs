@@ -5,11 +5,15 @@
 //!   against the issuer keys [`jwks`] fetches and caches.
 //! - [`jwks`]: the in-process cache of each configured issuer's published
 //!   keys, fetched through [`crate::outbound`].
-//!
-//! Nothing here is reachable over HTTP yet: the `/key-attestations`
-//! routes still answer 501, and the profile is never advertised.
+//! - [`mint`]: §5.2 steps 4, 5 and 7 and the §5.3 body, pure.
+//! - [`KeylessState`]: what `POST /key-attestations` holds beyond the
+//!   cache: the attestation signing key, the clock and the two limiters.
+//!   Present only when `keyless.enabled`; without it both
+//!   `/key-attestations` methods answer 501. Startup still refuses
+//!   `enabled = true`, so only in-process harnesses build one.
 
 pub mod jwks;
+pub mod mint;
 pub mod token;
 
 pub use jwks::{JwksCache, KeySource, Outbound};
@@ -27,6 +31,68 @@ pub fn system_clock() -> Clock {
     std::sync::Arc::new(|| chrono::Utc::now().timestamp_millis())
 }
 
+/// `POST /key-attestations` state (RFC-ACDP-0021 §5), built from config
+/// when `keyless.enabled`.
+pub struct KeylessState {
+    /// The key attestations are signed with: the receipt key, which
+    /// `build_did_document` lists in `assertionMethod` (§5.3).
+    signing_key: acdp::crypto::SigningKey,
+    /// `did:web:<authority>#<receipt.key_id_fragment>`.
+    pub key_id: String,
+    /// Standard base64 of the signing key's public half, the pinned key
+    /// the mint is proven against.
+    pub public_key_b64: String,
+    /// `did:web:<authority>`, the `aud` tokens must name.
+    pub registry_did: String,
+    /// Sets `not_before` (§5.2 step 7) and the token checks' `now`. Store
+    /// `created_at` stays on the real clock.
+    pub clock: Clock,
+    /// Per client IP, charged on arrival. `None` when the budget is 0.
+    pub ip_limiter: Option<std::sync::Arc<crate::rate_limit::AgentRateLimiter>>,
+    /// Per workload identity, charged only once a token verified for it
+    /// (§5.1, plan D17). `None` when the budget is 0.
+    pub identity_limiter: Option<std::sync::Arc<crate::rate_limit::AgentRateLimiter>>,
+}
+
+impl KeylessState {
+    /// The state for `cfg`, or `None` while `keyless.enabled` is false.
+    /// A receipt key that does not load is an error: the binary's startup
+    /// validation refuses keyless without one.
+    pub fn from_config(cfg: &acdp_registry_types::RegistryConfig) -> Result<Option<Self>, String> {
+        if !cfg.keyless.enabled {
+            return Ok(None);
+        }
+        let signer = crate::receipt::build_signer(&cfg.receipt, &cfg.registry.authority)?;
+        let signing_key = crate::receipt::load_signing_key(&cfg.receipt)?;
+        use base64::Engine as _;
+        let limiter = |n: u32| {
+            (n > 0).then(|| std::sync::Arc::new(crate::rate_limit::AgentRateLimiter::new(n)))
+        };
+        Ok(Some(Self {
+            public_key_b64: base64::engine::general_purpose::STANDARD
+                .encode(signing_key.verifying_key_bytes()),
+            signing_key,
+            key_id: signer.key_id().to_string(),
+            registry_did: acdp::did::authority_to_did_web(&cfg.registry.authority),
+            clock: system_clock(),
+            ip_limiter: limiter(cfg.keyless.rate_per_ip_per_minute),
+            identity_limiter: limiter(cfg.keyless.rate_per_identity_per_minute),
+        }))
+    }
+
+    /// The attestation signing key.
+    pub fn signing_key(&self) -> &acdp::crypto::SigningKey {
+        &self.signing_key
+    }
+
+    /// Replace the clock (tests).
+    #[must_use]
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+}
+
 /// The `details.reason` tokens this module emits (`registries/error-codes.md`,
 /// "Keyless-signing reason tokens").
 pub mod reason {
@@ -40,6 +106,20 @@ pub mod reason {
     pub const AUDIENCE_MISMATCH: &str = "audience_mismatch";
     /// §5.2 step 3, confirmation.
     pub const CONFIRMATION_MISMATCH: &str = "confirmation_mismatch";
+    /// §5.2 step 3, single use.
+    pub const TOKEN_REPLAYED: &str = "token_replayed";
+    /// §5.2 step 6.
+    pub const IDENTITY_NOT_AUTHORIZED: &str = "identity_not_authorized";
+}
+
+/// `e` with its keyless `details.reason`, when its message carries one
+/// (an SDK or store refusal built with `KeylessReason::error`); `e` as is
+/// otherwise.
+pub fn with_keyless_reason(e: AcdpError) -> RegistryError {
+    match acdp::types::keyless::KeylessReason::of(&e) {
+        Some(r) if r.is_registry_token() => RegistryError::with_reason(e, r.as_str()),
+        _ => RegistryError::Acdp(e),
+    }
 }
 
 /// Why a §5.2 step-1 to step-3 check refused, each with its wire answer

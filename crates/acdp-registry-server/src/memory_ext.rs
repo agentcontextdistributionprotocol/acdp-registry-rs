@@ -1989,3 +1989,26 @@ mod tests {
         assert!(store.key_attestation(ctx.as_str()).await.unwrap().is_some());
     }
 }
+
+/// RFC-ACDP-0021 Phase 5: the `POST/GET /key-attestations` A/H/E core on
+/// this backend, from the same kit the SQLite and pg suites use. The
+/// memory store keeps no transparency log, so the leaf half of A is the
+/// SQLite and pg runs'.
+#[cfg(test)]
+#[path = "../tests/keyless_kit/mod.rs"]
+mod keyless_kit;
+
+#[cfg(test)]
+mod keyless_http_tests {
+    use super::keyless_kit::{assert_mint_core, Kit, Opts};
+    use super::MemoryStore;
+    use acdp_registry_store::ExtendedRegistryStore as _;
+
+    #[tokio::test]
+    async fn kl002_a_h_e_core_on_the_memory_store() {
+        let store = MemoryStore::new();
+        store.migrate().await.unwrap();
+        let kit = Kit::new(store, Opts::default()).await;
+        assert_mint_core(&kit, "memory").await;
+    }
+}

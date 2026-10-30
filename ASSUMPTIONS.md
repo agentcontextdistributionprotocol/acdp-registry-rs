@@ -5131,3 +5131,28 @@ underlying settings and code were not touched by this pass, only the record of t
   - (f) no failure backoff, so each request waits a full timeout during an outage.
 - Blast radius: low and reversible. Nothing is reachable over HTTP yet, and `keyless.enabled` is still refused at startup.
 - Status: UNCONFIRMED
+
+## RFC-ACDP-0021 keyless, Phase 5 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) **Order of the budgets.** The per-IP budget is charged on arrival, before the body is read. The per-identity budget is peeked after the schema and charged only after `keyless::verify` succeeds, so a forged token naming an identity cannot drain that identity's budget. Keys: the resolved client IP (`rate_limit::client_ip`, as `/auth/*`) and `(type, issuer, subject)`. New metric scopes `keyless_per_ip` and `keyless_per_identity`.
+  - (b) **Replay is checked twice.** A read-only `key_attestation_token_seen` runs right after the token verifies (step 3, so a replay with a bad `pop` still answers `token_replayed`). The store's UNIQUE `token_hash` inside `commit_proven` is authoritative for a race; `with_keyless_reason` restores `details.reason` on that path.
+  - (c) **Step 6 freshness.** `WebResolver::resolve_until(controller, request start, listed?)`. Listed: proceed, fresh or not. Unlisted and fresh: `identity_not_authorized`. Unlisted, not fresh (the forced re-fetch was rate-limited by the resolver's 3600 s interval): 502 `key_resolution_unreachable` with no reason, since §5.2 has no token for it and a final 403 against a stale document would be wrong. A DID host answering non-2xx (404 included) is 502 `key_resolution_unreachable`, as RFC-ACDP-0001 §5.11 step 3, RFC-ACDP-0021 §5.2 step 6 and kl-002 L require.
+  - (c2) **An unusable attestation signer is fatal.** `AppStateInner::try_new` fails when `keyless.enabled` and `KeylessState::from_config` cannot build the signer; the binary propagates it with `?`, so a registry never advertises the profile while answering 501. `AppStateInner::new` panics on the same error (harnesses). The existing `keyless.enabled=true` startup refusal is unchanged.
+  - (d) **Step 5** compares `request.algorithm` with the JWK's algorithm and with the capabilities' `supported_signature_algorithms`. It does not use a separate keyless list.
+  - (e) **Window.** `[now, min(now + min(requested or 600, max_attestation_ttl_seconds), token exp)]`, all in milliseconds from the injectable keyless clock (`i64` Unix ms, the Phase 4 `Clock`, not a `DateTime` source). A window that would be empty is `token_invalid`.
+  - (f) **GET `limit`.** Default 20, maximum 100 (search's bounds, §5.4 "paginated like search"), below the store's own 200. A missing or non-`did:web` `controller` is `schema_violation`.
+  - (g) **Parse errors are sanitized.** serde messages for unknown or missing members are kept; any other message is replaced by its line and column, because serde can quote the value it read and that value may be the token.
+  - (h) **Off means untouched.** Both handlers take the raw request and answer 501 before any extractor runs. A garbage body, a wrong media type or a bad query still gets the same 501 as before.
+  - (i) **No idempotency, webhook or change hint on a mint.** `commit_proven(proven, None, None)`. The receipt and log-leaf metrics are recorded as for a publish.
+  - (j) **Receipt-key rotation invalidates attestations (known limitation).** Attestations are signed with the receipt key, and the SDK's consumer check (`check_attestation`, acdp-client `keyless.rs` ~373) uses strict `verify_body_signature`, which has no historical path. A retired receipt key leaves `assertionMethod` (`receipt::build_did_document`), so after a rotation every attestation the retired key signed fails RFC-ACDP-0021 §8.1 step 1 (`attestation_invalid`), for live windows and for the historical placement of the keyless bodies that rest on them. Keeping retired keys in `assertionMethod` was rejected: it would defeat a compromise rotation. A spec fix (an RFC-ACDP-0010 §9-style lifecycle for the attester key) has been raised with the spec owner. Operators are warned in `docs/RECEIPTS.md` (rotation procedure).
+  - (k) **Tests.** A shared kit (`tests/keyless_kit/mod.rs`) runs the A/H/E core on SQLite, memory and pg. It serves its own controller DID documents rather than extending `didweb::did_document_for_seed`, which has no service member. The memory store keeps no log, so the "one log leaf" half of A runs on SQLite and pg only.
+  - (l) `acdp`'s `keyless` feature is enabled on the server crate's dev-dependency only, for `producer::keyless::EphemeralKey`. Its feature lists are empty, so neither Cargo.lock nor vet changed.
+  - (m) Mutation scope: no `examine_globs` file changed. `handlers/context.rs` and `receipt.rs` are untouched.
+- Chose: as above.
+- Alternatives:
+  - (a) charging the identity budget on arrival, which lets anyone exhaust it;
+  - (c) answering `identity_not_authorized` against a stale cached document;
+  - (f) the store's 200 as the maximum.
+- Blast radius: low and reversible. Startup still refuses `keyless.enabled`, so no deployed registry reaches these handlers; with it off the wire is byte-identical.
+- Status: UNCONFIRMED
