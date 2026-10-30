@@ -1570,3 +1570,28 @@ async fn pg_key_attestation_core() {
     .await;
     keyless_kit::assert_mint_core(&kit, "pg").await;
 }
+
+/// RFC-ACDP-0021 Phase 6 on Postgres, with the log: kl-003 A-H (receipt
+/// and leaf fingerprint), kl-004 A-F, kl-009 B and kl-007 B.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn pg_keyless_publish_scenarios() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = PgStore::connect(&url, 4)
+        .await
+        .unwrap()
+        .with_transparency_log();
+    store.migrate().await.unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    truncate(&pool).await;
+    pool.close().await;
+    let kit = keyless_kit::Kit::new(
+        store,
+        keyless_kit::Opts {
+            log: true,
+            ..keyless_kit::Opts::default()
+        },
+    )
+    .await;
+    keyless_kit::assert_keyless_publish_core(&kit, "pg").await;
+}

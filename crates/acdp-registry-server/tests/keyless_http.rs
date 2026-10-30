@@ -837,3 +837,171 @@ async fn disabled_answers_501_before_reading_the_request() {
     assert_eq!(kit.outside.hits("jwks"), 0);
     assert_eq!(kit.did_hits(&controller), 0);
 }
+
+// ── keyless publish, §7 and R13 (Phase 6) ──────────────────────────────────
+
+/// kl-003 A-H, kl-004 A-F, kl-009 B and kl-007 B over HTTP on SQLite, with
+/// the transparency log (the leaf half of kl-003 A).
+#[tokio::test(flavor = "multi_thread")]
+async fn keyless_publish_scenarios_on_sqlite() {
+    let (kit, _d) = kit_with(Opts {
+        log: true,
+        ..Opts::default()
+    })
+    .await;
+    keyless_kit::assert_keyless_publish_core(&kit, "sqlite").await;
+}
+
+/// §12 / D13: with the profile on, a keyless body never reaches the
+/// unpinned playground branch, which verifies nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpinned_playground_never_accepts_a_keyless_body() {
+    let (kit, _d) = kit_with(Opts {
+        playground: true,
+        ..Opts::default()
+    })
+    .await;
+    let controller = listed(&kit);
+    let m = kit.mint(80, &controller, kit.oidc(SUBJECT), None).await;
+    let bad = keyless_kit::plain(
+        &m.producer_with(&m.att, keyless_kit::dangling(keyless_kit::AUTHORITY)),
+        "playground",
+    );
+    assert_eq!(
+        wire(&kit.publish(&bad).await),
+        is(400, "key_resolution_failed", Some("attestation_not_found"))
+    );
+    let mut forged = keyless_kit::plain(&m.producer(), "playground forged");
+    forged.signature.value = keyless_kit::plain(&m.producer(), "x").signature.value;
+    assert_eq!(
+        wire(&kit.publish(&forged).await),
+        is(400, "invalid_signature", None)
+    );
+    let ok = kit
+        .publish(&keyless_kit::plain(&m.producer(), "playground ok"))
+        .await;
+    assert_eq!(ok.0, StatusCode::CREATED, "{}", ok.1);
+    assert_eq!(
+        ok.1["registry_receipt"]["key_fingerprint"],
+        json!(m.att.key_fingerprint)
+    );
+}
+
+/// kl-003 J, kl-004 F and kl-007 B with the profile off: the SDK refuses at
+/// key resolution, with no `details`, exactly as before this profile.
+#[tokio::test(flavor = "multi_thread")]
+async fn profile_off_refuses_keyless_bodies_and_events_without_a_reason() {
+    let (kit, _d) = kit_with(Opts {
+        enabled: false,
+        ..Opts::default()
+    })
+    .await;
+    let controller = kit.controller_with_keys(
+        "off",
+        &[(kit.oidc_identity(SUBJECT), false)],
+        &[("key-1", 81)],
+    );
+    let m = keyless_kit::Minted::unminted(82, &controller);
+    let no_details = |r: &(StatusCode, Value), what: &str| {
+        assert_eq!(
+            wire(r),
+            is(400, "key_resolution_failed", None),
+            "{what}: {}",
+            r.1
+        );
+        assert!(r.1["error"].get("details").is_none(), "{what}: {}", r.1);
+    };
+    // kl-003 J.
+    no_details(
+        &kit.publish(&keyless_kit::plain(&m.producer(), "off J"))
+            .await,
+        "kl-003 J",
+    );
+    // kl-004 F: a keyless-signed event on an existing context.
+    let ok = kit
+        .publish(&keyless_kit::plain(
+            &keyless_kit::controller_producer(&controller, 81),
+            "off target",
+        ))
+        .await;
+    assert_eq!(ok.0, StatusCode::CREATED, "{}", ok.1);
+    let target = ok.1["ctx_id"].as_str().unwrap();
+    no_details(
+        &kit.post_event(
+            target,
+            "retract",
+            &keyless_kit::event_under(target, &controller, &m.att.key_id, "retracted"),
+        )
+        .await,
+        "kl-004 F",
+    );
+    // kl-007 B.
+    let k = ed_key_from(83);
+    let fragment = k
+        .key_id(&controller)
+        .unwrap()
+        .rsplit('#')
+        .next()
+        .unwrap()
+        .to_string();
+    let squatter = kit.controller_with_keys("squat-off", &[], &[(&fragment, 83)]);
+    let mut sq = keyless_kit::plain(&keyless_kit::controller_producer(&squatter, 83), "off B");
+    sq.signature.key_id = format!("{squatter}#{fragment}");
+    let r = kit.publish(&sq).await;
+    assert_eq!(
+        (r.0.as_u16(), r.1["error"]["code"].as_str()),
+        (400, Some("key_resolution_failed")),
+        "kl-007 B: {}",
+        r.1
+    );
+}
+
+/// kl-007 C: a registry advertising `acdp_version` < 0.5.0 refuses
+/// `key_attestation` with `schema_violation` naming §6.2, profile on or
+/// off, on the did:web and the did:key branches. At 0.5.0 with the profile
+/// off the same body is still kl-003 J's `key_resolution_failed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pre_050_registry_refuses_key_attestation_as_a_schema_violation() {
+    for enabled in [false, true] {
+        let (kit, _d) = kit_with(Opts {
+            enabled,
+            acdp_version: "0.4.0",
+            ..Opts::default()
+        })
+        .await;
+        let controller = listed(&kit);
+        let m = keyless_kit::Minted::unminted(84, &controller);
+        let did_web = keyless_kit::plain(&m.producer(), "kl-007 C");
+        let mut did_key = keyless_kit::plain(
+            &acdp::producer::Producer::new_did_key(SigningKey::from_bytes(&[85; 32])),
+            "kl-007 C did:key",
+        );
+        did_key.key_attestation = Some(m.reference.clone());
+        for (what, req) in [("did:web", &did_web), ("did:key", &did_key)] {
+            let r = kit.publish(req).await;
+            assert_eq!(
+                wire(&r),
+                is(400, "schema_violation", None),
+                "{what} enabled={enabled}: {}",
+                r.1
+            );
+            assert!(
+                r.1["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("RFC-ACDP-0021 §6.2"),
+                "{}",
+                r.1
+            );
+        }
+        if !enabled {
+            let (kit5, _d5) = kit_with(Opts {
+                enabled: false,
+                ..Opts::default()
+            })
+            .await;
+            let r = kit5.publish(&did_web).await;
+            assert_eq!(wire(&r), is(400, "key_resolution_failed", None), "{}", r.1);
+        }
+    }
+}
