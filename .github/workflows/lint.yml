@@ -246,6 +246,19 @@ jobs:
           python3 .github/scripts/required_checks_guard.py --self-test
           python3 .github/scripts/required_checks_guard.py --check
 
+      # acdp is pinned EXACTLY, together with tools/live-smoke and the cargo-vet
+      # exemptions for every acdp* crate. Before acdp-ci#47 the shared bump
+      # automation dropped the `=` and moved neither, and cargo-vet is advisory
+      # here, so such bump PRs auto-merged green-on-required with vet red (#476,
+      # #485, #497). This step is in the required `lint` job as the backstop. Unit tests first,
+      # as above: negative controls before the verdict on the real tree.
+      - name: acdp exact-pin guard
+        if: '!cancelled()'
+        run: |
+          set -euo pipefail
+          ACDP_PIN_GUARD_SKIP_REAL_TREE=1 python3 .github/scripts/test_check_acdp_pin.py -v
+          python3 .github/scripts/check_acdp_pin.py
+
       # The daily drift job (branch-protection-drift.yml) runs on a schedule, so a bug
       # in its comparison would otherwise surface only as a wrong verdict on main --
       # or never, if the bug makes it pass. Its logic is a script so it can be

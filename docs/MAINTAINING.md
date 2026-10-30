@@ -212,7 +212,7 @@ gh api --method POST $R/branches/main/protection/enforce_admins --jq .enabled
 # 4. Promote the advisory checks: live checks + the baseline's advisory_pending
 #    MINUS the names in KEEP_ADVISORY, every one pinned (unique_by makes a re-run
 #    harmless). cargo-vet stays advisory: promoting it would block every Dependabot
-#    and bump-acdp PR until someone regenerates the exemptions. Inspect the body
+#    PR until someone regenerates the exemptions. Inspect the body
 #    first: it must not contain cargo-vet.
 KEEP_ADVISORY='["cargo-vet"]'
 gh api $R/branches/main/protection/required_status_checks \
@@ -373,6 +373,18 @@ in `Cargo.lock` to be covered by one of:
   not a verdict. A crypto-critical crate may be exempted only at a version on the
   allow-list (see [below](#crypto-critical-crates-may-not-be-quietly-exempted)).
 
+**The `acdp*` exemptions move with the exact `acdp` pin, and a required check enforces it.**
+The `acdp exact-pin guard` step of the required `lint` job (`.github/scripts/check_acdp_pin.py`)
+fails unless `acdp = "=X"` in both `Cargo.toml` and `tools/live-smoke/Cargo.toml`, both
+lockfiles hold every crates.io `acdp*` crate at X, and every `[[exemptions.acdp*]]` is at X.
+cargo-vet staying advisory is why it exists: before acdp-ci#47 the shared bump automation
+dropped the `=` and moved neither live-smoke nor the exemptions, and three such bumps (#476,
+#485, #497) went green on every required check and auto-merged with vet red. Since acdp-ci#47, `bump-acdp.yml` passes
+`extra-manifests: tools/live-smoke`, and the shared bump keeps the `=`, bumps live-smoke in
+lockstep and moves the `[[exemptions.acdp*]]`, so a bot bump arrives consistent. The guard
+stays as the backstop: a bump that still leaves one place behind arrives red on `lint`.
+A new `acdp-*` crate in a release still needs its exemption added by hand.
+
 The workspace's own crates carry `audit-as-crates-io = false` policies. release-plz has
 `publish = false`, so they are not on crates.io; the policies keep `cargo vet` from
 asking about them if that ever changes.
@@ -410,8 +422,9 @@ and whether the notes say what was read). Check every new wildcard audit and
 that no import silently replaced an exemption you meant to keep reviewing. To record a real review instead, use
 `cargo vet certify <crate> <version>` (or a delta from an audited version). The notes
 should say what was read and what is not claimed, as acdp-rs's worksheets do. Each
-`acdp` bump changes the `acdp-*` versions, so a `bump-acdp` PR always needs the
-regenerate step until those crates are trusted some other way (for example a
+`acdp` bump changes the `acdp-*` versions; the shared `bump-acdp` automation moves their
+exemptions itself (see above), so only a release that adds or drops an `acdp-*` crate
+needs a hand edit, until those crates are trusted some other way (for example a
 `cargo vet trust` entry for their publisher, which is a maintainer decision).
 
 ### Crypto-critical crates may not be quietly exempted
@@ -465,11 +478,11 @@ acdp-rs's pin, so both repositories read the same `imports.lock` format.
 
 `cargo-vet` stays **advisory** until a maintainer decides otherwise. The runbook's
 promotion step leaves it out on purpose. While the `acdp-*` crates and most of the graph
-are exempted, every Dependabot and `bump-acdp` PR would be blocked until someone ran
-`cargo vet regenerate exemptions`. Promoting it is a separate, deliberate change. Remove
+are exempted, every Dependabot PR would be blocked until someone ran
+`cargo vet regenerate exemptions` (`bump-acdp` PRs move the `acdp*` exemptions themselves). Promoting it is a separate, deliberate change. Remove
 `cargo-vet` from `KEEP_ADVISORY` in step 4. Move it from `advisory_pending` to `required`
-in the baseline in the same PR. Have a plan for the `acdp-*` bumps first, such as a
-`cargo vet trust` entry or a regenerate step in `bump-acdp.yml`.
+in the baseline in the same PR. Have a plan for Dependabot bumps first, such as a
+regenerate step or `cargo vet trust` entries.
 
 ## Mutation oracle
 

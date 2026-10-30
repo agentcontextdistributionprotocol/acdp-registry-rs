@@ -14,6 +14,10 @@ jobs:
     with:
       ecosystem: cargo
       package: acdp
+      # tools/live-smoke is a second workspace with its own lockfile; the shared
+      # cargo bump keeps the `=` operator, bumps it in lockstep and moves the
+      # [[exemptions.acdp*]] (acdp-ci#47). check_acdp_pin.py (lint) enforces it.
+      extra-manifests: tools/live-smoke
       version: ${{ github.event.inputs.version }}
     secrets:
       ACDP_BOT_APP_ID: '${{ secrets.ACDP_BOT_APP_ID }}'
