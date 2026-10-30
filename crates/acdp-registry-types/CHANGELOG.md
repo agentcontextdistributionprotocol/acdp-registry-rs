@@ -1,5 +1,16 @@
 
 
+## [0.7.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.6.1...acdp-registry-types/v0.7.0) - 2026-10-30
+
+### Added
+
+- *(cors)* opt-in any-origin anonymous reads ([registry.cors] public_reads) ([#489](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/489))
+
+### Other
+
+- *(deps)* adopt ACDP spec @ 75fb0da and bump acdp to =0.18.1 ([#494](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/494))
+
+
 ## [0.6.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.6.0...acdp-registry-types/v0.6.1) - 2026-10-26
 
 ### Other

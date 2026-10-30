@@ -1,5 +1,12 @@
 
 
+## [0.7.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-webhook/v0.6.1...acdp-registry-webhook/v0.7.0) - 2026-10-30
+
+### Other
+
+- update Cargo.toml dependencies
+
+
 ## [0.6.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-webhook/v0.6.0...acdp-registry-webhook/v0.6.1) - 2026-10-26
 
 ### Other
