@@ -27,6 +27,10 @@
 
 mod common;
 mod didweb;
+// Only `SpawnedRegistry::start` and `get_raw` are used here
+// (`keyless_off_wire_snapshot`); the rest serves `conformance.rs`.
+#[allow(dead_code)]
+mod spawned_registry;
 
 use std::sync::Arc;
 
@@ -160,6 +164,7 @@ fn config(playground: bool) -> RegistryConfig {
         log: Default::default(),
         changes: Default::default(),
         events: Default::default(),
+        keyless: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -5549,6 +5554,117 @@ async fn key_attestations_are_not_implemented() {
         let v = body_to_json(resp).await;
         assert_eq!(v["error"]["code"], "not_implemented", "{method}: {v}");
     }
+}
+
+/// The golden `/.well-known/acdp.json` a default-config binary serves,
+/// captured from main before any RFC-ACDP-0021 code landed.
+const KEYLESS_OFF_CAPABILITIES_GOLDEN: &str = "tests/golden/keyless-off-capabilities.json";
+
+/// RFC-ACDP-0021 feature-off snapshot (plans/rfc0021-keyless.md, Phase 2).
+/// With `[keyless]` absent the wire stays byte-for-byte what it was before
+/// the profile was built, and every later phase re-runs this unchanged:
+///
+/// 1. the default-config capabilities document (the real binary's
+///    `build_capabilities`, so a spawned process, not this file's `caps()`)
+///    equals the committed golden file, and carries no `keyless` member;
+/// 2. a kl-003 J publish (a keyless key id on a resolvable did:web DID) is
+///    `key_resolution_failed` with no `details` member;
+/// 3. a kl-004 F lifecycle event signed under a keyless key id is
+///    `key_resolution_failed` with no `details` member.
+///
+/// `details.reason` is what the profile adds (RFC-ACDP-0021 §5.2); its
+/// absence here is the proof that the reason plumbing is inert when OFF.
+#[tokio::test(flavor = "multi_thread")]
+async fn keyless_off_wire_snapshot() {
+    // 1. Capabilities, as served by the shipped binary.
+    let golden_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(KEYLESS_OFF_CAPABILITIES_GOLDEN);
+    let golden = std::fs::read_to_string(&golden_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", golden_path.display()));
+    let (status, served) = tokio::task::spawn_blocking(|| {
+        let dir = tempfile::Builder::new()
+            .prefix("acdp-kl-off-")
+            .tempdir()
+            .expect("tempdir");
+        let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "kl-off", "", "");
+        reg.get_raw("/.well-known/acdp.json")
+    })
+    .await
+    .expect("join");
+    assert_eq!(status, 200, "{served}");
+    assert_eq!(
+        served,
+        golden.trim_end_matches('\n'),
+        "the feature-off capabilities document drifted from {KEYLESS_OFF_CAPABILITIES_GOLDEN}"
+    );
+    let doc: Value = serde_json::from_str(&served).expect("capabilities JSON");
+    assert!(doc.get("keyless").is_none(), "{doc}");
+    assert!(
+        !doc["profiles"]
+            .as_array()
+            .expect("profiles")
+            .iter()
+            .any(|p| p == "acdp-registry-keyless"),
+        "{doc}"
+    );
+
+    // 2 and 3 share one did:web harness, lifecycle on.
+    let addr = didweb::spawn_didweb_server().await;
+    let resolver = Arc::new(
+        WebResolver::with_test_endpoint(
+            didweb::ca_pem().as_bytes(),
+            didweb::DIDWEB_AUTHORITY,
+            addr,
+        )
+        .expect("test-endpoint resolver"),
+    );
+    let h = didweb_lifecycle_harness(resolver).await;
+    let seed = 68;
+    let did = didweb::didweb_for_seed(seed);
+
+    // 2. kl-003 J: a publish under a keyless key id.
+    let keyless = Producer::new(
+        SigningKey::from_bytes(&[seed; 32]),
+        AgentDid::new(did.clone()),
+        format!("{did}#acdp-kl-01"),
+    );
+    let req = keyless
+        .publish_request()
+        .title("kl-off publish")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body = {v}");
+    assert_eq!(v["error"]["code"], "key_resolution_failed", "body = {v}");
+    assert!(v["error"].get("details").is_none(), "body = {v}");
+    let msg = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("keyless key id"), "message = {msg}");
+
+    // 3. kl-004 F: a real context by the same producer, then a lifecycle
+    //    event on it carrying a keyless key id. The SDK refuses to sign under
+    //    one, so the event is signed under `#key-1` and the id rewritten on
+    //    the wire: the key id is refused before any signature is checked.
+    let req = producer(seed)
+        .publish_request()
+        .title("kl-off target")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::CREATED, "publish body = {v}");
+    let ctx_id = v["ctx_id"].as_str().unwrap().to_string();
+    let mut envelope = signed_event_envelope_did_web(seed, &ctx_id, "retracted", None);
+    envelope["event"]["signature"]["key_id"] = json!(format!("{did}#acdp-kl-01"));
+    let (status, v) = post_lifecycle(&h.router, &ctx_id, "retract", &envelope).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body = {v}");
+    assert_eq!(v["error"]["code"], "key_resolution_failed", "body = {v}");
+    assert!(v["error"].get("details").is_none(), "body = {v}");
+    // The SDK's reserved-fragment refusal, not some other resolution failure.
+    let msg = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("keyless key id"), "message = {msg}");
 }
 
 /// D4 + A2: an idempotent replay returns the ORIGINAL response, including

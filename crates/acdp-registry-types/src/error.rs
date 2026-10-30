@@ -54,6 +54,18 @@ pub enum RegistryError {
         message: String,
     },
 
+    /// A protocol error carrying an RFC-ACDP-0021 §5.2 / §6.3 reason token
+    /// in `details.reason`. The wire code and HTTP status are `inner`'s, so
+    /// this adds no code; only the keyless paths construct it, so nothing
+    /// changes for a registry without `acdp-registry-keyless`. `inner` is
+    /// boxed so the variant does not grow every `Result<_, RegistryError>`
+    /// (clippy `result_large_err`); build it with [`Self::with_reason`].
+    #[error("{inner}")]
+    WithReason {
+        inner: Box<AcdpError>,
+        reason: &'static str,
+    },
+
     /// Anything else.
     #[error("internal error: {0}")]
     Internal(String),
@@ -64,6 +76,7 @@ impl RegistryError {
     pub fn wire_code(&self) -> &'static str {
         match self {
             Self::Acdp(e) => acdp_wire_code(e),
+            Self::WithReason { inner, .. } => acdp_wire_code(inner),
             Self::Storage(_) => "internal_error",
             Self::Config(_) => "internal_error",
             Self::AuthChallenge(_) | Self::AuthToken(_) | Self::Jwt(_) => "not_authorized",
@@ -77,6 +90,7 @@ impl RegistryError {
     pub fn http_status(&self) -> u16 {
         match self {
             Self::Acdp(e) => http_status_for_acdp(e),
+            Self::WithReason { inner, .. } => http_status_for_acdp(inner),
             // RFC-ACDP-0007 §5: `not_authorized` is HTTP 403. The v0.1.0 code
             // registry has no 401-bearing code, and `http_status_for_acdp`
             // already pairs `not_authorized` with 403 — keep the auth-layer
@@ -92,6 +106,14 @@ impl RegistryError {
 }
 
 impl RegistryError {
+    /// `inner` with an RFC-ACDP-0021 reason token in `details.reason`.
+    pub fn with_reason(inner: AcdpError, reason: &'static str) -> Self {
+        Self::WithReason {
+            inner: Box::new(inner),
+            reason,
+        }
+    }
+
     /// Wrap an error from the federation proxy's `CrossRegistryResolver`.
     ///
     /// A document the origin registry served that this proxy cannot use is
@@ -123,8 +145,10 @@ pub struct WireErrorBody {
     pub code: String,
     pub message: String,
     /// Optional structured detail (RFC-ACDP-0007 §5). Currently carries
-    /// `{ "reason": "<snake_case>" }` for `superseded_target`. Absent (not
-    /// `null`) when there is nothing to add.
+    /// `{ "reason": "<snake_case>" }` for `superseded_target` and for the
+    /// keyless refusals ([`RegistryError::WithReason`]), and
+    /// `{ "field": "<member>" }` for a field violation. Absent (not `null`)
+    /// when there is nothing to add.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }
@@ -153,6 +177,8 @@ impl RegistryError {
     ///   real detail is logged server-side only.
     /// - `superseded_target` carries `details.reason` so a client can
     ///   distinguish the four failure conditions without parsing `message`.
+    /// - A keyless refusal carries its RFC-ACDP-0021 reason token the same
+    ///   way, unless it projects to `internal_error` (the rule above wins).
     fn wire_message_and_details(&self) -> (String, Option<serde_json::Value>) {
         if self.wire_code() == "internal_error" {
             return ("internal error".to_string(), None);
@@ -165,6 +191,12 @@ impl RegistryError {
         }
         if let Self::FieldViolation { field, message } = self {
             return (message.clone(), Some(serde_json::json!({ "field": field })));
+        }
+        if let Self::WithReason { inner, reason } = self {
+            return (
+                inner.to_string(),
+                Some(serde_json::json!({ "reason": reason })),
+            );
         }
         (self.to_string(), None)
     }
@@ -344,6 +376,73 @@ mod tests {
         let w = serde_json::to_value(WireError::from(&e)).unwrap();
         assert_eq!(w["error"]["details"]["field"], "limit");
         assert_eq!(w["error"]["message"], "limit must be 1 to 100");
+    }
+
+    /// RFC-ACDP-0021 reason plumbing: `WithReason` answers with its inner
+    /// error's code, status and message, plus `details.reason`, for every
+    /// inner the keyless paths raise.
+    #[test]
+    fn with_reason_keeps_the_inner_code_and_status_and_adds_details_reason() {
+        for (inner, code, status, reason) in [
+            (
+                AcdpError::KeyResolution("no attestation".into()),
+                "key_resolution_failed",
+                400,
+                "attestation_not_found",
+            ),
+            (
+                AcdpError::KeyNotAuthorized("window".into()),
+                "key_not_authorized",
+                403,
+                "outside_attestation_window",
+            ),
+            (
+                AcdpError::InvalidSignature("pop".into()),
+                "invalid_signature",
+                400,
+                "pop_invalid",
+            ),
+            (
+                AcdpError::NotAuthorized("identity".into()),
+                "not_authorized",
+                403,
+                "keyless_identity_mismatch",
+            ),
+        ] {
+            let message = inner.to_string();
+            let plain = RegistryError::Acdp(inner.clone());
+            let e = RegistryError::with_reason(inner, reason);
+            assert_eq!(e.wire_code(), code, "{reason}");
+            assert_eq!(e.http_status(), status, "{reason}");
+            assert_eq!(e.wire_code(), plain.wire_code(), "{reason}");
+            assert_eq!(e.http_status(), plain.http_status(), "{reason}");
+            let w = serde_json::to_value(WireError::from(&e)).unwrap();
+            assert_eq!(w["error"]["code"], code);
+            assert_eq!(w["error"]["message"], message);
+            assert_eq!(
+                w["error"]["details"],
+                serde_json::json!({ "reason": reason })
+            );
+            // The same inner without a reason has no `details` member at all.
+            let w = serde_json::to_value(WireError::from(&plain)).unwrap();
+            assert!(w["error"].get("details").is_none(), "{w}");
+            assert_eq!(w["error"]["message"], message);
+        }
+    }
+
+    /// An inner that projects to `internal_error` keeps the static message
+    /// and leaks no reason: the §5 no-leak rule wins over the token.
+    #[test]
+    fn with_reason_on_an_internal_error_leaks_nothing() {
+        let e = RegistryError::with_reason(
+            AcdpError::RegistryInternal("fingerprint drift".into()),
+            "attestation_mismatch",
+        );
+        assert_eq!(e.wire_code(), "internal_error");
+        assert_eq!(e.http_status(), 500);
+        let w = serde_json::to_value(WireError::from(&e)).unwrap();
+        assert_eq!(w["error"]["message"], "internal error");
+        assert!(w["error"].get("details").is_none(), "{w}");
     }
 
     /// #10/#11 — wire codes MUST be exactly the RFC-ACDP-0007 §5 registry

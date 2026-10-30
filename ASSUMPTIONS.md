@@ -5063,3 +5063,17 @@ underlying settings and code were not touched by this pass, only the record of t
   - (e) disable on the first refusal.
 - Blast radius: low and reversible. These are server-side delivery-policy constants and internal metric names. The wire format and the stored schema are unaffected.
 - Status: (g) CHANGED (2026-10-25) by Opus at /reconcile: a secret sealed under an unknown `key_id` is now retried (`outcome="unknown_key"`) and disabled only after 72 h; a secret that fails to open under the right `key_id` still disables at once. (a)–(f), (h)–(k) CONFIRMED. See DECISIONS.md "RFC-ACDP-0018 retraction recall".
+
+## RFC-ACDP-0021 keyless, Phase 2 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) `keyless_capabilities`, a `keyless_extensions` helper and the field rules (`KeylessConfig::validate`) live in `acdp-registry-types/src/config.rs`, not in `main.rs`. That lets `tests/conformance.rs` validate the member against the pinned schema, and the server crate needs no new `serde_json`/`url` dependency. `main.rs::validate_keyless` keeps the profile-without-`enabled` refusal, the cross-section prerequisites and the final "not yet available in this build" refusal.
+  - (b) Only the rules the plan lists are enforced. `jwt_issuer`, the JWKS TTL and staleness values, `fetch_timeout_ms`, `max_fetch_bytes` and the two rate budgets are not validated yet; the phase that first reads each (P4/P5) adds its bounds.
+  - (c) The receipts, lifecycle and `acdp_version >= 0.5.0` prerequisites are one check through `event_receipts_gate`, the same helper `validate_changes` uses, so they share one message. The log is checked separately. A memory backend is not refused.
+  - (d) Checks run in this order: profile listed without `enabled`, then field rules, then prerequisites, then "not yet available". So a misconfigured section reports its real fault before the Phase-7 switch.
+  - (e) The schema acceptance criterion is met in `conformance.rs` (`keyless_capabilities_member_satisfies_the_pinned_schema`, gated on `ACDP_SPEC_DIR`). It validates the served feature-off golden plus the `keyless` member and profile, because the binary cannot serve the member until Phase 7.
+  - (f) The golden is `crates/acdp-registry-server/tests/golden/keyless-off-capabilities.json`. It is compared with the raw bytes a spawned default-config binary serves (trailing newline trimmed), so `http_integration.rs` now includes `spawned_registry`. For the kl-004 F case the event is signed under `#key-1` and `signature.key_id` is rewritten on the wire, because the SDK refuses to sign under a keyless key id.
+- Chose: as above.
+- Alternatives: (a) a binary-private builder validated only by hand-written checks; (b) bounding every scalar now; (e) skipping schema validation until Phase 7.
+- Blast radius: low and reversible. Nothing here is reachable while `keyless.enabled` is refused, and the OFF wire is pinned by `keyless_off_wire_snapshot`.
+- Status: UNCONFIRMED

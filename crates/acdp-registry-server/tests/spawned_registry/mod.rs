@@ -14,9 +14,9 @@
 //! Child stdio goes to FILES, never pipes: an undrained pipe wedges a chatty
 //! child once the OS buffer fills (see `tls_startup.rs`).
 //!
-//! Included with `mod spawned_registry;` from `conformance.rs`. A directory
-//! module, not a top-level `tests/*.rs`, so Cargo does not compile it as a test
-//! binary of its own.
+//! Included with `mod spawned_registry;` from `conformance.rs` and
+//! `http_integration.rs`. A directory module, not a top-level `tests/*.rs`,
+//! so Cargo does not compile it as a test binary of its own.
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -130,15 +130,40 @@ impl SpawnedRegistry {
             .unwrap_or_else(|e| panic!("POST {path}: {e}\n{}", self.output()))
     }
 
-    /// Minimal HTTP/1.1, one request per connection (`Connection: close`, read
-    /// to EOF). This crate has no HTTP client among its dev-dependencies. A
-    /// non-JSON body comes back as `Value::String`, an empty one as `Null`.
+    /// `GET path`, returning the body exactly as served (dechunked, not
+    /// re-serialized), for byte-for-byte comparison with a golden file. Used
+    /// by `http_integration.rs` only.
+    #[allow(dead_code)]
+    pub fn get_raw(&self, path: &str) -> (u16, String) {
+        self.request_raw("GET", path, None)
+            .unwrap_or_else(|e| panic!("GET {path}: {e}\n{}", self.output()))
+    }
+
+    /// [`Self::request_raw`], with the body parsed. A non-JSON body comes back
+    /// as `Value::String`, an empty one as `Null`.
     fn request(
         &self,
         method: &str,
         path: &str,
         body: Option<&Value>,
     ) -> std::io::Result<(u16, Value)> {
+        let (status, body) = self.request_raw(method, path, body)?;
+        let v = if body.trim().is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(&body).unwrap_or(Value::String(body))
+        };
+        Ok((status, v))
+    }
+
+    /// Minimal HTTP/1.1, one request per connection (`Connection: close`, read
+    /// to EOF). This crate has no HTTP client among its dev-dependencies.
+    fn request_raw(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> std::io::Result<(u16, String)> {
         let mut s = TcpStream::connect(("127.0.0.1", self.port))?;
         s.set_read_timeout(Some(Duration::from_secs(10)))?;
         let payload = body
@@ -174,12 +199,7 @@ impl SpawnedRegistry {
         } else {
             rest.to_string()
         };
-        let v = if body.trim().is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_str(&body).unwrap_or(Value::String(body))
-        };
-        Ok((status, v))
+        Ok((status, body))
     }
 }
 
