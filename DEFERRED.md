@@ -35,3 +35,6 @@ When one of these is settled, edit its status in `ASSUMPTIONS.md` in the same PR
 `DECISIONS.md`. Do not open a PR only to tidy a status line.
 - RFC-ACDP-0018: a retired-key ring for `[changes]` (like `receipt.retired_keys`, no schema change) — do before the first prod `[events] enabled = true` or the first planned `[changes]` rotation with live subscriptions.
 - RFC-ACDP-0018: the conformance_gate scan for the feed bypass writers (`put`, `mark_superseded`) covers only the server and core crates.
+- RFC-ACDP-0021: lifecycle events signed by a keyless (attested) key are refused (R13); accept them when RFC-ACDP-0009 §2.14 lands lifecycle-event attestations.
+- RFC-ACDP-0021: the Fulcio certificate binding (RFC-ACDP-0009 §2.13) is not implemented; only the registry-minted key attestation is accepted.
+- RFC-ACDP-0021: no webhook or change-feed hint fires when a key attestation is minted or superseded; add one if a consumer needs push notice of new keyless keys.

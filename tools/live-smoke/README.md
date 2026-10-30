@@ -5,7 +5,10 @@ does it. It runs these steps in order:
 
 1. `GET /.well-known/acdp.json`. Fails unless the registry advertises
    `acdp-registry-receipts` and `acdp-registry-lifecycle` and has
-   `anonymous_public_reads` on.
+   `anonymous_public_reads` on. When it does not advertise
+   `acdp-registry-keyless` (RFC-ACDP-0021), fails unless `GET` and
+   `POST /key-attestations` both answer 501 `not_implemented`. When it does,
+   the probe is skipped: minting an attestation needs a real workload token.
 2. Publishes a `public` context, signed by a `did:web` producer. Fails unless
    the response carries a `registry_receipt`.
 3. Resolves the context through `acdp::client::CrossRegistryResolver`. The

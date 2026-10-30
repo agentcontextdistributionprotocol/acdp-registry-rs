@@ -49,7 +49,7 @@ env:
   # or deleted -- the survivor count falls with it, and a `<=` budget would read
   # that as an improvement. This assertion is what makes the budget below mean
   # anything.
-  MUTANTS_EXPECTED_SCOPE: "390"
+  MUTANTS_EXPECTED_SCOPE: "399"
 
   # The ONE committed ledger that a drifted survivor line is paired against, to
   # recover its identity (enclosing function + fn-relative offset + column, and
@@ -67,6 +67,12 @@ env:
   # below; this number is the machine-readable half of that list. It ratchets DOWN
   # as survivors are killed and must never be raised without a reason recorded in
   # the same commit.
+  #
+  # SCOPE 390 -> 399 (RFC-ACDP-0021 keyless publish). context.rs 137 -> 138 (one
+  # `delete !` in publish_inner) and store.rs 172 -> 180 (the new key_attestation,
+  # key_attestation_token_seen and list_key_attestations); log.rs 65 and receipt.rs
+  # 16 unchanged (`cargo mutants --list` at feat/rfc0021-keyless 4504b7d). TODO: the re-pin run id, its caught / missed /
+  # unviable / timeout split, MUTANTS_PRIOR_LEDGER and MUTANTS_SURVIVORS from that run.
   #
   # SCOPE 370 -> 390 (#471, RFC-ACDP-0018 retraction recall). NOT a budget
   # change: the floor stays 8 and the survivor SET is the same eight mutants,

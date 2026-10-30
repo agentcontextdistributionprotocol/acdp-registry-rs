@@ -203,6 +203,38 @@ async fn resolve_and_report(
     }))
 }
 
+/// RFC-ACDP-0021 §5.4: a registry that does not advertise
+/// `acdp-registry-keyless` must answer both `/key-attestations` methods
+/// with 501 `not_implemented`. When it is advertised there is nothing to
+/// probe: minting an attestation needs a real workload-identity token,
+/// which a smoke run cannot obtain.
+async fn keyless_off_posture(
+    http: &reqwest::Client,
+    base_url: &str,
+    advertised: bool,
+) -> Result<()> {
+    if advertised {
+        println!("keyless: acdp-registry-keyless is advertised; /key-attestations probe skipped (no workload token in smoke)");
+        return Ok(());
+    }
+    let url = format!("{base_url}/key-attestations");
+    for (method, req) in [
+        ("GET", http.get(&url)),
+        ("POST", http.post(&url).json(&json!({}))),
+    ] {
+        let resp = req.send().await?;
+        let status = resp.status();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        ensure!(
+            status == reqwest::StatusCode::NOT_IMPLEMENTED
+                && body["error"]["code"] == "not_implemented",
+            "acdp-registry-keyless is not advertised but {method} /key-attestations returned {status}: {body}"
+        );
+    }
+    println!("keyless: not advertised (GET and POST /key-attestations are 501 not_implemented)");
+    Ok(())
+}
+
 /// RFC-ACDP-0018: the feed head before the retraction, or `None` when the
 /// registry does not advertise `acdp-registry-changes` (then `/changes`
 /// must answer 501 `not_implemented`, or 404 from a build that predates
@@ -350,6 +382,9 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
         })
         .is_some_and(|version| version >= (0, 5));
     println!("capabilities: {}", serde_json::to_string(&caps)?);
+
+    // 1a. RFC-ACDP-0021: keyless is off unless advertised.
+    keyless_off_posture(&http, base_url, profiles.contains(&"acdp-registry-keyless")).await?;
 
     // 1b. RFC-ACDP-0018: remember the feed head before anything changes.
     let feed_client = RegistryClient::new(base_url)?;

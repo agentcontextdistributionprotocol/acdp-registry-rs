@@ -5213,3 +5213,14 @@ underlying settings and code were not touched by this pass, only the record of t
   - (b) a runtime config key for egress, which a production build could reach.
 - Blast radius: moderate and reversible. Keyless is now reachable by config, but off by default, and the off wire is byte-identical (`keyless_off_wire_snapshot`).
 - Status: UNCONFIRMED
+
+## RFC-ACDP-0021 keyless, Phase 8 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) **live-smoke OFF probe is strict.** With `acdp-registry-keyless` not advertised, `GET` and `POST /key-attestations` must both answer 501 with `error.code = "not_implemented"`. Unlike the `/changes` probe, a 404 is NOT tolerated, so live-smoke fails against a build that predates the route. Production already passes: v0.7.0 carries the #494 route, and on 2026-10-30 both methods answered 501 `not_implemented` there.
+  - (b) **Probe order.** The probe runs as step 1a, right after capabilities and before the RFC-ACDP-0018 feed head. It uses only the plain reqwest client, so it also runs against a local `http://` registry, where the SSRF-guarded `RegistryClient` refuses the scheme at step 1b.
+  - (c) **Mutation scope.** `test_egress.rs` is not added to `examine_globs`. The globs are an explicit allowlist of deliberate inclusions, and the module is test-build-only (`test-egress` feature), so nothing needs excluding. `handlers/context.rs` was already in scope.
+- Chose: as above.
+- Alternatives: (a) accept 404 like `/changes`, which would let a missing route pass as "off".
+- Blast radius: low and reversible. This is tooling only and is not run in CI.
+- Status: UNCONFIRMED
