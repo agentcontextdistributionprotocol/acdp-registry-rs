@@ -752,6 +752,7 @@ fn config() -> RegistryConfig {
         log: Default::default(),
         changes: Default::default(),
         events: Default::default(),
+        keyless: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -18193,6 +18194,104 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
             !schema.violations(doc).is_empty(),
             "the validator accepted {what}; it is not enforcing the pinned schema, so \
              every positive above proves nothing. Document: {doc:#}"
+        );
+    }
+}
+
+/// RFC-ACDP-0021 §13.1 (plans/rfc0021-keyless.md, Phase 2): the `keyless`
+/// member `build_capabilities` adds for an enabled `[keyless]` satisfies the
+/// pinned capabilities schema, on the served default document with the
+/// profile listed beside it.
+///
+/// The binary still refuses `keyless.enabled`, so this cannot be served yet;
+/// the document is the feature-off golden (a document the binary does serve)
+/// plus exactly what `keyless_extensions` contributes. The values are the
+/// longest and most varied `KeylessConfig::validate` accepts, so its rules
+/// and the schema's agree at the edges. Synthetic negatives prove the
+/// validator enforces the `keyless` subschema.
+#[test]
+fn keyless_capabilities_member_satisfies_the_pinned_schema() {
+    use acdp_registry_types::config::{
+        keyless_extensions, KeylessConfig, OidcIssuer, SpiffeDomain,
+    };
+    let Some(root) = spec_root() else {
+        eprintln!("ACDP_SPEC_DIR not set; skipping");
+        return;
+    };
+    let schema = PinnedSchema::load(&root, "acdp-capabilities.schema.json");
+    let golden =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/keyless-off-capabilities.json");
+    let mut doc: Value =
+        serde_json::from_str(&std::fs::read_to_string(&golden).expect("read the golden"))
+            .expect("golden capabilities parse");
+    assert!(
+        schema.violations(&doc).is_empty(),
+        "the feature-off golden itself must be schema-valid"
+    );
+
+    let cfg = KeylessConfig {
+        enabled: true,
+        max_attestation_ttl_seconds: 3600,
+        oidc_issuers: vec![
+            OidcIssuer {
+                issuer: "https://token.actions.example".into(),
+                jwks_uri: None,
+            },
+            // Distinct by one trailing slash (byte-for-byte comparison).
+            OidcIssuer {
+                issuer: "https://token.actions.example/".into(),
+                jwks_uri: None,
+            },
+            OidcIssuer {
+                issuer: format!("https://{}", "a".repeat(504)),
+                jwks_uri: None,
+            },
+        ],
+        spiffe_trust_domains: vec![
+            SpiffeDomain {
+                trust_domain: "prod.example-1_a".into(),
+                bundle_endpoint: "https://spire.example/bundle".into(),
+                jwt_issuer: None,
+            },
+            SpiffeDomain {
+                trust_domain: "a".repeat(255),
+                bundle_endpoint: "https://spire.example/bundle".into(),
+                jwt_issuer: None,
+            },
+        ],
+        ..KeylessConfig::default()
+    };
+    cfg.validate().expect("validate accepts the edge values");
+    doc["profiles"]
+        .as_array_mut()
+        .expect("profiles")
+        .push(json!("acdp-registry-keyless"));
+    for (k, v) in keyless_extensions(&cfg) {
+        doc[k] = v;
+    }
+    let v = schema.violations(&doc);
+    assert!(v.is_empty(), "keyless member: {v:?}\n{doc:#}");
+
+    let mut low_ttl = doc.clone();
+    low_ttl["keyless"]["max_attestation_ttl_seconds"] = json!(59);
+    let mut extra_key = doc.clone();
+    extra_key["keyless"]["jwks_uri"] = json!("https://x.example");
+    let mut http_issuer = doc.clone();
+    http_issuer["keyless"]["accepted_oidc_issuers"] = json!(["http://x.example"]);
+    let mut upper_domain = doc.clone();
+    upper_domain["keyless"]["accepted_spiffe_trust_domains"] = json!(["Prod"]);
+    let mut duplicate = doc.clone();
+    duplicate["keyless"]["accepted_oidc_issuers"] = json!(["https://a.x", "https://a.x"]);
+    for (what, bad) in [
+        ("max_attestation_ttl_seconds below 60", &low_ttl),
+        ("an extra key in the closed keyless object", &extra_key),
+        ("an http issuer", &http_issuer),
+        ("an upper-case trust domain", &upper_domain),
+        ("a duplicate issuer", &duplicate),
+    ] {
+        assert!(
+            !schema.violations(bad).is_empty(),
+            "the validator accepted {what}; it is not enforcing the keyless subschema"
         );
     }
 }
