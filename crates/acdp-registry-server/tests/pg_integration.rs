@@ -1539,3 +1539,34 @@ async fn pg_changes_feed_round_trip() {
     );
     assert_eq!(page(String::new()).await["changes"][0]["seq"], 3);
 }
+
+// ── RFC-ACDP-0021 Phase 5: POST/GET /key-attestations ───────────────────────
+
+mod keyless_kit;
+
+/// The kl-002 A/H/E core on Postgres, with the transparency log: the mint,
+/// its receipt, leaf and index row in one transaction; a sequential and a
+/// concurrent replay refused by the token's uniqueness; an unlisted
+/// identity refused after one re-fetch.
+#[tokio::test]
+#[serial]
+async fn pg_key_attestation_core() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = PgStore::connect(&url, 4)
+        .await
+        .unwrap()
+        .with_transparency_log();
+    store.migrate().await.unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    truncate(&pool).await;
+    pool.close().await;
+    let kit = keyless_kit::Kit::new(
+        store,
+        keyless_kit::Opts {
+            log: true,
+            ..keyless_kit::Opts::default()
+        },
+    )
+    .await;
+    keyless_kit::assert_mint_core(&kit, "pg").await;
+}

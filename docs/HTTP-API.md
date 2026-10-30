@@ -29,8 +29,8 @@ The complete inbound surface of `acdp-registry`. Routes are assembled in
 | POST | `/subscriptions`                 | bearer      | always (501 unless `events.enabled`) |
 | GET  | `/subscriptions/{subscription_id}` | bearer    | always (501 unless `events.enabled`) |
 | DELETE | `/subscriptions/{subscription_id}` | bearer  | always (501 unless `events.enabled`) |
-| POST | `/key-attestations`              | —           | always 501: `acdp-registry-keyless` (RFC-ACDP-0021) is not implemented |
-| GET  | `/key-attestations`              | —           | always 501: `acdp-registry-keyless` (RFC-ACDP-0021) is not implemented |
+| POST | `/key-attestations`              | —           | 501 unless `keyless.enabled` (startup refuses it in this release): mint a key attestation (RFC-ACDP-0021 §5) |
+| GET  | `/key-attestations`              | —           | 501 unless `keyless.enabled`: list a controller's attestations, newest first (§5.4) |
 | POST | `/auth/challenge`                | none        | `auth.enabled` |
 | POST | `/auth/token`                    | challenge signature | `auth.enabled` |
 | POST | `/auth/token/revoke`             | bearer      | `auth.enabled` |
@@ -127,6 +127,8 @@ never `0`). Each limiter is a fixed 60-second window, and the sources are:
 | Challenge per-agent budget | `POST /auth/challenge` | the requested `agent_id` | `limits.challenge_rate_per_minute` (default 60) |
 | Publish per-agent budget | `POST /contexts` | the signing `agent_id` | `limits.publish_rate_per_minute` (default 60) |
 | Lifecycle per-agent budget | `POST /contexts/{ctx_id}/retract`, `/republish` | the event `actor` | the same per-agent bucket as publish |
+| Keyless per-IP budget | `POST /key-attestations` | resolved client IP | `keyless.rate_per_ip_per_minute` (default 30) |
+| Keyless per-identity budget | `POST /key-attestations` | the workload identity `(type, issuer, subject)` | `keyless.rate_per_identity_per_minute` (default 10); charged only after the token verifies |
 
 The admin lifecycle routes and the read routes have no registry-side rate
 limit. The challenge, publish and lifecycle budgets are always per process,
@@ -385,7 +387,7 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_log_leaves_total` | counter | — | RFC-ACDP-0012 transparency-log leaves appended. |
 | `acdp_registry_lifecycle_event_total` | counter | `event`, `outcome` | Retract / republish outcomes. |
 | `acdp_registry_witness_cosignatures_total` | counter | `outcome` | Witness cosignatures `aggregated` / `rejected` / `store_error`. |
-| `acdp_registry_rate_limit_rejections_total` | counter | `scope` | 429s by scope (`auth_per_ip`, `auth_global`, `challenge_per_agent`, `challenge_global`, `publish_per_agent`, `lifecycle_per_agent`). |
+| `acdp_registry_rate_limit_rejections_total` | counter | `scope` | 429s by scope (`auth_per_ip`, `auth_global`, `challenge_per_agent`, `challenge_global`, `publish_per_agent`, `lifecycle_per_agent`, `keyless_per_ip`, `keyless_per_identity`). |
 | `acdp_registry_rate_limit_shared_total` | counter | `scope`, `outcome` | Round trips to the shared (cluster-wide) `/auth/*` limiter backend: `scope` is `auth_per_ip` or `auth_global`, `outcome` is `allow`, `deny` or `unavailable`. Counts which layer answered; a client-visible 429 still increments the rejections counter above. Emitted only when a shared backend is configured. |
 | `acdp_registry_rate_limit_shared_seconds` | histogram | `scope` | Latency of those round trips. The series to watch to confirm the shared limiter's database load assumption (see `docs/OPERATIONS.md`). |
 | `acdp_registry_changes_requests_total` | counter | `outcome` | RFC-ACDP-0018 `GET /changes` requests: `ok`, or the wire code (`invalid_cursor`, `cursor_expired`, `schema_violation`, …). |
@@ -821,6 +823,54 @@ This section records what this registry does:
   delivered hint ends the failure run. Replicas share the work through
   60-second store leases, so a hint is delivered by one replica.
 
+### `POST /key-attestations`, `GET /key-attestations` *(RFC-ACDP-0021)*
+
+Without `keyless.enabled` both answer `501 not_implemented`, decided before
+the request is read (no body or query refusal can precede it). **Startup
+refuses `keyless.enabled = true` in this release**, so a deployed registry
+always answers 501; the behaviour below is reachable only from in-process
+harnesses until keyless publish lands.
+
+`POST` takes an `acdp-key-attestation-request/1` body (`Content-Type`
+JSON, under `max_payload_bytes`, no HTTP signature: the workload token
+authenticates it) and runs RFC-ACDP-0021 §5.2 in order, stopping at the
+first failure:
+
+| Step | Failure | HTTP | `code` | `details.reason` |
+|------|---------|------|--------|------------------|
+| — | per-IP budget (`keyless.rate_per_ip_per_minute`, charged on arrival) | 429 | `rate_limited` | — |
+| 1 | not the closed schema (a `did:key` controller, an X509-SVID, `requested_ttl_seconds` outside 1..3600, unknown member) | 400 | `schema_violation` | — |
+| — | the identity's budget (`keyless.rate_per_identity_per_minute`; peeked here, charged only once the token verifies) | 429 | `rate_limited` | — |
+| 2 | issuer or trust domain not configured | 403 | `key_not_authorized` | `issuer_not_accepted` |
+| 3 | token signature, `iss`/`sub`, `exp`/`nbf`/`iat`, header rules | 403 | `key_not_authorized` | `token_invalid` |
+| 3 | issuer's key set unreachable (no usable cached copy) | 502 | `key_resolution_unreachable` | `issuer_unreachable` |
+| 3 | `aud` does not contain this registry's DID | 403 | `key_not_authorized` | `audience_mismatch` |
+| 3 | `cnf.jkt` is not the presented key's thumbprint | 403 | `key_not_authorized` | `confirmation_mismatch` |
+| 3 | the token already minted an attestation | 403 | `key_not_authorized` | `token_replayed` |
+| 4 | `pop` does not verify (a P-256 `pop` must be 64-byte P1363; DER is refused) | 400 | `invalid_signature` | `pop_invalid` |
+| 5 | `algorithm` is not the key's, or not in `supported_signature_algorithms` | 400 | `unsupported_algorithm` | — |
+| 6 | the controller's DID document cannot be fetched | 400 / 502 | `key_resolution_failed` / `key_resolution_unreachable` | — |
+| 6 | the document's `AcdpKeylessSigning` service does not list the identity, after one re-fetch past the cache | 403 | `key_not_authorized` | `identity_not_authorized` |
+| 6 | not listed in a cached document, and the re-fetch is rate-limited | 502 | `key_resolution_unreachable` | — |
+
+On success it publishes the `acdp:key-attestation` body under the registry's
+DID, signed with the receipt key, untenanted, through the ordinary publish
+path (receipt, transparency-log leaf and attestation index row in one
+transaction; a token that raced another request to it is refused there as
+`token_replayed`), and answers **`201 Created`** with `Location:
+/contexts/{ctx_id}` and the full retrieval representation (`body`,
+`registry_state`, `registry_receipt`). The window is
+`[now, min(now + requested_ttl_seconds (default 600), now +
+keyless.max_attestation_ttl_seconds, token exp)]`. The token is never logged
+or stored; `token_hash` is its trace.
+
+`GET /key-attestations?controller=<did:web>` lists a controller's
+attestations, newest first, optionally filtered by `issuer` and `subject`,
+paged like search (`limit` default 20, at most 100; `cursor` from
+`next_cursor`). Items are `{ctx_id, content_hash, metadata}`. A missing or
+non-`did:web` `controller` is `400 schema_violation`; a bad cursor is
+`400 invalid_cursor`; an unknown controller is an empty page.
+
 ---
 
 ## Auth
@@ -1170,10 +1220,10 @@ This page documents only what **this registry** answers and when.
 | 409 | `invalid_lifecycle_transition` | Double retract, or republish of a never-retracted context (RFC-ACDP-0013 §6 step 4). |
 | 413 | `payload_too_large` | Body over `max_payload_bytes`. |
 | 413 | `embedded_too_large` | Embedded data over `max_embedded_bytes`. |
-| 415 | `unsupported_media_type` | A body-bearing request (`POST /contexts`, the lifecycle and admin lifecycle routes, `/auth/*`) whose `Content-Type` is present but neither `application/json` nor `application/*+json` (parameters such as `charset` are ignored). An absent `Content-Type` is accepted on those routes except `/auth/*`, where it is also a 415. How to treat an absent header is registry choice under RFC-ACDP-0007 §4.1; this is ours. |
-| 429 | `rate_limited` | A rate-limit bucket drained (`/auth/*`, challenge, publish or lifecycle; see [Rate limits](#rate-limits-429)), or the shared `/auth/*` backend unavailable under `backend_unavailable = "deny"`; carries `Retry-After`. |
+| 415 | `unsupported_media_type` | A body-bearing request (`POST /contexts`, `POST /key-attestations`, the lifecycle and admin lifecycle routes, `/auth/*`) whose `Content-Type` is present but neither `application/json` nor `application/*+json` (parameters such as `charset` are ignored). An absent `Content-Type` is accepted on those routes except `/auth/*`, where it is also a 415. How to treat an absent header is registry choice under RFC-ACDP-0007 §4.1; this is ours. |
+| 429 | `rate_limited` | A rate-limit bucket drained (`/auth/*`, challenge, publish, lifecycle or `POST /key-attestations`; see [Rate limits](#rate-limits-429)), or the shared `/auth/*` backend unavailable under `backend_unavailable = "deny"`; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
-| 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*`, `/changes`, `/subscriptions` and lifecycle endpoints when their profiles are not enabled). |
+| 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*`, `/changes`, `/subscriptions`, `/key-attestations` and lifecycle endpoints when their profiles are not enabled). |
 | 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (on publish, and on `POST /auth/token` since 0.5.1). A foreign registry refused by the SSRF policy is also `cross_registry_resolution_failed`, and so is one that serves a context document this registry cannot parse (not JSON, an unknown or missing field); a refused DID host is not (it is 400 `key_resolution_failed`). |
 | 502 | `invalid_witness_cosignature` | A witness cosignature failed verification (RFC-ACDP-0015 §6.1). Like `invalid_log_proof`, a 502 because it is normally another party's artifact that failed. |
 | 502 | `invalid_log_proof` | A transparency-log proof/checkpoint failed RFC-ACDP-0012 §9 verification. Normally raised when validating an *upstream's* proofs (federation), which is why it is a 502. **It is also reachable from this registry's own `/log/proof`**: for a retrieval-authorized requester the handler echoes the leaf via `record.leaf()` (`log_proof` in `crates/acdp-registry-core/src/handlers/log.rs`), and a stored leaf that no longer parses under the closed schema surfaces as `invalid_log_proof` from here, not from a peer (`LogEntryRecord::leaf` in `crates/acdp-registry-store/src/log.rs`, with the reject cases pinned by that module's own tests). If you see it and you are not federating, suspect your own `log_leaves` table. The other `/log/*` failures are `schema_violation`, `not_found`, or `not_implemented`; there is no `log_unavailable`. |
