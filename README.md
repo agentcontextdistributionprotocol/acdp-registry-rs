@@ -5,7 +5,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-blue)](Cargo.toml)
 
 Reference **registry** implementation for the
-[Agent Context Distribution Protocol](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/546b8c861ddcc6cca8e563c9fea9bf79e2e335cf)
+[Agent Context Distribution Protocol](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/1560e0f389875be8addaa7b7908751e020db50fe)
 v0.1.0 through v0.5.0. Implements the `acdp-registry-core` and
 `acdp-registry-discovery` profiles on top of
 [`acdp`](https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/acdp-v0.15.1) —
