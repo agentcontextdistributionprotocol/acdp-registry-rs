@@ -1,5 +1,14 @@
 
 
+## [0.7.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.7.0...acdp-registry-server/v0.7.1) - 2026-10-30
+
+### Other
+
+- *(spec)* adopt ACDP spec @ 1560e0f (RFC-ACDP-0021 draft.4) ([#504](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/504))
+- *(spec)* adopt ACDP spec @ 546b8c8 ([#499](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/499))
+- *(deps)* adopt ACDP spec @ bf37195 and restore the exact acdp =0.18.2 pin ([#498](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/498))
+
+
 ## [0.7.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.6.1...acdp-registry-server/v0.7.0) - 2026-10-30
 
 ### Added

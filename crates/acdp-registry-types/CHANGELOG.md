@@ -1,5 +1,12 @@
 
 
+## [0.7.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.7.0...acdp-registry-types/v0.7.1) - 2026-10-30
+
+### Other
+
+- update Cargo.toml dependencies
+
+
 ## [0.7.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.6.1...acdp-registry-types/v0.7.0) - 2026-10-30
 
 ### Added
