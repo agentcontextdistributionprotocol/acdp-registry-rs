@@ -5488,6 +5488,69 @@ async fn did_key_publish_rejected_when_not_advertised() {
     assert_eq!(v["error"]["code"], "key_resolution_failed");
 }
 
+/// RFC-ACDP-0021 §4.2 / kl-003 J: an `acdp-kl-` key id never resolves on a
+/// registry without `acdp-registry-keyless`. The producer's did:web DID
+/// resolves (in-process fixture server), so the refusal is the reserved
+/// fragment's, surfaced as `key_resolution_failed` -- not accepted, and not
+/// a signature error.
+#[tokio::test(flavor = "multi_thread")]
+async fn keyless_key_id_publish_is_key_resolution_failed() {
+    let addr = didweb::spawn_didweb_server().await;
+    let resolver = Arc::new(
+        WebResolver::with_test_endpoint(
+            didweb::ca_pem().as_bytes(),
+            didweb::DIDWEB_AUTHORITY,
+            addr,
+        )
+        .expect("test-endpoint resolver"),
+    );
+    let h = didweb_lifecycle_harness(resolver).await;
+    let did = didweb::didweb_for_seed(66);
+    let p = Producer::new(
+        SigningKey::from_bytes(&[66; 32]),
+        AgentDid::new(did.clone()),
+        format!("{did}#acdp-kl-01"),
+    );
+    let req = p
+        .publish_request()
+        .title("kl-reserved-fragment")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    let (status, v) = publish(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body = {v}");
+    assert_eq!(v["error"]["code"], "key_resolution_failed", "body = {v}");
+    // The reserved-fragment refusal, not a mere "no such verification method".
+    let msg = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("keyless key id"), "message = {msg}");
+}
+
+/// RFC-ACDP-0021 §5.4: a registry not advertising `acdp-registry-keyless`
+/// answers both `/key-attestations` methods with 501 `not_implemented`.
+#[tokio::test]
+async fn key_attestations_are_not_implemented() {
+    let h = harness(false).await;
+    for method in ["GET", "POST"] {
+        let resp = h
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/key-attestations")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{method}");
+        let v = body_to_json(resp).await;
+        assert_eq!(v["error"]["code"], "not_implemented", "{method}: {v}");
+    }
+}
+
 /// D4 + A2: an idempotent replay returns the ORIGINAL response, including
 /// the original receipt — not a re-minted one.
 #[tokio::test]
@@ -8857,6 +8920,8 @@ const DATA_PLANE_ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("GET", "/log/proof", "/log/proof"),
     ("GET", "/log/entries", "/log/entries"),
+    ("GET", "/key-attestations", "/key-attestations"),
+    ("POST", "/key-attestations", "/key-attestations"),
 ];
 
 #[tokio::test]

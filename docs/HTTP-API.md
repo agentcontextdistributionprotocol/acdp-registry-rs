@@ -29,6 +29,8 @@ The complete inbound surface of `acdp-registry`. Routes are assembled in
 | POST | `/subscriptions`                 | bearer      | always (501 unless `events.enabled`) |
 | GET  | `/subscriptions/{subscription_id}` | bearer    | always (501 unless `events.enabled`) |
 | DELETE | `/subscriptions/{subscription_id}` | bearer  | always (501 unless `events.enabled`) |
+| POST | `/key-attestations`              | —           | always 501: `acdp-registry-keyless` (RFC-ACDP-0021) is not implemented |
+| GET  | `/key-attestations`              | —           | always 501: `acdp-registry-keyless` (RFC-ACDP-0021) is not implemented |
 | POST | `/auth/challenge`                | none        | `auth.enabled` |
 | POST | `/auth/token`                    | challenge signature | `auth.enabled` |
 | POST | `/auth/token/revoke`             | bearer      | `auth.enabled` |
@@ -160,7 +162,7 @@ check's own `auth_global` or `auth_per_ip` scope.
 > below — `GET /contexts/{ctx_id}`, `/contexts/{ctx_id}/body`,
 > `GET /contexts/search`, `GET /lineages/{lineage_id}`,
 > `/lineages/{lineage_id}/current`, `GET /log/checkpoint`, `GET /log/proof` and
-> `GET /log/entries`, `GET /changes` and the `/subscriptions` routes, plus the
+> `GET /log/entries`, `GET /changes`, the `/subscriptions` and `/key-attestations` routes, plus the
 > publish/retract/republish `POST`s — answers with
 > `Cache-Control: private` and `Vary: authorization, x-tenant-id`, so a shared
 > cache cannot reuse one requester's view for another (`POST /subscriptions`

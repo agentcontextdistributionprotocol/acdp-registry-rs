@@ -126,6 +126,14 @@ pub fn build_router_shared<S: ExtendedRegistryStore + 'static>(state: Arc<AppSta
             "/subscriptions/{subscription_id}",
             get(handlers::get_subscription::<S>).delete(handlers::delete_subscription::<S>),
         )
+        // Keyless key attestations (RFC-ACDP-0021 §5). Not implemented in
+        // this release: both methods answer 501, as §5.4 requires of a
+        // registry not advertising acdp-registry-keyless.
+        .route(
+            "/key-attestations",
+            get(handlers::key_attestations_not_implemented)
+                .post(handlers::key_attestations_not_implemented),
+        )
         // #205 (wire half of #190). These responses depend on WHO is asking --
         // §4.5 visibility, tenant scoping, and the per-requester leaf echo on
         // `/log/*` -- so a shared cache must never reuse one requester's copy
