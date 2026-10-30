@@ -30,6 +30,16 @@ refused at startup, and the Hard Seam is unchanged (no new `KeyAuthorization` or
 
 - **Rollback:** safe. Nothing to migrate.
 
+**It also adds migration 019 (both backends): a `key_attestations` table, the RFC-ACDP-0021
+key-attestation index (one row per minted attestation, with a UNIQUE `token_hash`).**
+
+- **No backfill.** No registry has minted an attestation yet, so the table starts empty and stays
+  empty: nothing writes it until the keyless profile ships and is enabled.
+- **Who is affected:** nobody. Publishes that are not keyless (every publish today) never read it.
+- **Rollback, Postgres:** safe to 0.7.0. The migrator tolerates the newer applied version, and
+  older binaries never touch the table.
+- **Rollback, SQLite:** restore the pre-upgrade file, as for any release that adds a migration.
+
 ---
 
 ## 0.7.0

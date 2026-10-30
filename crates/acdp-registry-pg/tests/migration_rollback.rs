@@ -272,3 +272,111 @@ async fn migration_017_creates_the_change_feed() {
     })
     .await;
 }
+
+/// Migration 019: the key-attestation index, its two indexes, the UNIQUE
+/// token and the shape CHECKs exist on a fresh database, and re-running
+/// `migrate()` is a no-op.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_019_creates_the_key_attestation_index() {
+    let Some(base_url) = pg_url_or_skip() else {
+        return;
+    };
+    with_throwaway_database(&base_url, "keyless", |db_url| async move {
+        use acdp_registry_store::parity::keyless_fixtures::{
+            commit, controller, controller_request, inserted,
+        };
+        let store = std::sync::Arc::new(PgStore::connect(&db_url, 2).await.expect("pg connect"));
+        store.migrate().await.expect("first migrate");
+        store
+            .migrate()
+            .await
+            .expect("re-running migrate is a no-op");
+        let pool = store.pool().clone();
+        let indexes: Vec<(String,)> = sqlx::query_as(
+            "SELECT indexname::text FROM pg_indexes \
+             WHERE tablename = 'key_attestations' AND indexname LIKE 'idx_key_attestations_%' \
+             ORDER BY 1",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read pg_indexes");
+        let found: Vec<&str> = indexes.iter().map(|(n,)| n.as_str()).collect();
+        assert_eq!(
+            found,
+            vec![
+                "idx_key_attestations_controller",
+                "idx_key_attestations_identity"
+            ]
+        );
+
+        // Two real contexts, so each refusal is the CHECK or UNIQUE it
+        // names and not the foreign key.
+        let c = controller("pg-019");
+        let a = inserted(
+            commit(&store, controller_request(&c, None), None).await,
+            "a",
+        );
+        let b = inserted(
+            commit(&store, controller_request(&c, None), None).await,
+            "b",
+        );
+        let (a, b) = (a.as_str().to_string(), b.as_str().to_string());
+        let insert = |ctx: String,
+                      ty: &'static str,
+                      issuer: Option<&'static str>,
+                      window: (i64, i64),
+                      token: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO key_attestations (ctx_id, controller, identity_type, issuer, \
+                     subject, org_wide, key_id, algorithm, key_fingerprint, not_before_ms, \
+                     not_after_ms, token_hash, created_at_ms) \
+                     VALUES ($1, 'c', $2, $3, 's', false, 'k', 'ed25519', 'f', $4, $5, $6, 0)",
+                )
+                .bind(ctx)
+                .bind(ty)
+                .bind(issuer)
+                .bind(window.0)
+                .bind(window.1)
+                .bind(token)
+                .execute(&pool)
+                .await
+            }
+        };
+        for (what, res) in [
+            (
+                "an unknown identity type",
+                insert(a.clone(), "x509", None, (0, 1), "t1").await,
+            ),
+            (
+                "an oidc row without an issuer",
+                insert(a.clone(), "oidc", None, (0, 1), "t1").await,
+            ),
+            (
+                "a spiffe row with an issuer",
+                insert(a.clone(), "spiffe", Some("i"), (0, 1), "t1").await,
+            ),
+            (
+                "an empty window",
+                insert(a.clone(), "spiffe", None, (1, 1), "t1").await,
+            ),
+            (
+                "a row with no context",
+                insert("acdp://reg.test/none".into(), "spiffe", None, (0, 1), "t1").await,
+            ),
+        ] {
+            assert!(res.is_err(), "{what} must be refused");
+        }
+        insert(a, "oidc", Some("i"), (0, 1), "t1")
+            .await
+            .expect("a well-formed row is accepted (positive control)");
+        assert!(
+            insert(b, "spiffe", None, (0, 1), "t1").await.is_err(),
+            "token_hash is UNIQUE"
+        );
+        drop(pool);
+        store.pool().close().await;
+    })
+    .await;
+}

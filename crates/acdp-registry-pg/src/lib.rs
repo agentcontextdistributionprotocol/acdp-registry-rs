@@ -4,6 +4,7 @@
 //! `TIMESTAMPTZ`, `TEXT[]`, `JSONB`, and Postgres FTS.
 
 mod changes;
+mod keyless;
 pub mod rate_limit;
 pub mod store;
 mod subscriptions;

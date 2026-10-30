@@ -3502,6 +3502,1209 @@ where
     }
 }
 
+// ── RFC-ACDP-0021 key attestations ──────────────────────────────────────────
+//
+// Every kit below drives real `commit_publish` calls, with receipts, against
+// the backend under test. Attestation bodies are committed under
+// `did:web:reg.test` (the registry DID of `AUTHORITY`), exactly as the mint
+// path will commit them. Stores do not verify producer signatures, so a
+// keyless successor is an ordinary request whose `signature.key_id` and
+// `key_attestation` are then pointed at an attestation.
+//
+// Refusal order (pinned by `assert_keyless_refusal_order`): idempotency
+// replay, then the `supersedes` ownership / AlreadySuperseded checks, then
+// `attestation_not_found` / `attestation_withdrawn`, then §7
+// `keyless_identity_mismatch`, then `outside_attestation_window`. See
+// `crate::key_attestations`.
+
+/// kl-001 vector 5 (spec bf37195 / 546b8c8), the §7 decision table, as the
+/// `cases` array. Embedded so the kit needs no `ACDP_SPEC_DIR`; the
+/// conformance suite re-asserts it against the fixture itself.
+pub const KL_001_VECTOR_5_CASES: &str = r#"[
+ {"name": "S1 same identity",
+  "predecessor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/pipeline:ref:refs/heads/main"}, "org_wide": false},
+  "successor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/pipeline:ref:refs/heads/main"}, "org_wide": false},
+  "expected": {"result": "allowed"}},
+ {"name": "S2 different subject",
+  "predecessor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/pipeline:ref:refs/heads/main"}, "org_wide": false},
+  "successor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/other:ref:refs/heads/main"}, "org_wide": false},
+  "expected": {"result": "refused", "reason": "keyless_identity_mismatch"}},
+ {"name": "S3 different identity type",
+  "predecessor": {"kind": "keyless", "identity": {"type": "spiffe", "subject": "spiffe://prod.example.com/ns/agents/sa/publisher"}, "org_wide": false},
+  "successor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/pipeline:ref:refs/heads/main"}, "org_wide": false},
+  "expected": {"result": "refused", "reason": "keyless_identity_mismatch"}},
+ {"name": "S4 org-wide successor",
+  "predecessor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/pipeline:ref:refs/heads/main"}, "org_wide": false},
+  "successor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/other:ref:refs/heads/main"}, "org_wide": true},
+  "expected": {"result": "allowed"}},
+ {"name": "S5 controller key supersedes keyless",
+  "predecessor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/pipeline:ref:refs/heads/main"}, "org_wide": false},
+  "successor": {"kind": "controller"},
+  "expected": {"result": "allowed"}},
+ {"name": "S6 keyless supersedes controller-signed",
+  "predecessor": {"kind": "controller"},
+  "successor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/pipeline:ref:refs/heads/main"}, "org_wide": false},
+  "expected": {"result": "refused", "reason": "keyless_identity_mismatch"}},
+ {"name": "S7 org-wide supersedes controller-signed",
+  "predecessor": {"kind": "controller"},
+  "successor": {"kind": "keyless", "identity": {"type": "spiffe", "subject": "spiffe://prod.example.com/ns/agents/sa/publisher"}, "org_wide": true},
+  "expected": {"result": "allowed"}},
+ {"name": "S8 org-wide predecessor does not widen the successor",
+  "predecessor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/pipeline:ref:refs/heads/main"}, "org_wide": true},
+  "successor": {"kind": "keyless", "identity": {"type": "oidc", "issuer": "https://token.actions.githubusercontent.com", "subject": "repo:example/other:ref:refs/heads/main"}, "org_wide": false},
+  "expected": {"result": "refused", "reason": "keyless_identity_mismatch"}},
+ {"name": "S9 controller supersedes controller",
+  "predecessor": {"kind": "controller"},
+  "successor": {"kind": "controller"},
+  "expected": {"result": "allowed"}}
+]"#;
+
+/// Fixtures shared by the keyless kits.
+pub mod keyless_fixtures {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    use acdp::crypto::SigningKey;
+    use acdp::error::AcdpError;
+    use acdp::producer::Producer;
+    use acdp::registry::store::{PendingIdempotencyCommit, PublishCommit, PublishCommitOutcome};
+    use acdp::types::body::Body;
+    use acdp::types::keyless::{
+        keyless_key_id, token_hash, Jwk, KeyAttestation, KeyAttestationRef, WorkloadIdentity,
+        ATTESTATION_VERSION, KEY_ATTESTATION_SCHEMA_URI, KEY_ATTESTATION_TYPE,
+    };
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    use acdp::types::primitives::{AgentDid, ContentHash, ContextType, CtxId, Visibility};
+    use acdp::types::publish::PublishRequest;
+    use chrono::{DateTime, Duration, Utc};
+
+    use crate::ExtendedRegistryStore;
+
+    use super::AUTHORITY;
+
+    /// The registry DID of `AUTHORITY`.
+    pub const REGISTRY: &str = "did:web:reg.test";
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// A value no other call, run or backend shares.
+    pub fn unique(label: &str) -> String {
+        format!(
+            "{label}-{}-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    /// A controller DID no other run shares.
+    pub fn controller(label: &str) -> String {
+        format!("did:web:agents.test:kl-{}", unique(label))
+    }
+
+    pub fn oidc(subject: &str) -> WorkloadIdentity {
+        WorkloadIdentity::Oidc {
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            subject: subject.into(),
+        }
+    }
+
+    pub fn spiffe(subject: &str) -> WorkloadIdentity {
+        WorkloadIdentity::Spiffe {
+            subject: subject.into(),
+        }
+    }
+
+    /// `now` truncated to milliseconds, the precision of every window.
+    pub fn now() -> DateTime<Utc> {
+        acdp::time::trunc_ms(Utc::now())
+    }
+
+    /// A window that contains the next ten minutes.
+    pub fn open_window() -> (DateTime<Utc>, DateTime<Utc>) {
+        let n = now();
+        (n - Duration::seconds(60), n + Duration::seconds(540))
+    }
+
+    /// A ten-minute window that ended ten minutes ago.
+    pub fn past_window() -> (DateTime<Utc>, DateTime<Utc>) {
+        let n = now();
+        (n - Duration::minutes(20), n - Duration::minutes(10))
+    }
+
+    /// One attestation to mint.
+    #[derive(Debug, Clone)]
+    pub struct Spec {
+        pub controller: String,
+        pub identity: WorkloadIdentity,
+        pub org_wide: bool,
+        pub window: (DateTime<Utc>, DateTime<Utc>),
+        /// The token whose hash the attestation records.
+        pub token: String,
+    }
+
+    impl Spec {
+        pub fn new(controller: &str, identity: WorkloadIdentity) -> Self {
+            Self {
+                controller: controller.to_string(),
+                identity,
+                org_wide: false,
+                window: open_window(),
+                token: unique("token"),
+            }
+        }
+
+        pub fn org_wide(mut self) -> Self {
+            self.org_wide = true;
+            self
+        }
+
+        pub fn window(mut self, window: (DateTime<Utc>, DateTime<Utc>)) -> Self {
+            self.window = window;
+            self
+        }
+
+        pub fn token(mut self, token: &str) -> Self {
+            self.token = token.to_string();
+            self
+        }
+
+        /// The §5.3 metadata, for an ephemeral key derived from `seed`.
+        pub fn attestation(&self, seed: u8) -> KeyAttestation {
+            let key = SigningKey::from_bytes(&[seed; 32]);
+            let jwk = Jwk::from_ed25519(&key.verifying_key_bytes());
+            let fp = jwk.fingerprint().expect("fingerprint");
+            KeyAttestation {
+                attestation_version: ATTESTATION_VERSION.into(),
+                controller: self.controller.clone(),
+                identity: self.identity.clone(),
+                org_wide: self.org_wide,
+                key_id: keyless_key_id(&self.controller, &fp).expect("key id"),
+                algorithm: "ed25519".into(),
+                public_key_jwk: jwk,
+                key_fingerprint: fp,
+                not_before: self.window.0,
+                not_after: self.window.1,
+                token_hash: token_hash(&self.token),
+            }
+        }
+
+        /// The attestation body's publish request, under the registry DID.
+        pub fn request(&self, seed: u8) -> (PublishRequest, KeyAttestation) {
+            let att = self.attestation(seed);
+            let metadata = serde_json::to_value(&att).expect("metadata");
+            (attestation_request(metadata), att)
+        }
+    }
+
+    /// An `acdp:key-attestation` request under the registry DID carrying
+    /// `metadata` as is (which a kit may make invalid on purpose).
+    pub fn attestation_request(metadata: serde_json::Value) -> PublishRequest {
+        Producer::new(
+            SigningKey::from_bytes(&[91; 32]),
+            AgentDid::new(REGISTRY.to_string()),
+            format!("{REGISTRY}#receipt-key-1"),
+        )
+        .publish_request()
+        .title("Key attestation")
+        .summary("reg.test attests an ephemeral ed25519 key (RFC-ACDP-0021).")
+        .context_type(ContextType::Custom(KEY_ATTESTATION_TYPE.into()))
+        .visibility(Visibility::Public)
+        .metadata(metadata)
+        .schema_uri(KEY_ATTESTATION_SCHEMA_URI)
+        .acdp_version("0.5.0")
+        .build()
+        .expect("valid attestation request")
+    }
+
+    /// A committed attestation.
+    #[derive(Debug, Clone)]
+    pub struct Minted {
+        pub ctx_id: CtxId,
+        pub content_hash: ContentHash,
+        pub attestation: KeyAttestation,
+    }
+
+    impl Minted {
+        pub fn reference(&self) -> KeyAttestationRef {
+            KeyAttestationRef {
+                ctx_id: self.ctx_id.clone(),
+                content_hash: self.content_hash.clone(),
+            }
+        }
+    }
+
+    /// The registry's receipt signer.
+    pub fn receipt_signer() -> acdp::types::ReceiptSigner {
+        acdp::types::ReceiptSigner::new(
+            SigningKey::from_bytes(&[91u8; 32]),
+            REGISTRY,
+            "did:web:reg.test#receipt-key-1",
+        )
+        .expect("signer")
+    }
+
+    /// `commit_publish` with a receipt minter, an optional idempotency key
+    /// and an optional RFC-ACDP-0014 admission that records it ran.
+    pub async fn commit<S>(
+        store: &Arc<S>,
+        req: PublishRequest,
+        idem: Option<String>,
+    ) -> Result<PublishCommitOutcome, AcdpError>
+    where
+        S: ExtendedRegistryStore + 'static,
+    {
+        let s = Arc::clone(store);
+        tokio::task::spawn_blocking(move || {
+            let signer = receipt_signer();
+            let mint = move |body: &Body| {
+                let receipt = signer.mint(
+                    &body.ctx_id,
+                    &body.lineage_id,
+                    &body.origin_registry,
+                    body.created_at,
+                    &body.content_hash,
+                    &format!("sha256:{}", "c".repeat(64)),
+                )?;
+                serde_json::to_value(receipt).map_err(AcdpError::from)
+            };
+            s.commit_publish(PublishCommit {
+                req: &req,
+                authority: AUTHORITY,
+                idempotency: idem.as_deref().map(|key| PendingIdempotencyCommit {
+                    key,
+                    ttl: chrono::Duration::hours(1),
+                }),
+                tenant: None,
+                receipt_minter: Some(&mint),
+                predecessor_admission: None,
+            })
+        })
+        .await
+        .expect("publish task")
+    }
+
+    pub fn inserted(outcome: Result<PublishCommitOutcome, AcdpError>, what: &str) -> CtxId {
+        match outcome {
+            Ok(PublishCommitOutcome::Inserted(r)) => r.ctx_id,
+            other => panic!("{what}: expected Inserted, got {other:?}"),
+        }
+    }
+
+    /// Mint `spec` and return the committed attestation.
+    pub async fn mint<S>(store: &Arc<S>, spec: &Spec) -> Minted
+    where
+        S: ExtendedRegistryStore + 'static,
+    {
+        let (req, attestation) = spec.request(7);
+        let content_hash = req.content_hash.clone();
+        let ctx_id = inserted(commit(store, req, None).await, "mint");
+        Minted {
+            ctx_id,
+            content_hash,
+            attestation,
+        }
+    }
+
+    /// The controller's own producer.
+    pub fn controller_producer(controller: &str) -> Producer {
+        Producer::new(
+            SigningKey::from_bytes(&[42; 32]),
+            AgentDid::new(controller.to_string()),
+            format!("{controller}#key-1"),
+        )
+    }
+
+    /// A controller-signed request, first version or superseding `prev`.
+    pub fn controller_request(controller: &str, prev: Option<(&CtxId, u32)>) -> PublishRequest {
+        let p = controller_producer(controller);
+        let b = match prev {
+            Some((ctx, v)) => p.supersede(ctx.clone()).version(v),
+            None => p.publish_request(),
+        };
+        b.title(unique("keyless fixture"))
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid request")
+    }
+
+    /// `controller_request` re-pointed at `att`: a keyless-signed request.
+    pub fn keyless_request(
+        controller: &str,
+        att: &KeyAttestationRef,
+        key_id: &str,
+        prev: Option<(&CtxId, u32)>,
+    ) -> PublishRequest {
+        let mut req = controller_request(controller, prev);
+        req.signature.key_id = key_id.to_string();
+        req.key_attestation = Some(att.clone());
+        req
+    }
+
+    /// `keyless_request` under a minted attestation.
+    pub fn signed_under(m: &Minted, prev: Option<(&CtxId, u32)>) -> PublishRequest {
+        keyless_request(
+            &m.attestation.controller,
+            &m.reference(),
+            &m.attestation.key_id,
+            prev,
+        )
+    }
+
+    /// Retract `ctx_id` with a registry-actor event.
+    pub async fn retract<S>(store: &Arc<S>, ctx_id: &CtxId)
+    where
+        S: ExtendedRegistryStore + 'static,
+    {
+        let event_id = ctx_id
+            .as_str()
+            .rsplit('/')
+            .next()
+            .expect("ctx_id ends in a UUID")
+            .to_string();
+        let event = LifecycleEvent::new(
+            event_id,
+            ctx_id.clone(),
+            LifecycleEventType::Retracted,
+            Utc::now(),
+            AgentDid::new(REGISTRY.to_string()),
+            Some("keyless parity: withdraw".to_string()),
+        )
+        .expect("valid lifecycle event");
+        let s = Arc::clone(store);
+        tokio::task::spawn_blocking(move || s.commit_lifecycle_event(&event))
+            .await
+            .expect("retract task")
+            .expect("retract succeeds");
+    }
+
+    /// Assert `res` is a refusal carrying keyless `reason`.
+    pub fn assert_reason<T: std::fmt::Debug>(
+        res: Result<T, AcdpError>,
+        reason: acdp::types::keyless::KeylessReason,
+        what: &str,
+    ) -> AcdpError {
+        let err = res.expect_err(&format!("{what}: expected {reason}"));
+        assert_eq!(
+            acdp::types::keyless::KeylessReason::of(&err),
+            Some(reason),
+            "{what}: wrong refusal {err:?}"
+        );
+        err
+    }
+}
+
+/// What a store has committed, for "nothing was persisted" checks: the
+/// number of searchable contexts under the registry DID (every mint) and
+/// under `controller` (every successor), and, where there is one, the log
+/// size. The registry DID and the log are store-wide, so the backend passes
+/// a store no other test writes to.
+async fn keyless_watermark<S>(store: &Arc<S>, controller: &str, has_log: bool) -> (u64, Option<u64>)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let mut contexts = 0u64;
+    for agent in [keyless_fixtures::REGISTRY, controller] {
+        let mut cursor: Option<String> = None;
+        loop {
+            let params = SearchParams {
+                agent_id: Some(agent.to_string()),
+                limit: Some(100),
+                cursor: cursor.take(),
+                ..Default::default()
+            };
+            let page = store.search(&params, None, true).expect("search");
+            contexts += page.matches.len() as u64;
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+    }
+    let log = if has_log {
+        Some(store.log_tree_size().await.expect("log_tree_size"))
+    } else {
+        None
+    };
+    (contexts, log)
+}
+
+/// **Index derivation and token replay (D4).** A mint indexes its body in
+/// the publish transaction. A second mint with the same token is refused
+/// `token_replayed` and leaves no body, feed row or log leaf; of two racing
+/// mints with one token exactly one commits; a corrupt attestation aborts.
+/// The log (when `has_log`) grows by exactly one leaf per accepted mint.
+///
+/// Pass a store with the transparency log enabled when the backend has one
+/// (`has_log = true`), on a database no other test writes to (this kit and
+/// [`assert_keyless_window_and_withdrawal`] count the whole store).
+pub async fn assert_key_attestation_index_and_replay<S>(store: &Arc<S>, has_log: bool, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::error::AcdpError;
+    use acdp::types::keyless::{token_hash, KeylessReason};
+    use keyless_fixtures::*;
+
+    if !has_log {
+        assert!(
+            matches!(
+                store.log_tree_size().await,
+                Err(AcdpError::NotImplemented(_))
+            ),
+            "[{label}] has_log = false is only for a backend with no log"
+        );
+    }
+    let c = controller(label);
+    let spec = Spec::new(&c, oidc("repo:example/pipeline:ref:refs/heads/main"));
+    let before = keyless_watermark(store, &c, has_log).await;
+    assert!(
+        !store
+            .key_attestation_token_seen(&token_hash(&spec.token))
+            .await
+            .expect("token_seen"),
+        "[{label}] a fresh token is unseen"
+    );
+    let first = mint(store, &spec).await;
+    let after_one = keyless_watermark(store, &c, has_log).await;
+    assert_eq!(after_one.0, before.0 + 1, "[{label}] one context per mint");
+    assert_eq!(
+        after_one.1,
+        before.1.map(|n| n + 1),
+        "[{label}] the log grows by exactly one leaf per mint"
+    );
+    assert!(
+        store
+            .key_attestation_token_seen(&token_hash(&spec.token))
+            .await
+            .expect("token_seen"),
+        "[{label}] the minted token is seen"
+    );
+    let record = store
+        .key_attestation(first.ctx_id.as_str())
+        .await
+        .expect("key_attestation")
+        .expect("the mint is indexed");
+    assert_eq!(record.attestation, first.attestation, "[{label}]");
+
+    // Same token, a different key and window: a different body.
+    let replay = Spec {
+        window: past_window(),
+        ..spec.clone()
+    };
+    let (req, _) = replay.request(8);
+    assert_ne!(req.content_hash, first.content_hash);
+    let err = assert_reason(
+        commit(store, req, None).await,
+        KeylessReason::TokenReplayed,
+        &format!("[{label}] replayed token"),
+    );
+    assert!(
+        matches!(err, AcdpError::KeyNotAuthorized(_)),
+        "[{label}] {err:?}"
+    );
+    assert_eq!(
+        keyless_watermark(store, &c, has_log).await,
+        after_one,
+        "[{label}] a replayed mint persists no body or log leaf"
+    );
+    let listed = store
+        .list_key_attestations(&c, &Default::default(), None, 50)
+        .await
+        .expect("list");
+    assert_eq!(listed.items.len(), 1, "[{label}] the replay is not indexed");
+
+    // A corrupt attestation (a code bug in the mint path) aborts the commit.
+    let mut bad = serde_json::to_value(spec.attestation(9)).expect("metadata");
+    bad["key_fingerprint"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    bad["token_hash"] = serde_json::json!(token_hash(&unique("corrupt")));
+    let err = commit(store, attestation_request(bad), None)
+        .await
+        .expect_err("a corrupt attestation must abort");
+    assert!(
+        matches!(err, AcdpError::RegistryInternal(_)),
+        "[{label}] {err:?}"
+    );
+    assert_eq!(
+        keyless_watermark(store, &c, has_log).await,
+        after_one,
+        "[{label}] an aborted mint persists nothing"
+    );
+
+    // Two racing mints with one token: exactly one commits.
+    let racing = Spec::new(&c, spiffe("spiffe://prod.example.com/ns/agents/sa/race"));
+    let (a, _) = racing.request(10);
+    let (b, _) = racing.request(11);
+    let (ra, rb) = tokio::join!(commit(store, a, None), commit(store, b, None));
+    let won = [&ra, &rb].iter().filter(|r| r.is_ok()).count();
+    assert_eq!(
+        won, 1,
+        "[{label}] exactly one racing mint wins: {ra:?} / {rb:?}"
+    );
+    let loser = if ra.is_ok() { rb } else { ra };
+    assert_reason(
+        loser,
+        KeylessReason::TokenReplayed,
+        &format!("[{label}] race"),
+    );
+    let end = keyless_watermark(store, &c, has_log).await;
+    assert_eq!(
+        end.0,
+        before.0 + 2,
+        "[{label}] two accepted mints, two contexts"
+    );
+    assert_eq!(
+        end.1,
+        before.1.map(|n| n + 2),
+        "[{label}] two accepted mints, two log leaves"
+    );
+}
+
+/// **§6.3 steps 3, 5 and 6 in the store.** Inside the window → Inserted;
+/// `created_at` at or past `not_after`, or before `not_before` →
+/// `outside_attestation_window` with nothing persisted; a retracted
+/// attestation → `attestation_withdrawn`; an unindexed one →
+/// `attestation_not_found`. Pass a store no other test writes to.
+pub async fn assert_keyless_window_and_withdrawal<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::error::AcdpError;
+    use acdp::types::keyless::KeylessReason;
+    use acdp::types::primitives::{ContentHash, CtxId};
+    use chrono::Duration;
+    use keyless_fixtures::*;
+
+    let c = controller(label);
+    let id = oidc("repo:example/pipeline:ref:refs/heads/main");
+    let open = mint(store, &Spec::new(&c, id.clone())).await;
+    inserted(
+        commit(store, signed_under(&open, None), None).await,
+        &format!("[{label}] inside the window"),
+    );
+
+    let before = keyless_watermark(store, &c, false).await;
+    let past = mint(store, &Spec::new(&c, id.clone()).window(past_window())).await;
+    let n = now();
+    let future = mint(
+        store,
+        &Spec::new(&c, id.clone()).window((n + Duration::minutes(10), n + Duration::minutes(20))),
+    )
+    .await;
+    let mid = keyless_watermark(store, &c, false).await;
+    assert_eq!(mid.0, before.0 + 2);
+    for (m, what) in [
+        (&past, "created_at >= not_after"),
+        (&future, "created_at < not_before"),
+    ] {
+        let err = assert_reason(
+            commit(store, signed_under(m, None), None).await,
+            KeylessReason::OutsideAttestationWindow,
+            &format!("[{label}] {what}"),
+        );
+        assert!(
+            matches!(err, AcdpError::KeyNotAuthorized(_)),
+            "[{label}] {err:?}"
+        );
+    }
+    assert_eq!(
+        keyless_watermark(store, &c, false).await,
+        mid,
+        "[{label}] a refused keyless publish persists nothing"
+    );
+
+    retract(store, &open.ctx_id).await;
+    let err = assert_reason(
+        commit(store, signed_under(&open, None), None).await,
+        KeylessReason::AttestationWithdrawn,
+        &format!("[{label}] retracted attestation"),
+    );
+    assert!(
+        matches!(err, AcdpError::KeyNotAuthorized(_)),
+        "[{label}] {err:?}"
+    );
+
+    let missing = KeyAttestationRefFixture::missing();
+    let err = assert_reason(
+        commit(
+            store,
+            keyless_request(&c, &missing, &open.attestation.key_id, None),
+            None,
+        )
+        .await,
+        KeylessReason::AttestationNotFound,
+        &format!("[{label}] unindexed attestation"),
+    );
+    assert!(
+        matches!(err, AcdpError::KeyResolution(_)),
+        "[{label}] {err:?}"
+    );
+    // A controller-signed body under the same controller is never checked.
+    inserted(
+        commit(store, controller_request(&c, None), None).await,
+        &format!("[{label}] controller-signed"),
+    );
+
+    struct KeyAttestationRefFixture;
+    impl KeyAttestationRefFixture {
+        fn missing() -> acdp::types::keyless::KeyAttestationRef {
+            acdp::types::keyless::KeyAttestationRef {
+                ctx_id: CtxId(format!(
+                    "acdp://{AUTHORITY}/00000000-0000-4000-8000-00000000dead"
+                )),
+                content_hash: ContentHash(format!("sha256:{}", "d".repeat(64))),
+            }
+        }
+    }
+}
+
+/// **The cross-store refusal order.** Every backend refuses a keyless
+/// successor in the order `crate::key_attestations` documents. Each leg
+/// below makes two checks fail at once and pins which one answers:
+///
+/// 1. an idempotent replay beats a since-withdrawn attestation;
+/// 2. `supersedes` ownership beats a withdrawn attestation;
+/// 3. AlreadySuperseded beats a withdrawn attestation, and so does a
+///    version mismatch (`version != previous + 1`);
+/// 4. `attestation_withdrawn` beats `keyless_identity_mismatch`;
+/// 5. `keyless_identity_mismatch` beats `outside_attestation_window`;
+/// 6. and with §7 satisfied, the window still refuses.
+pub async fn assert_keyless_refusal_order<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::error::{AcdpError, SupersessionReason};
+    use acdp::registry::store::PublishCommitOutcome;
+    use acdp::types::keyless::KeylessReason;
+    use keyless_fixtures::*;
+
+    let c = controller(label);
+    let x = oidc("repo:example/pipeline:ref:refs/heads/main");
+    let y = oidc("repo:example/other:ref:refs/heads/main");
+
+    // 1. Idempotent replay first.
+    let a = mint(store, &Spec::new(&c, x.clone())).await;
+    let req = signed_under(&a, None);
+    let key = unique("idem");
+    inserted(
+        commit(store, req.clone(), Some(key.clone())).await,
+        &format!("[{label}] keyed keyless publish"),
+    );
+    retract(store, &a.ctx_id).await;
+    assert!(
+        matches!(
+            commit(store, req, Some(key)).await,
+            Ok(PublishCommitOutcome::IdempotentReplay(_))
+        ),
+        "[{label}] an idempotent replay is answered before the attestation is re-checked"
+    );
+
+    // 2. Ownership first: another controller's predecessor.
+    let other = controller(label);
+    let foreign = inserted(
+        commit(store, controller_request(&other, None), None).await,
+        "foreign v1",
+    );
+    let err = commit(store, signed_under(&a, Some((&foreign, 2))), None)
+        .await
+        .expect_err("non-owner");
+    assert!(
+        matches!(
+            err,
+            AcdpError::SupersededTarget {
+                reason: SupersessionReason::NotFound,
+                ..
+            }
+        ),
+        "[{label}] ownership is checked before the attestation: {err:?}"
+    );
+
+    // 3. AlreadySuperseded first.
+    let v1 = inserted(
+        commit(store, controller_request(&c, None), None).await,
+        "v1",
+    );
+    inserted(
+        commit(store, controller_request(&c, Some((&v1, 2))), None).await,
+        "v2",
+    );
+    let err = commit(store, signed_under(&a, Some((&v1, 2))), None)
+        .await
+        .expect_err("already superseded");
+    assert!(
+        matches!(
+            err,
+            AcdpError::SupersededTarget {
+                reason: SupersessionReason::AlreadySuperseded,
+                ..
+            }
+        ),
+        "[{label}] AlreadySuperseded is checked before the attestation: {err:?}"
+    );
+
+    // 4. Withdrawn before §7: a controller-signed predecessor (S6 would
+    // refuse) and a withdrawn successor attestation.
+    let p1 = inserted(
+        commit(store, controller_request(&c, None), None).await,
+        "p1",
+    );
+    let err = commit(store, signed_under(&a, Some((&p1, 5))), None)
+        .await
+        .expect_err("version mismatch");
+    assert!(
+        matches!(
+            err,
+            AcdpError::SupersededTarget {
+                reason: SupersessionReason::VersionMismatch,
+                ..
+            }
+        ),
+        "[{label}] a version mismatch is checked before the attestation: {err:?}"
+    );
+    assert_reason(
+        commit(store, signed_under(&a, Some((&p1, 2))), None).await,
+        KeylessReason::AttestationWithdrawn,
+        &format!("[{label}] withdrawn beats mismatch"),
+    );
+
+    // 5. §7 before the window: a non-org-wide successor whose window is
+    // over, against the same controller-signed predecessor.
+    let stale = mint(store, &Spec::new(&c, y.clone()).window(past_window())).await;
+    assert_reason(
+        commit(store, signed_under(&stale, Some((&p1, 2))), None).await,
+        KeylessReason::KeylessIdentityMismatch,
+        &format!("[{label}] mismatch beats the window"),
+    );
+
+    // 6. With §7 satisfied (org-wide), the window answers.
+    let stale_org = mint(store, &Spec::new(&c, y).org_wide().window(past_window())).await;
+    assert_reason(
+        commit(store, signed_under(&stale_org, Some((&p1, 2))), None).await,
+        KeylessReason::OutsideAttestationWindow,
+        &format!("[{label}] the window after §7"),
+    );
+}
+
+/// **§7 through real commits.** Replays every case of kl-001 vector 5
+/// (`cases_json`, normally [`KL_001_VECTOR_5_CASES`]): an allowed successor
+/// is Inserted and supersedes its predecessor; a refused one is
+/// `not_authorized` + `keyless_identity_mismatch` and leaves the
+/// predecessor active.
+pub async fn assert_keyless_supersession_table<S>(store: &Arc<S>, cases_json: &str, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::error::AcdpError;
+    use acdp::types::keyless::{KeylessReason, WorkloadIdentity};
+    use acdp::types::primitives::{CtxId, Status};
+    use keyless_fixtures::*;
+
+    let cases: Vec<serde_json::Value> = serde_json::from_str(cases_json).expect("cases JSON");
+    assert_eq!(cases.len(), 9, "kl-001 vector 5 has nine cases");
+    for case in &cases {
+        let name = case["name"].as_str().expect("name");
+        let c = controller(label);
+        let side = |v: &serde_json::Value| -> Option<Spec> {
+            match v["kind"].as_str().expect("kind") {
+                "controller" => None,
+                "keyless" => {
+                    let identity: WorkloadIdentity =
+                        serde_json::from_value(v["identity"].clone()).expect("identity");
+                    let spec = Spec::new(&c, identity);
+                    Some(if v["org_wide"].as_bool().expect("org_wide") {
+                        spec.org_wide()
+                    } else {
+                        spec
+                    })
+                }
+                other => panic!("unknown kind {other}"),
+            }
+        };
+        let publish = |spec: Option<Spec>, prev: Option<CtxId>| {
+            let c = c.clone();
+            async move {
+                let prev = prev.as_ref().map(|p| (p, 2));
+                match spec {
+                    None => commit(store, controller_request(&c, prev), None).await,
+                    Some(spec) => {
+                        let m = mint(store, &spec).await;
+                        commit(store, signed_under(&m, prev), None).await
+                    }
+                }
+            }
+        };
+        let v1 = inserted(
+            publish(side(&case["predecessor"]), None).await,
+            &format!("[{label}] {name} predecessor"),
+        );
+        let res = publish(side(&case["successor"]), Some(v1.clone())).await;
+        let stored = store.get(&v1).expect("get").expect("v1 exists");
+        match case["expected"]["result"].as_str().expect("result") {
+            "allowed" => {
+                inserted(res, &format!("[{label}] {name}"));
+                assert_eq!(
+                    stored.registry_state.status,
+                    Status::Superseded,
+                    "[{label}] {name}"
+                );
+            }
+            "refused" => {
+                assert_eq!(
+                    case["expected"]["reason"].as_str(),
+                    Some("keyless_identity_mismatch")
+                );
+                let err = assert_reason(
+                    res,
+                    KeylessReason::KeylessIdentityMismatch,
+                    &format!("[{label}] {name}"),
+                );
+                assert!(
+                    matches!(err, AcdpError::NotAuthorized(_)),
+                    "[{label}] {name}: {err:?}"
+                );
+                assert_eq!(
+                    stored.registry_state.status,
+                    Status::Active,
+                    "[{label}] {name}: a refused successor supersedes nothing"
+                );
+            }
+            other => panic!("unknown result {other}"),
+        }
+    }
+}
+
+/// **A stored keyless predecessor with a malformed `key_attestation`
+/// member fails closed.** No publish path stores one, so the backend's
+/// `plant` stores `req` (a keyless-signed body whose member names a
+/// `ctx_id` and `content_hash` that do not parse) by hand and returns its
+/// `ctx_id`. A valid keyless v2 superseding it is refused with
+/// `RegistryInternal`, never admitted as controller-signed, and v1 stays
+/// active.
+pub async fn assert_malformed_keyless_predecessor_fails_closed<S, F, Fut>(
+    store: &Arc<S>,
+    label: &str,
+    plant: F,
+) where
+    S: ExtendedRegistryStore + 'static,
+    F: FnOnce(acdp::types::publish::PublishRequest) -> Fut,
+    Fut: std::future::Future<Output = CtxId>,
+{
+    use acdp::error::AcdpError;
+    use acdp::types::keyless::KeyAttestationRef;
+    use acdp::types::primitives::ContentHash;
+    use keyless_fixtures::*;
+
+    let c = controller(label);
+    let id = oidc("repo:example/pipeline:ref:refs/heads/main");
+    let key_id = Spec::new(&c, id.clone()).attestation(7).key_id;
+    let malformed = KeyAttestationRef {
+        ctx_id: CtxId("not-a-ctx-id".into()),
+        content_hash: ContentHash("sha256:not-hex".into()),
+    };
+    assert!(
+        malformed.validate().is_err(),
+        "the fixture member is malformed"
+    );
+    let v1 = plant(keyless_request(&c, &malformed, &key_id, None)).await;
+    let stored = store.get(&v1).expect("get").expect("planted v1");
+    assert!(
+        stored.body.key_attestation().is_err(),
+        "[{label}] the planted body carries the malformed member"
+    );
+    let s = mint(store, &Spec::new(&c, id)).await;
+    let err = commit(store, signed_under(&s, Some((&v1, 2))), None)
+        .await
+        .expect_err("a malformed keyless predecessor must fail closed");
+    assert!(
+        matches!(err, AcdpError::RegistryInternal(_)),
+        "[{label}] {err:?}"
+    );
+    let stored = store.get(&v1).expect("get").expect("v1");
+    assert_eq!(
+        stored.registry_state.status,
+        Status::Active,
+        "[{label}] the refused successor supersedes nothing"
+    );
+}
+
+/// **A keyless predecessor whose attestation row is gone fails closed.**
+/// Publishes a keyless v1, then calls `unindex` with its attestation's
+/// `ctx_id` (the backend deletes that index row by hand, the state a bug
+/// would leave), and asserts a keyless v2 superseding it is refused with
+/// `RegistryInternal`, not admitted as controller-signed.
+pub async fn assert_unindexed_keyless_predecessor_fails_closed<S, F, Fut>(
+    store: &Arc<S>,
+    label: &str,
+    unindex: F,
+) where
+    S: ExtendedRegistryStore + 'static,
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    use acdp::error::AcdpError;
+    use keyless_fixtures::*;
+
+    let c = controller(label);
+    let p = mint(
+        store,
+        &Spec::new(&c, oidc("repo:example/pipeline:ref:refs/heads/main")),
+    )
+    .await;
+    let v1 = inserted(
+        commit(store, signed_under(&p, None), None).await,
+        "keyless v1",
+    );
+    unindex(p.ctx_id.as_str().to_string()).await;
+    let s = mint(
+        store,
+        &Spec::new(&c, oidc("repo:example/pipeline:ref:refs/heads/main")),
+    )
+    .await;
+    let err = commit(store, signed_under(&s, Some((&v1, 2))), None)
+        .await
+        .expect_err("an unindexed keyless predecessor must fail closed");
+    assert!(
+        matches!(err, AcdpError::RegistryInternal(_)),
+        "[{label}] {err:?}"
+    );
+}
+
+/// **§5.4 listing.** Newest first (`created_at` descending, `ctx_id`
+/// ascending), only the controller's own, narrowed by issuer and subject
+/// byte for byte; cursor pages are disjoint and complete; a malformed
+/// cursor is `invalid_cursor`; a retracted attestation is still listed; and
+/// each item's `content_hash` and `metadata` are the stored body's.
+pub async fn assert_key_attestation_listing<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use crate::KeyAttestationFilter;
+    use acdp::error::AcdpError;
+    use keyless_fixtures::*;
+
+    let c = controller(label);
+    let a = "repo:example/pipeline:ref:refs/heads/main";
+    let specs = [
+        Spec::new(&c, oidc(a)),
+        Spec::new(&c, oidc(a)),
+        Spec::new(&c, oidc("repo:example/other:ref:refs/heads/main")),
+        Spec::new(
+            &c,
+            spiffe("spiffe://prod.example.com/ns/agents/sa/publisher"),
+        ),
+        Spec::new(&c, oidc(a)),
+    ];
+    let mut minted = Vec::new();
+    for spec in &specs {
+        minted.push(mint(store, spec).await);
+    }
+    // Another controller's attestation never shows up.
+    mint(store, &Spec::new(&controller(label), oidc(a))).await;
+    retract(store, &minted[1].ctx_id).await;
+
+    let mut expected = Vec::new();
+    for m in &minted {
+        let r = store
+            .key_attestation(m.ctx_id.as_str())
+            .await
+            .expect("record")
+            .expect("indexed");
+        expected.push((r.created_at_ms, m.ctx_id.as_str().to_string()));
+    }
+    expected.sort_by(|x, y| y.0.cmp(&x.0).then_with(|| x.1.cmp(&y.1)));
+    let expected: Vec<String> = expected.into_iter().map(|(_, id)| id).collect();
+
+    let list = |filter: KeyAttestationFilter, cursor: Option<String>, limit: u32| {
+        let c = c.clone();
+        async move {
+            store
+                .list_key_attestations(&c, &filter, cursor.as_deref(), limit)
+                .await
+        }
+    };
+    let whole = list(Default::default(), None, 50).await.expect("list");
+    let ids: Vec<String> = whole
+        .items
+        .iter()
+        .map(|i| i.ctx_id.as_str().to_string())
+        .collect();
+    assert_eq!(
+        ids, expected,
+        "[{label}] newest first, the controller's own, retracted included"
+    );
+    assert!(
+        whole.next_cursor.is_none(),
+        "[{label}] one page holds everything"
+    );
+
+    let mut paged = Vec::new();
+    let mut cursor = None;
+    for _ in 0..10 {
+        let page = list(Default::default(), cursor.take(), 2)
+            .await
+            .expect("page");
+        assert!(page.items.len() <= 2, "[{label}]");
+        paged.extend(page.items.iter().map(|i| i.ctx_id.as_str().to_string()));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(
+        paged, expected,
+        "[{label}] cursor pages are disjoint and complete"
+    );
+
+    for item in &whole.items {
+        let stored = store.get(&item.ctx_id).expect("get").expect("stored");
+        assert_eq!(item.content_hash, stored.body.content_hash, "[{label}]");
+        assert_eq!(
+            Some(&item.metadata),
+            stored.body.metadata.as_ref(),
+            "[{label}]"
+        );
+    }
+
+    let filter = |issuer: Option<&str>, subject: Option<&str>| KeyAttestationFilter {
+        issuer: issuer.map(str::to_string),
+        subject: subject.map(str::to_string),
+    };
+    let gh = "https://token.actions.githubusercontent.com";
+    let count =
+        |f: KeyAttestationFilter| async { list(f, None, 50).await.expect("list").items.len() };
+    assert_eq!(
+        count(filter(Some(gh), Some(a))).await,
+        3,
+        "[{label}] issuer + subject"
+    );
+    assert_eq!(
+        count(filter(Some(gh), None)).await,
+        4,
+        "[{label}] issuer excludes SPIFFE"
+    );
+    assert_eq!(
+        count(filter(
+            None,
+            Some("spiffe://prod.example.com/ns/agents/sa/publisher")
+        ))
+        .await,
+        1,
+        "[{label}] subject alone matches SPIFFE"
+    );
+    assert_eq!(
+        count(filter(Some(&format!("{gh}/")), None)).await,
+        0,
+        "[{label}] the issuer is compared byte for byte"
+    );
+    assert_eq!(
+        list(Default::default(), None, 50)
+            .await
+            .map(|p| p.items.len())
+            .unwrap_or_default(),
+        5
+    );
+    assert_eq!(
+        store
+            .list_key_attestations(&controller(label), &Default::default(), None, 50)
+            .await
+            .expect("list")
+            .items
+            .len(),
+        0,
+        "[{label}] an unknown controller lists nothing"
+    );
+    let err = list(Default::default(), Some("not a cursor!".into()), 2)
+        .await
+        .expect_err("malformed cursor");
+    assert!(
+        matches!(err, AcdpError::InvalidCursor(_)),
+        "[{label}] {err:?}"
+    );
+}
+
+/// **D19: the record is the index row joined to `contexts`.** Its
+/// `content_hash` is the stored body's, its status follows the context
+/// (retracted after an admin retraction), and its JWK is the minted one.
+/// A ctx_id with no index row (absent, or an ordinary body) is `None`.
+pub async fn assert_key_attestation_record_join<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use acdp::types::primitives::Status;
+    use keyless_fixtures::*;
+
+    let c = controller(label);
+    let m = mint(
+        store,
+        &Spec::new(
+            &c,
+            spiffe("spiffe://prod.example.com/ns/agents/sa/publisher"),
+        )
+        .org_wide(),
+    )
+    .await;
+    let stored = store.get(&m.ctx_id).expect("get").expect("stored");
+    let r = store
+        .key_attestation(m.ctx_id.as_str())
+        .await
+        .expect("record")
+        .expect("indexed");
+    assert_eq!(r.ctx_id, m.ctx_id, "[{label}]");
+    assert_eq!(r.content_hash, stored.body.content_hash, "[{label}]");
+    assert_eq!(r.content_hash, m.content_hash, "[{label}]");
+    assert_eq!(r.status, Status::Active, "[{label}]");
+    assert_eq!(r.attestation, m.attestation, "[{label}]");
+    assert_eq!(
+        r.attestation.public_key_jwk, m.attestation.public_key_jwk,
+        "[{label}] the JWK §6.3 step 8 verifies under"
+    );
+    assert_eq!(
+        Some(&r.metadata),
+        stored.body.metadata.as_ref(),
+        "[{label}]"
+    );
+    assert_eq!(
+        r.created_at_ms,
+        stored.body.created_at.timestamp_millis(),
+        "[{label}]"
+    );
+
+    retract(store, &m.ctx_id).await;
+    let r = store
+        .key_attestation(m.ctx_id.as_str())
+        .await
+        .expect("record")
+        .expect("indexed");
+    assert_eq!(
+        r.status,
+        Status::Retracted,
+        "[{label}] the status follows the context"
+    );
+
+    let plain = inserted(
+        commit(store, controller_request(&c, None), None).await,
+        "plain",
+    );
+    assert!(
+        store
+            .key_attestation(plain.as_str())
+            .await
+            .expect("record")
+            .is_none(),
+        "[{label}] an ordinary body is no attestation"
+    );
+    assert!(
+        store
+            .key_attestation(&format!(
+                "acdp://{AUTHORITY}/00000000-0000-4000-8000-00000000beef"
+            ))
+            .await
+            .expect("record")
+            .is_none(),
+        "[{label}]"
+    );
+}
+
 #[cfg(test)]
 mod lifecycle_probe_tests {
     use super::*;
