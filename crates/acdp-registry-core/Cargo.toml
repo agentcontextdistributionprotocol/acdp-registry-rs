@@ -19,6 +19,7 @@ acdp-registry-webhook = { path = "../acdp-registry-webhook", version = "0.7.0" }
 axum       = { workspace = true }
 chrono     = { workspace = true }
 http       = "1"
+jsonwebtoken = { workspace = true }
 reqwest    = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }

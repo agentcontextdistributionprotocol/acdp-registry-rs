@@ -50,6 +50,8 @@ pub const SUBSCRIPTION_REQUESTS_TOTAL: &str = "acdp_registry_subscription_reques
 pub const HINT_DELIVERIES_TOTAL: &str = "acdp_registry_hint_deliveries_total";
 pub const HINT_SUBSCRIPTIONS: &str = "acdp_registry_hint_subscriptions";
 pub const HINT_OLDEST_DUE_SECONDS: &str = "acdp_registry_hint_oldest_due_seconds";
+pub const KEYLESS_KEY_FETCH_TOTAL: &str = "acdp_registry_keyless_key_fetch_total";
+pub const KEYLESS_KEY_STALE_SERVED_TOTAL: &str = "acdp_registry_keyless_key_stale_served_total";
 
 /// Process-global recorder handle. `metrics-exporter-prometheus` installs a
 /// single global recorder; a second install returns an error. A `OnceLock`
@@ -235,6 +237,19 @@ pub fn record_hint_subscriptions(active: u64, disabled: u64) {
 pub fn record_hint_backlog(oldest_due_at_ms: Option<i64>, now_ms: i64) {
     let overdue_ms = oldest_due_at_ms.map_or(0, |due| now_ms.saturating_sub(due).max(0));
     metrics::gauge!(HINT_OLDEST_DUE_SECONDS).set(overdue_ms as f64 / 1000.0);
+}
+
+/// One fetch of a keyless issuer's published keys (RFC-ACDP-0021 §5.2
+/// step 3: an OIDC JWKS, its discovery document, or a SPIFFE bundle).
+/// `outcome` is a `keyless::jwks::FetchError` label or `ok`.
+pub fn record_keyless_key_fetch(outcome: &'static str) {
+    metrics::counter!(KEYLESS_KEY_FETCH_TOTAL, "outcome" => outcome).increment(1);
+}
+
+/// A keyless issuer's keys were used past their TTL because the issuer
+/// could not be reached (stale-if-error).
+pub fn record_keyless_key_stale_served() {
+    metrics::counter!(KEYLESS_KEY_STALE_SERVED_TOTAL).increment(1);
 }
 
 /// One retention-prune pass: rows deleted, and the feed's markers after it.

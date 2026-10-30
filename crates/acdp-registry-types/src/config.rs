@@ -1431,6 +1431,31 @@ impl KeylessConfig {
                 self.max_attestation_ttl_seconds
             ));
         }
+        // A stale key set may hold keys the issuer has since withdrawn (a
+        // compromised key rotated out mid-outage). A week rides out any
+        // realistic outage while bounding how long a withdrawn key can
+        // still verify tokens here.
+        if self.jwks_max_stale_seconds > MAX_KEYLESS_JWKS_STALE_SECONDS {
+            return Err(format!(
+                "keyless.jwks_max_stale_seconds={} must be at most {MAX_KEYLESS_JWKS_STALE_SECONDS} \
+                 (7 days): a stale key set may still hold keys the issuer withdrew.",
+                self.jwks_max_stale_seconds
+            ));
+        }
+        if self.fetch_timeout_ms < MIN_KEYLESS_FETCH_TIMEOUT_MS {
+            return Err(format!(
+                "keyless.fetch_timeout_ms={} must be at least {MIN_KEYLESS_FETCH_TIMEOUT_MS}: \
+                 below that no TLS handshake to an issuer completes.",
+                self.fetch_timeout_ms
+            ));
+        }
+        if self.max_fetch_bytes < MIN_KEYLESS_MAX_FETCH_BYTES {
+            return Err(format!(
+                "keyless.max_fetch_bytes={} must be at least {MIN_KEYLESS_MAX_FETCH_BYTES}: \
+                 below that not even a one-key JWKS fits.",
+                self.max_fetch_bytes
+            ));
+        }
         if self.oidc_issuers.is_empty() && self.spiffe_trust_domains.is_empty() {
             return Err(
                 "keyless.enabled=true needs at least one keyless.oidc_issuers or \
@@ -1487,6 +1512,13 @@ impl KeylessConfig {
         Ok(())
     }
 }
+
+/// `keyless.jwks_max_stale_seconds` upper bound: 7 days.
+pub const MAX_KEYLESS_JWKS_STALE_SECONDS: u64 = 7 * 24 * 3600;
+/// `keyless.fetch_timeout_ms` lower bound.
+pub const MIN_KEYLESS_FETCH_TIMEOUT_MS: u64 = 100;
+/// `keyless.max_fetch_bytes` lower bound: 1 KiB.
+pub const MIN_KEYLESS_MAX_FETCH_BYTES: u64 = 1024;
 
 /// The capabilities document's `keyless` member (RFC-ACDP-0021 §13.1) for
 /// this config: exactly the configured issuers and trust domains, in
@@ -1717,6 +1749,46 @@ mod tests {
             serde_json::to_value(&d).unwrap(),
             serde_json::to_value(&parsed).unwrap()
         );
+    }
+
+    /// The cache bounds: each out-of-range value is refused naming its key,
+    /// and each bound itself is accepted.
+    #[test]
+    fn keyless_cache_and_fetch_bounds_are_enforced() {
+        for (bad, key) in [
+            (
+                KeylessConfig {
+                    jwks_max_stale_seconds: MAX_KEYLESS_JWKS_STALE_SECONDS + 1,
+                    ..keyless_ok()
+                },
+                "keyless.jwks_max_stale_seconds=604801",
+            ),
+            (
+                KeylessConfig {
+                    fetch_timeout_ms: MIN_KEYLESS_FETCH_TIMEOUT_MS - 1,
+                    ..keyless_ok()
+                },
+                "keyless.fetch_timeout_ms=99",
+            ),
+            (
+                KeylessConfig {
+                    max_fetch_bytes: MIN_KEYLESS_MAX_FETCH_BYTES - 1,
+                    ..keyless_ok()
+                },
+                "keyless.max_fetch_bytes=1023",
+            ),
+        ] {
+            let e = keyless_refusal(&bad);
+            assert!(e.starts_with(key), "{key}: {e}");
+        }
+        KeylessConfig {
+            jwks_max_stale_seconds: MAX_KEYLESS_JWKS_STALE_SECONDS,
+            fetch_timeout_ms: MIN_KEYLESS_FETCH_TIMEOUT_MS,
+            max_fetch_bytes: MIN_KEYLESS_MAX_FETCH_BYTES,
+            ..keyless_ok()
+        }
+        .validate()
+        .expect("each bound is inclusive");
     }
 
     #[test]
