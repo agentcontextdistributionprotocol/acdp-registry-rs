@@ -12,7 +12,7 @@ This is a **private operational feature** of this registry. It is not the
 subscriptions (`POST /subscriptions`, see [HTTP-API.md](HTTP-API.md)), a
 separate mechanism with its own signed, content-free hint body. It is also
 not the older sketch in
-[RFC-ACDP-0009 §2.10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/75fb0da5d2baf5c5ce2f1fbf314b845e6cbe161a/rfcs/RFC-ACDP-0009-extensions.md#210-registry-webhook-event-profile). The two differ
+[RFC-ACDP-0009 §2.10](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/bf37195a7b39cb9e5ddac9058511d76d72f3c55a/rfcs/RFC-ACDP-0009-extensions.md#210-registry-webhook-event-profile). The two differ
 on the wire: the envelope here carries `schema_version` and `type`, not the
 sketch's `event_version` and `event_type`, and the HMAC covers the raw posted bytes (the timestamped
 signature covers the timestamp, a dot, then those bytes) rather than JCS canonical bytes. Do not build against the sketch expecting this payload.

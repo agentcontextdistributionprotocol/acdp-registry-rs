@@ -9787,7 +9787,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "kl",
-        "RFC-ACDP-0021 keyless signing (Draft), spec pin 75fb0da: 9 fixtures, none carrying \
+        "RFC-ACDP-0021 keyless signing (Draft), spec pin bf37195: 9 fixtures, none carrying \
          an endpoint (kl-001's vectors array is the golden attestation/publish known-answer \
          set, not an HTTP exchange). Two grounds, split by fixture. kl-005, kl-006 and \
          kl-008 apply only to acdp-consumer-keyless: the consumer's verification of keyless \
@@ -9800,7 +9800,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "mcp",
-        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin 75fb0da: 7 fixtures, all \
+        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin bf37195: 7 fixtures, all \
          applies_to_profiles = [acdp-producer-mcp-proxy], none carrying an endpoint \
          (mcp-001's vectors array is a known-answer set). They are obligations of an MCP \
          signing proxy, a producer: an acdp:mcp-tool-result body is an ordinary signed \
@@ -9810,7 +9810,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "trust",
-        "RFC-ACDP-0020 registry trust lists (Draft), spec pin 75fb0da: 7 fixtures, all \
+        "RFC-ACDP-0020 registry trust lists (Draft), spec pin bf37195: 7 fixtures, all \
          applies_to_profiles = [acdp-consumer-trust-list], none carrying an endpoint \
          (trust-001's vectors array is a known-answer set). Selecting, validating and \
          applying signed acdp:trust-list bodies is the consumer's evaluation; an \
@@ -10213,7 +10213,9 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// added); 169 after the `093279a` bump (chain-001..010 added, RFC-ACDP-0017);
 /// 177 after the `81bbe3f` bump (rec-001..008 added, RFC-ACDP-0018); 178 after
 /// the `1511b08` bump (chain-011 added, RFC-ACDP-0017 Final); 202 after the
-/// `75fb0da` bump (kl-001..009, mcp-001..007, trust-001..007, rev-007 added).
+/// `75fb0da` bump (kl-001..009, mcp-001..007, trust-001..007, rev-007 added);
+/// still 202 after the `bf37195` bump (RFC-ACDP-0021 draft.3: kl fixtures only
+/// modified).
 /// A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.

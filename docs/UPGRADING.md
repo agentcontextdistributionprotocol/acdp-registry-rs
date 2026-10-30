@@ -21,6 +21,17 @@ belongs in the per-crate changelogs.
 
 ---
 
+## Unreleased
+
+**No upgrade steps.** Adopts ACDP spec `bf37195` (RFC-ACDP-0021 0.5.0-draft.3) and restores the
+exact `acdp =0.18.2` pin. The binary's behavior is unchanged: `acdp-registry-keyless` is still
+refused at startup, and the Hard Seam is unchanged (no new `KeyAuthorization` or
+`RevocationTrustClass` variant; revocation discovery stays keyed by `agent_id`).
+
+- **Rollback:** safe. Nothing to migrate.
+
+---
+
 ## 0.7.0
 
 **No upgrade steps.** New opt-in key `registry.cors.public_reads` (default `false`): any origin may
