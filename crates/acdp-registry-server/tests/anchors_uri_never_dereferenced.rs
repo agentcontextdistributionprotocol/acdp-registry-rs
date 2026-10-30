@@ -11,9 +11,9 @@
 //! this repo's real reqwest-based clients actually use — not every
 //! conceivable HTTP-dispatch spelling; a hand-rolled `reqwest::get(..)` or
 //! `.execute(req)` call would not match this grep) and pins the set to
-//! exactly the four audited, legitimate ones, so a *fifth* `.send()`-idiom
+//! exactly the five audited, legitimate ones, so a *sixth* `.send()`-idiom
 //! client wired into a code path the behavioral test doesn't traverse still
-//! fails CI — and asserts that none of the four even mentions "anchor".
+//! fails CI — and asserts that none of the five even mentions "anchor".
 //!
 //! See `plans/reg3-anchors.md`, Phase 6, for the full spec this test
 //! implements.
@@ -32,6 +32,11 @@ const EXPECTED_SEND_SITES: &[&str] = &[
     // RFC-ACDP-0018 §8.2 change hints: POSTs a fixed hint body to the
     // subscriber's callback_url; never reads a context, let alone anchors.
     "crates/acdp-registry-core/src/hints.rs",
+    // RFC-ACDP-0021 §5.2 step 3: GETs a configured keyless issuer's JWKS,
+    // OIDC discovery document or SPIFFE bundle; the URLs come only from
+    // `[keyless]` config (or that issuer's discovery document), never from
+    // a context, let alone anchors.
+    "crates/acdp-registry-core/src/keyless/jwks.rs",
 ];
 
 /// This file's own path relative to the workspace root. This exclusion
@@ -70,7 +75,7 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// True iff `src` contains a zero-argument dispatch call — the
-/// reqwest/http-client idiom used by all four legitimate sites (e.g.
+/// reqwest/http-client idiom used by all five legitimate sites (e.g.
 /// `client.get(..).header(..).<call>().await`). This is scoped
 /// specifically to the *zero-argument* form: Rust's channel senders
 /// (`mpsc::Sender`, `oneshot::Sender`, `broadcast::Sender`, ...) always
@@ -87,7 +92,7 @@ fn contains_outbound_http_dispatch_call(src: &str) -> bool {
 }
 
 #[test]
-fn outbound_http_send_sites_are_exactly_the_four_legitimate_ones() {
+fn outbound_http_send_sites_are_exactly_the_audited_ones() {
     let root = workspace_root();
     let crates_dir = root.join("crates");
     let mut rs_files = Vec::new();
@@ -128,13 +133,13 @@ fn outbound_http_send_sites_are_exactly_the_four_legitimate_ones() {
 }
 
 /// RFC-ACDP-0016 §6 NORMATIVE: "there is no code path in core verification
-/// that ever reads `anchors[].uri`". None of the four legitimate
+/// that ever reads `anchors[].uri`". None of the five legitimate
 /// outbound-HTTP call sites — the *only* places in the workspace that make
 /// an outbound HTTP call at all, per the test above — may even mention
 /// "anchor" in any form. This is the criterion-5 check, asserted here in
 /// code rather than only confirmed by hand.
 #[test]
-fn none_of_the_four_send_sites_mentions_anchor() {
+fn none_of_the_audited_send_sites_mentions_anchor() {
     let root = workspace_root();
     for rel in EXPECTED_SEND_SITES {
         let path = root.join(rel);
@@ -143,7 +148,7 @@ fn none_of_the_four_send_sites_mentions_anchor() {
             !src.to_lowercase().contains("anchor"),
             "{rel} (an outbound-HTTP call site) must not mention \"anchor\" in any form — \
              RFC-ACDP-0016 §6 forbids `anchors[].uri` from ever being dereferenced, and this \
-             is one of only four places in the whole workspace that make an outbound HTTP call"
+             is one of only five places in the whole workspace that make an outbound HTTP call"
         );
     }
 }

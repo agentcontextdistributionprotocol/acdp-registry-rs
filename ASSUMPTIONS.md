@@ -5093,3 +5093,41 @@ underlying settings and code were not touched by this pass, only the record of t
 - Alternatives: (a) a TEXT timestamp column matching `contexts`; (c) `SELECT … FOR SHARE` on the attestation row, which would make the check authoritative at commit time; (d) checking the memory store's status before the inner commit, which would refuse in a different order from the SQL backends; (f) hiding retracted rows from the list.
 - Blast radius: low. Nothing writes the index until the mint endpoint exists (Phase 4+), and non-keyless publishes skip every check. Migration 019 is additive; Postgres stays N-1 safe.
 - Status: UNCONFIRMED
+
+## RFC-ACDP-0021 keyless, Phase 4 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) **AITP vs RFC-0021 divergences.** RFC-0021 §5.2 step 3 wins on the wire; AITP's rules are written for a peer handshake, which this request is not:
+    - `aud`: AITP §6.3 wants exactly one value for a JWT-SVID. RFC-0021 says a string or array that *contains* `registry_did`. A multi-audience token naming the registry is accepted.
+    - `iat`: AITP wants it within ±300 s, and REQUIRED for a JWT-SVID. RFC-0021 says "when present", at most 60 s ahead. An absent or old `iat` is accepted.
+    - `nonce`: AITP requires it. RFC-0021 has no handshake nonce, so it is not read.
+    - `cnf.jkt`: AITP requires it. RFC-0021 says "if the token carries" it (kl-002 G), so absent is accepted.
+  - (b) **AITP rules applied where RFC-0021 is silent (SPIFFE only, §6.2/§6.3):**
+    - The header holds only `alg`, `kid` and `typ`. `kid` is required. `typ` is `JWT` or `JOSE`.
+    - `alg` is RS/PS 256/384/512 or ES256/ES384. EdDSA is refused. ES512 is refused too, because jsonwebtoken cannot verify it.
+    - Only bundle keys with `use: "jwt-svid"` are candidates; a key with no `use` is ignored. This is stricter than the plan's "`jwt-svid` or no `use`".
+  - (c) The OIDC `alg` list is plan D9: RS256, PS256, ES256, ES384, EdDSA. These are refused before any fetch, for both kinds: any `crit` header; RSA keys under 2048 bits (RFC 7518 §3.3); and a JWK whose own `alg` disagrees with the header. With no `kid`, the token needs exactly one candidate key. Two keys sharing one `kid` are `token_invalid`.
+  - (d) A malformed `cnf`, or a non-string `cnf.jkt`, is `confirmation_mismatch`. A `cnf` that has no `jkt` is accepted.
+  - (e) `exp` is required and compared in whole seconds (floor), strictly `> now`. Fractional NumericDates are accepted.
+  - (f) **Cache:**
+    - TTL: `min(jwks_cache_ttl_seconds, clamp(max-age, 60, 3600))`; `no-store` and `no-cache` count as max-age 0. Without a max-age the config TTL applies, capped at 3600 s.
+    - After a failed fetch, a source is not refetched for 30 s (`FAILURE_BACKOFF_MS`). If it holds a usable stale copy, that copy answers meanwhile. If it holds none, a negative cache answers `issuer_unreachable` at once, so an outage costs one timeout per window instead of one per queued request.
+    - A `[keyless]` section with `enabled = false` builds no cache slots, so nothing is ever fetched.
+    - A forced refetch for an unknown `kid` that fails is `issuer_unreachable`, not `token_invalid`.
+  - (g) **Discovery:** the discovery document's `issuer` must equal the configured issuer byte for byte (OIDC Discovery §4.3), and its `jwks_uri` must be https. Every failure maps to `issuer_unreachable`: non-2xx (a redirect included), oversize, bad JSON, a bad discovery document, an SSRF refusal, or a timeout. Fetches are logged at warn with the source and a failure class only.
+  - (g2) **4xx reading of D16.** A 4xx from the JWKS, bundle or discovery endpoint is also `issuer_unreachable` (502, retryable), even though §5.2 names only network failure, timeout and 5xx. This is a deliberate reading of D16's "unfetchable": the registry cannot tell an issuer-side misconfiguration from a transient fault, and a retryable answer never blames the client's token for the issuer's state.
+  - (g3) **Config bounds.**
+    - `jwks_max_stale_seconds` ≤ 604800 (7 days). A stale set may still hold a key the issuer withdrew mid-outage; a week rides out any realistic outage while bounding that exposure.
+    - `fetch_timeout_ms` ≥ 100.
+    - `max_fetch_bytes` ≥ 1024, which is about the smallest one-key JWKS.
+    - Each refusal names its key (`keyless_cache_and_fetch_bounds_are_enforced`).
+  - (h) Metrics: `acdp_registry_keyless_key_fetch_total{outcome}` and `acdp_registry_keyless_key_stale_served_total`. Docs are deferred to Phase 7.
+  - (i) `rsa` 0.9 and `jsonwebtoken` were added as dev-dependencies of the server crate, and `jsonwebtoken` as a normal dependency of core. All were already in Cargo.lock, so no crate, vet or deny entry changed.
+  - (j) Mutation scope: no `examine_globs` file changed in this phase; `hints.rs` is not in scope.
+- Chose: as above.
+- Alternatives:
+  - (a) AITP's stricter rules, which would refuse tokens RFC-0021 accepts;
+  - (b) the plan's "no `use`" bundle keys;
+  - (f) no failure backoff, so each request waits a full timeout during an outage.
+- Blast radius: low and reversible. Nothing is reachable over HTTP yet, and `keyless.enabled` is still refused at startup.
+- Status: UNCONFIRMED

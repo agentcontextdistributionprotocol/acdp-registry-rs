@@ -109,6 +109,10 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// [`MIN_SCAN_ROWS`](crate::handlers::MIN_SCAN_ROWS) unless a
     /// test lowered it with [`Self::with_changes_min_scan_rows`].
     pub changes_min_scan_rows: u32,
+    /// RFC-ACDP-0021 §5.2 step 3: the configured keyless issuers' published
+    /// keys, one slot per `[keyless]` issuer or trust domain. Empty, and
+    /// never fetched from, while `keyless.enabled` is false.
+    pub keyless_jwks: Arc<crate::keyless::JwksCache>,
 }
 
 impl<S: ExtendedRegistryStore> AppStateInner<S> {
@@ -197,6 +201,14 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
         self
     }
 
+    /// Replace the keyless key cache (tests: a loopback-permitting policy,
+    /// a static resolver, a private CA or an injected clock).
+    #[must_use]
+    pub fn with_keyless_jwks(mut self, cache: crate::keyless::JwksCache) -> Self {
+        self.keyless_jwks = Arc::new(cache);
+        self
+    }
+
     /// Replace the callback SSRF policy (tests).
     pub fn with_callback_policy(mut self, policy: acdp::safe_http::SsrfPolicy) -> Self {
         self.callback_policy = policy;
@@ -214,6 +226,11 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
         cross_registry: Option<Arc<CrossRegistryResolver>>,
     ) -> Self {
         let playground = Arc::new(RwLock::new(config.playground.clone()));
+        let keyless_jwks = Arc::new(crate::keyless::JwksCache::new(
+            &config.keyless,
+            crate::keyless::Outbound::production(),
+            crate::keyless::system_clock(),
+        ));
         let rate_limiter = match config.limits.publish_rate_per_minute {
             0 => None,
             n => Some(Arc::new(AgentRateLimiter::new(n))),
@@ -326,6 +343,7 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             hint_extra_roots: Vec::new(),
             hint_timeouts: crate::hints::HintTimeouts::default(),
             changes_min_scan_rows: crate::handlers::MIN_SCAN_ROWS,
+            keyless_jwks,
         }
     }
 }

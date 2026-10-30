@@ -103,6 +103,14 @@ serial_test    = "3"
 # `rustls` half of U-521's "byte-identical `no-dev` graph" measurement expired
 # the moment `rustls` became a normal dependency; the `rcgen` half did not.
 rcgen          = "0.14"
+# RFC-ACDP-0021 Phase 4: `tests/keyless_token.rs` signs RS256 workload tokens
+# with a key generated at test runtime (no committed key material, as for
+# `rcgen` above). Already in the graph through `jsonwebtoken`'s `rust_crypto`
+# feature, with the same default features, so it adds no crate and no vet
+# entry. Dev-only under resolver 2.
+rsa            = { version = "0.9", features = ["getrandom"] }
+# The same tests encode those tokens; the workspace's own JWT crate.
+jsonwebtoken   = { workspace = true }
 # Hardening C7: `memory_ext.rs`'s `#[cfg(test)] mod tests` runs the shared
 # cross-backend parity suite (`acdp_registry_store::parity`, gated behind
 # `test-support`) against `MemoryStore`. The server is bin-only, so those tests
