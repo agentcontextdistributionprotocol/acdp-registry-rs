@@ -543,6 +543,21 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
              (RFC-ACDP-0018 §5) — set changes.enabled=true or remove the profile."
         );
     }
+    // RFC-ACDP-0021 `acdp-registry-keyless` is a spec profile (so it is in the
+    // allowlist above) that this release does not implement: refuse to
+    // advertise it rather than serve /key-attestations as 501 under a
+    // profile that promises them.
+    if cfg
+        .registry
+        .profiles
+        .iter()
+        .any(|p| p == "acdp-registry-keyless")
+    {
+        anyhow::bail!(
+            "registry.profiles advertises 'acdp-registry-keyless', which this release does \
+             not implement (RFC-ACDP-0021 POST/GET /key-attestations). Remove the profile."
+        );
+    }
     validate_changes_retention(&cfg.changes)?;
     if cfg.changes.enabled {
         validate_changes(cfg)?;
@@ -1928,6 +1943,17 @@ mod tests {
         assert!(
             err.to_string().contains("requires storage.backend"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn advertising_the_unimplemented_keyless_profile_is_refused() {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.registry.profiles = vec!["acdp-registry-keyless".into()];
+        let err = validate_config(&cfg).expect_err("refused at startup");
+        assert!(
+            err.to_string().contains("does not implement"),
+            "an allowlisted spec profile, refused by its own guard: {err}"
         );
     }
 

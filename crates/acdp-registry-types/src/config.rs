@@ -352,6 +352,7 @@ pub const REGISTRY_ADVERTISABLE_PROFILES: &[&str] = &[
     "acdp-registry-lifecycle",
     "acdp-registry-changes",
     "acdp-registry-events",
+    "acdp-registry-keyless",
 ];
 
 fn default_bind() -> String {

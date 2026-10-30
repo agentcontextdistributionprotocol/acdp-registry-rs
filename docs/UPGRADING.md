@@ -28,6 +28,12 @@ make anonymous `GET`/`HEAD` reads, with no credentials and no `Authorization` he
 cross-origin. Nothing changes unless you set it. It cannot be combined with
 `registry.cors.allowed_origins`; a config with both is refused at startup.
 
+This release also adopts ACDP spec `75fb0da` and `acdp` 0.18.1. The spec adds the
+`acdp-registry-keyless` profile (RFC-ACDP-0021, Draft). The name is now accepted in
+`registry.profiles` validation, but advertising it is refused at startup because the profile is not
+implemented yet. acdp 0.18.1 adds no variant to `KeyAuthorization` or `RevocationTrustClass`, and
+revocation discovery stays keyed by `agent_id`.
+
 - **Rollback:** safe once the key is gone. An older binary refuses to start with it present
   (`deny_unknown_fields`), from TOML or from `ACDP_REGISTRY_REGISTRY__CORS__PUBLIC_READS` (even
   `false`), so remove both before rolling back.
