@@ -2021,4 +2021,13 @@ mod keyless_http_tests {
         let kit = Kit::new(store, Opts::default()).await;
         super::keyless_kit::assert_keyless_publish_core(&kit, "memory").await;
     }
+
+    /// §6.3 under a P-256 ephemeral key on this backend (no log).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keyless_publish_under_a_p256_key_on_the_memory_store() {
+        let store = MemoryStore::new();
+        store.migrate().await.unwrap();
+        let kit = Kit::new(store, Opts::default()).await;
+        super::keyless_kit::assert_keyless_p256_publish(&kit, "memory").await;
+    }
 }

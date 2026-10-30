@@ -853,6 +853,19 @@ async fn keyless_publish_scenarios_on_sqlite() {
     keyless_kit::assert_keyless_publish_core(&kit, "sqlite").await;
 }
 
+/// §6.3 under a P-256 ephemeral key on SQLite, with the log: the receipt
+/// and leaf carry the attested (compressed-point) fingerprint, and another
+/// P-256 key's signature under the keyless key id is `invalid_signature`.
+#[tokio::test(flavor = "multi_thread")]
+async fn keyless_publish_under_a_p256_key_on_sqlite() {
+    let (kit, _d) = kit_with(Opts {
+        log: true,
+        ..Opts::default()
+    })
+    .await;
+    keyless_kit::assert_keyless_p256_publish(&kit, "sqlite").await;
+}
+
 /// §12 / D13: with the profile on, a keyless body never reaches the
 /// unpinned playground branch, which verifies nothing.
 #[tokio::test(flavor = "multi_thread")]

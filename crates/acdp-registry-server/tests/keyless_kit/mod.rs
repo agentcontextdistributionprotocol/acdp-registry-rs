@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicI64, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acdp::crypto::{AcdpSigningKey, SigningKey};
+use acdp::crypto::{AcdpSigningKey, P256SigningKey, SigningKey};
 use acdp::did::WebResolver;
 use acdp::producer::keyless::EphemeralKey;
 use acdp::producer::Producer;
@@ -301,6 +301,9 @@ pub struct Opts {
     pub acdp_version: &'static str,
     /// `[playground] enabled`, unpinned (§12: never accepts a keyless body).
     pub playground: bool,
+    /// `[metrics] enabled` (open, no bearer): mounts `GET /metrics` and
+    /// installs the process-global recorder.
+    pub metrics: bool,
 }
 
 impl Default for Opts {
@@ -314,6 +317,7 @@ impl Default for Opts {
             enabled: true,
             acdp_version: "0.5.0",
             playground: false,
+            metrics: false,
         }
     }
 }
@@ -395,6 +399,7 @@ impl Kit {
         cfg.keyless.rate_per_identity_per_minute = opts.rate_per_identity;
         cfg.keyless.rate_per_ip_per_minute = opts.rate_per_ip;
         cfg.keyless.fetch_timeout_ms = 3000;
+        cfg.metrics.enabled = opts.metrics;
 
         let signer =
             acdp_registry_core::receipt::build_signer(&cfg.receipt, &cfg.registry.authority)
@@ -1353,4 +1358,169 @@ pub async fn assert_keyless_publish_core(kit: &Kit, label: &str) {
         "{label} kl-007 B: {}",
         r.1
     );
+}
+
+// ── keyless publish under a P-256 ephemeral key ────────────────────────────
+
+/// A minted attestation for a P-256 ephemeral key. The key is not `Clone`
+/// and zeroizes on drop, so the scalar is held and the key rebuilt per use.
+pub struct MintedP256 {
+    pub att: KeyAttestation,
+    pub reference: KeyAttestationRef,
+    pub scalar: [u8; 32],
+}
+
+/// The P-256 signing key for `scalar`.
+pub fn p256_signing_key(scalar: &[u8; 32]) -> AcdpSigningKey {
+    AcdpSigningKey::P256(P256SigningKey::from_bytes(scalar).expect("a P-256 scalar"))
+}
+
+/// A fresh random P-256 scalar.
+pub fn p256_scalar() -> [u8; 32] {
+    P256SigningKey::generate().seed_bytes()
+}
+
+impl MintedP256 {
+    /// The SDK's keyless producer for this attestation.
+    pub fn producer(&self) -> Producer {
+        Producer::keyless(
+            p256_signing_key(&self.scalar),
+            &self.att,
+            self.reference.clone(),
+        )
+        .expect("keyless producer")
+    }
+}
+
+impl Kit {
+    /// Mint an attestation for the P-256 key `scalar`. The SDK's request
+    /// carries the R8 proof of possession: a 64-byte IEEE 1363 `r||s`.
+    pub async fn mint_p256(
+        &self,
+        scalar: [u8; 32],
+        controller: &str,
+        descriptor: IdentityDescriptor,
+        ttl: Option<u32>,
+    ) -> MintedP256 {
+        let key = EphemeralKey::from_key(p256_signing_key(&scalar));
+        let req = Self::request(&key, controller, descriptor, ttl);
+        assert_eq!(req.algorithm, "ecdsa-p256");
+        assert_eq!(
+            B64.decode(&req.pop).expect("base64 pop").len(),
+            64,
+            "R8: the P-256 pop is P1363 r||s"
+        );
+        let (status, v) = self.post(&req).await;
+        assert_eq!(status, StatusCode::CREATED, "mint p256: {v}");
+        let body: acdp::types::body::Body = serde_json::from_value(v["body"].clone()).unwrap();
+        let att = KeyAttestation::from_body(&body).unwrap();
+        MintedP256 {
+            reference: KeyAttestationRef {
+                ctx_id: body.ctx_id.clone(),
+                content_hash: body.content_hash.clone(),
+            },
+            att,
+            scalar,
+        }
+    }
+}
+
+/// §6.3 end to end under a P-256 ephemeral key: mint, publish (201, then
+/// an idempotent 200), the receipt's and the leaf's `key_fingerprint` are
+/// the attested key's (the SDK's fingerprint over the compressed SEC1
+/// point), and a body signed by another P-256 key under the same keyless
+/// key id is `invalid_signature` with no reason (kl-003 H).
+pub async fn assert_keyless_p256_publish(kit: &Kit, label: &str) {
+    let has_log = kit_has_log(kit).await;
+    let controller = kit.controller("p256", &[(kit.oidc_identity(SUBJECT), false)]);
+
+    let scalar = p256_scalar();
+    let sdk = EphemeralKey::from_key(p256_signing_key(&scalar));
+    let fingerprint = sdk.fingerprint().unwrap();
+    let m = kit
+        .mint_p256(scalar, &controller, kit.oidc(SUBJECT), Some(600))
+        .await;
+    assert_eq!(m.att.algorithm, "ecdsa-p256", "{label}");
+    assert_eq!(m.att.key_fingerprint, fingerprint, "{label} attested");
+    assert_eq!(m.att.public_key_jwk, sdk.jwk().unwrap(), "{label} jwk");
+    assert_eq!(m.att.key_id, sdk.key_id(&controller).unwrap(), "{label}");
+    assert!(
+        m.att.key_id.starts_with(&format!("{controller}#acdp-kl-")),
+        "{label}: {}",
+        m.att.key_id
+    );
+
+    let req = plain(&m.producer(), "p256 keyless");
+    assert_eq!(req.signature.algorithm, "ecdsa-p256", "{label}");
+    assert_eq!(req.signature.key_id, m.att.key_id, "{label}");
+    assert_eq!(
+        B64.decode(&req.signature.value).unwrap().len(),
+        64,
+        "{label}: P1363 body signature"
+    );
+    let before = if has_log {
+        Some(kit.log_size().await)
+    } else {
+        None
+    };
+    let idem = unique("p256");
+    let a = kit.publish_idem(&req, Some(&idem)).await;
+    assert_eq!(a.0, StatusCode::CREATED, "{label} p256 publish: {}", a.1);
+    assert_eq!(
+        a.1["registry_receipt"]["key_fingerprint"],
+        json!(fingerprint),
+        "{label} p256 receipt"
+    );
+    if let Some(n) = before {
+        assert_eq!(kit.log_size().await, n + 1, "{label} p256: one leaf");
+        assert_eq!(
+            kit.leaf(n).await["key_fingerprint"],
+            json!(fingerprint),
+            "{label} p256 leaf"
+        );
+    }
+    let replay = kit.publish_idem(&req, Some(&idem)).await;
+    assert_eq!(
+        replay.0,
+        StatusCode::OK,
+        "{label} p256 replay: {}",
+        replay.1
+    );
+    assert_eq!(replay.1["ctx_id"], a.1["ctx_id"], "{label} p256 replay");
+    assert_eq!(
+        kit.body_of(a.1["ctx_id"].as_str().unwrap())
+            .await
+            .signature
+            .key_id,
+        m.att.key_id,
+        "{label} stored key id"
+    );
+
+    // Another P-256 key signs the same content hash under the keyless key
+    // id: the attested key does not verify it.
+    let mut forged = plain(&m.producer(), "p256 forged");
+    let other = p256_signing_key(&p256_scalar());
+    let (alg, value) = other.sign_content_hash(&forged.content_hash);
+    assert_eq!(alg, "ecdsa-p256");
+    forged.signature.value = value;
+    let before = if has_log {
+        Some(kit.log_size().await)
+    } else {
+        None
+    };
+    let r = kit.publish(&forged).await;
+    assert_eq!(
+        wire(&r),
+        is(400, "invalid_signature", None),
+        "{label} p256 forged: {}",
+        r.1
+    );
+    assert!(
+        r.1["error"].get("details").is_none(),
+        "{label} p256 forged: {}",
+        r.1
+    );
+    if let Some(n) = before {
+        assert_eq!(kit.log_size().await, n, "{label} p256 forged: no leaf");
+    }
 }

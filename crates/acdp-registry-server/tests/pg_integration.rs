@@ -1595,3 +1595,28 @@ async fn pg_keyless_publish_scenarios() {
     .await;
     keyless_kit::assert_keyless_publish_core(&kit, "pg").await;
 }
+
+/// §6.3 under a P-256 ephemeral key on Postgres, with the log: receipt and
+/// leaf fingerprint, and the other-key signature refusal.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn pg_keyless_publish_under_a_p256_key() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = PgStore::connect(&url, 4)
+        .await
+        .unwrap()
+        .with_transparency_log();
+    store.migrate().await.unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    truncate(&pool).await;
+    pool.close().await;
+    let kit = keyless_kit::Kit::new(
+        store,
+        keyless_kit::Opts {
+            log: true,
+            ..keyless_kit::Opts::default()
+        },
+    )
+    .await;
+    keyless_kit::assert_keyless_p256_publish(&kit, "pg").await;
+}
