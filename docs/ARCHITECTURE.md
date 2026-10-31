@@ -196,17 +196,17 @@ The protocol-critical part of `POST /contexts` is **not** implemented here — i
 is `acdp`'s `RegistryServer`, which implements the ordered algorithm of
 [RFC-ACDP-0003 §2.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/0ba958247f0aaa4b6e307ff88555d1b23ba5fb7f/rfcs/RFC-ACDP-0003-publish.md#21-registry-processing).
 The steps and their one invariant are specified there and explained in
-[acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/registry.md#the-publish-pipeline--the-one-rule);
+[acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.19.0/docs/registry.md#the-publish-pipeline--the-one-rule);
 this page does not restate them. We reuse it unchanged and add storage
 adapters, **not** a parallel validator. The per-agent publish budget is this
 registry's own limiter, peeked and charged in steps 3 and 6 below rather than
 plugged into `RegistryServer` (the guide allows a host-enforced limiter:
-[acdp-rs · Rate limiting](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/registry.md#rate-limiting)).
+[acdp-rs · Rate limiting](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.19.0/docs/registry.md#rate-limiting)).
 
 The registry calls the SDK in two halves, `prove_publish_identity*` and then
 `commit_proven`, so the budget is charged at the point the signer becomes proven;
 the semantics are in
-[acdp-rs · Splitting prove from commit](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/registry.md#splitting-prove-from-commit).
+[acdp-rs · Splitting prove from commit](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.19.0/docs/registry.md#splitting-prove-from-commit).
 
 What `publish` (`crates/acdp-registry-core/src/handlers/context.rs`) wraps
 around those calls:
@@ -256,7 +256,7 @@ The four-way charge split is pinned by
 The producer lifecycle routes (`/retract`, `/republish`) share that per-agent
 bucket, keyed by the event `actor`, and follow the same rule: a read-only peek
 before verification, a `PublishCharge` armed once the signer is proven. They
-use the SDK's lifecycle [prove/commit split](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/registry.md#splitting-prove-from-commit-for-lifecycle-events) (`acdp` 0.14.4): after the tenant
+use the SDK's lifecycle [prove/commit split](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.19.0/docs/registry.md#splitting-prove-from-commit-for-lifecycle-events) (`acdp` 0.14.4): after the tenant
 gate and the bearer check, `prove_lifecycle_identity*` runs RFC-ACDP-0013 §6
 steps 1–3 (visibility, event validation and endpoint binding, actor ==
 producer) and the signature verification, persisting nothing; the charge arms;
@@ -266,7 +266,7 @@ charged; an event refused before its signature is checked (unknown or
 invisible context, actor ≠ producer, wrong `event_type`) costs nobody.
 
 DID verification reuses `acdp`'s `WebResolver` (LRU-cached, SSRF-policy-gated —
-see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/security.md#ssrfpolicy)) for **both** publish and
+see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.19.0/docs/security.md#ssrfpolicy)) for **both** publish and
 auth-challenge verification; there is intentionally only one resolver per server
 instance.
 
