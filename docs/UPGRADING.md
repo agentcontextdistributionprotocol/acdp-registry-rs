@@ -21,7 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## Unreleased
+## 0.8.1
 
 **No upgrade steps.** `keyless.oidc_issuers` can now be set from the environment as well as the TOML
 file: `ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON`, a JSON array of `{issuer, jwks_uri?}`, applied
