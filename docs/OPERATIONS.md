@@ -368,7 +368,7 @@ trust domain. It needs `[lifecycle] enabled = true`, a `[receipt]` key and
 (`key_attestations`) comes from migration 019, which this release adds and
 every binary runs at startup whether keyless is on or off. It is additive,
 with no backfill: it starts empty, and only mints write it (see
-[UPGRADING.md](UPGRADING.md#unreleased)). Check `/.well-known/acdp.json`: `profiles` lists
+[UPGRADING.md](UPGRADING.md#080)). Check `/.well-known/acdp.json`: `profiles` lists
 `acdp-registry-keyless` and the `keyless` member names your issuers. To turn
 it off, set `enabled = false` and restart; attestations already minted stay
 public bodies, and bodies published under them stay stored and verifiable
