@@ -48,7 +48,6 @@
 //! a lease, which lapses after [`LEASE_MS`] and the subscription is tried
 //! again.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,7 +57,7 @@ use acdp_registry_store::{ExtendedRegistryStore, SubscriptionProgress, Subscript
 use acdp_registry_types::RegistryError;
 use zeroize::Zeroize as _;
 
-use crate::callback::{resolve_allowed, CallbackResolver};
+use crate::callback::resolve_allowed;
 use crate::changes_key::{ChangesKey, SealError};
 use crate::handlers::{evaluate_changes, ChangesRequest, Since};
 use crate::state::AppState;
@@ -535,54 +534,20 @@ async fn deliver<S: ExtendedRegistryStore + 'static>(
 
 /// A client for one delivery: https only, no proxy, no redirects, no
 /// pooling, bounded timeouts, and every DNS answer checked through the
-/// callback policy.
+/// callback policy ([`crate::outbound::policy_client`]).
 fn hint_client<S: ExtendedRegistryStore + 'static>(
     state: &AppState<S>,
 ) -> Result<reqwest::Client, reqwest::Error> {
-    let mut b = reqwest::Client::builder()
-        .use_rustls_tls()
-        .https_only(true)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(state.hint_timeouts.connect)
-        .timeout(state.hint_timeouts.request)
-        .pool_max_idle_per_host(0)
-        .dns_resolver(Arc::new(PolicyResolver {
-            policy: state.callback_policy.clone(),
-            inner: Arc::clone(&state.callback_resolver),
+    crate::outbound::policy_client(
+        &state.callback_policy,
+        &state.callback_resolver,
+        crate::outbound::ClientBounds {
             lookup: state.hint_timeouts.lookup,
-        }));
-    for root in &state.hint_extra_roots {
-        b = b.add_root_certificate(root.clone());
-    }
-    b.build()
-}
-
-/// `reqwest` DNS hook: resolve through the configured
-/// [`CallbackResolver`], then refuse the whole answer if any address is
-/// forbidden (`reject_if_any_forbidden`; filtering would let one public
-/// address smuggle a private one through).
-struct PolicyResolver {
-    policy: acdp::safe_http::SsrfPolicy,
-    inner: Arc<dyn CallbackResolver>,
-    lookup: Duration,
-}
-
-impl reqwest::dns::Resolve for PolicyResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let policy = self.policy.clone();
-        let inner = Arc::clone(&self.inner);
-        let lookup = self.lookup;
-        let host = name.as_str().to_owned();
-        Box::pin(async move {
-            // Port 0: the connector substitutes the URL's port.
-            let addrs: Vec<SocketAddr> = resolve_allowed(&policy, inner.as_ref(), &host, 0, lookup)
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-            let addrs: reqwest::dns::Addrs = Box::new(addrs.into_iter());
-            Ok(addrs)
-        })
-    }
+            connect: state.hint_timeouts.connect,
+            request: state.hint_timeouts.request,
+        },
+        &state.hint_extra_roots,
+    )
 }
 
 /// Run a pass whenever [`AppStateInner::notify_hints`](crate::state::AppStateInner::notify_hints)

@@ -90,6 +90,25 @@ top of the upstream sync trait:
   `finish_subscription_attempt` (a lease, so two replicas never deliver the
   same subscription at once), `subscription_counts`. The hint worker in
   `acdp-registry-core/src/hints.rs` drives them.
+- RFC-ACDP-0021 key attestations (`key_attestations`, migration 019) —
+  `key_attestation(ctx_id)` (the index row joined to its context, so the
+  status follows a retraction), `key_attestation_token_seen(token_hash)` and
+  `list_key_attestations(controller, filter, cursor, limit)` (newest first,
+  keyset cursor). The index is written only by `commit_publish`, in the
+  publish transaction, which also makes the §6.3 and §7 checks a keyless
+  publish needs (attestation found, not withdrawn, `created_at` in its
+  window, supersession by the same workload identity) and refuses a reused
+  token. The checks are pure functions in
+  `acdp-registry-store/src/key_attestations.rs`, which also fixes the order
+  every backend refuses in; each backend's `keyless.rs` holds only the SQL.
+  The HTTP side is `acdp-registry-core/src/keyless/` (token verification,
+  the per-replica issuer-key cache, the pure mint) and
+  `handlers/keyless.rs`; all of it is inert unless `keyless.enabled`. A
+  test-build-only hook, `acdp-registry-core/src/test_egress.rs` (feature
+  `test-egress`, enabled only from `acdp-registry-server`'s
+  dev-dependencies), lets the spawned-binary test point the DID resolver
+  and issuer-key fetcher at a loopback host; a release build compiles it to
+  `None`.
 
 ### Change feed
 
@@ -175,7 +194,7 @@ request-id pair, `SetRequestId` must be applied last so it runs first, because
 
 The protocol-critical part of `POST /contexts` is **not** implemented here — it
 is `acdp`'s `RegistryServer`, which implements the ordered algorithm of
-[RFC-ACDP-0003 §2.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/1560e0f389875be8addaa7b7908751e020db50fe/rfcs/RFC-ACDP-0003-publish.md#21-registry-processing).
+[RFC-ACDP-0003 §2.1](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/0ba958247f0aaa4b6e307ff88555d1b23ba5fb7f/rfcs/RFC-ACDP-0003-publish.md#21-registry-processing).
 The steps and their one invariant are specified there and explained in
 [acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.15.1/docs/registry.md#the-publish-pipeline--the-one-rule);
 this page does not restate them. We reuse it unchanged and add storage

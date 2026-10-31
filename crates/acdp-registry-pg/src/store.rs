@@ -437,6 +437,27 @@ impl ExtendedRegistryStore for PgStore {
 
     // ── Change-hint subscriptions (RFC-ACDP-0018 §8) ───────────────────
 
+    async fn key_attestation(
+        &self,
+        ctx_id: &str,
+    ) -> Result<Option<acdp_registry_store::KeyAttestationRecord>, AcdpError> {
+        crate::keyless::record(&self.pool, ctx_id).await
+    }
+
+    async fn key_attestation_token_seen(&self, token_hash: &str) -> Result<bool, AcdpError> {
+        crate::keyless::token_seen(&self.pool, token_hash).await
+    }
+
+    async fn list_key_attestations(
+        &self,
+        controller: &str,
+        filter: &acdp_registry_store::KeyAttestationFilter,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Page<acdp::types::keyless::KeyAttestationListItem>, AcdpError> {
+        crate::keyless::list(&self.pool, controller, filter, cursor, limit).await
+    }
+
     async fn create_subscription(
         &self,
         new: &acdp_registry_store::NewSubscription,
@@ -1223,6 +1244,11 @@ impl RegistryStore for PgStore {
                     });
                 }
 
+                // RFC-ACDP-0021 §6.3/§7 for a keyless successor, after the
+                // same checks and before the admission below (the order
+                // `acdp_registry_store::key_attestations` fixes).
+                crate::keyless::supersession_gate(&mut tx, &req, &row).await?;
+
                 // 2.5. RFC-ACDP-0014 §4 `supersedes`-row admission. Runs AFTER
                 // tenant scoping, producer-continuity, lineage/version
                 // coherence and AlreadySuperseded have all passed — never
@@ -1285,6 +1311,9 @@ impl RegistryStore for PgStore {
                 created_at,
             );
 
+            // RFC-ACDP-0021 §6.3 step 6 against the assigned created_at.
+            crate::keyless::window_gate(&mut tx, &req, created_at).await?;
+
             // 4.5. Mint the registry receipt (RFC-ACDP-0010 §7) inside the
             // transaction, against the fully-assigned body. The receipt is
             // written by the SAME INSERT as the context row below, so a
@@ -1304,6 +1333,9 @@ impl RegistryStore for PgStore {
                 receipt.as_ref(),
             )
             .await?;
+            // RFC-ACDP-0021 §5.3: index a minted attestation; a replayed
+            // token aborts before the log append lock is taken.
+            crate::keyless::index_attestation(&mut tx, &body, &authority).await?;
 
             // 5.5. Append the transparency-log leaf (RFC-ACDP-0012 §7.1)
             // in the SAME transaction as the context row and its receipt:

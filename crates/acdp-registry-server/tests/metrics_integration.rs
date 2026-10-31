@@ -116,6 +116,7 @@ fn metrics_config() -> RegistryConfig {
         log: Default::default(),
         changes: Default::default(),
         events: Default::default(),
+        keyless: Default::default(),
         witnesses: Vec::new(),
     }
 }

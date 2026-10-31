@@ -9,8 +9,10 @@ pub mod changes_key;
 pub mod extract;
 pub mod handlers;
 pub mod hints;
+pub mod keyless;
 pub mod log;
 pub mod metrics;
+pub mod outbound;
 pub mod playground;
 pub mod publish_reply;
 pub mod rate_limit;
@@ -19,6 +21,7 @@ pub mod receipt;
 pub(crate) mod secure_compare;
 pub mod state;
 pub mod tenant_trust;
+pub mod test_egress;
 pub mod witness;
 
 pub use state::{AppState, AppStateInner};
@@ -126,13 +129,14 @@ pub fn build_router_shared<S: ExtendedRegistryStore + 'static>(state: Arc<AppSta
             "/subscriptions/{subscription_id}",
             get(handlers::get_subscription::<S>).delete(handlers::delete_subscription::<S>),
         )
-        // Keyless key attestations (RFC-ACDP-0021 §5). Not implemented in
-        // this release: both methods answer 501, as §5.4 requires of a
-        // registry not advertising acdp-registry-keyless.
+        // Keyless key attestations (RFC-ACDP-0021 §5). Always mounted:
+        // without `keyless.enabled` both methods answer 501, as §5.4
+        // requires of a registry not advertising acdp-registry-keyless.
+        // Public (attestations are public bodies), but kept in this group
+        // so the cache posture matches the rest of the data plane.
         .route(
             "/key-attestations",
-            get(handlers::key_attestations_not_implemented)
-                .post(handlers::key_attestations_not_implemented),
+            get(handlers::list_key_attestations::<S>).post(handlers::create_key_attestation::<S>),
         )
         // #205 (wire half of #190). These responses depend on WHO is asking --
         // §4.5 visibility, tenant scoping, and the per-requester leaf echo on

@@ -49,7 +49,7 @@ env:
   # or deleted -- the survivor count falls with it, and a `<=` budget would read
   # that as an improvement. This assertion is what makes the budget below mean
   # anything.
-  MUTANTS_EXPECTED_SCOPE: "390"
+  MUTANTS_EXPECTED_SCOPE: "399"
 
   # The ONE committed ledger that a drifted survivor line is paired against, to
   # recover its identity (enclosing function + fn-relative offset + column, and
@@ -61,12 +61,28 @@ env:
   # which would trip the classifier's own duplicate-name assertion on every run.
   # docs/mutation-runs/README.md indexes which ledgers are CURRENT, in prose;
   # this variable is the machine-readable half of that index.
-  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/run40283754611-scope-390-outcomes.json"
+  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/run41124872541-scope-399-outcomes.json"
 
   # Surviving mutants at that sha. Each is enumerated with its own written reason
   # below; this number is the machine-readable half of that list. It ratchets DOWN
   # as survivors are killed and must never be raised without a reason recorded in
   # the same commit.
+  #
+  # SCOPE 390 -> 399 (RFC-ACDP-0021 keyless publish). context.rs 137 -> 138 (one
+  # `delete !` in publish_inner) and store.rs 172 -> 180 (the new key_attestation,
+  # key_attestation_token_seen and list_key_attestations); log.rs 65 and receipt.rs
+  # 16 unchanged (`cargo mutants --list` at feat/rfc0021-keyless 4504b7d). NOT a budget change: the
+  # floor stays 8 and the survivor SET is the same eight mutants, five on shifted
+  # lines (context.rs :615:39 -> :645:39, :1254:16 -> :1284:16, timeout :1290:12 ->
+  # :1320:12; store.rs :1233:35 -> :1254:35, :1556:35 -> :1588:35, :2170:5 ->
+  # :2202:5 -- the keyless dispatch, R13 and the kl-007 C gate moved publish_inner
+  # down; the keyless gate moved commit_publish down). No new MISSED: every new
+  # mutant at the keyless call sites and the kl-007 C gate is CAUGHT. Measured by
+  # run 41124872541 (workflow_dispatch on feat/rfc0021-keyless 8c44ca6): 399 / 255
+  # caught / 8 missed / 135 unviable / 1 timeout, `end_time` present, 307.1 min.
+  # Its outcomes.json is committed unchanged as the new MUTANTS_PRIOR_LEDGER, and
+  # this list is its `missed.txt` verbatim. The reason texts below keep the line
+  # numbers they were written against.
   #
   # SCOPE 370 -> 390 (#471, RFC-ACDP-0018 retraction recall). NOT a budget
   # change: the floor stays 8 and the survivor SET is the same eight mutants,
@@ -326,7 +342,7 @@ env:
     # block removes nothing. The retain's OWN `t == tenant` was CAUGHT at the
     # same site: two mutations, opposite verdicts, the signature of a redundant
     # guard. Its sibling `delete !` at :1290:12 is the budgeted TIMEOUT.
-    crates/acdp-registry-core/src/handlers/context.rs:1254:16: delete ! in run_search_with_refill
+    crates/acdp-registry-core/src/handlers/context.rs:1284:16: delete ! in run_search_with_refill
     # context.rs:85:9 and :86:9 -- search returns only PUBLIC rows to every
     # requester (probed with an anonymous caller, an audience member and the
     # row's own producer), so `?visibility=public` selects everything already
@@ -342,7 +358,7 @@ env:
     # pins behaviour either side of the boundary; the boundary itself is not
     # reachable deterministically and a test that waited for it would be a flake
     # generator.
-    crates/acdp-registry-core/src/handlers/context.rs:615:39: replace > with >= in publish_inner
+    crates/acdp-registry-core/src/handlers/context.rs:645:39: replace > with >= in publish_inner
     # ----- sqlite/src/store.rs, admitted by U-552 (scope 213 -> 351) -----
     # store.rs:1007:35 -- EQUIVALENT, and by a stronger argument than the
     # millisecond-boundary one used for context.rs:615:39 above. Step 1 first runs
@@ -354,7 +370,7 @@ env:
     # same site, `> with <` and `> with ==`, were EQUIVALENT-labelled by U-544 and
     # KILLED by U-552 once probed with a SUPERSEDING request, so this entry is what
     # is left after that correction rather than an inherited assumption.
-    crates/acdp-registry-sqlite/src/store.rs:1233:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
+    crates/acdp-registry-sqlite/src/store.rs:1254:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
     # store.rs:1330:35 -- UNREACHABLE BY DESIGN, not a coverage gap. It sits inside
     # the `if inserted == 0` branch (store.rs:1297), reached only when a concurrent
     # publish claims the same idempotency key between this transaction's step-1
@@ -388,7 +404,7 @@ env:
     # 40283754611 (scope 390, #471) records :1556:35 and :1233:35, moved again by
     # the same-transaction feed append. Earlier wording, kept:
     # mutants, moved down by the event-receipt mint in commit_publish.
-    crates/acdp-registry-sqlite/src/store.rs:1556:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
+    crates/acdp-registry-sqlite/src/store.rs:1588:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
     # store.rs:2170:5 (was :2052:5 until #471) -- EQUIVALENT (#461). `end_sweep_tx` closes an
     # event-receipt sweep transaction that wrote NOTHING, via an explicit
     # ROLLBACK. Replacing it with `Ok(())` drops the Transaction instead, and
@@ -397,7 +413,7 @@ env:
     # row differs either way; only the instant the write lock is released moves,
     # and no test can observe that without racing the pool. The explicit call is
     # kept because it surfaces a rollback error instead of swallowing it.
-    crates/acdp-registry-sqlite/src/store.rs:2170:5: replace end_sweep_tx -> Result<(), AcdpError> with Ok(())
+    crates/acdp-registry-sqlite/src/store.rs:2202:5: replace end_sweep_tx -> Result<(), AcdpError> with Ok(())
 
   # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
   # unconditional `timeout != 0` until U-504, on the stated reasoning that "a

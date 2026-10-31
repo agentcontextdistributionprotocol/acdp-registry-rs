@@ -4750,3 +4750,41 @@ rows. All five entries are therefore **decided by Opus** (reversible tier).
 **Resulting status:** 0 open declarations for this plan. 2 entries confirmed as written, 3 confirmed with a small change
 (P4 (a) clamp, P5 (d) tenant guard, P6 (g) unknown key retried), and 2 deferrals with triggers. None needed the owner, and no
 follow-up blocks `/ship`.
+
+## RFC-ACDP-0021 keyless — 2026-10-31
+
+Plan: `plans/rfc0021-keyless.md`. Entries: ASSUMPTIONS.md "RFC-ACDP-0021 keyless, Phase 2" to "Phase 8".
+Reversible items analyzed and decided by a fresh Opus agent; the three one-way doors analyzed by Fable and decided
+by the owner.
+
+- **Owner (on Fable's analysis), one-way doors:**
+  - **P3 (a) migration 019 shape: CONFIRMED.** The controller index covers the list's filter and its
+    `created_at_ms DESC, ctx_id` keyset exactly; integer milliseconds are the cursor's anchor (018 set the
+    precedent). UNIQUE `token_hash` kept forever is stricter than §5.2 and needs no sweep. The FK is safe because
+    contexts are never deleted. A tenant need is a join to `contexts.tenant_id`. The only miss found
+    (`identity_type` leading the identity index) is an additive 020 if it ever matters. Safe to ship with the
+    feature off.
+  - **P4 (a)-(e) token acceptance: CONFIRMED.** RFC-0021 §15 rests on `aud`, single use, the `pop` over
+    `token_hash|controller|registry_did|key_fingerprint`, and the bounded window, not on AITP's handshake
+    `nonce`/`cnf`. GitHub, GCP and stock SPIRE cannot mint those. The stricter header and key rules match what
+    real issuers emit, and the SPIFFE bundle spec requires `use`. Loosening later is wire-compatible; tightening
+    would need a spec change.
+  - **P7 (b) test-egress hook: CONFIRMED with a CHANGE.** The design mirrors `acdp/test-transport`, and
+    `cfg(test)` cannot cross crates. Fable showed `--features acdp-registry-core/test-egress` compiles the hook
+    into a release binary. docker.yml and release-binaries.yml now fail if the shipped binary contains
+    `ACDP_TEST_EGRESS` (verified locally: absent from a default release build, present with the feature).
+- **Opus, reversible items:**
+  - **P4 (f) CHANGED.** A source past TTL plus `jwks_max_stale_seconds` re-fetched on every request inside the
+    30 s failure backoff, serializing a 5 s timeout per queued request during an outage. It now answers the stale
+    copy or `issuer_unreachable` without fetching until the window ends.
+    `jwks::tests::an_expired_copy_is_not_refetched_inside_the_backoff_window` saw 6 hits before the fix and 1 after.
+  - **CONFIRMED:** P2 (a)-(f); P3 (b)-(g), including (c) no `FOR SHARE` (§9.2 makes a racing retraction
+    equivalent to publish-then-retract) and (f) listing includes retracted rows (§5.4 "every attestation", §9.3);
+    P4 (g)-(j), including (g2) 4xx as `issuer_unreachable`; P5 (a)-(i), (k)-(m); P6 (a)-(o), including (h) kl-007 C
+    as §6.2 requires, and (m) fail-closed replay, consistent with the did:web path; P7 (a), (c)-(i); P8 (a)-(c).
+  - **RESOLVED:** P5 (j), by spec 1560e0f (§8.1 step 1 historical arm).
+  - **CLOSED:** P3 (h) and P6 (l), by the scope-399 mutants re-pin (run 41124872541; the same eight survivors on
+    shifted lines, no new miss).
+
+**Resulting status:** 0 open entries for this plan. Two changes (the JWKS backoff fix, the binary check), both
+landed in this branch. Nothing blocks `/ship`.

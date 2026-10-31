@@ -391,6 +391,23 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         }
     }
 
+    // RFC-ACDP-0021 §6.2/§12 (kl-007 C): a registry advertising
+    // `acdp_version` < 0.5.0 MUST reject a publish carrying `key_attestation`
+    // with `schema_violation`, profile or not. Only the advertised version
+    // counts (no declared-version rule, unlike anchors' §14). Here, above the
+    // branch split, so it covers every publish path.
+    if req.key_attestation.is_some() {
+        let advertised = &state.server.capabilities().acdp_version;
+        if !version_at_least(advertised, 0, 5) {
+            return Err(RegistryError::Acdp(
+                acdp::error::AcdpError::SchemaViolation(format!(
+                    "key_attestation requires a registry advertising acdp_version >= 0.5.0 \
+                     (RFC-ACDP-0021 §6.2); this registry advertises '{advertised}'"
+                )),
+            ));
+        }
+    }
+
     // RFC-ACDP-0003 §6.1/§6.2.1: the Idempotency-Key value is 1–256 ASCII
     // printable characters. An empty, over-long, or non-printable value is
     // treated as ABSENT (the publish proceeds without idempotency) — NOT
@@ -476,11 +493,24 @@ async fn publish_inner<S: ExtendedRegistryStore + 'static>(
         .read()
         .expect("playground RwLock poisoned")
         .clone();
-    let (is_replay, response): (bool, PublishResponse) = if req
-        .agent_id
-        .as_str()
-        .starts_with("did:key:")
+    let (is_replay, response): (bool, PublishResponse) = if let Some(kl) =
+        super::keyless::keyless_publish_state(&state, &req)
     {
+        // RFC-ACDP-0021 §6.3, profile on: a keyless key id is checked
+        // against its attestation, ahead of every other branch, so neither
+        // did:key nor the playground (pinned or not) ever sees one.
+        let (charge_back, outcome) = super::keyless::publish_keyless(
+            &state,
+            &kl,
+            &req,
+            idempotency_key.clone(),
+            publish_tenant.clone(),
+            charge,
+        )
+        .await;
+        charge = charge_back;
+        outcome?
+    } else if req.agent_id.as_str().starts_with("did:key:") {
         // did:key producers (ACDP 0.2.0 workstream C): steps 7–8 run
         // through acdp's pure offline verifier — the DID *is* the key, so
         // no DID document fetch and no SSRF surface. The capabilities gate
@@ -1520,6 +1550,9 @@ async fn lifecycle_transition<S: ExtendedRegistryStore + 'static>(
         .map_err(|e| RegistryError::Acdp(AcdpError::SchemaViolation(e.to_string())))?;
     let (event, _raw_event) =
         acdp::registry::parse_lifecycle_request(&raw).map_err(RegistryError::Acdp)?;
+    // RFC-ACDP-0021 §6.3 (R13), profile on: a keyless-signed event is
+    // refused before its target is looked at (kl-004 F).
+    super::keyless::refuse_keyless_event(&state, &event)?;
 
     // 3. §6 step 2: the event binds to exactly one context — the path's.
     let path_ctx = CtxId::parse(ctx_id).map_err(RegistryError::Acdp)?;

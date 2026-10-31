@@ -41,6 +41,10 @@ pub struct RegistryConfig {
     /// by default; needs `changes` and `auth`.
     #[serde(default)]
     pub events: EventsConfig,
+    /// RFC-ACDP-0021 keyless signing (`acdp-registry-keyless`). Off by
+    /// default.
+    #[serde(default)]
+    pub keyless: KeylessConfig,
     /// Transparency-log witnesses this registry polls and whose verified
     /// cosignatures it aggregates onto its checkpoint responses
     /// (RFC-ACDP-0015 §6.1). Empty (the default) disables aggregation.
@@ -256,6 +260,7 @@ impl RegistryConfig {
             log: LogConfig::default(),
             changes: ChangesConfig::default(),
             events: EventsConfig::default(),
+            keyless: KeylessConfig::default(),
             witnesses: Vec::new(),
         }
     }
@@ -1315,6 +1320,307 @@ fn default_max_subscriptions_per_requester() -> u64 {
     10
 }
 
+/// RFC-ACDP-0021 keyless signing: `POST`/`GET /key-attestations`, the
+/// keyless publish path and the `acdp-registry-keyless` profile.
+///
+/// When `enabled` is false (the default) nothing here is read: the profile
+/// and the capabilities `keyless` member are absent, and every keyless key
+/// id fails resolution as on a registry without the profile.
+///
+/// The issuer and trust-domain lists are exactly the advertised
+/// `keyless.accepted_oidc_issuers` and `keyless.accepted_spiffe_trust_domains`
+/// (§13.1), and the only places a JWKS or trust bundle is fetched from.
+/// Issuers are compared byte for byte, never normalised, so
+/// `https://issuer.example` and `https://issuer.example/` are two issuers.
+///
+/// Both lists are arrays of tables, which the env source cannot express:
+/// set them in the TOML file. The scalars take the usual
+/// `ACDP_REGISTRY_KEYLESS__<KEY>` overrides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeylessConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The longest attestation window minted, advertised as
+    /// `keyless.max_attestation_ttl_seconds`. 60 to 3600.
+    #[serde(default = "default_keyless_max_attestation_ttl_seconds")]
+    pub max_attestation_ttl_seconds: u32,
+    /// Accepted OIDC issuers (`[[keyless.oidc_issuers]]`).
+    #[serde(default)]
+    pub oidc_issuers: Vec<OidcIssuer>,
+    /// Accepted SPIFFE trust domains (`[[keyless.spiffe_trust_domains]]`).
+    #[serde(default)]
+    pub spiffe_trust_domains: Vec<SpiffeDomain>,
+    /// How long a fetched JWKS is used before it is refetched.
+    #[serde(default = "default_keyless_jwks_cache_ttl_seconds")]
+    pub jwks_cache_ttl_seconds: u64,
+    /// How long past its TTL a JWKS may still be used while its issuer
+    /// cannot be reached.
+    #[serde(default = "default_keyless_jwks_max_stale_seconds")]
+    pub jwks_max_stale_seconds: u64,
+    /// Per-request bound on one outbound JWKS, bundle or discovery fetch.
+    #[serde(default = "default_keyless_fetch_timeout_ms")]
+    pub fetch_timeout_ms: u64,
+    /// The largest fetched response body read, in bytes.
+    #[serde(default = "default_keyless_max_fetch_bytes")]
+    pub max_fetch_bytes: u64,
+    /// `POST /key-attestations` budget per workload identity.
+    #[serde(default = "default_keyless_rate_per_identity_per_minute")]
+    pub rate_per_identity_per_minute: u32,
+    /// `POST /key-attestations` budget per client IP.
+    #[serde(default = "default_keyless_rate_per_ip_per_minute")]
+    pub rate_per_ip_per_minute: u32,
+}
+
+/// One accepted OIDC issuer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OidcIssuer {
+    /// The issuer URI, compared byte for byte with the token's `iss`.
+    #[serde(default)]
+    pub issuer: String,
+    /// The JWKS location. `None` = discovered from the issuer's
+    /// `/.well-known/openid-configuration`.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+}
+
+/// One accepted SPIFFE trust domain.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpiffeDomain {
+    /// The trust domain name, e.g. `prod.example.org`.
+    #[serde(default)]
+    pub trust_domain: String,
+    /// The SPIFFE bundle endpoint serving the domain's JWT authorities.
+    #[serde(default)]
+    pub bundle_endpoint: String,
+    /// The `iss` the domain's JWT-SVIDs carry, when they carry one.
+    #[serde(default)]
+    pub jwt_issuer: Option<String>,
+}
+
+impl Default for KeylessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_attestation_ttl_seconds: default_keyless_max_attestation_ttl_seconds(),
+            oidc_issuers: Vec::new(),
+            spiffe_trust_domains: Vec::new(),
+            jwks_cache_ttl_seconds: default_keyless_jwks_cache_ttl_seconds(),
+            jwks_max_stale_seconds: default_keyless_jwks_max_stale_seconds(),
+            fetch_timeout_ms: default_keyless_fetch_timeout_ms(),
+            max_fetch_bytes: default_keyless_max_fetch_bytes(),
+            rate_per_identity_per_minute: default_keyless_rate_per_identity_per_minute(),
+            rate_per_ip_per_minute: default_keyless_rate_per_ip_per_minute(),
+        }
+    }
+}
+
+impl KeylessConfig {
+    /// The field rules for an enabled `[keyless]` section, each refusal
+    /// naming its key. The cross-section prerequisites (receipts, log,
+    /// lifecycle, version) are checked by the server at startup. The
+    /// issuer and trust-domain rules are the capabilities schema's
+    /// `keyless` item rules, so every accepted value is advertisable.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(60..=3600).contains(&self.max_attestation_ttl_seconds) {
+            return Err(format!(
+                "keyless.max_attestation_ttl_seconds={} must be from 60 to 3600 \
+                 (RFC-ACDP-0021 §13.1).",
+                self.max_attestation_ttl_seconds
+            ));
+        }
+        // The cache never holds a fresh copy longer than its ceiling
+        // (`keyless::jwks::MAX_TTL_SECONDS`), nor shorter than a
+        // `max-age` may impose; a value outside that would be silently
+        // clamped, so it is refused instead.
+        if !(MIN_KEYLESS_JWKS_CACHE_TTL_SECONDS..=MAX_KEYLESS_JWKS_CACHE_TTL_SECONDS)
+            .contains(&self.jwks_cache_ttl_seconds)
+        {
+            return Err(format!(
+                "keyless.jwks_cache_ttl_seconds={} must be from \
+                 {MIN_KEYLESS_JWKS_CACHE_TTL_SECONDS} to {MAX_KEYLESS_JWKS_CACHE_TTL_SECONDS}.",
+                self.jwks_cache_ttl_seconds
+            ));
+        }
+        // A stale key set may hold keys the issuer has since withdrawn (a
+        // compromised key rotated out mid-outage). A week rides out any
+        // realistic outage while bounding how long a withdrawn key can
+        // still verify tokens here.
+        if self.jwks_max_stale_seconds > MAX_KEYLESS_JWKS_STALE_SECONDS {
+            return Err(format!(
+                "keyless.jwks_max_stale_seconds={} must be at most {MAX_KEYLESS_JWKS_STALE_SECONDS} \
+                 (7 days): a stale key set may still hold keys the issuer withdrew.",
+                self.jwks_max_stale_seconds
+            ));
+        }
+        if self.fetch_timeout_ms < MIN_KEYLESS_FETCH_TIMEOUT_MS {
+            return Err(format!(
+                "keyless.fetch_timeout_ms={} must be at least {MIN_KEYLESS_FETCH_TIMEOUT_MS}: \
+                 below that no TLS handshake to an issuer completes.",
+                self.fetch_timeout_ms
+            ));
+        }
+        if self.max_fetch_bytes < MIN_KEYLESS_MAX_FETCH_BYTES {
+            return Err(format!(
+                "keyless.max_fetch_bytes={} must be at least {MIN_KEYLESS_MAX_FETCH_BYTES}: \
+                 below that not even a one-key JWKS fits.",
+                self.max_fetch_bytes
+            ));
+        }
+        if self.oidc_issuers.is_empty() && self.spiffe_trust_domains.is_empty() {
+            return Err(
+                "keyless.enabled=true needs at least one keyless.oidc_issuers or \
+                 keyless.spiffe_trust_domains entry: with neither, no token can verify."
+                    .into(),
+            );
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, o) in self.oidc_issuers.iter().enumerate() {
+            if !is_advertisable_issuer(&o.issuer) {
+                return Err(format!(
+                    "keyless.oidc_issuers[{i}].issuer '{}' must match ^https://[^\\s#?]+$ \
+                     and be at most 512 characters.",
+                    o.issuer
+                ));
+            }
+            if !seen.insert(o.issuer.as_str()) {
+                return Err(format!(
+                    "keyless.oidc_issuers[{i}].issuer '{}' is listed twice.",
+                    o.issuer
+                ));
+            }
+            if let Some(uri) = &o.jwks_uri {
+                if !is_https_url(uri) {
+                    return Err(format!(
+                        "keyless.oidc_issuers[{i}].jwks_uri '{uri}' must be an https URL."
+                    ));
+                }
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, d) in self.spiffe_trust_domains.iter().enumerate() {
+            if !is_advertisable_trust_domain(&d.trust_domain) {
+                return Err(format!(
+                    "keyless.spiffe_trust_domains[{i}].trust_domain '{}' must match \
+                     ^[a-z0-9._-]+$ and be at most 255 characters.",
+                    d.trust_domain
+                ));
+            }
+            if !seen.insert(d.trust_domain.as_str()) {
+                return Err(format!(
+                    "keyless.spiffe_trust_domains[{i}].trust_domain '{}' is listed twice.",
+                    d.trust_domain
+                ));
+            }
+            if !is_https_url(&d.bundle_endpoint) {
+                return Err(format!(
+                    "keyless.spiffe_trust_domains[{i}].bundle_endpoint '{}' must be an \
+                     https URL.",
+                    d.bundle_endpoint
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `keyless.jwks_cache_ttl_seconds` lower bound (the `max-age` floor).
+pub const MIN_KEYLESS_JWKS_CACHE_TTL_SECONDS: u64 = 60;
+/// `keyless.jwks_cache_ttl_seconds` upper bound (the cache's TTL ceiling).
+pub const MAX_KEYLESS_JWKS_CACHE_TTL_SECONDS: u64 = 3600;
+/// `keyless.jwks_max_stale_seconds` upper bound: 7 days.
+pub const MAX_KEYLESS_JWKS_STALE_SECONDS: u64 = 7 * 24 * 3600;
+/// `keyless.fetch_timeout_ms` lower bound.
+pub const MIN_KEYLESS_FETCH_TIMEOUT_MS: u64 = 100;
+/// `keyless.max_fetch_bytes` lower bound: 1 KiB.
+pub const MIN_KEYLESS_MAX_FETCH_BYTES: u64 = 1024;
+
+/// The capabilities document's `keyless` member (RFC-ACDP-0021 §13.1) for
+/// this config: exactly the configured issuers and trust domains, in
+/// config order.
+pub fn keyless_capabilities(cfg: &KeylessConfig) -> acdp::types::keyless::KeylessCapabilities {
+    acdp::types::keyless::KeylessCapabilities {
+        accepted_oidc_issuers: cfg.oidc_issuers.iter().map(|o| o.issuer.clone()).collect(),
+        accepted_spiffe_trust_domains: cfg
+            .spiffe_trust_domains
+            .iter()
+            .map(|d| d.trust_domain.clone())
+            .collect(),
+        max_attestation_ttl_seconds: cfg.max_attestation_ttl_seconds,
+    }
+}
+
+/// The capabilities `extensions` members `[keyless]` contributes: the
+/// `keyless` member when enabled (§13.1: present exactly when the profile
+/// is), nothing otherwise.
+pub fn keyless_extensions(cfg: &KeylessConfig) -> serde_json::Map<String, serde_json::Value> {
+    let mut extensions = serde_json::Map::new();
+    if cfg.enabled {
+        extensions.insert(
+            "keyless".into(),
+            serde_json::to_value(keyless_capabilities(cfg))
+                .expect("two string lists and an integer always serialize"),
+        );
+    }
+    extensions
+}
+
+/// The schema's `accepted_oidc_issuers` item: `^https://[^\s#?]+$`, at most
+/// 512 characters. `\s` is ECMAScript's, which also matches U+FEFF.
+fn is_advertisable_issuer(s: &str) -> bool {
+    s.chars().count() <= 512
+        && s.strip_prefix("https://").is_some_and(|rest| {
+            !rest.is_empty()
+                && !rest
+                    .chars()
+                    .any(|c| c.is_whitespace() || c == '\u{feff}' || c == '#' || c == '?')
+        })
+}
+
+/// The schema's `accepted_spiffe_trust_domains` item: `^[a-z0-9._-]+$`, at
+/// most 255 characters.
+fn is_advertisable_trust_domain(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+}
+
+/// An absolute `https` URL with a host.
+fn is_https_url(s: &str) -> bool {
+    url::Url::parse(s).is_ok_and(|u| u.scheme() == "https" && u.host().is_some())
+}
+
+fn default_keyless_max_attestation_ttl_seconds() -> u32 {
+    600
+}
+
+fn default_keyless_jwks_cache_ttl_seconds() -> u64 {
+    300
+}
+
+fn default_keyless_jwks_max_stale_seconds() -> u64 {
+    3600
+}
+
+fn default_keyless_fetch_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_keyless_max_fetch_bytes() -> u64 {
+    65_536
+}
+
+fn default_keyless_rate_per_identity_per_minute() -> u32 {
+    10
+}
+
+fn default_keyless_rate_per_ip_per_minute() -> u32 {
+    30
+}
+
 fn default_changes_key_id() -> u8 {
     1
 }
@@ -1415,6 +1721,366 @@ fn current_unix_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `[keyless]` section every field rule accepts: one issuer of each
+    /// kind.
+    fn keyless_ok() -> KeylessConfig {
+        KeylessConfig {
+            enabled: true,
+            oidc_issuers: vec![OidcIssuer {
+                issuer: "https://token.actions.example".into(),
+                jwks_uri: Some("https://token.actions.example/jwks".into()),
+            }],
+            spiffe_trust_domains: vec![SpiffeDomain {
+                trust_domain: "prod.example.org".into(),
+                bundle_endpoint: "https://spire.prod.example.org/bundle".into(),
+                jwt_issuer: None,
+            }],
+            ..KeylessConfig::default()
+        }
+    }
+
+    fn keyless_refusal(c: &KeylessConfig) -> String {
+        c.validate().expect_err("this [keyless] must be refused")
+    }
+
+    #[test]
+    fn keyless_defaults_are_inert_and_an_empty_table_parses() {
+        for src in ["", "enabled = false"] {
+            let k: KeylessConfig = toml::from_str(src).expect("an empty [keyless] parses");
+            assert!(!k.enabled);
+            assert_eq!(k.max_attestation_ttl_seconds, 600);
+            assert_eq!(k.jwks_cache_ttl_seconds, 300);
+            assert_eq!(k.jwks_max_stale_seconds, 3600);
+            assert_eq!(k.fetch_timeout_ms, 5000);
+            assert_eq!(k.max_fetch_bytes, 65_536);
+            assert_eq!(k.rate_per_identity_per_minute, 10);
+            assert_eq!(k.rate_per_ip_per_minute, 30);
+            assert!(k.oidc_issuers.is_empty() && k.spiffe_trust_domains.is_empty());
+        }
+        // `load` layers `defaults()` under the file, so `Default` must agree
+        // with the serde defaults or the file's omitted keys would read 0.
+        let d = RegistryConfig::defaults().keyless;
+        let parsed: KeylessConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            serde_json::to_value(&d).unwrap(),
+            serde_json::to_value(&parsed).unwrap()
+        );
+    }
+
+    /// The cache bounds: each out-of-range value is refused naming its key,
+    /// and each bound itself is accepted.
+    #[test]
+    fn keyless_cache_and_fetch_bounds_are_enforced() {
+        for (bad, key) in [
+            (
+                KeylessConfig {
+                    jwks_max_stale_seconds: MAX_KEYLESS_JWKS_STALE_SECONDS + 1,
+                    ..keyless_ok()
+                },
+                "keyless.jwks_max_stale_seconds=604801",
+            ),
+            (
+                KeylessConfig {
+                    fetch_timeout_ms: MIN_KEYLESS_FETCH_TIMEOUT_MS - 1,
+                    ..keyless_ok()
+                },
+                "keyless.fetch_timeout_ms=99",
+            ),
+            (
+                KeylessConfig {
+                    max_fetch_bytes: MIN_KEYLESS_MAX_FETCH_BYTES - 1,
+                    ..keyless_ok()
+                },
+                "keyless.max_fetch_bytes=1023",
+            ),
+        ] {
+            let e = keyless_refusal(&bad);
+            assert!(e.starts_with(key), "{key}: {e}");
+        }
+        KeylessConfig {
+            jwks_max_stale_seconds: MAX_KEYLESS_JWKS_STALE_SECONDS,
+            fetch_timeout_ms: MIN_KEYLESS_FETCH_TIMEOUT_MS,
+            max_fetch_bytes: MIN_KEYLESS_MAX_FETCH_BYTES,
+            ..keyless_ok()
+        }
+        .validate()
+        .expect("each bound is inclusive");
+    }
+
+    #[test]
+    fn keyless_tables_refuse_unknown_keys() {
+        for src in [
+            "enabled = true\nissuers = []",
+            "[[oidc_issuers]]\nissuer = \"https://i.example\"\naudience = \"x\"",
+            "[[spiffe_trust_domains]]\ntrust_domain = \"d\"\nbundle = \"https://b\"",
+        ] {
+            assert!(toml::from_str::<KeylessConfig>(src).is_err(), "{src}");
+        }
+    }
+
+    /// The arrays of tables come from the file and the scalars from env, as
+    /// the section's doc comment says.
+    #[test]
+    fn keyless_loads_lists_from_the_file_and_scalars_from_env() {
+        let mut env = EnvGuard::new();
+        env.unset("ACDP_REGISTRY_CONFIG");
+        env.set("ACDP_REGISTRY_KEYLESS__MAX_ATTESTATION_TTL_SECONDS", "900");
+        let path = toml_fixture(&format!(
+            "{FIXTURE}[keyless]\nenabled = true\n\
+             [[keyless.oidc_issuers]]\nissuer = \"https://i.example\"\n\
+             [[keyless.spiffe_trust_domains]]\ntrust_domain = \"d.example\"\n\
+             bundle_endpoint = \"https://b.example/bundle\"\n"
+        ));
+        let cfg = RegistryConfig::load(Some(path.to_str().unwrap())).expect("loads");
+        let _ = std::fs::remove_file(&path);
+        assert!(cfg.keyless.enabled);
+        assert_eq!(cfg.keyless.max_attestation_ttl_seconds, 900);
+        assert_eq!(cfg.keyless.oidc_issuers[0].issuer, "https://i.example");
+        assert_eq!(cfg.keyless.oidc_issuers[0].jwks_uri, None);
+        assert_eq!(
+            cfg.keyless.spiffe_trust_domains[0].trust_domain,
+            "d.example"
+        );
+        assert_eq!(cfg.keyless.jwks_cache_ttl_seconds, 300);
+        assert_eq!(cfg.keyless.validate(), Ok(()));
+    }
+
+    #[test]
+    fn keyless_enabled_env_override_parses_as_a_bool() {
+        let mut env = EnvGuard::new();
+        env.unset("ACDP_REGISTRY_CONFIG");
+        let path = toml_fixture(FIXTURE);
+        for (v, want) in [("true", true), ("false", false)] {
+            env.set("ACDP_REGISTRY_KEYLESS__ENABLED", v);
+            let cfg = RegistryConfig::load(Some(path.to_str().unwrap())).expect("loads");
+            assert_eq!(cfg.keyless.enabled, want, "{v}");
+        }
+        // Not a bool: the load fails rather than reading it as off.
+        env.set("ACDP_REGISTRY_KEYLESS__ENABLED", "maybe");
+        let err = RegistryConfig::load(Some(path.to_str().unwrap()))
+            .expect_err("a non-bool is refused")
+            .to_string();
+        assert!(err.contains("keyless.enabled"), "{err}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The issuer lists are arrays of tables, which the env source cannot
+    /// express: an attempt fails the load, naming the key, instead of being
+    /// silently ignored.
+    #[test]
+    fn keyless_list_keys_cannot_be_set_from_env() {
+        let mut env = EnvGuard::new();
+        env.unset("ACDP_REGISTRY_CONFIG");
+        let path = toml_fixture(FIXTURE);
+        for (var, key) in [
+            (
+                "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS",
+                "keyless.oidc_issuers",
+            ),
+            (
+                "ACDP_REGISTRY_KEYLESS__SPIFFE_TRUST_DOMAINS",
+                "keyless.spiffe_trust_domains",
+            ),
+        ] {
+            env.set(var, "https://issuer.example");
+            let err = RegistryConfig::load(Some(path.to_str().unwrap()))
+                .expect_err("a list key from env is refused")
+                .to_string();
+            env.unset(var);
+            assert!(err.contains(key), "{var}: {err}");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn keyless_accepts_a_coherent_section() {
+        assert_eq!(keyless_ok().validate(), Ok(()));
+        // Either list alone is enough.
+        let mut oidc_only = keyless_ok();
+        oidc_only.spiffe_trust_domains.clear();
+        assert_eq!(oidc_only.validate(), Ok(()));
+        let mut spiffe_only = keyless_ok();
+        spiffe_only.oidc_issuers.clear();
+        assert_eq!(spiffe_only.validate(), Ok(()));
+        // The window bounds are inclusive.
+        for ttl in [60, 3600] {
+            let mut c = keyless_ok();
+            c.max_attestation_ttl_seconds = ttl;
+            assert_eq!(c.validate(), Ok(()), "{ttl}");
+        }
+        // Byte-for-byte comparison: a trailing slash is a different issuer.
+        let mut slash = keyless_ok();
+        slash.oidc_issuers.push(OidcIssuer {
+            issuer: "https://token.actions.example/".into(),
+            jwks_uri: None,
+        });
+        assert_eq!(slash.validate(), Ok(()));
+        // The longest advertisable values.
+        let mut long = keyless_ok();
+        long.oidc_issuers[0].issuer = format!("https://{}", "a".repeat(504));
+        long.spiffe_trust_domains[0].trust_domain = "a".repeat(255);
+        assert_eq!(long.validate(), Ok(()));
+    }
+
+    #[test]
+    fn keyless_ttl_outside_60_to_3600_is_refused() {
+        for ttl in [0, 59, 3601] {
+            let mut c = keyless_ok();
+            c.max_attestation_ttl_seconds = ttl;
+            assert!(
+                keyless_refusal(&c).contains("keyless.max_attestation_ttl_seconds"),
+                "{ttl}"
+            );
+        }
+    }
+
+    #[test]
+    fn keyless_jwks_cache_ttl_outside_60_to_3600_is_refused() {
+        for ttl in [0, 59, 3601, u64::MAX] {
+            let mut c = keyless_ok();
+            c.jwks_cache_ttl_seconds = ttl;
+            assert!(
+                keyless_refusal(&c).contains("keyless.jwks_cache_ttl_seconds"),
+                "{ttl}"
+            );
+        }
+        for ttl in [60, 300, 3600] {
+            let mut c = keyless_ok();
+            c.jwks_cache_ttl_seconds = ttl;
+            assert_eq!(c.validate(), Ok(()), "{ttl}");
+        }
+    }
+
+    #[test]
+    fn keyless_with_no_issuer_or_trust_domain_is_refused() {
+        let mut c = keyless_ok();
+        c.oidc_issuers.clear();
+        c.spiffe_trust_domains.clear();
+        let e = keyless_refusal(&c);
+        assert!(
+            e.contains("keyless.oidc_issuers") && e.contains("keyless.spiffe_trust_domains"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn keyless_issuer_must_be_an_advertisable_https_uri() {
+        for bad in [
+            String::new(),
+            "http://issuer.example".into(),
+            "https://".into(),
+            "issuer.example".into(),
+            "https://issuer.example/#frag".into(),
+            "https://issuer.example/?q=1".into(),
+            "https://issuer .example".into(),
+            "https://issuer.example\u{feff}".into(),
+            format!("https://{}", "a".repeat(505)),
+        ] {
+            let mut c = keyless_ok();
+            c.oidc_issuers[0].issuer = bad.clone();
+            assert!(
+                keyless_refusal(&c).contains("keyless.oidc_issuers[0].issuer"),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keyless_duplicate_issuer_is_refused() {
+        let mut c = keyless_ok();
+        c.oidc_issuers.push(c.oidc_issuers[0].clone());
+        let e = keyless_refusal(&c);
+        assert!(
+            e.contains("keyless.oidc_issuers[1].issuer") && e.contains("twice"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn keyless_jwks_uri_must_be_https() {
+        for bad in ["http://token.actions.example/jwks", "", "/jwks", "https://"] {
+            let mut c = keyless_ok();
+            c.oidc_issuers[0].jwks_uri = Some(bad.into());
+            assert!(
+                keyless_refusal(&c).contains("keyless.oidc_issuers[0].jwks_uri"),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keyless_trust_domain_must_match_the_schema_pattern() {
+        for bad in [
+            String::new(),
+            "Prod.example.org".into(),
+            "prod example".into(),
+            "spiffe://prod.example.org".into(),
+            "prod.example.org/".into(),
+            "a".repeat(256),
+        ] {
+            let mut c = keyless_ok();
+            c.spiffe_trust_domains[0].trust_domain = bad.clone();
+            assert!(
+                keyless_refusal(&c).contains("keyless.spiffe_trust_domains[0].trust_domain"),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keyless_duplicate_trust_domain_is_refused() {
+        let mut c = keyless_ok();
+        c.spiffe_trust_domains
+            .push(c.spiffe_trust_domains[0].clone());
+        let e = keyless_refusal(&c);
+        assert!(
+            e.contains("keyless.spiffe_trust_domains[1].trust_domain") && e.contains("twice"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn keyless_bundle_endpoint_must_be_https() {
+        for bad in ["", "http://spire.example/bundle", "spire.example"] {
+            let mut c = keyless_ok();
+            c.spiffe_trust_domains[0].bundle_endpoint = bad.into();
+            assert!(
+                keyless_refusal(&c).contains("keyless.spiffe_trust_domains[0].bundle_endpoint"),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keyless_capabilities_lists_exactly_the_configured_issuers() {
+        let mut c = keyless_ok();
+        c.max_attestation_ttl_seconds = 1200;
+        c.oidc_issuers.push(OidcIssuer {
+            issuer: "https://second.example".into(),
+            jwks_uri: None,
+        });
+        let caps = keyless_capabilities(&c);
+        assert_eq!(
+            caps.accepted_oidc_issuers,
+            vec!["https://token.actions.example", "https://second.example"]
+        );
+        assert_eq!(caps.accepted_spiffe_trust_domains, vec!["prod.example.org"]);
+        assert_eq!(caps.max_attestation_ttl_seconds, 1200);
+        // The member is the §13.1 shape and nothing else: no jwks_uri, no
+        // bundle endpoint, no rate limits.
+        let v = serde_json::to_value(&caps).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "accepted_oidc_issuers",
+                "accepted_spiffe_trust_domains",
+                "max_attestation_ttl_seconds"
+            ]
+        );
+    }
 
     #[test]
     fn rate_limit_shared_backend_keys_default_for_an_old_config() {

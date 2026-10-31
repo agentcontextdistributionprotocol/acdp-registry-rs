@@ -68,7 +68,10 @@ playground     = ["acdp-registry-core/playground"]
 # uses) so the loopback-permissive policy used by
 # `anchors_uri_never_dereferenced_publish_and_retrieve` (http_integration.rs)
 # is only reachable from test builds, never from the production binary.
-acdp           = { workspace = true, features = ["test-transport"] }
+# RFC-ACDP-0021 Phase 5: `keyless` gives the tests the SDK's
+# `producer::keyless::EphemeralKey` (the client half of POST
+# /key-attestations). Its feature lists are empty: no crate, no vet entry.
+acdp           = { workspace = true, features = ["test-transport", "keyless"] }
 http-body-util = "0.1"
 hex            = { workspace = true }
 serde          = { workspace = true }
@@ -103,6 +106,14 @@ serial_test    = "3"
 # `rustls` half of U-521's "byte-identical `no-dev` graph" measurement expired
 # the moment `rustls` became a normal dependency; the `rcgen` half did not.
 rcgen          = "0.14"
+# RFC-ACDP-0021 Phase 4: `tests/keyless_token.rs` signs RS256 workload tokens
+# with a key generated at test runtime (no committed key material, as for
+# `rcgen` above). Already in the graph through `jsonwebtoken`'s `rust_crypto`
+# feature, with the same default features, so it adds no crate and no vet
+# entry. Dev-only under resolver 2.
+rsa            = { version = "0.9", features = ["getrandom"] }
+# The same tests encode those tokens; the workspace's own JWT crate.
+jsonwebtoken   = { workspace = true }
 # Hardening C7: `memory_ext.rs`'s `#[cfg(test)] mod tests` runs the shared
 # cross-backend parity suite (`acdp_registry_store::parity`, gated behind
 # `test-support`) against `MemoryStore`. The server is bin-only, so those tests
@@ -110,6 +121,18 @@ rcgen          = "0.14"
 # `parity`. Dev-only: under `resolver = "2"` the feature never reaches the
 # shipped binary (see the note on `rcgen` above).
 acdp-registry-store = { path = "../acdp-registry-store", version = "0.7.0", features = ["test-support"] }
+# RFC-ACDP-0021 Phase 7: `tests/keyless_e2e.rs` spawns the binary against a
+# loopback HTTPS issuer and DID host, which the shipped outbound posture
+# refuses. `test-egress` compiles in `acdp_registry_core::test_egress`, read
+# only when `ACDP_TEST_EGRESS` is set. Dev-only: under `resolver = "2"` the
+# feature reaches the binary only in builds that compile test targets, never
+# `cargo build`/`--release` (see the note on `rcgen` above);
+# `keyless_e2e.rs::test_egress_is_reachable_only_from_dev_dependencies` pins it.
+acdp-registry-core = { path = "../acdp-registry-core", version = "0.7.0", features = ["test-egress"] }
+# The same test drives the spawned binary over HTTPS (lifecycle events and raw
+# documents the SDK client has no call for). Already a normal dependency of
+# acdp-registry-core with these features: no crate, no vet entry.
+reqwest        = { workspace = true }
 # #385: full JSON-Schema validation of the documents the spawned binary SERVES
 # (`/.well-known/acdp.json` and friends) against the pinned spec's
 # `schemas/json/*.schema.json`, in `tests/conformance.rs`. Default features OFF

@@ -428,7 +428,8 @@
 //! *illegitimate excuse* -- never on a *classified-but-uncovered* one. A family with a
 //! logged skip reason and no coverage at all passes all four, which is exactly how `vis`
 //! and `idem` sat uncovered before Phases 8-10. **No family sits in that position today:
-//! the tally is 21 `COVERED` + 8 `EXCUSED` + 0 `DEFERRED` = 29.** `cur` closed to
+//! the tally is 22 `COVERED` + 7 `EXCUSED` + 0 `DEFERRED` = 29** (`kl` moved from
+//! `EXCUSED` to `COVERED` with RFC-ACDP-0021 Phase 7). `cur` closed to
 //! `COVERED` in Phase 15, and `rcpt`/`lhr`/`log` -- the last three, deferred only for
 //! their consumer-role verification residue -- moved to `EXCUSED` when #130 closed, on
 //! obligation-ownership grounds rather than coverage grounds (see `EXCUSED`'s own entries
@@ -642,10 +643,12 @@
 #![cfg(feature = "storage-sqlite")]
 
 mod common;
-// Only the TLS fixture server is used here (did-001); the module's other
-// helpers serve `http_integration.rs`.
-#[allow(dead_code)]
-mod didweb;
+// RFC-ACDP-0021: the in-process keyless registry the kl-* tests drive.
+#[path = "keyless_kit/mod.rs"]
+mod keyless_kit;
+// The TLS fixture server (did-001), loaded once, through the kit: a second
+// `mod didweb;` would compile the file twice (`clippy::duplicate_mod`).
+use keyless_kit::didweb;
 mod spawned_registry;
 
 use std::path::{Path, PathBuf};
@@ -752,6 +755,7 @@ fn config() -> RegistryConfig {
         log: Default::default(),
         changes: Default::default(),
         events: Default::default(),
+        keyless: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -9786,21 +9790,8 @@ const EXCUSED: &[(&str, &str)] = &[
          family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
     (
-        "kl",
-        "RFC-ACDP-0021 keyless signing (Draft), spec pin 1560e0f: 9 fixtures, none carrying \
-         an endpoint (kl-001's vectors array is the golden attestation/publish known-answer \
-         set, not an HTTP exchange). Two grounds, split by fixture. kl-005, kl-006 and \
-         kl-008 apply only to acdp-consumer-keyless: the consumer's verification of keyless \
-         bodies, attester trust and chains, which no harness configuration would make this \
-         registry responsible for. kl-001..004, kl-007 and kl-009 apply to \
-         acdp-registry-keyless, a profile this registry does not implement at this pin: \
-         validate_config refuses to advertise it, and this replay harness advertises only \
-         acdp-registry-core (HARNESS_PROFILES). None of the family is in \
-         acdp-registry-core's required_fixtures or conditional_fixtures.",
-    ),
-    (
         "mcp",
-        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin 1560e0f: 7 fixtures, all \
+        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin 0ba9582: 7 fixtures, all \
          applies_to_profiles = [acdp-producer-mcp-proxy], none carrying an endpoint \
          (mcp-001's vectors array is a known-answer set). They are obligations of an MCP \
          signing proxy, a producer: an acdp:mcp-tool-result body is an ordinary signed \
@@ -9810,7 +9801,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "trust",
-        "RFC-ACDP-0020 registry trust lists (Draft), spec pin 1560e0f: 7 fixtures, all \
+        "RFC-ACDP-0020 registry trust lists (Draft), spec pin 0ba9582: 7 fixtures, all \
          applies_to_profiles = [acdp-consumer-trust-list], none carrying an endpoint \
          (trust-001's vectors array is a known-answer set). Selecting, validating and \
          applying signed acdp:trust-list bodies is the consumer's evaluation; an \
@@ -9894,6 +9885,21 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
         "lin",
         &[CoverageMechanism::Direct(&[
             "lin_vectors_reproduce_lineage_derivation",
+        ])],
+    ),
+    // RFC-ACDP-0021 (Phase 7): the acdp-registry-keyless fixtures, scenario by
+    // scenario, against the keyless kit. kl-005, kl-006 and kl-008 are
+    // consumer-only (KL_CONSUMER_ONLY_FIXTURES, with reasons), checked by
+    // kl_fixtures_are_exercised_or_consumer_only.
+    (
+        "kl",
+        &[CoverageMechanism::Direct(&[
+            "kl001_golden_attestation_pop_and_supersession_table",
+            "kl002_attestation_request_scenarios",
+            "kl003_keyless_publish_scenarios",
+            "kl004_supersession_and_event_refusal",
+            "kl007_registry_fail_closed",
+            "kl009_identity_removal_and_listing",
         ])],
     ),
     (
@@ -10216,7 +10222,8 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// `75fb0da` bump (kl-001..009, mcp-001..007, trust-001..007, rev-007 added);
 /// still 202 after the `bf37195` bump (RFC-ACDP-0021 draft.3: kl fixtures only
 /// modified), after the `546b8c8` bump (error-codes.md only), and after the `1560e0f`
-/// bump (kl-005 M/N added in place; RFC-0019/0020 promotions).
+/// bump (kl-005 M/N added in place; RFC-0019/0020 promotions), and after the
+/// `0ba9582` bump (docs only: the profile table).
 /// A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
@@ -10320,6 +10327,12 @@ const DIRECT_FNS: &[(&str, fn())] = &[
     direct_fn!(can007_registry_created_at_millisecond_truncation),
     direct_fn!(can013_registry_accepts_and_serves_canonical_zero_millisecond_timestamps),
     direct_fn!(lin_vectors_reproduce_lineage_derivation),
+    direct_fn!(kl001_golden_attestation_pop_and_supersession_table),
+    direct_fn!(kl002_attestation_request_scenarios),
+    direct_fn!(kl003_keyless_publish_scenarios),
+    direct_fn!(kl004_supersession_and_event_refusal),
+    direct_fn!(kl007_registry_fail_closed),
+    direct_fn!(kl009_identity_removal_and_listing),
     direct_fn!(caps_vectors_validate_capabilities_document),
     direct_fn!(idem001_004_publish_idempotency_key_lifecycle_and_restart_durability),
     direct_fn!(idem005_no_support_ignores_idempotency_key_header),
@@ -14233,8 +14246,10 @@ macro_rules! exercised_by {
 /// Thirteen with `rec-001`, `rec-002` and `rec-005`, once `GET /changes`
 /// (RFC-ACDP-0018 §5) shipped; fourteen with `rec-003`. `rec-004` stays
 /// with `tests/changes_http.rs`: its scenarios need per-requester bearers
-/// the spawned binary (auth off) does not issue.
-const EXERCISED_FIXTURES_AT_PIN: usize = 14;
+/// the spawned binary (auth off) does not issue. Twenty with the six
+/// `acdp-registry-keyless` fixtures (kl-001..004, kl-007, kl-009), once
+/// RFC-ACDP-0021 Phase 7 switched the profile on.
+const EXERCISED_FIXTURES_AT_PIN: usize = 20;
 
 #[rustfmt::skip]
 const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
@@ -14261,6 +14276,14 @@ const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
     exercised_by!("rec-002", rec_changes_registry_side),
     exercised_by!("rec-005", rec_changes_registry_side),
     exercised_by!("rec-003", rec003_filters_registry_side),
+    // RFC-ACDP-0021: the acdp-registry-keyless fixtures against the keyless
+    // kit (keyless on; profile-off and 0.4.0 kits where a scenario says so).
+    exercised_by!("kl-001", kl001_golden_attestation_pop_and_supersession_table),
+    exercised_by!("kl-002", kl002_attestation_request_scenarios),
+    exercised_by!("kl-003", kl003_keyless_publish_scenarios),
+    exercised_by!("kl-004", kl004_supersession_and_event_refusal),
+    exercised_by!("kl-007", kl007_registry_fail_closed),
+    exercised_by!("kl-009", kl009_identity_removal_and_listing),
 ];
 
 /// Every fixture this suite claims to have retired must really be requested by
@@ -18071,6 +18094,15 @@ fn served_full_features_toml() -> String {
     )
 }
 
+/// `[keyless]` for a spawned registry (RFC-ACDP-0021): one OIDC issuer, never
+/// contacted (issuer keys are fetched on the first mint, not at startup).
+/// Needs [`served_full_features_toml`]'s receipt key, lifecycle and log.
+fn served_keyless_toml() -> String {
+    "[keyless]\nenabled = true\n\n[[keyless.oidc_issuers]]\n\
+     issuer = \"https://token.actions.example\"\n"
+        .to_string()
+}
+
 /// #385: the WHOLE `/.well-known/acdp.json` the shipped binary serves, with
 /// read auth OFF and ON and with every profile it can advertise switched on,
 /// satisfies the pinned `acdp-capabilities.schema.json`.
@@ -18101,14 +18133,9 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
     let schema = PinnedSchema::load(&root, "acdp-capabilities.schema.json");
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // Every allowlisted profile this release can actually serve:
-    // `acdp-registry-keyless` is a spec profile that validate_config refuses
-    // to advertise until RFC-ACDP-0021 is implemented.
-    let served_profiles: Vec<&str> = REGISTRY_ADVERTISABLE_PROFILES
-        .iter()
-        .copied()
-        .filter(|p| *p != "acdp-registry-keyless")
-        .collect();
+    // Every allowlisted profile, `acdp-registry-keyless` included
+    // (RFC-ACDP-0021 Phase 7 lifted its startup refusal).
+    let served_profiles: Vec<&str> = REGISTRY_ADVERTISABLE_PROFILES.to_vec();
     let all_profiles = served_profiles
         .iter()
         .map(|p| format!("\"{p}\""))
@@ -18123,9 +18150,10 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
             // `[events]` needs `auth.enabled` (§8.1), so it is added here
             // rather than in the shared feature tables.
             format!(
-                "{}\n{}\n[events]\nenabled = true\n",
+                "{}\n{}\n[events]\nenabled = true\n\n{}",
                 served_auth_toml(true),
-                served_full_features_toml()
+                served_full_features_toml(),
+                served_keyless_toml()
             ),
         ),
     ];
@@ -18163,6 +18191,21 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
         advertised, expected,
         "the all-profiles registry must advertise exactly REGISTRY_ADVERTISABLE_PROFILES"
     );
+    // RFC-ACDP-0021 §13.1: the `keyless` member exactly when the profile is
+    // served.
+    for tag in ["auth-off", "auth-on"] {
+        assert!(
+            served[tag].get("keyless").is_none(),
+            "{tag}: {}",
+            served[tag]
+        );
+    }
+    assert_eq!(
+        served["all-profiles"]["keyless"]["accepted_oidc_issuers"],
+        json!(["https://token.actions.example"]),
+        "{}",
+        served["all-profiles"]
+    );
     // §9: each RFC-ACDP-0018 profile brings its limits.
     let limits = &served["all-profiles"]["limits"];
     for limit in [
@@ -18193,6 +18236,104 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
             !schema.violations(doc).is_empty(),
             "the validator accepted {what}; it is not enforcing the pinned schema, so \
              every positive above proves nothing. Document: {doc:#}"
+        );
+    }
+}
+
+/// RFC-ACDP-0021 §13.1 (plans/rfc0021-keyless.md, Phase 2): the `keyless`
+/// member `build_capabilities` adds for an enabled `[keyless]` satisfies the
+/// pinned capabilities schema, on the served default document with the
+/// profile listed beside it.
+///
+/// `served_capabilities_documents_satisfy_the_pinned_schema` validates the
+/// member the binary serves for one issuer; this one is the feature-off golden
+/// plus exactly what `keyless_extensions` contributes for edge-case values. The values are the
+/// longest and most varied `KeylessConfig::validate` accepts, so its rules
+/// and the schema's agree at the edges. Synthetic negatives prove the
+/// validator enforces the `keyless` subschema.
+#[test]
+fn keyless_capabilities_member_satisfies_the_pinned_schema() {
+    use acdp_registry_types::config::{
+        keyless_extensions, KeylessConfig, OidcIssuer, SpiffeDomain,
+    };
+    let Some(root) = spec_root() else {
+        eprintln!("ACDP_SPEC_DIR not set; skipping");
+        return;
+    };
+    let schema = PinnedSchema::load(&root, "acdp-capabilities.schema.json");
+    let golden =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/keyless-off-capabilities.json");
+    let mut doc: Value =
+        serde_json::from_str(&std::fs::read_to_string(&golden).expect("read the golden"))
+            .expect("golden capabilities parse");
+    assert!(
+        schema.violations(&doc).is_empty(),
+        "the feature-off golden itself must be schema-valid"
+    );
+
+    let cfg = KeylessConfig {
+        enabled: true,
+        max_attestation_ttl_seconds: 3600,
+        oidc_issuers: vec![
+            OidcIssuer {
+                issuer: "https://token.actions.example".into(),
+                jwks_uri: None,
+            },
+            // Distinct by one trailing slash (byte-for-byte comparison).
+            OidcIssuer {
+                issuer: "https://token.actions.example/".into(),
+                jwks_uri: None,
+            },
+            OidcIssuer {
+                issuer: format!("https://{}", "a".repeat(504)),
+                jwks_uri: None,
+            },
+        ],
+        spiffe_trust_domains: vec![
+            SpiffeDomain {
+                trust_domain: "prod.example-1_a".into(),
+                bundle_endpoint: "https://spire.example/bundle".into(),
+                jwt_issuer: None,
+            },
+            SpiffeDomain {
+                trust_domain: "a".repeat(255),
+                bundle_endpoint: "https://spire.example/bundle".into(),
+                jwt_issuer: None,
+            },
+        ],
+        ..KeylessConfig::default()
+    };
+    cfg.validate().expect("validate accepts the edge values");
+    doc["profiles"]
+        .as_array_mut()
+        .expect("profiles")
+        .push(json!("acdp-registry-keyless"));
+    for (k, v) in keyless_extensions(&cfg) {
+        doc[k] = v;
+    }
+    let v = schema.violations(&doc);
+    assert!(v.is_empty(), "keyless member: {v:?}\n{doc:#}");
+
+    let mut low_ttl = doc.clone();
+    low_ttl["keyless"]["max_attestation_ttl_seconds"] = json!(59);
+    let mut extra_key = doc.clone();
+    extra_key["keyless"]["jwks_uri"] = json!("https://x.example");
+    let mut http_issuer = doc.clone();
+    http_issuer["keyless"]["accepted_oidc_issuers"] = json!(["http://x.example"]);
+    let mut upper_domain = doc.clone();
+    upper_domain["keyless"]["accepted_spiffe_trust_domains"] = json!(["Prod"]);
+    let mut duplicate = doc.clone();
+    duplicate["keyless"]["accepted_oidc_issuers"] = json!(["https://a.x", "https://a.x"]);
+    for (what, bad) in [
+        ("max_attestation_ttl_seconds below 60", &low_ttl),
+        ("an extra key in the closed keyless object", &extra_key),
+        ("an http issuer", &http_issuer),
+        ("an upper-case trust domain", &upper_domain),
+        ("a duplicate issuer", &duplicate),
+    ] {
+        assert!(
+            !schema.violations(bad).is_empty(),
+            "the validator accepted {what}; it is not enforcing the keyless subschema"
         );
     }
 }
@@ -19138,5 +19279,979 @@ fn rec003_filters_registry_side() {
         (status, f["error"]["code"].as_str()),
         (400, Some("schema_violation")),
         "F: {f}"
+    );
+}
+
+// ── RFC-ACDP-0021 keyless signing (kl-*) ─────────────────────────────────────
+//
+// The registry-side kl fixtures, scenario by scenario, against the in-process
+// keyless kit (`tests/keyless_kit`, SQLite, keyless on, the kit's loopback
+// issuer and controller DID host). Every refusal is compared with the
+// fixture's own `expected` (`http_status`, `error_code`, `details.reason`);
+// a member the fixture leaves out is not compared, except that a fixture
+// naming an `error_code` with no `details` requires the answer to carry no
+// `details.reason`. Each test also pins the fixture's scenario letters, so a
+// spec bump that adds or renames one is loud.
+//
+// The real binary with keyless on is `tests/keyless_e2e.rs`.
+
+/// The kl fixtures that apply only to `acdp-consumer-keyless`, so no
+/// harness configuration makes this registry responsible for them. The
+/// consumer halves of the shared fixtures (kl-001 vectors 2 and 4, kl-007 A
+/// and D, kl-009 D and E) are named in the kl tests' docs.
+const KL_CONSUMER_ONLY_FIXTURES: &[(&str, &str)] = &[
+    (
+        "kl-005",
+        "acdp-consumer-keyless only: RFC-ACDP-0021 §8.1 consumer verification (key status, \
+         placement by receipt, revocation, and M/N: the attesting registry's rotated or \
+         removed receipt key). The registry's half of M/N is keeping a retired receipt key \
+         in verificationMethod, which receipt::build_did_document does for \
+         [[receipt.retired_keys]] (docs/RECEIPTS.md).",
+    ),
+    (
+        "kl-006",
+        "acdp-consumer-keyless only: §11 attester trust (local configuration or trust \
+         lists). tests/keyless_e2e.rs runs the SDK consumer against this registry with it \
+         accepted (scenario B) and with no attester accepted (A).",
+    ),
+    (
+        "kl-008",
+        "acdp-consumer-keyless only: RFC-ACDP-0017 chain verification of keyless nodes \
+         (RFC-ACDP-0021 §10).",
+    ),
+];
+
+/// A kit over a fresh SQLite store (with the log when `opts.log`).
+async fn kl_kit(opts: keyless_kit::Opts) -> (keyless_kit::Kit, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("kl.sqlite"), 1)
+        .await
+        .expect("sqlite");
+    let store = if opts.log {
+        store.with_transparency_log()
+    } else {
+        store
+    };
+    store.migrate().await.expect("migrate");
+    (keyless_kit::Kit::new(store, opts).await, dir)
+}
+
+/// Run `f` on a fresh multi-thread runtime: the kl tests are plain `#[test]`s
+/// so `exercised_fixtures_are_really_requested` can call them.
+fn kl_block_on<F: std::future::Future<Output = ()>>(f: F) {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(f);
+}
+
+/// The fixture `id`, or `None` (skip) without the spec.
+fn kl_fixture(id: &str) -> Option<Value> {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping {id}");
+        return None;
+    };
+    Some(
+        find_fixture_by_id(&fixtures, id)
+            .unwrap_or_else(|| panic!("{id} not found at the pinned spec")),
+    )
+}
+
+/// The scenario letters of `fx` (`"A — ..."` gives `A`), in order.
+fn kl_letters(fx: &Value) -> Vec<String> {
+    fx["scenarios"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{} scenarios[] missing", fx["id"]))
+        .iter()
+        .map(|s| {
+            s["name"]
+                .as_str()
+                .and_then(|n| n.split_whitespace().next())
+                .unwrap_or_else(|| panic!("unnamed scenario in {}", fx["id"]))
+                .to_string()
+        })
+        .collect()
+}
+
+/// Pin the scenario letters: the fixture has exactly `letters`.
+fn kl_pin_letters(fx: &Value, letters: &str) {
+    let want: Vec<String> = letters.chars().map(String::from).collect();
+    assert_eq!(
+        kl_letters(fx),
+        want,
+        "{} scenarios changed at the pin: re-read the fixture",
+        fx["id"]
+    );
+}
+
+/// Scenario `letter`'s `expected`.
+fn kl_expected<'a>(fx: &'a Value, letter: &str) -> &'a Value {
+    let s = fx["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| {
+            s["name"]
+                .as_str()
+                .is_some_and(|n| n.split_whitespace().next() == Some(letter))
+        })
+        .unwrap_or_else(|| panic!("{} has no scenario {letter}", fx["id"]));
+    &s["expected"]
+}
+
+/// Assert a response against scenario `letter`'s `expected`.
+fn kl_assert(fx: &Value, letter: &str, r: &(StatusCode, Value)) {
+    let e = kl_expected(fx, letter);
+    let what = format!("{} {letter}", fx["id"].as_str().unwrap_or("kl"));
+    if let Some(status) = e["http_status"].as_u64() {
+        assert_eq!(u64::from(r.0.as_u16()), status, "{what}: {}", r.1);
+    }
+    if let Some(code) = e["error_code"].as_str() {
+        assert_eq!(r.1["error"]["code"].as_str(), Some(code), "{what}: {}", r.1);
+        assert_eq!(
+            r.1["error"]["details"]["reason"].as_str(),
+            e["details"]["reason"].as_str(),
+            "{what}: {}",
+            r.1
+        );
+    }
+}
+
+/// A request for `controller` whose `pop` is another key's (kl-002 I).
+fn kl_bad_pop(controller: &str, descriptor: acdp::types::keyless::IdentityDescriptor) -> Value {
+    use keyless_kit::{ed_key, Kit};
+    let mut v = serde_json::to_value(Kit::request(
+        &ed_key(),
+        controller,
+        descriptor.clone(),
+        None,
+    ))
+    .unwrap();
+    v["pop"] = json!(Kit::request(&ed_key(), controller, descriptor, None).pop);
+    v
+}
+
+/// kl-001 (RFC-ACDP-0021 golden vectors), the registry's vectors:
+///
+/// - 1: the attestation body this registry mints (`keyless::mint::build`,
+///   the code `POST /key-attestations` runs) for the vector's inputs under
+///   the rcpt-001 seed is the golden canonical form, content hash and
+///   signature;
+/// - 3: the token hash, the proof's JCS preimage and the deterministic
+///   Ed25519 proof, which the registry's step 4 accepts;
+/// - 5: every case of the §7 supersession table, published over HTTP
+///   (and the store parity kit's embedded copy of the table is this one);
+/// - 6: the P-256 proof is accepted in P1363 form and refused DER-encoded
+///   (`invalid_signature`, `pop_invalid`).
+///
+/// Vectors 2 (verifying a keyless-signed body) and 4 (the key-status table)
+/// are the consumer's (`acdp-consumer-keyless`).
+#[test]
+fn kl001_golden_attestation_pop_and_supersession_table() {
+    use acdp::types::keyless::{
+        IdentityDescriptor, Jwk, KeyAttestationRequest, ListedIdentity, WorkloadIdentity,
+        REQUEST_VERSION,
+    };
+    use acdp_registry_core::keyless::mint;
+    use base64::Engine as _;
+
+    let Some(fx) = kl_fixture("kl-001") else {
+        return;
+    };
+    let vector = |n: &str| -> &Value {
+        fx["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"].as_str().is_some_and(|s| s.starts_with(n)))
+            .unwrap_or_else(|| panic!("kl-001 vector {n} missing"))
+    };
+    let names: Vec<&str> = fx["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    assert_eq!(
+        names.len(),
+        6,
+        "kl-001 vectors changed at the pin: {names:?}"
+    );
+
+    let seed = |k: &str| -> [u8; 32] {
+        let hex = fx[k]["private_seed_hex"].as_str().unwrap();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        bytes.try_into().unwrap()
+    };
+    let registry_key = SigningKey::from_bytes(&seed("registry_test_keypair"));
+    let ephemeral = SigningKey::from_bytes(&seed("ephemeral_test_keypair"));
+    let ed_jwk: Jwk =
+        serde_json::from_value(fx["ephemeral_test_keypair"]["public_key_jwk"].clone()).unwrap();
+    assert_eq!(ed_jwk, Jwk::from_ed25519(&ephemeral.verifying_key_bytes()));
+    let p256_jwk: Jwk =
+        serde_json::from_value(fx["p256_test_keypair"]["public_key_jwk"].clone()).unwrap();
+
+    // Vector 3.
+    let v3 = vector("3 ");
+    let pre = &v3["pop_preimage"];
+    let controller = pre["controller"].as_str().unwrap();
+    let registry_did = pre["registry_did"].as_str().unwrap();
+    let request = |algorithm: &str, jwk: &Jwk, pop: &str, token: &str| KeyAttestationRequest {
+        request_version: REQUEST_VERSION.into(),
+        controller: controller.into(),
+        identity: IdentityDescriptor::oidc("https://issuer.invalid", "s", token),
+        algorithm: algorithm.into(),
+        public_key_jwk: jwk.clone(),
+        pop: pop.into(),
+        requested_ttl_seconds: None,
+    };
+    let token = v3["token"].as_str().unwrap();
+    let pop = v3["expected"]["pop_value_base64"].as_str().unwrap();
+    let req = request("ed25519", &ed_jwk, pop, token);
+    assert_eq!(
+        req.token_hash(),
+        v3["expected"]["token_hash"].as_str().unwrap()
+    );
+    assert_eq!(
+        req.pop_preimage(registry_did).unwrap(),
+        v3["expected"]["pop_canonical_form"].as_str().unwrap()
+    );
+    assert_eq!(
+        ephemeral.sign_string(v3["expected"]["pop_canonical_form"].as_str().unwrap()),
+        pop,
+        "Ed25519 is deterministic"
+    );
+    assert_eq!(mint::verify_pop(&req, registry_did).unwrap(), "ed25519");
+
+    // Vector 6.
+    let v6 = vector("6 ");
+    let p1363 = request(
+        "ecdsa-p256",
+        &p256_jwk,
+        v6["pop_value_base64"].as_str().unwrap(),
+        v6["token"].as_str().unwrap(),
+    );
+    assert_eq!(
+        p1363.pop_preimage(registry_did).unwrap(),
+        v6["expected"]["pop_canonical_form"].as_str().unwrap()
+    );
+    assert_eq!(v6["expected"]["p1363_accepted"], json!(true));
+    assert_eq!(
+        mint::verify_pop(&p1363, registry_did).unwrap(),
+        "ecdsa-p256"
+    );
+    assert_eq!(v6["expected"]["der_rejected"], json!(true));
+    let der = request(
+        "ecdsa-p256",
+        &p256_jwk,
+        v6["pop_value_der_base64"].as_str().unwrap(),
+        v6["token"].as_str().unwrap(),
+    );
+    let e = mint::verify_pop(&der, registry_did).unwrap_err();
+    let wire = serde_json::to_value(acdp_registry_types::error::WireError::from(&e)).unwrap();
+    assert_eq!(
+        (
+            e.wire_code(),
+            e.http_status(),
+            &wire["error"]["details"]["reason"]
+        ),
+        ("invalid_signature", 400, &json!("pop_invalid"))
+    );
+
+    // Vector 1.
+    let v1 = vector("1 ");
+    let content = &v1["producer_content"];
+    let meta = &content["metadata"];
+    let identity: WorkloadIdentity = serde_json::from_value(meta["identity"].clone()).unwrap();
+    let ts = |k: &str| {
+        chrono::DateTime::parse_from_rfc3339(meta[k].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let att = mint::attestation(
+        &request("ed25519", &ed_jwk, pop, token),
+        meta["algorithm"].as_str().unwrap(),
+        &ListedIdentity {
+            identity,
+            org_wide: meta["org_wide"].as_bool().unwrap(),
+        },
+        (ts("not_before"), ts("not_after")),
+        meta["token_hash"].as_str().unwrap().into(),
+    )
+    .unwrap();
+    assert_eq!(serde_json::to_value(&att).unwrap(), *meta);
+    let authority = content["agent_id"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("did:web:")
+        .unwrap();
+    let key_id = fx["registry_test_keypair"]["key_id"].as_str().unwrap();
+    let publish = mint::build(&registry_key, key_id, authority, &att).unwrap();
+    let ours = serde_json::to_value(&publish).unwrap();
+    for (k, v) in content.as_object().unwrap() {
+        assert_eq!(&ours[k], v, "kl-001 vector 1 member {k}");
+    }
+    assert_eq!(
+        acdp::types::keyless::token_hash(v1["expected"]["canonical_form"].as_str().unwrap()),
+        v1["expected"]["content_hash"].as_str().unwrap(),
+        "the content hash is sha256 of the canonical form"
+    );
+    assert_eq!(
+        publish.content_hash.as_str(),
+        v1["expected"]["content_hash"].as_str().unwrap()
+    );
+    let sig = base64::engine::general_purpose::STANDARD
+        .decode(&publish.signature.value)
+        .unwrap();
+    let hex: String = sig.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(hex, v1["expected"]["signature_value_hex"].as_str().unwrap());
+
+    // Vector 5, over HTTP.
+    let v5 = vector("5 ");
+    let cases = v5["cases"].as_array().unwrap();
+    let embedded: Value =
+        serde_json::from_str(acdp_registry_store::parity::KL_001_VECTOR_5_CASES).unwrap();
+    assert_eq!(
+        &embedded, &v5["cases"],
+        "the store parity kit's copy of the §7 table drifted from kl-001"
+    );
+    kl_block_on(async {
+        let (kit, _d) = kl_kit(keyless_kit::Opts::default()).await;
+        // Fixture subjects mapped onto the kit's issuer and trust domain.
+        let other = "repo:acme/other:ref:refs/heads/main";
+        let local = |id: &Value| -> (WorkloadIdentity, String) {
+            match id["type"].as_str().unwrap() {
+                "spiffe" => (
+                    WorkloadIdentity::Spiffe {
+                        subject: keyless_kit::SPIFFE_SUB.into(),
+                    },
+                    "spiffe".into(),
+                ),
+                _ if id["subject"].as_str().unwrap().contains("/other:") => {
+                    (kit.oidc_identity(other), other.into())
+                }
+                _ => (
+                    kit.oidc_identity(keyless_kit::SUBJECT),
+                    keyless_kit::SUBJECT.into(),
+                ),
+            }
+        };
+        let descriptor = |which: &str| -> IdentityDescriptor {
+            if which == "spiffe" {
+                kit.svid()
+            } else {
+                kit.oidc(which)
+            }
+        };
+        let mut seed = 100u8;
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let mut listed: Vec<(WorkloadIdentity, bool)> = Vec::new();
+            for side in ["predecessor", "successor"] {
+                if case[side]["kind"] == "keyless" {
+                    let (id, _) = local(&case[side]["identity"]);
+                    if !listed.iter().any(|(l, _)| *l == id) {
+                        listed.push((id, case[side]["org_wide"].as_bool().unwrap()));
+                    }
+                }
+            }
+            let controller = kit.controller_with_keys("v5", &listed, &[("key-1", 99)]);
+            let mut producer = |side: &str| -> Option<(u8, String)> {
+                (case[side]["kind"] == "keyless").then(|| {
+                    seed += 1;
+                    (seed, local(&case[side]["identity"]).1)
+                })
+            };
+            let pred_p = match producer("predecessor") {
+                Some((s, which)) => kit
+                    .mint(s, &controller, descriptor(&which), None)
+                    .await
+                    .producer(),
+                None => keyless_kit::controller_producer(&controller, 99),
+            };
+            let pred = kit
+                .publish(&keyless_kit::plain(&pred_p, &format!("{name} predecessor")))
+                .await;
+            assert_eq!(
+                pred.0,
+                StatusCode::CREATED,
+                "{name} predecessor: {}",
+                pred.1
+            );
+            let pred_body = kit.body_of(pred.1["ctx_id"].as_str().unwrap()).await;
+            let succ_p = match producer("successor") {
+                Some((s, which)) => kit
+                    .mint(s, &controller, descriptor(&which), None)
+                    .await
+                    .producer(),
+                None => keyless_kit::controller_producer(&controller, 99),
+            };
+            let r = kit
+                .publish(&keyless_kit::successor(&succ_p, &pred_body, name))
+                .await;
+            match case["expected"]["result"].as_str().unwrap() {
+                "allowed" => assert_eq!(r.0, StatusCode::CREATED, "{name}: {}", r.1),
+                "refused" => assert_eq!(
+                    keyless_kit::wire(&r),
+                    keyless_kit::is(403, "not_authorized", case["expected"]["reason"].as_str()),
+                    "{name}"
+                ),
+                other => panic!("{name}: unknown result {other}"),
+            }
+        }
+    });
+}
+
+/// kl-002 A-N (RFC-ACDP-0021 §5.2), `POST /key-attestations`: every
+/// scenario's answer, with the log on (A mints exactly one leaf). M runs on
+/// a kit with the profile off.
+#[test]
+fn kl002_attestation_request_scenarios() {
+    use keyless_kit::{ed_key, Kit, Opts, SUBJECT};
+    let Some(fx) = kl_fixture("kl-002") else {
+        return;
+    };
+    kl_pin_letters(&fx, "ABCDEFGHIJKLMN");
+    kl_block_on(async {
+        let (kit, _d) = kl_kit(Opts {
+            log: true,
+            ..Opts::default()
+        })
+        .await;
+        let other = "repo:acme/other:ref:refs/heads/main";
+        let controller = kit.controller("kl002", &[(kit.oidc_identity(SUBJECT), false)]);
+        let req = |d| Kit::request(&ed_key(), &controller, d, None);
+        let with = |f: &dyn Fn(&mut Value)| {
+            let mut c = kit.claims(SUBJECT);
+            f(&mut c);
+            kit.oidc_with(SUBJECT, &c)
+        };
+
+        // A, with one leaf and the §5.3 body.
+        let before = kit.log_size().await;
+        let a = kit.post(&req(kit.oidc(SUBJECT))).await;
+        kl_assert(&fx, "A", &a);
+        assert_eq!(a.1["body"]["type"], "acdp:key-attestation");
+        assert_eq!(a.1["body"]["agent_id"], keyless_kit::REGISTRY_DID);
+        assert!(a.1["registry_receipt"].is_object(), "{}", a.1);
+        assert_eq!(kit.log_size().await, before + 1, "A: one log leaf");
+
+        kl_assert(
+            &fx,
+            "B",
+            &kit.post(&req(with(&|c| c["aud"] = json!("did:web:other.test"))))
+                .await,
+        );
+        kl_assert(
+            &fx,
+            "C",
+            &kit.post(&req(with(&|c| c["aud"] = json!("registry.test"))))
+                .await,
+        );
+        let d = acdp::types::keyless::IdentityDescriptor::oidc(
+            "https://evil.example",
+            SUBJECT,
+            kit.oidc.sign(&kit.claims(SUBJECT)),
+        );
+        kl_assert(&fx, "D", &kit.post(&req(d)).await);
+        kl_assert(&fx, "E", &kit.post(&req(kit.oidc(other))).await);
+
+        let key = ed_key();
+        let mut c = kit.claims(SUBJECT);
+        c["cnf"] = json!({ "jkt": ed_key().jwk().unwrap().thumbprint().unwrap() });
+        let f = Kit::request(&key, &controller, kit.oidc_with(SUBJECT, &c), None);
+        kl_assert(&fx, "F", &kit.post(&f).await);
+        let g = kit.post(&req(kit.oidc(SUBJECT))).await;
+        assert!(kit.claims(SUBJECT).get("cnf").is_none());
+        kl_assert(&fx, "G", &g);
+
+        let once = kit.oidc(SUBJECT);
+        assert_eq!(kit.post(&req(once.clone())).await.0, StatusCode::CREATED);
+        kl_assert(&fx, "H", &kit.post(&req(once)).await);
+        kl_assert(
+            &fx,
+            "I",
+            &kit.post(&kl_bad_pop(&controller, kit.oidc(SUBJECT))).await,
+        );
+        // J: expired, and `sub` not the descriptor's subject.
+        let now = kit.now();
+        kl_assert(
+            &fx,
+            "J",
+            &kit.post(&req(with(&|c| c["exp"] = json!(now - 120)))).await,
+        );
+        kl_assert(
+            &fx,
+            "J",
+            &kit.post(&req(with(&|c| c["sub"] = json!(other)))).await,
+        );
+
+        let mut k = serde_json::to_value(req(kit.oidc(SUBJECT))).unwrap();
+        k["controller"] = json!("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+        kl_assert(&fx, "K", &kit.post(&k).await);
+
+        let unreachable = kit.controller("kl002-l", &[(kit.oidc_identity(SUBJECT), false)]);
+        kit.outside.set_did_status(500);
+        let l = kit
+            .post(&Kit::request(
+                &ed_key(),
+                &unreachable,
+                kit.oidc(SUBJECT),
+                None,
+            ))
+            .await;
+        kit.outside.set_did_status(200);
+        kl_assert(&fx, "L", &l);
+
+        let mut n = serde_json::to_value(req(kit.oidc(SUBJECT))).unwrap();
+        n["identity"] = json!({
+            "type": "spiffe", "subject": keyless_kit::SPIFFE_SUB,
+            "svid_format": "x509", "svid": "MIIB"
+        });
+        kl_assert(&fx, "N", &kit.post(&n).await);
+
+        let (off, _d2) = kl_kit(Opts {
+            enabled: false,
+            ..Opts::default()
+        })
+        .await;
+        let m = off
+            .post(&Kit::request(
+                &ed_key(),
+                &controller,
+                kit.oidc(SUBJECT),
+                None,
+            ))
+            .await;
+        kl_assert(&fx, "M", &m);
+    });
+}
+
+/// kl-003 A-J (RFC-ACDP-0021 §6.3), keyless publish: every scenario's
+/// answer, with the log on (A's receipt and leaf carry the attested
+/// fingerprint). J runs on a kit with the profile off.
+#[test]
+fn kl003_keyless_publish_scenarios() {
+    use acdp::producer::keyless::EphemeralKey;
+    use acdp::types::keyless::{keyless_key_id, KeyAttestationRef};
+    use keyless_kit::{controller_producer, plain, signing_key, Minted, Opts, SUBJECT};
+    use std::sync::atomic::Ordering;
+    let Some(fx) = kl_fixture("kl-003") else {
+        return;
+    };
+    kl_pin_letters(&fx, "ABCDEFGHIJ");
+    kl_block_on(async {
+        let (kit, _d) = kl_kit(Opts {
+            log: true,
+            ..Opts::default()
+        })
+        .await;
+        let same = kit.oidc_identity(SUBJECT);
+        let controller =
+            kit.controller_with_keys("kl003", &[(same.clone(), false)], &[("key-1", 40)]);
+        let m = kit
+            .mint(61, &controller, kit.oidc(SUBJECT), Some(600))
+            .await;
+
+        // A.
+        let n = kit.log_size().await;
+        let a = kit.publish(&plain(&m.producer(), "kl-003 A")).await;
+        kl_assert(&fx, "A", &a);
+        assert_eq!(
+            a.1["registry_receipt"]["key_fingerprint"],
+            json!(m.att.key_fingerprint)
+        );
+        assert_eq!(
+            kit.leaf(n).await["key_fingerprint"],
+            json!(m.att.key_fingerprint)
+        );
+
+        // B: the registry's created_at at or after not_after.
+        let real = kit.clock.load(Ordering::SeqCst);
+        kit.clock.store(real - 2 * 3600 * 1000, Ordering::SeqCst);
+        let mb = kit
+            .mint(67, &controller, kit.oidc(SUBJECT), Some(600))
+            .await;
+        kit.clock.store(real, Ordering::SeqCst);
+        kl_assert(
+            &fx,
+            "B",
+            &kit.publish(&plain(&mb.producer(), "kl-003 B")).await,
+        );
+
+        // C: a keyless key id and no member.
+        let mut c = plain(&controller_producer(&controller, 61), "kl-003 C");
+        c.signature.key_id = m.att.key_id.clone();
+        kl_assert(&fx, "C", &kit.publish(&c).await);
+
+        // D: an attestation on another registry.
+        let foreign = KeyAttestationRef {
+            ctx_id: CtxId(format!(
+                "acdp://other.test/{}",
+                m.reference.ctx_id.as_str().rsplit('/').next().unwrap()
+            )),
+            content_hash: m.reference.content_hash.clone(),
+        };
+        kl_assert(
+            &fx,
+            "D",
+            &kit.publish(&plain(&m.producer_with(&m.att, foreign), "kl-003 D"))
+                .await,
+        );
+
+        // E: the pinned content hash differs.
+        let e_ref = KeyAttestationRef {
+            content_hash: ContentHash(format!("sha256:{}", "0".repeat(64))),
+            ..m.reference.clone()
+        };
+        kl_assert(
+            &fx,
+            "E",
+            &kit.publish(&plain(&m.producer_with(&m.att, e_ref), "kl-003 E"))
+                .await,
+        );
+
+        // F: another controller, then another key, under the attestation.
+        let controller2 = kit.controller("kl003-f", &[(same.clone(), false)]);
+        let mut att2 = m.att.clone();
+        att2.controller = controller2.clone();
+        att2.key_id = keyless_key_id(&controller2, &m.att.key_fingerprint).unwrap();
+        kl_assert(
+            &fx,
+            "F",
+            &kit.publish(&plain(
+                &m.producer_with(&att2, m.reference.clone()),
+                "kl-003 F",
+            ))
+            .await,
+        );
+        let k62 = EphemeralKey::from_key(signing_key(62));
+        let mut att3 = m.att.clone();
+        att3.key_fingerprint = k62.fingerprint().unwrap();
+        att3.public_key_jwk = k62.jwk().unwrap();
+        att3.key_id = k62.key_id(&controller).unwrap();
+        let other_key = Minted {
+            att: att3,
+            reference: m.reference.clone(),
+            seed: 62,
+        };
+        kl_assert(
+            &fx,
+            "F",
+            &kit.publish(&plain(&other_key.producer(), "kl-003 F key"))
+                .await,
+        );
+
+        // G: withdrawn by the registry (§9.2, an admin retract).
+        let mg = kit
+            .mint(66, &controller, kit.oidc(SUBJECT), Some(600))
+            .await;
+        let w = kit.admin_retract(mg.reference.ctx_id.as_str()).await;
+        assert_eq!(w.0, StatusCode::OK, "G retract: {}", w.1);
+        kl_assert(
+            &fx,
+            "G",
+            &kit.publish(&plain(&mg.producer(), "kl-003 G")).await,
+        );
+
+        // H: the signature is another body's.
+        let mut h = plain(&m.producer(), "kl-003 H");
+        h.signature.value = plain(&m.producer(), "kl-003 H other").signature.value;
+        kl_assert(&fx, "H", &kit.publish(&h).await);
+
+        // I: a key_attestation member beside a non-keyless key id.
+        let mut i = plain(&m.producer(), "kl-003 I");
+        i.signature.key_id = format!("{controller}#key-1");
+        kl_assert(&fx, "I", &kit.publish(&i).await);
+
+        // J: the profile off; a keyless-signed body on a resolvable DID.
+        let (off, _d2) = kl_kit(Opts {
+            enabled: false,
+            ..Opts::default()
+        })
+        .await;
+        let off_controller = off.controller_with_keys(
+            "kl003-j",
+            &[(off.oidc_identity(SUBJECT), false)],
+            &[("key-1", 81)],
+        );
+        let unminted = Minted::unminted(82, &off_controller);
+        let j = off.publish(&plain(&unminted.producer(), "kl-003 J")).await;
+        kl_assert(&fx, "J", &j);
+        assert!(j.1["error"].get("details").is_none(), "J: {}", j.1);
+    });
+}
+
+/// kl-004 A-F (RFC-ACDP-0021 §7 and R13): keyless supersession and the
+/// refusal of keyless-signed lifecycle events, on both endpoints.
+#[test]
+fn kl004_supersession_and_event_refusal() {
+    use keyless_kit::{
+        controller_producer, dangling, event_under, successor, Opts, AUTHORITY, SUBJECT,
+    };
+    let Some(fx) = kl_fixture("kl-004") else {
+        return;
+    };
+    kl_pin_letters(&fx, "ABCDEF");
+    kl_block_on(async {
+        let (kit, _d) = kl_kit(Opts::default()).await;
+        let other = "repo:acme/other:ref:refs/heads/main";
+        let org = "repo:acme/org:ref:refs/heads/main";
+        let controller = kit.controller_with_keys(
+            "kl004",
+            &[
+                (kit.oidc_identity(SUBJECT), false),
+                (kit.oidc_identity(other), false),
+                (kit.oidc_identity(org), true),
+            ],
+            &[("key-1", 40)],
+        );
+        let m0 = kit
+            .mint(60, &controller, kit.oidc(SUBJECT), Some(600))
+            .await;
+        let first = kit
+            .publish(&keyless_kit::plain(&m0.producer(), "kl-004 base"))
+            .await;
+        assert_eq!(first.0, StatusCode::CREATED, "{}", first.1);
+        let base = kit.body_of(first.1["ctx_id"].as_str().unwrap()).await;
+
+        let m_other = kit.mint(70, &controller, kit.oidc(other), Some(600)).await;
+        kl_assert(
+            &fx,
+            "A",
+            &kit.publish(&successor(&m_other.producer(), &base, "kl-004 A"))
+                .await,
+        );
+        let m_same = kit
+            .mint(71, &controller, kit.oidc(SUBJECT), Some(600))
+            .await;
+        let b = kit
+            .publish(&successor(&m_same.producer(), &base, "kl-004 B"))
+            .await;
+        kl_assert(&fx, "B", &b);
+        let body_b = kit.body_of(b.1["ctx_id"].as_str().unwrap()).await;
+        let m_org = kit.mint(72, &controller, kit.oidc(org), Some(600)).await;
+        let c = kit
+            .publish(&successor(&m_org.producer(), &body_b, "kl-004 C"))
+            .await;
+        kl_assert(&fx, "C", &c);
+        let body_c = kit.body_of(c.1["ctx_id"].as_str().unwrap()).await;
+        let d = kit
+            .publish(&successor(
+                &controller_producer(&controller, 40),
+                &body_c,
+                "kl-004 D",
+            ))
+            .await;
+        kl_assert(&fx, "D", &d);
+        let body_d = kit.body_of(d.1["ctx_id"].as_str().unwrap()).await;
+        kl_assert(
+            &fx,
+            "E",
+            &kit.publish(&successor(&m_same.producer(), &body_d, "kl-004 E"))
+                .await,
+        );
+
+        // F: whatever the target and identity, org-wide included.
+        let target = body_b.ctx_id.as_str().to_string();
+        let nowhere = dangling(AUTHORITY).ctx_id.as_str().to_string();
+        for (t, key_id, endpoint, event_type) in [
+            (&target, &m_same.att.key_id, "retract", "retracted"),
+            (&target, &m_org.att.key_id, "retract", "retracted"),
+            (&nowhere, &m_same.att.key_id, "retract", "retracted"),
+            (&target, &m_org.att.key_id, "republish", "republished"),
+        ] {
+            let envelope = event_under(t, &controller, key_id, event_type);
+            kl_assert(&fx, "F", &kit.post_event(t, endpoint, &envelope).await);
+        }
+    });
+}
+
+/// kl-007 B and C (RFC-ACDP-0021 §4, §6.2), the registry's fail-closed
+/// duties: a DID-document method whose fragment begins `acdp-kl-` resolves
+/// nothing, and a registry at `acdp_version` 0.4.0 refuses
+/// `key_attestation` as a schema violation, with the profile on or off.
+/// A and D are the consumer's (`acdp-consumer-keyless`).
+#[test]
+fn kl007_registry_fail_closed() {
+    use keyless_kit::{controller_producer, ed_key_from, plain, Minted, Opts, SUBJECT};
+    let Some(fx) = kl_fixture("kl-007") else {
+        return;
+    };
+    kl_pin_letters(&fx, "ABCD");
+    kl_block_on(async {
+        // B, profile on and off.
+        for enabled in [true, false] {
+            let (kit, _d) = kl_kit(Opts {
+                enabled,
+                ..Opts::default()
+            })
+            .await;
+            let owner = kit.controller("kl007", &[]);
+            let fragment = ed_key_from(83)
+                .key_id(&owner)
+                .unwrap()
+                .rsplit('#')
+                .next()
+                .unwrap()
+                .to_string();
+            let squatter =
+                kit.controller_with_keys("kl007-b", &[], &[(&fragment, 83), ("key-1", 84)]);
+            let mut sq = plain(&controller_producer(&squatter, 83), "kl-007 B");
+            sq.signature.key_id = format!("{squatter}#{fragment}");
+            let r = kit.publish(&sq).await;
+            assert_eq!(
+                (r.0.as_u16(), r.1["error"]["code"].as_str()),
+                (400, kl_expected(&fx, "B")["error_code"].as_str()),
+                "kl-007 B enabled={enabled}: {}",
+                r.1
+            );
+        }
+        // C, profile on and off.
+        for enabled in [true, false] {
+            let (kit, _d) = kl_kit(Opts {
+                enabled,
+                acdp_version: "0.4.0",
+                ..Opts::default()
+            })
+            .await;
+            let controller = kit.controller("kl007-c", &[(kit.oidc_identity(SUBJECT), false)]);
+            let m = Minted::unminted(85, &controller);
+            kl_assert(
+                &fx,
+                "C",
+                &kit.publish(&plain(&m.producer(), "kl-007 C")).await,
+            );
+        }
+    });
+}
+
+/// kl-009 A, B and C (RFC-ACDP-0021 §9), the registry's half of identity
+/// removal: a removed identity can no longer mint (A) or publish inside a
+/// live window (B, the SHOULD re-check, which this registry makes), and
+/// `GET /key-attestations` lists every attestation for the controller and
+/// identity, newest first, paginated (C). D and E are the controller's and
+/// the consumer's (kl-005).
+#[test]
+fn kl009_identity_removal_and_listing() {
+    use keyless_kit::{ed_key, plain, urlencode, Kit, Opts, SUBJECT};
+    let Some(fx) = kl_fixture("kl-009") else {
+        return;
+    };
+    kl_pin_letters(&fx, "ABCDE");
+    for letter in ["A", "B"] {
+        let behavior = kl_expected(&fx, letter)["behavior"].as_str().unwrap();
+        assert!(
+            behavior.contains("key_not_authorized") && behavior.contains("identity_not_authorized"),
+            "kl-009 {letter} no longer names the refusal: {behavior}"
+        );
+    }
+    let refused = keyless_kit::is(403, "key_not_authorized", Some("identity_not_authorized"));
+    kl_block_on(async {
+        let (kit, _d) = kl_kit(Opts::default()).await;
+        let id = kit.oidc_identity(SUBJECT);
+        let controller = kit.controller("kl009", &[(id.clone(), false)]);
+
+        // C: three attestations, newest first, two to a page.
+        let mut minted = Vec::new();
+        for seed in [90u8, 91, 92] {
+            minted.push(kit.mint(seed, &controller, kit.oidc(SUBJECT), None).await);
+        }
+        let issuer = match &id {
+            acdp::types::keyless::WorkloadIdentity::Oidc { issuer, .. } => issuer.clone(),
+            _ => unreachable!(),
+        };
+        let base = format!(
+            "/key-attestations?controller={}&issuer={}&subject={}",
+            urlencode(&controller),
+            urlencode(&issuer),
+            urlencode(SUBJECT)
+        );
+        let mut seen = Vec::new();
+        let mut uri = format!("{base}&limit=2");
+        loop {
+            let page = kit.get(&uri).await;
+            kl_assert(&fx, "C", &page);
+            for item in page.1["items"].as_array().unwrap() {
+                assert!(item["content_hash"].is_string(), "{item}");
+                seen.push(item["ctx_id"].as_str().unwrap().to_string());
+            }
+            match page.1["next_cursor"].as_str() {
+                Some(c) => uri = format!("{base}&limit=2&cursor={}", urlencode(c)),
+                None => break,
+            }
+        }
+        let newest_first: Vec<String> = minted
+            .iter()
+            .rev()
+            .map(|m| m.reference.ctx_id.as_str().to_string())
+            .collect();
+        assert_eq!(
+            seen, newest_first,
+            "kl-009 C: every attestation, newest first"
+        );
+
+        // A and B: the controller stops listing the identity.
+        let live = &minted[2];
+        kit.list(&controller, &[]);
+        kit.resolver.invalidate(&controller);
+        let a = kit
+            .post(&Kit::request(
+                &ed_key(),
+                &controller,
+                kit.oidc(SUBJECT),
+                None,
+            ))
+            .await;
+        assert_eq!(keyless_kit::wire(&a), refused, "kl-009 A: {}", a.1);
+        let b = kit.publish(&plain(&live.producer(), "kl-009 B")).await;
+        assert_eq!(keyless_kit::wire(&b), refused, "kl-009 B: {}", b.1);
+    });
+}
+
+/// Every kl fixture at the pin is exercised by a kl test above
+/// (`EXERCISED_FIXTURES`) or is consumer-only (`KL_CONSUMER_ONLY_FIXTURES`),
+/// never both; and a consumer-only one really applies to no registry
+/// profile.
+#[test]
+fn kl_fixtures_are_exercised_or_consumer_only() {
+    let Some(stems) = fixture_stems_and_ids() else {
+        eprintln!("conformance: spec unavailable; skipping the kl accounting");
+        return;
+    };
+    let fixtures = spec_fixtures().expect("spec present");
+    let kl: Vec<&str> = stems
+        .iter()
+        .map(|(_, id)| id.as_str())
+        .filter(|id| id.starts_with("kl-"))
+        .collect();
+    assert_eq!(kl.len(), 9, "kl fixtures at the pin: {kl:?}");
+    for id in &kl {
+        let exercised = EXERCISED_FIXTURES.iter().any(|(e, _, _)| e == id);
+        let consumer = KL_CONSUMER_ONLY_FIXTURES.iter().any(|(c, _)| c == id);
+        assert!(
+            exercised ^ consumer,
+            "{id}: exercised={exercised}, consumer-only={consumer}; exactly one must hold"
+        );
+        if consumer {
+            let fx = find_fixture_by_id(&fixtures, id).unwrap();
+            let profiles = fx["applies_to_profiles"].as_array().unwrap();
+            assert!(
+                profiles
+                    .iter()
+                    .all(|p| p.as_str().is_some_and(|p| p.starts_with("acdp-consumer-"))),
+                "{id} is listed consumer-only but applies to {profiles:?}"
+            );
+        }
+    }
+    let kl005 = find_fixture_by_id(&fixtures, "kl-005").unwrap();
+    let letters = kl_letters(&kl005);
+    assert!(
+        letters.iter().any(|l| l == "M") && letters.iter().any(|l| l == "N"),
+        "kl-005 M/N (receipt-key rotation) are what the kl-005 reason cites: {letters:?}"
     );
 }

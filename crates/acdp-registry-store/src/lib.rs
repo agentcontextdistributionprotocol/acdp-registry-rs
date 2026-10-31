@@ -8,6 +8,7 @@ pub mod changes;
 pub mod cursor;
 pub mod event_receipts;
 pub mod fulltext;
+pub mod key_attestations;
 pub mod lifecycle;
 pub mod log;
 pub mod rate_limit;
@@ -31,6 +32,7 @@ use async_trait::async_trait;
 pub use changes::{FeedAppend, FeedHead, FeedPage, FeedQuery, FeedRow};
 pub use cursor::{decode_cursor, encode_cursor};
 pub use event_receipts::{EventReceiptMinter, StoredReceipt, SweepReport};
+pub use key_attestations::{KeyAttestationFilter, KeyAttestationIndexRow, KeyAttestationRecord};
 pub use log::{build_leaf_record, LogEntryRecord};
 pub use rate_limit::{LimitDecision, SharedLimitScope, SharedRateLimitBackend};
 pub use subscriptions::{
@@ -411,6 +413,55 @@ pub trait ExtendedRegistryStore: RegistryStore + Send + Sync {
         let _ = head;
         Err(AcdpError::NotImplemented(
             "this backend does not implement change-hint subscriptions (RFC-ACDP-0018 §8)".into(),
+        ))
+    }
+
+    // ── Key attestations (RFC-ACDP-0021 §5.3-§5.4) ────────────────────
+    //
+    // The index rows are written only inside `commit_publish`, in the same
+    // transaction as the attestation body (see `key_attestations`), so there
+    // is no insert method here. Defaults return `NotImplemented`; a
+    // deployment MUST NOT advertise `acdp-registry-keyless` against such a
+    // backend.
+
+    /// The attestation at `ctx_id`: its index row joined to its `contexts`
+    /// row, which supplies the `content_hash`, the current status and the
+    /// metadata. `None` when no attestation is indexed there.
+    async fn key_attestation(
+        &self,
+        ctx_id: &str,
+    ) -> Result<Option<KeyAttestationRecord>, AcdpError> {
+        let _ = ctx_id;
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement key attestations (RFC-ACDP-0021)".into(),
+        ))
+    }
+
+    /// True when an attestation was already minted for `token_hash`. The
+    /// handler's §5.2 pre-check; the UNIQUE index in the mint transaction is
+    /// the authoritative one.
+    async fn key_attestation_token_seen(&self, token_hash: &str) -> Result<bool, AcdpError> {
+        let _ = token_hash;
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement key attestations (RFC-ACDP-0021)".into(),
+        ))
+    }
+
+    /// `controller`'s attestations, newest first (`created_at` descending,
+    /// then `ctx_id` ascending), narrowed by `filter`. Keyset-paginated with
+    /// the [`cursor`] codec; `limit` is clamped to
+    /// `1..=`[`key_attestations::MAX_LIST_LIMIT`]. Retracted attestations are
+    /// listed too: §5.4 lists every attestation minted.
+    async fn list_key_attestations(
+        &self,
+        controller: &str,
+        filter: &KeyAttestationFilter,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Page<acdp::types::keyless::KeyAttestationListItem>, AcdpError> {
+        let _ = (controller, filter, cursor, limit);
+        Err(AcdpError::NotImplemented(
+            "this backend does not implement key attestations (RFC-ACDP-0021)".into(),
         ))
     }
 

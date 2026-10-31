@@ -5063,3 +5063,164 @@ underlying settings and code were not touched by this pass, only the record of t
   - (e) disable on the first refusal.
 - Blast radius: low and reversible. These are server-side delivery-policy constants and internal metric names. The wire format and the stored schema are unaffected.
 - Status: (g) CHANGED (2026-10-25) by Opus at /reconcile: a secret sealed under an unknown `key_id` is now retried (`outcome="unknown_key"`) and disabled only after 72 h; a secret that fails to open under the right `key_id` still disables at once. (a)–(f), (h)–(k) CONFIRMED. See DECISIONS.md "RFC-ACDP-0018 retraction recall".
+
+## RFC-ACDP-0021 keyless, Phase 2 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) `keyless_capabilities`, a `keyless_extensions` helper and the field rules (`KeylessConfig::validate`) live in `acdp-registry-types/src/config.rs`, not in `main.rs`. That lets `tests/conformance.rs` validate the member against the pinned schema, and the server crate needs no new `serde_json`/`url` dependency. `main.rs::validate_keyless` keeps the profile-without-`enabled` refusal, the cross-section prerequisites and the final "not yet available in this build" refusal.
+  - (b) Only the rules the plan lists are enforced. `jwt_issuer`, the JWKS TTL and staleness values, `fetch_timeout_ms`, `max_fetch_bytes` and the two rate budgets are not validated yet; the phase that first reads each (P4/P5) adds its bounds.
+  - (c) The receipts, lifecycle and `acdp_version >= 0.5.0` prerequisites are one check through `event_receipts_gate`, the same helper `validate_changes` uses, so they share one message. The log is checked separately. A memory backend is not refused.
+  - (d) Checks run in this order: profile listed without `enabled`, then field rules, then prerequisites, then "not yet available". So a misconfigured section reports its real fault before the Phase-7 switch.
+  - (e) The schema acceptance criterion is met in `conformance.rs` (`keyless_capabilities_member_satisfies_the_pinned_schema`, gated on `ACDP_SPEC_DIR`). It validates the served feature-off golden plus the `keyless` member and profile, because the binary cannot serve the member until Phase 7.
+  - (f) The golden is `crates/acdp-registry-server/tests/golden/keyless-off-capabilities.json`. It is compared with the raw bytes a spawned default-config binary serves (trailing newline trimmed), so `http_integration.rs` now includes `spawned_registry`. For the kl-004 F case the event is signed under `#key-1` and `signature.key_id` is rewritten on the wire, because the SDK refuses to sign under a keyless key id.
+- Chose: as above.
+- Alternatives: (a) a binary-private builder validated only by hand-written checks; (b) bounding every scalar now; (e) skipping schema validation until Phase 7.
+- Blast radius: low and reversible. Nothing here is reachable while `keyless.enabled` is refused, and the OFF wire is pinned by `keyless_off_wire_snapshot`.
+- Status: CONFIRMED (2026-10-31, Opus; DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31")
+
+## RFC-ACDP-0021 keyless, Phase 3 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) The index stores `created_at_ms` as INTEGER/BIGINT milliseconds, not the `contexts.created_at` type. SQLite stores `created_at` as variable-precision `to_rfc3339` TEXT, which does not sort lexicographically as a keyset, and milliseconds are the cursor's own anchor (`encode_cursor`). The window columns are milliseconds too, and the window is half-open (`not_before <= created_at < not_after`).
+  - (b) Every backend refuses in one fixed order, documented in `acdp-registry-store/src/key_attestations.rs` and pinned by `parity::assert_keyless_refusal_order`. First idempotency replay, then the `supersedes` existence/ownership/AlreadySuperseded checks. Next the successor attestation (`attestation_not_found`, then `attestation_withdrawn`), then §7 `keyless_identity_mismatch`, then the RFC-ACDP-0014 admission, then `outside_attestation_window` against the assigned `created_at`. Last comes `token_replayed` for a mint, after the body insert and before the log leaf. The successor check is pure, so it runs again at the window step for a non-superseding publish.
+  - (c) Postgres reads the attestation row and its `retracted` flag without `FOR SHARE` (READ COMMITTED), so the withdrawal check is a read, not a lock. A retraction that commits after the publish has read the index row, but before the publish commits, loses: that publish is accepted. RFC-ACDP-0021 §9.2 makes that acceptable: a consumer treats the retracted attestation as a registry-attested revocation with `compromised_since` = `not_before`, so every body signed under the key, including that one, then fails closed (`attestation_withdrawn`, §8.1 step 7). The UNIQUE `token_hash` decides a mint race on every SQL backend.
+  - (d) The memory wrapper takes its snapshots under its own lock and captures them by value: the successor row and its retracted flag, the predecessor's attestation row, and whether the mint token is used. It wraps `predecessor_admission` and `receipt_minter`, so the checks run where the inner store calls those closures and never re-enter either lock. Without a receipt minter, `InMemoryStore` exposes no assigned `created_at`, so a keyless publish fails closed with `RegistryInternal` and a mint's replay check runs before the commit. A keyless deployment always mints receipts.
+  - (e) A keyless predecessor whose attestation row is missing, or whose `key_attestation` member is malformed, fails closed with `RegistryInternal`; it is never treated as controller-signed (`parity::assert_unindexed_keyless_predecessor_fails_closed` and `assert_malformed_keyless_predecessor_fails_closed`, all three stores). A corrupt attestation body under the registry DID aborts the commit the same way.
+  - (f) Listing includes retracted attestations (the record's `status` says so) and clamps `limit` to 1..=200. Filters compare `issuer` and `subject` byte for byte.
+  - (g) The kl-001 vector 5 cases are embedded in `parity::KL_001_VECTOR_5_CASES`, so the store kits need no `ACDP_SPEC_DIR`. Re-asserting them against the fixture file belongs to the conformance phase.
+  - (h) `crates/acdp-registry-sqlite/src/store.rs`, which is in `.cargo/mutants.toml` examine_globs, changed (three call lines and three delegating methods). Its re-pin is left to Phase 8, per the plan.
+- Chose: as above.
+- Alternatives: (a) a TEXT timestamp column matching `contexts`; (c) `SELECT … FOR SHARE` on the attestation row, which would make the check authoritative at commit time; (d) checking the memory store's status before the inner commit, which would refuse in a different order from the SQL backends; (f) hiding retracted rows from the list.
+- Blast radius: low. Nothing writes the index until the mint endpoint exists (Phase 4+), and non-keyless publishes skip every check. Migration 019 is additive; Postgres stays N-1 safe.
+- Status: CONFIRMED (2026-10-31): (a) by the owner on Fable's analysis (migration 019 shape); (b)-(g) by Opus; (h) closed by the scope-399 re-pin (run 41124872541). DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
+
+## RFC-ACDP-0021 keyless, Phase 4 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) **AITP vs RFC-0021 divergences.** RFC-0021 §5.2 step 3 wins on the wire; AITP's rules are written for a peer handshake, which this request is not:
+    - `aud`: AITP §6.3 wants exactly one value for a JWT-SVID. RFC-0021 says a string or array that *contains* `registry_did`. A multi-audience token naming the registry is accepted.
+    - `iat`: AITP wants it within ±300 s, and REQUIRED for a JWT-SVID. RFC-0021 says "when present", at most 60 s ahead. An absent or old `iat` is accepted.
+    - `nonce`: AITP requires it. RFC-0021 has no handshake nonce, so it is not read.
+    - `cnf.jkt`: AITP requires it. RFC-0021 says "if the token carries" it (kl-002 G), so absent is accepted.
+  - (b) **AITP rules applied where RFC-0021 is silent (SPIFFE only, §6.2/§6.3):**
+    - The header holds only `alg`, `kid` and `typ`. `kid` is required. `typ` is `JWT` or `JOSE`.
+    - `alg` is RS/PS 256/384/512 or ES256/ES384. EdDSA is refused. ES512 is refused too, because jsonwebtoken cannot verify it.
+    - Only bundle keys with `use: "jwt-svid"` are candidates; a key with no `use` is ignored. This is stricter than the plan's "`jwt-svid` or no `use`".
+  - (c) The OIDC `alg` list is plan D9: RS256, PS256, ES256, ES384, EdDSA. These are refused before any fetch, for both kinds: any `crit` header; RSA keys under 2048 bits (RFC 7518 §3.3); and a JWK whose own `alg` disagrees with the header. With no `kid`, the token needs exactly one candidate key. Two keys sharing one `kid` are `token_invalid`.
+  - (d) A malformed `cnf`, or a non-string `cnf.jkt`, is `confirmation_mismatch`. A `cnf` that has no `jkt` is accepted.
+  - (e) `exp` is required and compared in whole seconds (floor), strictly `> now`. Fractional NumericDates are accepted.
+  - (f) **Cache:**
+    - TTL: `min(jwks_cache_ttl_seconds, clamp(max-age, 60, 3600))`; `no-store` and `no-cache` count as max-age 0. Without a max-age the config TTL applies, capped at 3600 s.
+    - After a failed fetch, a source is not refetched for 30 s (`FAILURE_BACKOFF_MS`). If it holds a usable stale copy, that copy answers meanwhile. If it holds none, a negative cache answers `issuer_unreachable` at once, so an outage costs one timeout per window instead of one per queued request.
+    - A `[keyless]` section with `enabled = false` builds no cache slots, so nothing is ever fetched.
+    - A forced refetch for an unknown `kid` that fails is `issuer_unreachable`, not `token_invalid`.
+  - (g) **Discovery:** the discovery document's `issuer` must equal the configured issuer byte for byte (OIDC Discovery §4.3), and its `jwks_uri` must be https. Every failure maps to `issuer_unreachable`: non-2xx (a redirect included), oversize, bad JSON, a bad discovery document, an SSRF refusal, or a timeout. Fetches are logged at warn with the source and a failure class only.
+  - (g2) **4xx reading of D16.** A 4xx from the JWKS, bundle or discovery endpoint is also `issuer_unreachable` (502, retryable), even though §5.2 names only network failure, timeout and 5xx. This is a deliberate reading of D16's "unfetchable": the registry cannot tell an issuer-side misconfiguration from a transient fault, and a retryable answer never blames the client's token for the issuer's state.
+  - (g3) **Config bounds.**
+    - `jwks_max_stale_seconds` ≤ 604800 (7 days). A stale set may still hold a key the issuer withdrew mid-outage; a week rides out any realistic outage while bounding that exposure.
+    - `fetch_timeout_ms` ≥ 100.
+    - `max_fetch_bytes` ≥ 1024, which is about the smallest one-key JWKS.
+    - Each refusal names its key (`keyless_cache_and_fetch_bounds_are_enforced`).
+  - (h) Metrics: `acdp_registry_keyless_key_fetch_total{outcome}` and `acdp_registry_keyless_key_stale_served_total`. Docs are deferred to Phase 7.
+  - (i) `rsa` 0.9 and `jsonwebtoken` were added as dev-dependencies of the server crate, and `jsonwebtoken` as a normal dependency of core. All were already in Cargo.lock, so no crate, vet or deny entry changed.
+  - (j) Mutation scope: no `examine_globs` file changed in this phase; `hints.rs` is not in scope.
+- Chose: as above.
+- Alternatives:
+  - (a) AITP's stricter rules, which would refuse tokens RFC-0021 accepts;
+  - (b) the plan's "no `use`" bundle keys;
+  - (f) no failure backoff, so each request waits a full timeout during an outage.
+- Blast radius: low and reversible. Nothing is reachable over HTTP yet, and `keyless.enabled` is still refused at startup.
+- Status: CONFIRMED (2026-10-31): (a)-(e) by the owner on Fable's analysis (token acceptance); (f) CHANGED by Opus (the failure backoff now also covers a held copy past its stale allowance, jwks.rs); (g)-(j) by Opus. DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
+
+## RFC-ACDP-0021 keyless, Phase 5 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) **Order of the budgets.** The per-IP budget is charged on arrival, before the body is read. The per-identity budget is peeked after the schema and charged only after `keyless::verify` succeeds, so a forged token naming an identity cannot drain that identity's budget. Keys: the resolved client IP (`rate_limit::client_ip`, as `/auth/*`) and `(type, issuer, subject)`. New metric scopes `keyless_per_ip` and `keyless_per_identity`.
+  - (b) **Replay is checked twice.** A read-only `key_attestation_token_seen` runs right after the token verifies (step 3, so a replay with a bad `pop` still answers `token_replayed`). The store's UNIQUE `token_hash` inside `commit_proven` is authoritative for a race; `with_keyless_reason` restores `details.reason` on that path.
+  - (c) **Step 6 freshness.** `WebResolver::resolve_until(controller, request start, listed?)`. Listed: proceed, fresh or not. Unlisted and fresh: `identity_not_authorized`. Unlisted, not fresh (the forced re-fetch was rate-limited by the resolver's 3600 s interval): 502 `key_resolution_unreachable` with no reason, since §5.2 has no token for it and a final 403 against a stale document would be wrong. A DID host answering non-2xx (404 included) is 502 `key_resolution_unreachable`, as RFC-ACDP-0001 §5.11 step 3, RFC-ACDP-0021 §5.2 step 6 and kl-002 L require.
+  - (c2) **An unusable attestation signer is fatal.** `AppStateInner::try_new` fails when `keyless.enabled` and `KeylessState::from_config` cannot build the signer; the binary propagates it with `?`, so a registry never advertises the profile while answering 501. `AppStateInner::new` panics on the same error (harnesses). The existing `keyless.enabled=true` startup refusal is unchanged.
+  - (d) **Step 5** compares `request.algorithm` with the JWK's algorithm and with the capabilities' `supported_signature_algorithms`. It does not use a separate keyless list.
+  - (e) **Window.** `[now, min(now + min(requested or 600, max_attestation_ttl_seconds), token exp)]`, all in milliseconds from the injectable keyless clock (`i64` Unix ms, the Phase 4 `Clock`, not a `DateTime` source). A window that would be empty is `token_invalid`.
+  - (f) **GET `limit`.** Default 20, maximum 100 (search's bounds, §5.4 "paginated like search"), below the store's own 200. A missing or non-`did:web` `controller` is `schema_violation`.
+  - (g) **Parse errors are sanitized.** serde messages for unknown or missing members are kept; any other message is replaced by its line and column, because serde can quote the value it read and that value may be the token.
+  - (h) **Off means untouched.** Both handlers take the raw request and answer 501 before any extractor runs. A garbage body, a wrong media type or a bad query still gets the same 501 as before.
+  - (i) **No idempotency, webhook or change hint on a mint.** `commit_proven(proven, None, None)`. The receipt and log-leaf metrics are recorded as for a publish.
+  - (j) **Receipt-key rotation and attestations: RESOLVED by spec 1560e0f (RFC-ACDP-0021 0.5.0-draft.4, ruling by spec owner 87).** The gap found here (attestations signed with the receipt key; §8.1 step 1 had no historical arm) is closed in the spec: §8.1 step 1 now applies the RFC-ACDP-0010 §10 historical arm through the attestation's own receipt (`kl-005` M, N). The registry obligation is to keep a retired receipt key in `verificationMethod` and drop it from `assertionMethod` only, which `receipt::build_did_document` already does for `[[receipt.retired_keys]]`; removal from `verificationMethod` is the compromise signal. No code change. Operator wording in `docs/RECEIPTS.md`. Consumers on acdp 0.18.2 (`check_attestation`, strict) apply it once the SDK implements draft.4.
+  - (k) **Tests.** A shared kit (`tests/keyless_kit/mod.rs`) runs the A/H/E core on SQLite, memory and pg. It serves its own controller DID documents rather than extending `didweb::did_document_for_seed`, which has no service member. The memory store keeps no log, so the "one log leaf" half of A runs on SQLite and pg only.
+  - (l) `acdp`'s `keyless` feature is enabled on the server crate's dev-dependency only, for `producer::keyless::EphemeralKey`. Its feature lists are empty, so neither Cargo.lock nor vet changed.
+  - (m) Mutation scope: no `examine_globs` file changed. `handlers/context.rs` and `receipt.rs` are untouched.
+- Chose: as above.
+- Alternatives:
+  - (a) charging the identity budget on arrival, which lets anyone exhaust it;
+  - (c) answering `identity_not_authorized` against a stale cached document;
+  - (f) the store's 200 as the maximum.
+- Blast radius: low and reversible. Startup still refuses `keyless.enabled`, so no deployed registry reaches these handlers; with it off the wire is byte-identical.
+- Status: CONFIRMED (2026-10-31, Opus; (j) RESOLVED by spec 1560e0f). DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
+
+## RFC-ACDP-0021 keyless, Phase 6 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) **Dispatch.** `publish_inner` sends a publish to `handlers/keyless.rs::publish_keyless` only when `state.keyless` is present (the profile is on) and `signature.key_id` is a keyless key id. That branch comes before did:key and both playground branches, so a pinned key for a controller DID never applies to a keyless key id and the unpinned playground never sees one (§12, D13). With the profile off nothing changes: the SDK refuses at key resolution with no `details` (kl-003 J).
+  - (b) **Step 3.** Only index rows count. A `ctx_id` that names an ordinary body on this registry is `attestation_not_found`, so it cannot be probed. A stored attestation that is corrupt (its record or metadata no longer parses) surfaces to the client as a **500 `internal_error`**, deliberately not as `attestation_mismatch`: an index row exists only for a body that passed `KeyAttestation::from_body` when it was committed (Phase 3), so a parse failure is storage corruption, not a client fault. Left as is by the review.
+  - (c) **Step 6 is checked twice, with distinct messages.** The handler checks against the keyless clock ("the registry's time … is outside the window"). The store then checks against the `created_at` it assigns ("created_at … is outside the window"). Both answer `key_not_authorized` with `outside_attestation_window`. kl-003 B asserts each message, so the authoritative store path is proven to run.
+  - (d) **Step 7** uses the resolver's normal cached `resolve` (D11). A failed fetch keeps the resolver's own error (502 `key_resolution_unreachable`, or `key_resolution_failed`); it never becomes `identity_not_authorized`. kl-009 B is tested by invalidating the cache, the same as an expired entry.
+  - (e) **Step 8** has no reason (`invalid_signature` is a consumer token, not a registry `details.reason`). A `Jwk::verify` error that is not `InvalidSignature` is re-raised as `invalid_signature`.
+  - (f) **Pinned key.** The attested JWK is decoded to raw Ed25519 bytes, or to uncompressed SEC1 for P-256, and handed to `prove_publish_identity_pinned`. The SDK's computed fingerprint must equal the attestation's `key_fingerprint`, or the publish fails `internal_error`. The check is skipped only when the SDK computed no fingerprint, which happens only without a receipt signer, and keyless requires receipts.
+  - (g) **R13** runs right after `parse_lifecycle_request`, before the path-binding check, the rate-limit peek and the tenant gate. The refusal is identical for a missing target, an org-wide key, and either endpoint. With the profile off, kl-004 F stays the SDK's `key_resolution_failed` with no `details`, as D12 and `keyless_off_wire_snapshot` require.
+  - (h) **kl-007 C** sits directly after the anchors gate and before the limiter. It applies with the profile on and off, on every branch, and gates on the advertised version only. This is the deliberate feature-off behaviour change the plan names. Phase 7 records it in UPGRADING.
+  - (i) **Messages.** Reason-carrying refusals keep the SDK's `keyless:<token>: ` message prefix, as Phase 5's do. `details.reason` is the contract.
+  - (j) **No new metric.** `metrics.rs` is unchanged: keyless publishes are counted by the existing `record_publish` outcome and wire code, and receipts and leaves are counted on the shared tail.
+  - (k) **Kit changes.** Every kit enables lifecycle with an admin token (`ADMIN_TOKEN`, for the kl-003 G withdrawal). New options are `Opts.acdp_version` (kl-007 C uses 0.4.0) and `Opts.playground`. DID documents can carry Ed25519 verification methods, and the kit exposes the resolver. The Phase 6 tests run multi-threaded because the SQLite lifecycle path uses `block_in_place`.
+  - (l) **Mutation scope.** `crates/acdp-registry-core/src/handlers/context.rs`, which is in `.cargo/mutants.toml` examine_globs, changed: one dispatch branch, one R13 call and the kl-007 C gate. Its re-pin is left to Phase 8, per the plan. `handlers/keyless.rs` is not in scope.
+  - (m) **Idempotent replay is fail-closed (corrects the plan's edge-case line).** The handler runs §6.3 steps 0-8 before `commit_proven` and its idempotency gate. A replay inside the window answers 200 from the stored reply. A replay after the window has closed, after the attestation was withdrawn, or after the identity was delisted is refused 403 with that step's reason, as a did:web replay is when its key no longer resolves. Pinned by the kit's kl-003 A leg (window closed: `key_not_authorized`, `outside_attestation_window`) on all three stores.
+  - (n) **The store re-checks step 4.** `key_attestations::admit_successor`, shared by the sqlite, pg and memory gates, now also requires the indexed row to bind the request: `agent_id` equal to its `controller`, `signature.key_id` equal to its `key_id` and to the key id re-derived from its `key_fingerprint`, and `signature.algorithm` equal to its own. Otherwise it refuses `key_not_authorized` with `attestation_mismatch`, the handler's step-4 answer. The check comes after not-found and before withdrawn, matching the handler's order. It is pinned by a store-direct leg in `parity::assert_keyless_window_and_withdrawal` (another controller, another key, another algorithm; nothing persisted) and by a unit test.
+  - (o) **Memory TOCTOU, non-production.** The memory wrapper snapshots the attestation's withdrawn flag before `inner.commit_publish`, so a withdrawal racing a publish can lose there. The memory backend is test-only (it cannot advertise the log, a keyless prerequisite), so this is not a production exposure.
+- Chose: as above.
+- Alternatives:
+  - (c) a single store-only window check, which would let a bad-signature, out-of-window body answer `invalid_signature`;
+  - (d) `resolve_until` at publish, which forces a re-fetch the SHOULD does not ask for;
+  - (g) R13 after the path-binding check.
+- Blast radius: low and reversible. Startup still refuses `keyless.enabled`, so only in-process harnesses reach the keyless branch and R13. The one feature-off change is kl-007 C, which the spec requires.
+- Status: CONFIRMED (2026-10-31, Opus; (l) closed by the scope-399 re-pin). DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
+
+## RFC-ACDP-0021 keyless, Phase 7 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) **Switch on.** `validate_keyless_at` no longer refuses a coherent `[keyless]`. Every earlier rule still applies: the prerequisites, the field bounds, `acdp_version >= 0.5.0`, and refusing a listed profile while `enabled = false`. The default stays off, and prod config is untouched.
+  - (b) **Test egress hook (deviates from the plan's "the spawned test sends no token traffic").** A real-binary mint needs the binary to reach a loopback HTTPS issuer and DID host, and the production outbound posture forbids exactly that.
+    - The hook is the new `acdp-registry-core/src/test_egress.rs`, behind the feature `test-egress` (= `acdp/test-transport`). It is enabled only by `acdp-registry-server`'s dev-dependency on core.
+    - Resolver 2 unifies dev-dependency features only into builds that compile test targets. What was proven: `cargo tree -e normal,features` shows no `test-egress` for the default features, for `-p acdp-registry-server --no-default-features --features storage-pg`, and for `--workspace --all-features`. `keyless_e2e::test_egress_is_reachable_only_from_dev_dependencies` pins the manifest shape over every `crates/*/Cargo.toml`, the workspace-root `Cargo.toml` and `tools/live-smoke/Cargo.toml`.
+    - `main.rs` calls `test_egress::web_resolver()` and `test_egress::keyless_outbound()` unconditionally. It relies on the gating inside `test_egress.rs`, where both return `None` without the feature, and has no `cfg` of its own.
+    - Even in a test build it does nothing unless `ACDP_TEST_EGRESS` is set, and a set but bad value panics. That variable is added to the conformance gate's documented env list and to CONFIGURATION.md as test-only.
+  - (c) **Family bookkeeping.** `kl` moves from EXCUSED to COVERED (Direct, six fns), with a per-fixture `KL_CONSUMER_ONLY_FIXTURES` for kl-005, kl-006 and kl-008, which are consumer verification. `EXERCISED_FIXTURES_AT_PIN` goes from 14 to 20; `TOTAL_FIXTURES_AT_PIN` stays 202.
+  - (d) **Consumer-side parts of registry fixtures.** These run in no registry test, and are covered by the SDK and by the e2e's `fetch_with_policy`:
+    - kl-001 vectors 2 and 4;
+    - kl-007 A and D;
+    - kl-009 D and E.
+  - (e) **kl-009 A and B** have a prose `behavior` and no `http_status`. The test asserts that the prose still names `key_not_authorized` and `identity_not_authorized`, then asserts 403 with that reason.
+  - (f) **Test support changes.**
+    - `reqwest` (already in the workspace) is a server dev-dependency, used for the e2e's readiness and raw calls. No new crate.
+    - `didweb::fixture()` and `keyless_kit::spawn_outside` are now pub, and `controller_document` is now a free fn.
+  - (g) **Docs.**
+    - The UPGRADING `## Unreleased` entry is rewritten as one entry.
+    - Its rollback note now says 0.7.0 refuses any `[keyless]` section, even with `enabled = false`. Verified against the v0.7.0 tag: that tag has no `keyless` field, and the config uses `deny_unknown_fields`.
+    - README gains a profile matrix.
+  - (h) **Audited send-site list.** `tests/anchors_uri_never_dereferenced.rs` `EXPECTED_SEND_SITES` gains `tests/keyless_e2e.rs`. It is test code whose client calls the registry under test at fixed paths and never reads anchors. Separately, `conformance.rs` now loads `didweb` through `keyless_kit` (`clippy::duplicate_mod`).
+  - (i) **Mutation scope.** There is one new core module, `test_egress.rs`, and `main.rs` call sites for the resolver and JWKS cache changed. Both are feature-gated or None-returning in release builds. The re-pin is Phase 8.
+- Chose: as above.
+- Alternatives:
+  - (b) no spawned-binary mint, covering ON mode in-process only;
+  - (b) a runtime config key for egress, which a production build could reach.
+- Blast radius: moderate and reversible. Keyless is now reachable by config, but off by default, and the off wire is byte-identical (`keyless_off_wire_snapshot`).
+- Status: CONFIRMED (2026-10-31): (b) by the owner on Fable's analysis, with a CHANGE: docker.yml and release-binaries.yml assert the shipped binary carries no ACDP_TEST_EGRESS; the rest by Opus. DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
+
+## RFC-ACDP-0021 keyless, Phase 8 (2026-10-30)
+- Plan: plans/rfc0021-keyless.md
+- Assumed:
+  - (a) **live-smoke OFF probe is strict.** With `acdp-registry-keyless` not advertised, `GET` and `POST /key-attestations` must both answer 501 with `error.code = "not_implemented"`. Unlike the `/changes` probe, a 404 is NOT tolerated, so live-smoke fails against a build that predates the route. Production already passes: v0.7.0 carries the #494 route, and on 2026-10-30 both methods answered 501 `not_implemented` there.
+  - (b) **Probe order.** The probe runs as step 1a, right after capabilities and before the RFC-ACDP-0018 feed head. It uses only the plain reqwest client, so it also runs against a local `http://` registry, where the SSRF-guarded `RegistryClient` refuses the scheme at step 1b.
+  - (c) **Mutation scope.** `test_egress.rs` is not added to `examine_globs`. The globs are an explicit allowlist of deliberate inclusions, and the module is test-build-only (`test-egress` feature), so nothing needs excluding. `handlers/context.rs` was already in scope.
+- Chose: as above.
+- Alternatives: (a) accept 404 like `/changes`, which would let a missing route pass as "off".
+- Blast radius: low and reversible. This is tooling only and is not run in CI.
+- Status: CONFIRMED (2026-10-31, Opus). DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"

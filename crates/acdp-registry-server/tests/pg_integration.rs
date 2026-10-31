@@ -151,6 +151,7 @@ fn config(playground: bool) -> RegistryConfig {
         log: Default::default(),
         changes: Default::default(),
         events: Default::default(),
+        keyless: Default::default(),
         witnesses: Vec::new(),
     }
 }
@@ -1537,4 +1538,85 @@ async fn pg_changes_feed_round_trip() {
         3
     );
     assert_eq!(page(String::new()).await["changes"][0]["seq"], 3);
+}
+
+// ── RFC-ACDP-0021 Phase 5: POST/GET /key-attestations ───────────────────────
+
+mod keyless_kit;
+
+/// The kl-002 A/H/E core on Postgres, with the transparency log: the mint,
+/// its receipt, leaf and index row in one transaction; a sequential and a
+/// concurrent replay refused by the token's uniqueness; an unlisted
+/// identity refused after one re-fetch.
+#[tokio::test]
+#[serial]
+async fn pg_key_attestation_core() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = PgStore::connect(&url, 4)
+        .await
+        .unwrap()
+        .with_transparency_log();
+    store.migrate().await.unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    truncate(&pool).await;
+    pool.close().await;
+    let kit = keyless_kit::Kit::new(
+        store,
+        keyless_kit::Opts {
+            log: true,
+            ..keyless_kit::Opts::default()
+        },
+    )
+    .await;
+    keyless_kit::assert_mint_core(&kit, "pg").await;
+}
+
+/// RFC-ACDP-0021 Phase 6 on Postgres, with the log: kl-003 A-H (receipt
+/// and leaf fingerprint), kl-004 A-F, kl-009 B and kl-007 B.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn pg_keyless_publish_scenarios() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = PgStore::connect(&url, 4)
+        .await
+        .unwrap()
+        .with_transparency_log();
+    store.migrate().await.unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    truncate(&pool).await;
+    pool.close().await;
+    let kit = keyless_kit::Kit::new(
+        store,
+        keyless_kit::Opts {
+            log: true,
+            ..keyless_kit::Opts::default()
+        },
+    )
+    .await;
+    keyless_kit::assert_keyless_publish_core(&kit, "pg").await;
+}
+
+/// §6.3 under a P-256 ephemeral key on Postgres, with the log: receipt and
+/// leaf fingerprint, and the other-key signature refusal.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn pg_keyless_publish_under_a_p256_key() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = PgStore::connect(&url, 4)
+        .await
+        .unwrap()
+        .with_transparency_log();
+    store.migrate().await.unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    truncate(&pool).await;
+    pool.close().await;
+    let kit = keyless_kit::Kit::new(
+        store,
+        keyless_kit::Opts {
+            log: true,
+            ..keyless_kit::Opts::default()
+        },
+    )
+    .await;
+    keyless_kit::assert_keyless_p256_publish(&kit, "pg").await;
 }

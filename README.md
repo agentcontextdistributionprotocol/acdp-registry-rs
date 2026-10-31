@@ -5,7 +5,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-blue)](Cargo.toml)
 
 Reference **registry** implementation for the
-[Agent Context Distribution Protocol](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/1560e0f389875be8addaa7b7908751e020db50fe)
+[Agent Context Distribution Protocol](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/0ba958247f0aaa4b6e307ff88555d1b23ba5fb7f)
 v0.1.0 through v0.5.0. Implements the `acdp-registry-core` and
 `acdp-registry-discovery` profiles on top of
 [`acdp`](https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/acdp-v0.15.1) —
@@ -21,6 +21,25 @@ aggregation (RFC-ACDP-0015), and the 0.5.0 retraction recall profiles
 (RFC-ACDP-0016, Draft) is unconditional — every deployment advertises
 `acdp_version >= 0.5.0` and accepts well-formed anchors on every publish,
 see [docs/HTTP-API.md](docs/HTTP-API.md).
+
+## Profiles and the config that advertises them
+
+| Profile | Spec reference | Advertised when |
+|---------|----------------|-----------------|
+| `acdp-registry-core` | RFC-ACDP-0003 | in the default `registry.profiles` |
+| `acdp-registry-discovery` | `GET /contexts/search` | in the default `registry.profiles` |
+| `acdp-registry-federated` | cross-registry resolution | listed in `registry.profiles` |
+| `acdp-registry-receipts` | RFC-ACDP-0010 | a `[receipt]` key is configured |
+| `acdp-registry-head-receipts` | RFC-ACDP-0011 | `receipt.head_receipts = true` |
+| `acdp-registry-transparency-log` | RFC-ACDP-0012 | `[log] enabled = true` |
+| `acdp-registry-lifecycle` | RFC-ACDP-0013 | `[lifecycle] enabled = true` |
+| `acdp-registry-changes` | RFC-ACDP-0018 §5 (Draft) | `[changes] enabled = true` |
+| `acdp-registry-events` | RFC-ACDP-0018 §8 (Draft) | `[events] enabled = true` |
+| `acdp-registry-keyless` | RFC-ACDP-0021 §13 (Draft) | `[keyless] enabled = true`; **off by default**, and needs a `[receipt]` key, lifecycle and the log |
+
+The full rules, including which profiles must be listed and which are added
+automatically, are in
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md#startup-validation).
 
 ## What you get
 
@@ -49,6 +68,11 @@ see [docs/HTTP-API.md](docs/HTTP-API.md).
   supersessions, key revocations, each with its receipt evidence) behind
   durable encrypted cursors, plus signed, content-free change hints to
   subscriber callbacks.
+- **Keyless signing (off by default)** — RFC-ACDP-0021 (Draft): a CI job or
+  workload trades its OIDC ID token or SPIFFE JWT-SVID for a short-lived,
+  registry-signed attestation of an ephemeral key, then publishes under its
+  controller's DID with no long-lived key. See the matrix below and
+  [docs/OPERATIONS.md](docs/OPERATIONS.md#keyless-signing).
 - **HMAC-signed webhooks** — `context.published`, `context.retrieved`,
   `context.retracted`, `context.republished`, `search.executed`.
 - **Abuse controls & observability** — per-IP and global `/auth/*` rate

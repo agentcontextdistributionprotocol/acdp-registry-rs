@@ -4,6 +4,7 @@
 //! profile. Production deployments use `acdp-registry-pg`.
 
 mod changes;
+mod keyless;
 pub mod store;
 mod subscriptions;
 

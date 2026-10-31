@@ -195,6 +195,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The test-build outbound override (acdp-registry-core `test-egress`) must
+      # never reach a shipped image: built with it, the registry trusts the CA
+      # named in ACDP_TEST_EGRESS for DID documents and keyless issuer keys. That
+      # string exists only inside the feature-gated module, so its absence proves
+      # the feature was off (DECISIONS.md, RFC-ACDP-0021 keyless reconcile).
+      - name: assert no test-egress hook in the image binary
+        run: |
+          set -euo pipefail
+          docker create --name egress-probe acdp-registry:smoke >/dev/null
+          docker cp egress-probe:/usr/local/bin/acdp-registry "$RUNNER_TEMP/acdp-registry"
+          docker rm egress-probe >/dev/null
+          if grep -aq ACDP_TEST_EGRESS "$RUNNER_TEMP/acdp-registry"; then
+            echo "::error::the image binary contains the test-egress hook (built with acdp-registry-core/test-egress)"
+            exit 1
+          fi
+
       - name: smoke test
         run: |
           set -euxo pipefail

@@ -89,7 +89,7 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 390 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 399 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
 # MEASURED by mutants.yml run 40283754611 (workflow_dispatch on feat/rfc0018-retraction-recall;
 # re-pin for RFC-ACDP-0018 retraction recall), whose outcomes.json is committed as
@@ -98,12 +98,21 @@ copy_vcs = true
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
-#     crates/acdp-registry-core/src/handlers/context.rs   137
+#     crates/acdp-registry-core/src/handlers/context.rs   138
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs             16
-#     crates/acdp-registry-sqlite/src/store.rs            172
+#     crates/acdp-registry-sqlite/src/store.rs            180
 #     ----------------------------------------------------------
-#     total                                               390
+#     total                                               399
+#
+# 390 -> 399 (RFC-ACDP-0021 keyless publish): context.rs 137 -> 138 (one `delete !` in
+# publish_inner, the keyless call site) and store.rs 172 -> 180 (return-replacement
+# mutants of the new SqliteStore key_attestation, key_attestation_token_seen and
+# list_key_attestations); log.rs 65 and receipt.rs 16 unchanged. The split is from
+# `cargo mutants --list` at feat/rfc0021-keyless 4504b7d. The measured caught / missed /
+# unviable / timeout split is run 41124872541: 255 caught / 8 missed / 135 unviable /
+# 1 timeout; the same eight survivors on shifted lines (:645, :1284, :1320; store.rs
+# :1254, :1588, :2202), no new MISSED.
 #
 # 370 -> 390 (#471, RFC-ACDP-0018 retraction recall): context.rs 136 -> 137 (the hint
 # wake-up after a publish) and store.rs 153 -> 172 (same-transaction feed appends). The

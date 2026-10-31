@@ -60,7 +60,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use acdp::client::CrossRegistryResolver;
-use acdp::did::{authority_to_did_web, WebResolver};
+use acdp::did::authority_to_did_web;
 use acdp::registry::RegistryServer;
 use acdp::types::capabilities::{CapabilitiesDocument, Limits};
 use acdp_registry_auth::{AuthService, ChallengeStore, JwtSecret, JwtSigner, RevocationStore};
@@ -543,21 +543,7 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
              (RFC-ACDP-0018 §5) — set changes.enabled=true or remove the profile."
         );
     }
-    // RFC-ACDP-0021 `acdp-registry-keyless` is a spec profile (so it is in the
-    // allowlist above) that this release does not implement: refuse to
-    // advertise it rather than serve /key-attestations as 501 under a
-    // profile that promises them.
-    if cfg
-        .registry
-        .profiles
-        .iter()
-        .any(|p| p == "acdp-registry-keyless")
-    {
-        anyhow::bail!(
-            "registry.profiles advertises 'acdp-registry-keyless', which this release does \
-             not implement (RFC-ACDP-0021 POST/GET /key-attestations). Remove the profile."
-        );
-    }
+    validate_keyless(cfg)?;
     validate_changes_retention(&cfg.changes)?;
     if cfg.changes.enabled {
         validate_changes(cfg)?;
@@ -1262,7 +1248,9 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     if let Some(rev) = revocations.clone() {
         signer = signer.with_revocations(rev);
     }
-    let resolver = Arc::new(WebResolver::new());
+    // `test_egress` is `None` in every production build (the feature is
+    // dev-only); a test build answers it only with `ACDP_TEST_EGRESS` set.
+    let resolver = Arc::new(acdp_registry_core::test_egress::web_resolver().unwrap_or_default());
     let mut auth = AuthService::new(
         cfg.auth.clone(),
         challenges,
@@ -1316,8 +1304,18 @@ async fn serve_with_store<S: ExtendedRegistryStore + 'static>(
     // Compose state + router. The constructor seeds `playground` —
     // the live-mutable cell backing `POST /admin/pinned-keys/reload`
     // (plan §2) — from `cfg.playground`.
-    let state = AppStateInner::new(server, auth, webhook, cfg.clone(), cross_registry)
+    // Fallible: with keyless enabled, an unusable attestation signer is
+    // fatal here rather than a quiet 501 behind an advertised profile.
+    let mut state = AppStateInner::try_new(server, auth, webhook, cfg.clone(), cross_registry)
+        .map_err(anyhow::Error::msg)?
         .with_shared_auth_limiter(shared_auth_limiter);
+    if let Some(outbound) = acdp_registry_core::test_egress::keyless_outbound() {
+        state = state.with_keyless_jwks(acdp_registry_core::keyless::JwksCache::new(
+            &cfg.keyless,
+            outbound,
+            acdp_registry_core::keyless::system_clock(),
+        ));
+    }
 
     // RFC-ACDP-0015 §6.1 witness-cosignature aggregation: one background
     // poller per configured witness fetches its cosignature feed over the
@@ -1722,6 +1720,56 @@ fn validate_events(cfg: &RegistryConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The `acdp-registry-keyless` rules (RFC-ACDP-0021 and the profile row).
+/// The profile is advertised exactly when `keyless.enabled`; an enabled
+/// section must pass its field rules and the prerequisites: the attestation
+/// is a receipted, logged body under the registry DID (§5.3), a keyless key
+/// never signs a lifecycle event (§6.3), and the profile is 0.5.0 Draft.
+/// A section that passes every rule starts the registry with the profile
+/// advertised and `/key-attestations` served.
+fn validate_keyless(cfg: &RegistryConfig) -> anyhow::Result<()> {
+    validate_keyless_at(cfg, acdp_version_claim(cfg))
+}
+
+/// [`validate_keyless`] against an explicit `acdp_version` claim. The real
+/// claim is never below 0.5.0 today (the anchors rung is unconditional),
+/// so this seam is what lets the version prerequisite be tested.
+fn validate_keyless_at(cfg: &RegistryConfig, acdp_version: &str) -> anyhow::Result<()> {
+    let k = &cfg.keyless;
+    if cfg
+        .registry
+        .profiles
+        .iter()
+        .any(|p| p == "acdp-registry-keyless")
+        && !k.enabled
+    {
+        anyhow::bail!(
+            "registry.profiles advertises 'acdp-registry-keyless' but keyless.enabled is \
+             false. Advertising the profile commits the registry to serve POST/GET \
+             /key-attestations (RFC-ACDP-0021 §5) — set keyless.enabled=true or remove the \
+             profile."
+        );
+    }
+    if !k.enabled {
+        return Ok(());
+    }
+    k.validate().map_err(|e| anyhow::anyhow!(e))?;
+    if !acdp_registry_core::receipt::event_receipts_gate(cfg, acdp_version) {
+        anyhow::bail!(
+            "keyless.enabled=true requires lifecycle.enabled=true, a [receipt] signing key \
+             and acdp_version >= 0.5.0: an attestation is a receipted body under the \
+             registry DID (RFC-ACDP-0021 §5.3) and the profile is 0.5.0 Draft."
+        );
+    }
+    if !cfg.log.enabled {
+        anyhow::bail!(
+            "keyless.enabled=true requires log.enabled=true: every attestation is logged \
+             (RFC-ACDP-0021 §5.2 step 8, §5.3)."
+        );
+    }
+    Ok(())
+}
+
 /// The `changes.enabled` prerequisites (RFC-ACDP-0018 §5.4, §9 and the
 /// `acdp-registry-changes` profile row).
 fn validate_changes(cfg: &RegistryConfig) -> anyhow::Result<()> {
@@ -1814,6 +1862,12 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
             if cfg.events.enabled && !profiles.iter().any(|p| p == events_profile) {
                 profiles.push(events_profile.into());
             }
+            // RFC-ACDP-0021 §13.1: the profile and the `keyless` member go
+            // together, exactly when `keyless.enabled`.
+            let keyless_profile = "acdp-registry-keyless";
+            if cfg.keyless.enabled && !profiles.iter().any(|p| p == keyless_profile) {
+                profiles.push(keyless_profile.into());
+            }
             profiles
         },
         limits: Limits {
@@ -1849,7 +1903,9 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
         },
         anonymous_public_reads: cfg.auth.anonymous_public_reads,
         supports_idempotency_key: true,
-        extensions: Default::default(),
+        // The SDK has no typed `keyless` field: the member rides in
+        // `extensions`, read back by `CapabilitiesDocument::keyless`.
+        extensions: acdp_registry_types::config::keyless_extensions(&cfg.keyless),
     }
 }
 
@@ -1947,14 +2003,162 @@ mod tests {
     }
 
     #[test]
-    fn advertising_the_unimplemented_keyless_profile_is_refused() {
+    fn advertising_the_keyless_profile_without_enabling_it_is_refused() {
         let mut cfg = RegistryConfig::defaults();
         cfg.registry.profiles = vec!["acdp-registry-keyless".into()];
         let err = validate_config(&cfg).expect_err("refused at startup");
         assert!(
-            err.to_string().contains("does not implement"),
+            err.to_string().contains("keyless.enabled is false"),
             "an allowlisted spec profile, refused by its own guard: {err}"
         );
+    }
+
+    /// A coherent `[keyless]`: one issuer, a receipt key, lifecycle and the
+    /// log on.
+    fn keyless_cfg() -> RegistryConfig {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.keyless.enabled = true;
+        cfg.keyless.oidc_issuers = vec![acdp_registry_types::config::OidcIssuer {
+            issuer: "https://token.actions.example".into(),
+            jwks_uri: None,
+        }];
+        cfg.receipt.signing_key_seed_b64 =
+            base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        cfg.lifecycle.enabled = true;
+        cfg.log.enabled = true;
+        cfg
+    }
+
+    fn keyless_rejection(cfg: &RegistryConfig) -> String {
+        validate_keyless(cfg)
+            .expect_err("this [keyless] must be refused")
+            .to_string()
+    }
+
+    /// RFC-ACDP-0021 Phase 7: a section passing every rule starts, with the
+    /// profile listed by the operator or not.
+    #[test]
+    fn a_coherent_keyless_section_is_accepted() {
+        let cfg = keyless_cfg();
+        validate_keyless(&cfg).expect("a coherent [keyless] is accepted");
+        validate_config(&cfg).expect("and reaches startup");
+        let mut listed = keyless_cfg();
+        listed
+            .registry
+            .profiles
+            .push("acdp-registry-keyless".into());
+        validate_config(&listed).expect("listed by the operator as well");
+    }
+
+    #[test]
+    fn keyless_off_is_not_validated_at_all() {
+        // The default, and an off section holding values an enabled one
+        // would refuse: nothing is read when the profile is off.
+        assert!(validate_keyless(&RegistryConfig::defaults()).is_ok());
+        let mut off = RegistryConfig::defaults();
+        off.keyless.max_attestation_ttl_seconds = 0;
+        off.keyless.oidc_issuers = vec![acdp_registry_types::config::OidcIssuer {
+            issuer: "http://not-https".into(),
+            jwks_uri: None,
+        }];
+        assert!(validate_keyless(&off).is_ok());
+        assert!(validate_config(&off).is_ok());
+    }
+
+    #[test]
+    fn keyless_field_rules_are_reached_from_validate_config() {
+        let mut cfg = keyless_cfg();
+        cfg.keyless.max_attestation_ttl_seconds = 59;
+        let err = validate_config(&cfg).expect_err("refused at startup");
+        assert!(
+            err.to_string()
+                .contains("keyless.max_attestation_ttl_seconds"),
+            "{err}"
+        );
+        let mut cfg = keyless_cfg();
+        cfg.keyless.oidc_issuers.clear();
+        assert!(keyless_rejection(&cfg).contains("keyless.oidc_issuers"));
+    }
+
+    #[test]
+    fn keyless_requires_receipts_lifecycle_and_the_log() {
+        let mut no_receipt = keyless_cfg();
+        no_receipt.receipt.signing_key_seed_b64.clear();
+        assert!(keyless_rejection(&no_receipt).contains("[receipt] signing key"));
+        let mut no_lifecycle = keyless_cfg();
+        no_lifecycle.lifecycle.enabled = false;
+        assert!(keyless_rejection(&no_lifecycle).contains("lifecycle.enabled=true"));
+        let mut no_log = keyless_cfg();
+        no_log.log.enabled = false;
+        assert!(keyless_rejection(&no_log).contains("log.enabled=true"));
+    }
+
+    #[test]
+    fn keyless_requires_an_acdp_version_claim_of_at_least_0_5_0() {
+        let cfg = keyless_cfg();
+        for below in ["0.4.0", "0.3.0", "0.1.0", "not-a-version"] {
+            let err = validate_keyless_at(&cfg, below).expect_err("refused below 0.5.0");
+            assert!(
+                err.to_string().contains("acdp_version >= 0.5.0"),
+                "{below}: {err}"
+            );
+        }
+        // Control: at 0.5.0 the same config is accepted.
+        validate_keyless_at(&cfg, "0.5.0").expect("accepted at 0.5.0");
+        // And the binary's own claim is at least 0.5.0.
+        validate_keyless(&cfg).expect("accepted at the binary's own claim");
+    }
+
+    /// `build_capabilities` with `[keyless]` on: the profile and the
+    /// `keyless` member appear together and read back through the SDK's
+    /// `CapabilitiesDocument::keyless`; off, neither does.
+    #[test]
+    fn keyless_capabilities_round_trip_through_the_sdk_reader() {
+        let mut cfg = keyless_cfg();
+        cfg.keyless.max_attestation_ttl_seconds = 900;
+        cfg.keyless.spiffe_trust_domains = vec![acdp_registry_types::config::SpiffeDomain {
+            trust_domain: "prod.example.org".into(),
+            bundle_endpoint: "https://spire.prod.example.org/bundle".into(),
+            jwt_issuer: None,
+        }];
+        let doc = build_capabilities(&cfg);
+        assert!(doc.profiles.iter().any(|p| p == "acdp-registry-keyless"));
+        let back = doc
+            .keyless()
+            .expect("a well-formed keyless member")
+            .expect("present");
+        assert_eq!(
+            back,
+            acdp_registry_types::config::keyless_capabilities(&cfg.keyless)
+        );
+        assert_eq!(
+            back.accepted_oidc_issuers,
+            vec!["https://token.actions.example"]
+        );
+        assert_eq!(back.accepted_spiffe_trust_domains, vec!["prod.example.org"]);
+        assert_eq!(back.max_attestation_ttl_seconds, 900);
+        // Through the wire form as well: serialize, parse, read.
+        let wire: CapabilitiesDocument =
+            serde_json::from_value(serde_json::to_value(&doc).unwrap()).unwrap();
+        assert_eq!(wire.keyless().unwrap(), Some(back));
+
+        // Listed by the operator as well: not duplicated.
+        let mut listed = cfg.clone();
+        listed.registry.profiles =
+            vec!["acdp-registry-core".into(), "acdp-registry-keyless".into()];
+        let doc = build_capabilities(&listed);
+        assert_eq!(
+            doc.profiles
+                .iter()
+                .filter(|p| *p == "acdp-registry-keyless")
+                .count(),
+            1
+        );
+
+        let off = build_capabilities(&RegistryConfig::defaults());
+        assert!(!off.profiles.iter().any(|p| p == "acdp-registry-keyless"));
+        assert!(off.extensions.get("keyless").is_none());
+        assert_eq!(off.keyless().unwrap(), None);
     }
 
     #[test]
@@ -2264,10 +2468,58 @@ mod tests {
             AuthConfig::default(),
             challenges,
             signer,
-            Arc::new(WebResolver::new()),
+            Arc::new(acdp::did::WebResolver::new()),
             authority,
         ));
         acdp_registry_core::build_router(AppStateInner::new(server, auth, None, cfg, None))
+    }
+
+    /// RFC-ACDP-0021: with `keyless.enabled`, a state whose attestation
+    /// signer cannot be built is a startup error (`try_new`, which `serve`
+    /// propagates with `?`), never a logged fallback to 501 behind an
+    /// advertised profile. With keyless off the same config builds.
+    #[cfg(feature = "storage-sqlite")]
+    #[tokio::test]
+    async fn keyless_without_a_usable_signer_is_fatal_at_state_construction() {
+        use acdp_registry_auth::InMemoryChallengeStore;
+        use acdp_registry_sqlite::SqliteStore;
+        use acdp_registry_types::AuthConfig;
+
+        let build = |cfg: RegistryConfig| async move {
+            let store = SqliteStore::connect_in_memory().await.unwrap();
+            store.migrate().await.unwrap();
+            let authority = cfg.registry.authority.clone();
+            let server = Arc::new(
+                RegistryServer::try_new(store, build_capabilities(&cfg), &authority).unwrap(),
+            );
+            let challenges: Arc<dyn ChallengeStore> = Arc::new(InMemoryChallengeStore::new());
+            let signer = JwtSigner::new(
+                JwtSecret::from_bytes(&[42u8; 32]),
+                format!("did:web:{authority}"),
+                authority.clone(),
+                30,
+            );
+            let auth = Arc::new(AuthService::new(
+                AuthConfig::default(),
+                challenges,
+                signer,
+                Arc::new(acdp::did::WebResolver::new()),
+                authority,
+            ));
+            AppStateInner::try_new(server, auth, None, cfg, None).map(|_| ())
+        };
+
+        let mut cfg = RegistryConfig::defaults();
+        assert!(
+            cfg.receipt.signing_key_seed_b64.is_empty(),
+            "no receipt key"
+        );
+        assert!(build(cfg.clone()).await.is_ok(), "keyless off builds");
+        cfg.keyless.enabled = true;
+        let err = build(cfg.clone()).await.expect_err("keyless on, no signer");
+        assert!(err.contains("keyless.enabled=true"), "{err}");
+        cfg.receipt.signing_key_seed_b64 = "not base64!".into();
+        assert!(build(cfg).await.is_err(), "keyless on, a bad receipt key");
     }
 
     /// W3-U5: pins the invariant the auth-off `info!` in `serve_with_store`

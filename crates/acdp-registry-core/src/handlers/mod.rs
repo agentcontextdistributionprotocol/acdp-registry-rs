@@ -15,7 +15,7 @@ pub use changes::{
 };
 pub(crate) use context::version_at_least;
 pub use context::{current, lineage, publish, republish, retract, retrieve, retrieve_body, search};
-pub use keyless::key_attestations_not_implemented;
+pub use keyless::{create_key_attestation, list_key_attestations};
 pub use log::{log_checkpoint, log_entries, log_proof};
 pub use meta::{capabilities, health, jwks, livez, registry_did_document};
 pub use subscriptions::{create_subscription, delete_subscription, get_subscription};

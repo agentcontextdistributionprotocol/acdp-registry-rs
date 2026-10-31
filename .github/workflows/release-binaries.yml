@@ -59,10 +59,12 @@ jobs:
             os: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
+          # macos-14 images retire 2026-11-02 (actions/runner-images#13518);
+          # macos-15 is arm64 like macos-14, so x86_64 still cross-compiles.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
           - flavor: postgres
             feature: storage-pg
           - flavor: sqlite
@@ -140,6 +142,21 @@ jobs:
           ( cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
           cat "dist/$NAME.tar.gz.sha256"
           echo "bin=$STAGE/acdp-registry" >> "$GITHUB_OUTPUT"
+
+      # The test-build outbound override (acdp-registry-core `test-egress`) must
+      # never reach a shipped binary: built with it, a binary trusts the CA named
+      # in ACDP_TEST_EGRESS for DID documents and keyless issuer keys. That string
+      # exists only inside the feature-gated module, so its absence proves the
+      # feature was off (DECISIONS.md, RFC-ACDP-0021 keyless reconcile).
+      - name: assert no test-egress hook in the binary
+        env:
+          BIN: ${{ steps.pkg.outputs.bin }}
+        run: |
+          set -euo pipefail
+          if grep -aq ACDP_TEST_EGRESS "$BIN"; then
+            echo "::error::$BIN contains the test-egress hook (built with acdp-registry-core/test-egress)"
+            exit 1
+          fi
 
       # The packaged binary must boot, not merely link. The sqlite flavor needs
       # nothing external, so it serves /healthz from a throwaway database; the
