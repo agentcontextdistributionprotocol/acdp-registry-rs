@@ -12,9 +12,9 @@
 //! body, verifies it on the SDK consumer path, and gets the R13 refusal for
 //! a lifecycle event signed under the keyless key id.
 //!
-//! No receipt-key rotation happens here, so acdp 0.18.2's strict
-//! `check_attestation` (no historical arm for a rotated receipt key until
-//! the SDK implements 0.5.0-draft.4, `kl-005` M/N) does not come into play.
+//! No receipt-key rotation happens here. acdp 0.19.0 implements the
+//! 0.5.0-draft.4 historical arm for a rotated receipt key (`kl-005` M/N), and
+//! the SDK's own tests cover it.
 
 #![cfg(feature = "storage-sqlite")]
 
