@@ -42,15 +42,15 @@ whitelist rather than "split anything containing a comma" — deserializes from 
 environment as a plain scalar. A comma in one of those values is part of the
 value.
 
-### Two settings that cannot be expressed as env vars at all — and their escape hatches
+### Settings that cannot be expressed as env vars at all — and their escape hatches
 
-`auth.tenant_agents` and `playground.pinned_keys` are lists **of structs**.
+`auth.tenant_agents`, `playground.pinned_keys` and `keyless.oidc_issuers` are lists **of structs**.
 Comma-splitting can only ever produce a `Vec<String>`, so the ordinary
 `ACDP_REGISTRY_<SECTION>__<FIELD>` mechanism cannot represent them. On a platform
 with no config-file mechanism — Railway "deploy from image" services are the
 motivating case — they would otherwise be unreachable.
 
-Two JSON escape hatches exist for exactly this. They are read directly rather
+Three JSON escape hatches exist for exactly this. They are read directly rather
 than through the env layer, and are applied **after** every other source, so they
 win if both a TOML file and the variable are present:
 
@@ -58,6 +58,7 @@ win if both a TOML file and the variable are present:
 |----------|------|-------|
 | `ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON` | `auth.tenant_agents` | JSON array of `{agent_did, tenant_id}` |
 | `ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON` | `playground.pinned_keys` | JSON array of `{agent_did, public_key_b64, algorithm?, valid_from?, valid_until?}` |
+| `ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON` | `keyless.oidc_issuers` | JSON array of `{issuer, jwks_uri?}` |
 
 ```bash
 export ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON='[{"agent_did":"did:web:agent.example.com","tenant_id":"acme"}]'
@@ -771,7 +772,11 @@ or trust domain (see [Startup validation](#startup-validation)).
 
 The scalars take the usual `ACDP_REGISTRY_KEYLESS__<KEY>` env overrides
 (e.g. `ACDP_REGISTRY_KEYLESS__ENABLED=true`). The two lists are arrays of
-tables, which the env source cannot express: set them in the TOML file.
+tables, which the env source cannot express: set them in the TOML file, or
+set `oidc_issuers` with the JSON escape hatch
+`ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON` (see
+[the escape hatches](#settings-that-cannot-be-expressed-as-env-vars-at-all--and-their-escape-hatches)). SPIFFE trust domains are
+file only.
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
@@ -783,7 +788,7 @@ tables, which the env source cannot express: set them in the TOML file.
 | `max_fetch_bytes` | u64 | `65536` | Largest fetched response body read. At least 1024. Env `ACDP_REGISTRY_KEYLESS__MAX_FETCH_BYTES`. |
 | `rate_per_identity_per_minute` | u32 | `10` | `POST /key-attestations` budget per workload identity, charged only once its token verifies; `0` disables it. Env `ACDP_REGISTRY_KEYLESS__RATE_PER_IDENTITY_PER_MINUTE`. |
 | `rate_per_ip_per_minute` | u32 | `30` | `POST /key-attestations` budget per resolved client IP, charged on arrival; `0` disables it. Env `ACDP_REGISTRY_KEYLESS__RATE_PER_IP_PER_MINUTE`. |
-| `[[keyless.oidc_issuers]]` | table[] | none | Accepted OIDC issuers, advertised as `keyless.accepted_oidc_issuers`. File only. |
+| `[[keyless.oidc_issuers]]` | table[] | none | Accepted OIDC issuers, advertised as `keyless.accepted_oidc_issuers`. Env `ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON` (a JSON array). |
 | `[[keyless.spiffe_trust_domains]]` | table[] | none | Accepted SPIFFE trust domains, advertised as `keyless.accepted_spiffe_trust_domains`. File only. |
 
 `[[keyless.oidc_issuers]]` entries:

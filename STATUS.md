@@ -1,6 +1,6 @@
 # Status and definition of done
 
-**As of 2026-10-31, the stable line is 0.7.x (latest: 0.7.0).** This repository is *done* while `main` is green and no issue is open.
+**As of 2026-10-31, the stable line is 0.8.x (latest: 0.8.0).** This repository is *done* while `main` is green and no issue is open.
 That is the normal resting state, not a gap to fill.
 
 ## When to reopen it

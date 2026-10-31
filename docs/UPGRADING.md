@@ -21,6 +21,14 @@ belongs in the per-crate changelogs.
 
 ---
 
+## Unreleased
+
+**No upgrade steps.** `keyless.oidc_issuers` can now be set from the environment as well as the TOML
+file: `ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON`, a JSON array of `{issuer, jwks_uri?}`, applied
+after the file like the other `*_JSON` escape hatches
+([CONFIGURATION.md](CONFIGURATION.md#settings-that-cannot-be-expressed-as-env-vars-at-all--and-their-escape-hatches)).
+Nothing reads it unless it is set.
+
 ## 0.8.0
 
 **No upgrade steps unless you turn on keyless signing, which is off by default.** This release
