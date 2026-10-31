@@ -80,14 +80,15 @@ impl RegistryConfig {
                 Some(rest) => rest.contains("__"),
                 None => true,
             })
-            // `AUTH__TENANT_AGENTS_JSON` / `PLAYGROUND__PINNED_KEYS_JSON` are
-            // hand-rolled escape hatches (handled below, after
+            // `AUTH__TENANT_AGENTS_JSON` / `PLAYGROUND__PINNED_KEYS_JSON` /
+            // `KEYLESS__OIDC_ISSUERS_JSON` are hand-rolled escape hatches (handled below, after
             // deserialization) — not real config paths. Left in this
-            // snapshot they'd reach AuthConfig's / PlaygroundConfig's
-            // `deny_unknown_fields` as unknown keys.
+            // snapshot they'd reach AuthConfig's / PlaygroundConfig's /
+            // KeylessConfig's `deny_unknown_fields` as unknown keys.
             .filter(|(k, _)| {
                 k != "ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON"
                     && k != "ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON"
+                    && k != "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON"
             })
             // #271: an EMPTY prefixed override is treated as ABSENT, not as an
             // override with the empty value. `Self::empty_env_overrides_ignored`
@@ -181,6 +182,23 @@ impl RegistryConfig {
                 config::ConfigError::Message(format!(
                     "ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON: invalid JSON array of \
                      {{agent_did, public_key_b64, algorithm?, valid_from?, valid_until?}}: {e}"
+                ))
+            })?;
+        }
+
+        // `keyless.oidc_issuers` is `Vec<OidcIssuer>` — same problem, same
+        // fix, so an env-only deployment can name its accepted issuers.
+        // Validation (issuer shape, duplicates) is `KeylessConfig`'s, as for
+        // the TOML form.
+        if let Ok(json) = std::env::var("ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON")
+            .ok()
+            .filter(|j| !j.trim().is_empty())
+            .ok_or(())
+        {
+            cfg.keyless.oidc_issuers = serde_json::from_str(&json).map_err(|e| {
+                config::ConfigError::Message(format!(
+                    "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON: invalid JSON array of \
+                     {{issuer, jwks_uri?}}: {e}"
                 ))
             })?;
         }
@@ -2704,6 +2722,11 @@ backend = "sqlite"
                 "ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON",
                 r#"[{"agent_did":"did:web:x:agents:rotor","public_key_b64":"AAAA","algorithm":"ed25519"}]"#,
             ),
+            // And for `keyless.oidc_issuers` (Vec<OidcIssuer>).
+            (
+                "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON",
+                r#"[{"issuer":"https://token.actions.githubusercontent.com"}]"#,
+            ),
             // A prefixed but un-nested var must NOT trip `deny_unknown_fields`
             // via the env source. `..._TEST_PG_URL` is the CI test harness var;
             // `ACDP_REGISTRY_CONFIG` is the same shape but is excluded here
@@ -2748,6 +2771,12 @@ backend = "sqlite"
             "did:web:x:agents:rotor"
         );
         assert_eq!(cfg.playground.pinned_keys[0].public_key_b64, "AAAA");
+        assert_eq!(cfg.keyless.oidc_issuers.len(), 1);
+        assert_eq!(
+            cfg.keyless.oidc_issuers[0].issuer,
+            "https://token.actions.githubusercontent.com"
+        );
+        assert_eq!(cfg.keyless.oidc_issuers[0].jwks_uri, None);
 
         // Malformed JSON is rejected with an attributed error. This used to be
         // described as "a second, sequential round-trip within this same test,
@@ -2762,6 +2791,18 @@ backend = "sqlite"
         assert!(
             err.to_string().contains("TENANT_AGENTS_JSON"),
             "expected a TENANT_AGENTS_JSON-attributed error, got: {err}"
+        );
+
+        // An unknown member is refused too (OidcIssuer denies unknown fields).
+        env.set(
+            "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON",
+            r#"[{"issuer":"https://token.actions.githubusercontent.com","audience":"x"}]"#,
+        );
+        let err = RegistryConfig::load(None).unwrap_err();
+        env.unset("ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON");
+        assert!(
+            err.to_string().contains("OIDC_ISSUERS_JSON"),
+            "expected an OIDC_ISSUERS_JSON-attributed error, got: {err}"
         );
     }
 
@@ -3068,6 +3109,7 @@ backend = "sqlite"
         for key in [
             "ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON",
             "ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON",
+            "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON",
         ] {
             env.set(key, "");
             RegistryConfig::load(Some(&path))

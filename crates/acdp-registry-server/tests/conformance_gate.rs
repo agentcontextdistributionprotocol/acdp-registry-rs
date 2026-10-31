@@ -1564,6 +1564,7 @@ fn every_directly_read_env_var_is_documented() {
         "ACDP_LOG_FORMAT",
         "ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON",
         "ACDP_REGISTRY_CONFIG",
+        "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON",
         "ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON",
         // Test builds only (`acdp_registry_core::test_egress`, compiled in
         // by the `test-egress` dev-dependency feature); documented as such.
