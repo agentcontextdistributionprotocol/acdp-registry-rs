@@ -9791,7 +9791,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "mcp",
-        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin 1560e0f: 7 fixtures, all \
+        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin 0ba9582: 7 fixtures, all \
          applies_to_profiles = [acdp-producer-mcp-proxy], none carrying an endpoint \
          (mcp-001's vectors array is a known-answer set). They are obligations of an MCP \
          signing proxy, a producer: an acdp:mcp-tool-result body is an ordinary signed \
@@ -9801,7 +9801,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "trust",
-        "RFC-ACDP-0020 registry trust lists (Draft), spec pin 1560e0f: 7 fixtures, all \
+        "RFC-ACDP-0020 registry trust lists (Draft), spec pin 0ba9582: 7 fixtures, all \
          applies_to_profiles = [acdp-consumer-trust-list], none carrying an endpoint \
          (trust-001's vectors array is a known-answer set). Selecting, validating and \
          applying signed acdp:trust-list bodies is the consumer's evaluation; an \
@@ -10222,7 +10222,8 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// `75fb0da` bump (kl-001..009, mcp-001..007, trust-001..007, rev-007 added);
 /// still 202 after the `bf37195` bump (RFC-ACDP-0021 draft.3: kl fixtures only
 /// modified), after the `546b8c8` bump (error-codes.md only), and after the `1560e0f`
-/// bump (kl-005 M/N added in place; RFC-0019/0020 promotions).
+/// bump (kl-005 M/N added in place; RFC-0019/0020 promotions), and after the
+/// `0ba9582` bump (docs only: the profile table).
 /// A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.

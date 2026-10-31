@@ -24,8 +24,8 @@ belongs in the per-crate changelogs.
 ## Unreleased
 
 **No upgrade steps unless you turn on keyless signing, which is off by default.** This release
-adopts ACDP spec `1560e0f` (RFC-ACDP-0021 0.5.0-draft.4; RFC-ACDP-0020 and most of RFC-ACDP-0019
-Final) and restores the exact `acdp =0.18.2` pin. It makes the `acdp-registry-keyless` profile
+adopts ACDP spec `0ba9582` (RFC-ACDP-0021 0.5.0-draft.4; RFC-ACDP-0020 and most of RFC-ACDP-0019
+Final) and the exact `acdp =0.19.0` pin. It makes the `acdp-registry-keyless` profile
 (RFC-ACDP-0021, Draft) available: `POST`/`GET /key-attestations`, keyless publish and supersession,
 and the refusal of lifecycle events under keyless key ids. With the default `[keyless] enabled =
 false` the binary behaves exactly as 0.7.0: `/key-attestations` answers `501 not_implemented`, the
@@ -45,7 +45,7 @@ is refused with `key_resolution_failed`.
   `key_attestation` as `schema_violation`. This binary always advertises 0.5.0, so that branch is
   reachable only from the conformance harness.
 - **Hard Seam:** unchanged. No new `KeyAuthorization` or `RevocationTrustClass` variant: the
-  registry adds none, and acdp 0.18.2 adds none. Revocation discovery stays keyed by `agent_id`.
+  registry adds none, and acdp 0.19.0 adds none. Revocation discovery stays keyed by `agent_id`.
   Attestations are bodies under the registry DID with `context_type` `acdp:key-attestation`, so a
   consumer's registry-DID revocation search (filtered by `acdp:key-revocation`) is unaffected.
 - **Rollback:** safe to 0.7.0 once the `[keyless]` section is gone. 0.7.0 has no `[keyless]` key and
