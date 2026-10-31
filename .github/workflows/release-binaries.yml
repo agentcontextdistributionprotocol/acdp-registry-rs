@@ -59,10 +59,12 @@ jobs:
             os: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
+          # macos-14 images retire 2026-11-02 (actions/runner-images#13518);
+          # macos-15 is arm64 like macos-14, so x86_64 still cross-compiles.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
           - flavor: postgres
             feature: storage-pg
           - flavor: sqlite
