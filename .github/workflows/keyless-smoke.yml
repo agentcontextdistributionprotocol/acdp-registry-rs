@@ -1,0 +1,77 @@
+name: keyless-smoke
+
+# RFC-ACDP-0021 end to end against the deployed registry, with a real
+# workload identity: this job's GitHub Actions OIDC token, minted with the
+# registry DID as audience, buys an attestation for an ephemeral key; the
+# job publishes under it and verifies the body as a consumer
+# (`tools/live-smoke keyless`). It writes one public smoke context per run.
+#
+# The controller (`did:web:acdp-smoke-producer.vercel.app`) lists exactly the
+# identity this job carries when dispatched on main, in its `did.json`
+# `AcdpKeylessSigning` service:
+#   issuer  https://token.actions.githubusercontent.com
+#   subject repo:agentcontextdistributionprotocol/acdp-registry-rs:ref:refs/heads/main
+# Run from any other ref and the registry refuses the mint
+# (identity_not_authorized), which is the intended result.
+#
+# The registry is fixed, not an input: the token is a bearer credential for
+# the identity above, so it may only ever reach the registry it names as
+# audience. A free-text URL would let a dispatcher send a main-branch token
+# to a host of their choosing and replay it here.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keyless-smoke
+  cancel-in-progress: false
+
+jobs:
+  keyless:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BASE_URL: https://registry.agentcontextdistributionprotocol.io
+      REGISTRY_DID: did:web:registry.agentcontextdistributionprotocol.io
+      CONTROLLER: did:web:acdp-smoke-producer.vercel.app
+      ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+
+      - name: build live-smoke
+        working-directory: tools/live-smoke
+        run: cargo build --release --locked
+
+      # The token is requested last, right before use: it lives minutes and
+      # the attestation window is bounded by it. The audience is the
+      # registry DID (RFC-ACDP-0021 §5.2 step 3), pinned and checked
+      # against what the registry serves.
+      - name: keyless mint, publish, verify
+        working-directory: tools/live-smoke
+        run: |
+          set -euo pipefail
+          AUD="$REGISTRY_DID"
+          SERVED="$(curl -fsS "$BASE_URL/.well-known/did.json" | jq -r .id)"
+          [ "$SERVED" = "$AUD" ] || { echo "::error::registry serves DID '$SERVED', expected '$AUD'"; exit 1; }
+          RESP="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$(jq -rn --arg a "$AUD" '$a|@uri')")"
+          SMOKE_OIDC_TOKEN="$(jq -r .value <<<"$RESP")"
+          echo "::add-mask::$SMOKE_OIDC_TOKEN"
+          # The identity descriptor must carry the token's own `sub`.
+          export SMOKE_OIDC_TOKEN
+          SUBJECT="$(python3 -c 'import base64,json,os; p=os.environ["SMOKE_OIDC_TOKEN"].split(".")[1]; print(json.loads(base64.urlsafe_b64decode(p+"="*(-len(p)%4)))["sub"])')"
+          echo "subject: $SUBJECT"
+          ./target/release/acdp-registry-live-smoke keyless \
+            --base-url "$BASE_URL" --controller "$CONTROLLER" \
+            --issuer "$ISSUER" --subject "$SUBJECT"

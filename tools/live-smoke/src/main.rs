@@ -6,13 +6,23 @@
 //! retraction must also appear on `GET /changes` and pass
 //! `acdp::client::verify_change`.
 //!
-//! Two subcommands:
+//! Three subcommands:
 //!
 //! ```text
-//! live-smoke did-doc --did did:web:<host>
+//! live-smoke did-doc --did did:web:<host> [--keyless-issuer <iss> --keyless-subject <sub>]
 //! live-smoke run --base-url https://<registry> --producer-did did:web:<host>
 //! live-smoke run --base-url https://<registry> --producer-did did:key
+//! live-smoke keyless --base-url https://<registry> --controller did:web:<host> \
+//!     --issuer <oidc iss> --subject <oidc sub>
 //! ```
+//!
+//! `keyless` (RFC-ACDP-0021) needs no seed: it reads a workload-identity
+//! token minted with the registry DID as audience from `SMOKE_OIDC_TOKEN`,
+//! mints an attestation for an ephemeral key, publishes under it and
+//! verifies the body as a consumer accepting this registry as attester.
+//! The controller's `did.json` must list the identity in its
+//! `AcdpKeylessSigning` service. `.github/workflows/keyless-smoke.yml`
+//! runs it with a GitHub Actions token.
 //!
 //! Both read the producer's Ed25519 seed (standard base64, 32 bytes) from
 //! `SMOKE_PRODUCER_SEED_B64`. `did-doc` prints the `did.json` to serve at the
@@ -28,15 +38,17 @@ use std::time::Duration;
 
 use acdp::client::{
     verify_change, ChangeEffect, ChangeVerdict, CrossRegistryResolver, DiscoveryFailurePolicy,
-    RegistryClient, RevocationCache, RevocationDiscovery, RevocationPolicy, Since,
-    VerificationPolicy,
+    KeyAuthorization, KeylessPolicy, RegistryClient, RevocationCache, RevocationDiscovery,
+    RevocationPolicy, Since, VerificationPolicy, VerifiedContext,
 };
 use acdp::crypto::SigningKey;
 use acdp::did::key::DidKeyMaterial;
 use acdp::did::WebResolver;
+use acdp::producer::keyless::EphemeralKey;
 use acdp::producer::Producer;
 use acdp::safe_http::SsrfPolicy;
 use acdp::types::change::{ChangeKind, WatchFilter};
+use acdp::types::keyless::{IdentityDescriptor, KeyAttestation, KeylessReason};
 use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
 use acdp::types::primitives::{AgentDid, ContextType, CtxId, Visibility};
 use acdp::types::EventReceipt;
@@ -67,11 +79,13 @@ fn arg(args: &[String], name: &str) -> Result<String> {
 
 /// The `did.json` for a `did:web` producer holding `key`. The Ed25519
 /// multibase is the same string a `did:key` carries after `did:key:`.
-fn did_doc(did: &str, key: &SigningKey) -> Value {
+/// `keyless` = `(issuer, subject)` adds the RFC-ACDP-0021 §4.1
+/// `AcdpKeylessSigning` service listing that one OIDC identity.
+fn did_doc(did: &str, key: &SigningKey, keyless: Option<(&str, &str)>) -> Value {
     let did_key = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
     let multibase = did_key.trim_start_matches("did:key:");
     let vm = format!("{did}#{KEY_FRAGMENT}");
-    json!({
+    let mut doc = json!({
         "@context": ["https://www.w3.org/ns/did/v1", "https://w3id.org/security/multikey/v1"],
         "id": did,
         "verificationMethod": [{
@@ -82,7 +96,17 @@ fn did_doc(did: &str, key: &SigningKey) -> Value {
         }],
         "authentication": [vm],
         "assertionMethod": [vm],
-    })
+    });
+    if let Some((issuer, subject)) = keyless {
+        doc["service"] = json!([{
+            "id": format!("{did}#acdp-keyless"),
+            "type": "AcdpKeylessSigning",
+            "serviceEndpoint": {
+                "identities": [{ "type": "oidc", "issuer": issuer, "subject": subject }],
+            },
+        }]);
+    }
+    doc
 }
 
 /// Seam's resolver shape (`seam-context-acdp::with_remote_registry` +
@@ -518,16 +542,167 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
     Ok(())
 }
 
+/// RFC-ACDP-0021 end to end against a registry advertising
+/// `acdp-registry-keyless`: mint (§5), keyless publish (§6), consumer
+/// verification (§8) with this registry accepted as attester, and the
+/// control that a consumer accepting no attester refuses the same body.
+async fn keyless(base_url: &str, controller: &str, issuer: &str, subject: &str) -> Result<()> {
+    let token = std::env::var("SMOKE_OIDC_TOKEN")
+        .context("SMOKE_OIDC_TOKEN is not set (an OIDC token with the registry DID as aud)")?;
+    AgentDid::parse_web(controller)?;
+    let base_url = base_url.trim_end_matches('/');
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+
+    let caps: Value = http
+        .get(format!("{base_url}/.well-known/acdp.json"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    ensure!(
+        caps["profiles"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|v| v == "acdp-registry-keyless")),
+        "capabilities do not advertise acdp-registry-keyless"
+    );
+    ensure!(
+        caps["keyless"]["accepted_oidc_issuers"]
+            .as_array()
+            .is_some_and(|i| i.iter().any(|v| v == issuer)),
+        "keyless.accepted_oidc_issuers does not list {issuer}: {}",
+        caps["keyless"]
+    );
+    println!("keyless capabilities: {}", caps["keyless"]);
+    let registry_did: String = http
+        .get(format!("{base_url}/.well-known/did.json"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?["id"]
+        .as_str()
+        .context("registry did.json has no id")?
+        .into();
+
+    let client = RegistryClient::new(base_url)?;
+    let key = EphemeralKey::generate();
+    let req = key.attestation_request(
+        controller,
+        &registry_did,
+        IdentityDescriptor::oidc(issuer, subject, token),
+        None,
+    )?;
+    let minted = client.request_key_attestation(&req).await.map_err(|e| {
+        let reason = KeylessReason::of(&e)
+            .map(|r| format!(" (reason {r:?})"))
+            .unwrap_or_default();
+        anyhow::anyhow!("POST /key-attestations: {e}{reason}")
+    })?;
+    let att = KeyAttestation::from_body(&minted.body)?;
+    ensure!(
+        minted.body.agent_id.to_string() == registry_did,
+        "attestation is not signed under the registry DID: {}",
+        minted.body.agent_id
+    );
+    ensure!(
+        minted.registry_receipt.is_some(),
+        "attestation carries no receipt"
+    );
+    println!(
+        "attestation: {} key_id {} window [{}, {})",
+        minted.body.ctx_id, att.key_id, att.not_before, att.not_after
+    );
+
+    let producer = key.into_producer(&minted.body)?;
+    let publish = producer
+        .publish_request()
+        .title(format!("keyless smoke {}", chrono::Utc::now().to_rfc3339()))
+        .summary("acdp-registry-rs tools/live-smoke: RFC-ACDP-0021 keyless publish")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .tags(vec!["smoke-test", "keyless"])
+        .build()?;
+    let published = client.publish(&publish).await.map_err(|e| {
+        let reason = KeylessReason::of(&e)
+            .map(|r| format!(" (reason {r:?})"))
+            .unwrap_or_default();
+        anyhow::anyhow!("keyless publish: {e}{reason}")
+    })?;
+    println!("published: {}", published.ctx_id);
+
+    let policy = VerificationPolicy {
+        keyless: KeylessPolicy::attesters([registry_did.clone()]),
+        ..VerificationPolicy::default()
+    };
+    let verified = VerifiedContext::fetch_with_policy(
+        &client,
+        &WebResolver::new(),
+        &published.ctx_id,
+        &policy,
+    )
+    .await
+    .context("consumer verification with this registry as attester")?;
+    ensure!(
+        verified.body().signature.key_id == att.key_id,
+        "verified body is not signed under the attested key id"
+    );
+    ensure!(
+        verified.key_status() == KeyAuthorization::CurrentlyAuthorized,
+        "expected currently_authorized, got {:?}",
+        verified.key_status()
+    );
+    ensure!(
+        VerifiedContext::fetch_with_policy(
+            &client,
+            &WebResolver::new(),
+            &published.ctx_id,
+            &VerificationPolicy::default()
+        )
+        .await
+        .is_err(),
+        "a consumer accepting no attester verified a keyless body"
+    );
+    println!(
+        "verified: key_status {:?}, receipt {}",
+        verified.key_status(),
+        verified.verified_receipt().is_some()
+    );
+    println!("KEYLESS SMOKE OK {}", published.ctx_id);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("did-doc") => {
             let did = arg(&args, "--did")?;
-            println!("{}", serde_json::to_string_pretty(&did_doc(&did, &seed()?))?);
+            let issuer = arg(&args, "--keyless-issuer").ok();
+            let subject = arg(&args, "--keyless-subject").ok();
+            let keyless = match (&issuer, &subject) {
+                (Some(i), Some(s)) => Some((i.as_str(), s.as_str())),
+                (None, None) => None,
+                _ => bail!("--keyless-issuer and --keyless-subject go together"),
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&did_doc(&did, &seed()?, keyless))?
+            );
             Ok(())
         }
         Some("run") => run(&arg(&args, "--base-url")?, &arg(&args, "--producer-did")?).await,
-        _ => bail!("usage: live-smoke did-doc --did <did:web> | run --base-url <url> --producer-did <did:web>|did:key"),
+        Some("keyless") => {
+            keyless(
+                &arg(&args, "--base-url")?,
+                &arg(&args, "--controller")?,
+                &arg(&args, "--issuer")?,
+                &arg(&args, "--subject")?,
+            )
+            .await
+        }
+        _ => bail!("usage: live-smoke did-doc --did <did:web> | run --base-url <url> --producer-did <did:web>|did:key | keyless --base-url <url> --controller <did:web> --issuer <iss> --subject <sub>"),
     }
 }
