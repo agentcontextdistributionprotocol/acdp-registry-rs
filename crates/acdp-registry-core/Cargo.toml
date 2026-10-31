@@ -46,6 +46,14 @@ acdp-registry-sqlite = { path = "../acdp-registry-sqlite", version = "0.7.0" }
 # `disabled` and records nothing at all. Already a workspace dependency (the
 # server binary uses it), so this adds no new external crate.
 tracing-subscriber = { workspace = true }
+# Test-only: `keyless::jwks`'s unit tests fetch from a loopback HTTPS
+# issuer (the fetcher is `https_only`). A per-process CA from `rcgen`, served
+# by `axum-server`; `rustls` to pick the `ring` provider explicitly, since
+# the graph enables two. All three are already in the workspace graph through
+# `acdp-registry-server`'s dev-dependencies, so they add no crate.
+rcgen       = "0.14"
+axum-server = { workspace = true }
+rustls      = { version = "0.23", features = ["ring"] }
 
 [features]
 default    = []

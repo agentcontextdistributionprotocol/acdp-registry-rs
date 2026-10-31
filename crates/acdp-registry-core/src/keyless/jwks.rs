@@ -304,15 +304,17 @@ impl JwksCache {
                     self.counters.hits.fetch_add(1, Ordering::Relaxed);
                     return Ok(Arc::clone(&e.keys));
                 }
+                // Inside the backoff window a held copy answers (stale, if
+                // still usable) or the source is unreachable, without a
+                // fetch: an outage costs one timeout per window, not one
+                // per queued request, even once the copy is past its
+                // stale window.
                 if backing_off {
-                    if let Some(keys) = self.stale(e, now) {
-                        return Ok(keys);
-                    }
+                    return self.stale(e, now).ok_or(IssuerUnreachable);
                 }
             }
             // Negative cache: a cold source that just failed answers at
-            // once, so an outage costs one timeout per window, not one
-            // per queued request.
+            // once, for the same reason.
             None if backing_off => return Err(IssuerUnreachable),
             None => {}
         }
@@ -596,5 +598,141 @@ mod tests {
         assert_eq!(c.keys(&s).await, Err(IssuerUnreachable));
         assert_eq!(c.refresh_for_unknown_kid(&s).await, Err(IssuerUnreachable));
         assert_eq!(c.stats().fetches, 0);
+    }
+
+    /// A loopback HTTPS issuer serving `/jwks`: its status is switchable
+    /// and every request is counted.
+    struct Issuer {
+        status: std::sync::atomic::AtomicU16,
+        hits: AtomicU64,
+    }
+
+    const ISSUER_HOST: &str = "issuer.test";
+
+    /// The issuer, its address and the CA PEM its certificate chains to.
+    async fn spawn_issuer() -> (Arc<Issuer>, std::net::SocketAddr, String) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+            KeyUsagePurpose,
+        };
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        ca.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let ca_cert = ca.self_signed(&ca_key).unwrap();
+        let leaf_key = KeyPair::generate().unwrap();
+        let mut leaf = CertificateParams::new(vec![ISSUER_HOST.to_string()]).unwrap();
+        leaf.is_ca = IsCa::ExplicitNoCa;
+        leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let leaf_cert = leaf
+            .signed_by(&leaf_key, &rcgen::Issuer::from_params(&ca, &ca_key))
+            .unwrap();
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+            leaf_cert.pem().into_bytes(),
+            leaf_key.serialize_pem().into_bytes(),
+        )
+        .await
+        .unwrap();
+
+        let issuer = Arc::new(Issuer {
+            status: std::sync::atomic::AtomicU16::new(200),
+            hits: AtomicU64::new(0),
+        });
+        let i = Arc::clone(&issuer);
+        let app = axum::Router::new().route(
+            "/jwks",
+            axum::routing::get(move || async move {
+                use axum::response::IntoResponse;
+                i.hits.fetch_add(1, Ordering::SeqCst);
+                match i.status.load(Ordering::SeqCst) {
+                    200 => axum::Json(serde_json::json!({ "keys": [
+                        { "kty": "OKP", "crv": "Ed25519", "kid": "k1", "x": "AA" }
+                    ] }))
+                    .into_response(),
+                    s => http::StatusCode::from_u16(s).unwrap().into_response(),
+                }
+            }),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        tokio::spawn(async move {
+            let _ = axum_server::from_tcp_rustls(listener, tls)
+                .unwrap()
+                .serve(app.into_make_service())
+                .await;
+        });
+        (issuer, addr, ca_cert.pem())
+    }
+
+    /// A source whose copy is past TTL + max-stale and whose refetch failed
+    /// is not refetched again inside [`FAILURE_BACKOFF_MS`]: every request
+    /// there answers unreachable without an issuer hit, and the first one
+    /// after the window fetches once.
+    #[tokio::test]
+    async fn an_expired_copy_is_not_refetched_inside_the_backoff_window() {
+        let (issuer, addr, ca_pem) = spawn_issuer().await;
+        let issuer_uri = "https://issuer.test";
+        let cfg = KeylessConfig {
+            enabled: true,
+            oidc_issuers: vec![acdp_registry_types::config::OidcIssuer {
+                issuer: issuer_uri.into(),
+                jwks_uri: Some(format!("https://{ISSUER_HOST}:{}/jwks", addr.port())),
+            }],
+            jwks_cache_ttl_seconds: 300,
+            jwks_max_stale_seconds: 600,
+            ..KeylessConfig::default()
+        };
+        let outbound = Outbound {
+            policy: acdp::safe_http::SsrfPolicy {
+                allow_loopback_resolved: true,
+                ..acdp::safe_http::SsrfPolicy::default()
+            },
+            resolver: Arc::new(
+                crate::callback::StaticResolver::new()
+                    .with(ISSUER_HOST, &["127.0.0.1".parse().unwrap()]),
+            ),
+            extra_roots: Vec::new(),
+        }
+        .with_root_pem(ca_pem.as_bytes())
+        .unwrap();
+        let now = Arc::new(std::sync::atomic::AtomicI64::new(1_000_000_000));
+        let n = Arc::clone(&now);
+        let cache = JwksCache::new(&cfg, outbound, Arc::new(move || n.load(Ordering::SeqCst)));
+        let src = KeySource::Oidc(issuer_uri.into());
+
+        // Served once, then the issuer fails.
+        let keys = cache.keys(&src).await.expect("first fetch");
+        assert_eq!(keys.keys.len(), 1);
+        assert_eq!(issuer.hits.load(Ordering::SeqCst), 1);
+        issuer.status.store(503, Ordering::SeqCst);
+
+        // Past TTL + max-stale: no usable copy remains.
+        now.fetch_add((300 + 600) * 1000 + 1, Ordering::SeqCst);
+        for _ in 0..5 {
+            assert_eq!(cache.keys(&src).await, Err(IssuerUnreachable));
+        }
+        assert_eq!(
+            issuer.hits.load(Ordering::SeqCst),
+            2,
+            "one refetch per window"
+        );
+        assert_eq!(cache.stats().fetches, 2);
+        assert_eq!(cache.stats().fetch_failures, 1);
+        assert_eq!(cache.stats().stale_served, 0);
+
+        // Still inside the window just before it ends.
+        now.fetch_add(FAILURE_BACKOFF_MS - 1, Ordering::SeqCst);
+        assert_eq!(cache.keys(&src).await, Err(IssuerUnreachable));
+        assert_eq!(issuer.hits.load(Ordering::SeqCst), 2);
+
+        // After the window, exactly one more fetch.
+        now.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(cache.keys(&src).await, Err(IssuerUnreachable));
+        assert_eq!(issuer.hits.load(Ordering::SeqCst), 3);
+        assert_eq!(cache.keys(&src).await, Err(IssuerUnreachable));
+        assert_eq!(issuer.hits.load(Ordering::SeqCst), 3);
     }
 }

@@ -5076,7 +5076,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - Chose: as above.
 - Alternatives: (a) a binary-private builder validated only by hand-written checks; (b) bounding every scalar now; (e) skipping schema validation until Phase 7.
 - Blast radius: low and reversible. Nothing here is reachable while `keyless.enabled` is refused, and the OFF wire is pinned by `keyless_off_wire_snapshot`.
-- Status: UNCONFIRMED
+- Status: CONFIRMED (2026-10-31, Opus; DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31")
 
 ## RFC-ACDP-0021 keyless, Phase 3 (2026-10-30)
 - Plan: plans/rfc0021-keyless.md
@@ -5092,7 +5092,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - Chose: as above.
 - Alternatives: (a) a TEXT timestamp column matching `contexts`; (c) `SELECT … FOR SHARE` on the attestation row, which would make the check authoritative at commit time; (d) checking the memory store's status before the inner commit, which would refuse in a different order from the SQL backends; (f) hiding retracted rows from the list.
 - Blast radius: low. Nothing writes the index until the mint endpoint exists (Phase 4+), and non-keyless publishes skip every check. Migration 019 is additive; Postgres stays N-1 safe.
-- Status: UNCONFIRMED
+- Status: CONFIRMED (2026-10-31): (a) by the owner on Fable's analysis (migration 019 shape); (b)-(g) by Opus; (h) closed by the scope-399 re-pin (run 41124872541). DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
 
 ## RFC-ACDP-0021 keyless, Phase 4 (2026-10-30)
 - Plan: plans/rfc0021-keyless.md
@@ -5130,7 +5130,7 @@ underlying settings and code were not touched by this pass, only the record of t
   - (b) the plan's "no `use`" bundle keys;
   - (f) no failure backoff, so each request waits a full timeout during an outage.
 - Blast radius: low and reversible. Nothing is reachable over HTTP yet, and `keyless.enabled` is still refused at startup.
-- Status: UNCONFIRMED
+- Status: CONFIRMED (2026-10-31): (a)-(e) by the owner on Fable's analysis (token acceptance); (f) CHANGED by Opus (the failure backoff now also covers a held copy past its stale allowance, jwks.rs); (g)-(j) by Opus. DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
 
 ## RFC-ACDP-0021 keyless, Phase 5 (2026-10-30)
 - Plan: plans/rfc0021-keyless.md
@@ -5155,7 +5155,7 @@ underlying settings and code were not touched by this pass, only the record of t
   - (c) answering `identity_not_authorized` against a stale cached document;
   - (f) the store's 200 as the maximum.
 - Blast radius: low and reversible. Startup still refuses `keyless.enabled`, so no deployed registry reaches these handlers; with it off the wire is byte-identical.
-- Status: UNCONFIRMED
+- Status: CONFIRMED (2026-10-31, Opus; (j) RESOLVED by spec 1560e0f). DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
 
 ## RFC-ACDP-0021 keyless, Phase 6 (2026-10-30)
 - Plan: plans/rfc0021-keyless.md
@@ -5181,7 +5181,7 @@ underlying settings and code were not touched by this pass, only the record of t
   - (d) `resolve_until` at publish, which forces a re-fetch the SHOULD does not ask for;
   - (g) R13 after the path-binding check.
 - Blast radius: low and reversible. Startup still refuses `keyless.enabled`, so only in-process harnesses reach the keyless branch and R13. The one feature-off change is kl-007 C, which the spec requires.
-- Status: UNCONFIRMED
+- Status: CONFIRMED (2026-10-31, Opus; (l) closed by the scope-399 re-pin). DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
 
 ## RFC-ACDP-0021 keyless, Phase 7 (2026-10-30)
 - Plan: plans/rfc0021-keyless.md
@@ -5212,7 +5212,7 @@ underlying settings and code were not touched by this pass, only the record of t
   - (b) no spawned-binary mint, covering ON mode in-process only;
   - (b) a runtime config key for egress, which a production build could reach.
 - Blast radius: moderate and reversible. Keyless is now reachable by config, but off by default, and the off wire is byte-identical (`keyless_off_wire_snapshot`).
-- Status: UNCONFIRMED
+- Status: CONFIRMED (2026-10-31): (b) by the owner on Fable's analysis, with a CHANGE: docker.yml and release-binaries.yml assert the shipped binary carries no ACDP_TEST_EGRESS; the rest by Opus. DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
 
 ## RFC-ACDP-0021 keyless, Phase 8 (2026-10-30)
 - Plan: plans/rfc0021-keyless.md
@@ -5223,4 +5223,4 @@ underlying settings and code were not touched by this pass, only the record of t
 - Chose: as above.
 - Alternatives: (a) accept 404 like `/changes`, which would let a missing route pass as "off".
 - Blast radius: low and reversible. This is tooling only and is not run in CI.
-- Status: UNCONFIRMED
+- Status: CONFIRMED (2026-10-31, Opus). DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"

@@ -110,8 +110,9 @@ copy_vcs = true
 # mutants of the new SqliteStore key_attestation, key_attestation_token_seen and
 # list_key_attestations); log.rs 65 and receipt.rs 16 unchanged. The split is from
 # `cargo mutants --list` at feat/rfc0021-keyless 4504b7d. The measured caught / missed /
-# unviable / timeout split, the ledger and the survivor lines come from the re-pin
-# mutants.yml run and are recorded with it (TODO: run id).
+# unviable / timeout split is run 41124872541: 255 caught / 8 missed / 135 unviable /
+# 1 timeout; the same eight survivors on shifted lines (:645, :1284, :1320; store.rs
+# :1254, :1588, :2202), no new MISSED.
 #
 # 370 -> 390 (#471, RFC-ACDP-0018 retraction recall): context.rs 136 -> 137 (the hint
 # wake-up after a publish) and store.rs 153 -> 172 (same-transaction feed appends). The

@@ -778,8 +778,19 @@ async fn an_outage_serves_the_stale_copy_within_its_window_then_502s() {
         unreachable()
     );
 
-    // The issuer recovers: the next lookup fetches again.
+    assert_eq!(fx.iss.hits("jwks"), 3);
+
+    // The issuer recovers, but that failed refetch opened a new backoff
+    // window: inside it the source answers unreachable with no fetch.
     fx.iss.status.store(200, Ordering::SeqCst);
+    assert_eq!(
+        refused(fx.check(&cache, &fx.oidc(sign(&ed, &fx.claims()))).await),
+        unreachable()
+    );
+    assert_eq!(fx.iss.hits("jwks"), 3);
+
+    // After the window, the next lookup fetches again.
+    fx.advance(30);
     fx.check(&cache, &fx.oidc(sign(&ed, &fx.claims())))
         .await
         .unwrap();
