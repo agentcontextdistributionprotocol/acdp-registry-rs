@@ -1,5 +1,12 @@
 
 
+## [0.8.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.7.0...acdp-registry-types/v0.8.0) - 2026-10-31
+
+### Added
+
+- *(keyless)* acdp-registry-keyless profile of RFC-ACDP-0021 (off by default) ([#509](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/509))
+
+
 ## [0.7.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.6.1...acdp-registry-types/v0.7.0) - 2026-10-30
 
 ### Added

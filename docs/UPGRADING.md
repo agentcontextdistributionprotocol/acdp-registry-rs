@@ -21,7 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## Unreleased
+## 0.8.0
 
 **No upgrade steps unless you turn on keyless signing, which is off by default.** This release
 adopts ACDP spec `0ba9582` (RFC-ACDP-0021 0.5.0-draft.4; RFC-ACDP-0020 and most of RFC-ACDP-0019
