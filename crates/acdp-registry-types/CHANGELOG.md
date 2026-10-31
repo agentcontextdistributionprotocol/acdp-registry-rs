@@ -1,5 +1,12 @@
 
 
+## [0.8.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.8.0...acdp-registry-types/v0.8.1) - 2026-10-31
+
+### Added
+
+- *(config)* ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON env escape hatch ([#513](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/513))
+
+
 ## [0.8.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.7.0...acdp-registry-types/v0.8.0) - 2026-10-31
 
 ### Added
