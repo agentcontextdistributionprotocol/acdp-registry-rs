@@ -13,14 +13,13 @@ name: keyless-smoke
 #   subject repo:agentcontextdistributionprotocol/acdp-registry-rs:ref:refs/heads/main
 # Run from any other ref and the registry refuses the mint
 # (identity_not_authorized), which is the intended result.
+#
+# The registry is fixed, not an input: the token is a bearer credential for
+# the identity above, so it may only ever reach the registry it names as
+# audience. A free-text URL would let a dispatcher send a main-branch token
+# to a host of their choosing and replay it here.
 on:
   workflow_dispatch:
-    inputs:
-      base_url:
-        description: "Registry base URL"
-        required: true
-        default: "https://registry.agentcontextdistributionprotocol.io"
-        type: string
 
 permissions:
   contents: read
@@ -37,7 +36,8 @@ jobs:
       contents: read
       id-token: write
     env:
-      BASE_URL: ${{ inputs.base_url }}
+      BASE_URL: https://registry.agentcontextdistributionprotocol.io
+      REGISTRY_DID: did:web:registry.agentcontextdistributionprotocol.io
       CONTROLLER: did:web:acdp-smoke-producer.vercel.app
       ISSUER: https://token.actions.githubusercontent.com
     steps:
@@ -55,13 +55,15 @@ jobs:
 
       # The token is requested last, right before use: it lives minutes and
       # the attestation window is bounded by it. The audience is the
-      # registry DID (RFC-ACDP-0021 §5.2 step 3), read from the registry.
+      # registry DID (RFC-ACDP-0021 §5.2 step 3), pinned and checked
+      # against what the registry serves.
       - name: keyless mint, publish, verify
         working-directory: tools/live-smoke
         run: |
           set -euo pipefail
-          AUD="$(curl -fsS "${BASE_URL%/}/.well-known/did.json" | jq -r .id)"
-          case "$AUD" in did:web:*) : ;; *) echo "::error::registry DID '$AUD' is not did:web"; exit 1 ;; esac
+          AUD="$REGISTRY_DID"
+          SERVED="$(curl -fsS "$BASE_URL/.well-known/did.json" | jq -r .id)"
+          [ "$SERVED" = "$AUD" ] || { echo "::error::registry serves DID '$SERVED', expected '$AUD'"; exit 1; }
           RESP="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$(jq -rn --arg a "$AUD" '$a|@uri')")"
           SMOKE_OIDC_TOKEN="$(jq -r .value <<<"$RESP")"

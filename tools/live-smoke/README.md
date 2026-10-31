@@ -107,6 +107,7 @@ doppler run --project acdp-registry --config prd -- \
 ```
 
 `.github/workflows/keyless-smoke.yml` runs the check from that identity
-(dispatch it on `main`). Every run leaves one active keyless context titled
-`keyless smoke <timestamp>` behind; it cannot be retracted, because keyless
-keys never sign lifecycle events.
+against the reference registry only (dispatch it on `main`). Every run leaves one active keyless context titled
+`keyless smoke <timestamp>` behind. The ephemeral key cannot retract it
+(keyless keys never sign lifecycle events); the controller's own key, the
+`SMOKE_PRODUCER_SEED_B64` seed, can.
