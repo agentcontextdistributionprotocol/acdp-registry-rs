@@ -1,7 +1,7 @@
 //! The data-plane read gate: RFC-ACDP-0008 §6.2 read authentication, then
 //! the §4.3 read rate limit, before any read handler runs.
 //!
-//! Every `GET`/`HEAD` on the `data` group passes through [`read_gate`]. It
+//! Every `GET`/`HEAD` on the `data` group passes through `read_gate`. It
 //! resolves the `Authorization` header once, into a [`ReadPrincipal`]
 //! request extension the handlers read instead of parsing the header again:
 //!

@@ -7,6 +7,8 @@
 //! precondition assertion that the capture saw the request logs at all (an
 //! empty buffer would trivially "not contain the token").
 
+#![cfg(feature = "storage-sqlite")]
+
 mod common;
 
 use std::io::Write;
