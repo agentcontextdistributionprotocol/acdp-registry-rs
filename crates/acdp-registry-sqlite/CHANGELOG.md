@@ -1,5 +1,12 @@
 
 
+## [0.10.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.9.0...acdp-registry-sqlite/v0.10.0) - 2026-11-01
+
+### Added
+
+- *(changes)* expire older cursors on sequence reset; adopt spec pin c40671e ([#526](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/526))
+
+
 ## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.8.1...acdp-registry-sqlite/v0.9.0) - 2026-11-01
 
 ### Other

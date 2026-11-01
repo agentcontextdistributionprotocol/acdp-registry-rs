@@ -1,5 +1,16 @@
 
 
+## [0.10.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.9.0...acdp-registry-server/v0.10.0) - 2026-11-01
+
+### Added
+
+- *(changes)* expire older cursors on sequence reset; adopt spec pin c40671e ([#526](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/526))
+
+### Fixed
+
+- *(rate-limit)* forwarded_skip_rightmost for edges that append their own hop ([#524](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/524)) ([#525](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/525))
+
+
 ## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.8.1...acdp-registry-server/v0.9.0) - 2026-11-01
 
 ### Added

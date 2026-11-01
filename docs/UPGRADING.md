@@ -21,7 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## Unreleased
+## 0.10.0
 
 **Railway (and any edge that appends its own hop): set `rate_limit.forwarded_skip_rightmost`.**
 Railway rewrites `X-Forwarded-For` to `<client>, <edge address>`, and the edge address changes per
