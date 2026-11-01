@@ -5224,3 +5224,27 @@ underlying settings and code were not touched by this pass, only the record of t
 - Alternatives: (a) accept 404 like `/changes`, which would let a missing route pass as "off".
 - Blast radius: low and reversible. This is tooling only and is not run in CI.
 - Status: CONFIRMED (2026-10-31, Opus). DECISIONS.md "RFC-ACDP-0021 keyless — 2026-10-31"
+
+## bearer_static issuance scope (F1)
+- **Plan:** plans/bearer-static-read-limits.md
+- **Assumed:** RFC-0008 §6.2 at dd5486c allows config binding only for operator-administered DIDs; Seam's DID is not one.
+- **Chose:** ship both config-bound tokens (Phase 4) and DID-proof self-issuance (Phase 5) in this run, issuance disabled by default.
+- **Alternatives:** config-only now, issuance when a consumer asks.
+- **Blast radius if wrong:** extra code behind a default-off flag; reversible by removal.
+- **Status:** UNCONFIRMED
+
+## /changes cursor reset safety design (F2)
+- **Plan:** plans/bearer-static-read-limits.md
+- **Assumed:** §5.3 "MUST refuse every cursor issued before the reset"; no DB-stored value can detect a restore.
+- **Chose:** cursor v2 carries position fp + issuance-head fp (automatic expiry of every cursor issued after the backup point) plus an operator-bumped `changes.cursor_epoch` in a clear authenticated header for literal compliance (memory backend: random per process). Not key rotation (it would disable subscriptions).
+- **Alternatives:** mandatory key rotation on restore; DB epoch; position-only fp.
+- **Blast radius if wrong:** cursor format is opaque and versioned; a v3 costs one forced consumer resync.
+- **Status:** UNCONFIRMED
+
+## Railway forwarded-header trust (F3)
+- **Plan:** plans/bearer-static-read-limits.md
+- **Assumed:** Railway's edge overwrites/appends X-Forwarded-For so the client IP is the trusted rightmost hop; proxy IPs can't be listed.
+- **Chose:** `any_peer` trust mode, verified in Phase 7 by a forged-XFF probe; fallback 6000/min per peer without header trust.
+- **Alternatives:** no header trust (all users share Railway's proxy IP bucket).
+- **Blast radius if wrong:** spoofable anonymous bucket keys (a client could evade or exhaust others' buckets); config-reversible.
+- **Status:** UNCONFIRMED

@@ -1895,6 +1895,9 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
                 .events
                 .enabled
                 .then_some(cfg.events.max_subscriptions_per_requester),
+            max_reads_per_minute: None,
+            max_anonymous_reads_per_minute: None,
+            extensions: Default::default(),
         },
         read_authentication_methods: if cfg.auth.enabled {
             vec![READ_AUTH_METHOD_BEARER_JWT.into()]

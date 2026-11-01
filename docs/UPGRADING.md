@@ -21,6 +21,20 @@ belongs in the per-crate changelogs.
 
 ---
 
+## Unreleased
+
+**No upgrade steps.** The spec pin moves to `dd5486c` (RFC-ACDP-0008 read rate limits and static
+bearer tokens, 0.5.0 Draft; RFC-ACDP-0007 `limits` open from 0.5.0; RFC-ACDP-0018 clarifications) and
+`acdp` to `=0.20.0`.
+
+- **Capabilities are unchanged on the wire.** acdp 0.20 adds `limits.max_reads_per_minute` and
+  `limits.max_anonymous_reads_per_minute`; the registry does not emit them, so a consumer on acdp 0.19
+  (whose `Limits` refuses unknown fields) still parses this registry's capabilities.
+- **Every 429 now carries `Retry-After`**, including one that originates as an SDK-layer
+  `rate_limited` error without a delay (60 s default), as RFC-ACDP-0008 §4.3 requires from 0.5.0.
+- **Hard Seam:** unchanged. acdp 0.20 adds no `KeyAuthorization` or `RevocationTrustClass` variant;
+  `AcdpError::RateLimited` became a struct variant carrying the parsed `Retry-After`.
+
 ## 0.8.1
 
 **No upgrade steps.** `keyless.oidc_issuers` can now be set from the environment as well as the TOML
