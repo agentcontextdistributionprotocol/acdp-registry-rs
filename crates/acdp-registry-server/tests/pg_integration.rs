@@ -1529,7 +1529,13 @@ async fn pg_changes_feed_round_trip() {
     // one at 2 still resumes, and `since` absent starts after the prefix.
     let c0 = {
         let key = acdp_registry_core::changes_key::ChangesKey::from_master(&[93u8; 32], 1).unwrap();
-        key.encode_cursor(0)
+        key.encode_cursor(
+            0,
+            acdp_registry_core::changes_key::CursorAnchor {
+                seq: 0,
+                fp: acdp_registry_store::FEED_ORIGIN_FP,
+            },
+        )
     };
     let store = PgStore::connect(&url, 2).await.unwrap();
     let future = chrono::Utc::now().timestamp_millis() + 3_600_000;
@@ -1542,6 +1548,59 @@ async fn pg_changes_feed_round_trip() {
         3
     );
     assert_eq!(page(String::new()).await["changes"][0]["seq"], 3);
+
+    // rec-005 F: rewind the feed as a restore from a backup taken at seq 2
+    // would, so the identity issues 3 again. Cursors issued past the backup
+    // point expire beyond the restored head and after their seq is reused.
+    let at_head = page("since=head".into()).await["next_cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let assert_expired = |c: String, why: &'static str| {
+        let app = app.clone();
+        async move {
+            let (status, v) =
+                pg_send(&app, "GET", &format!("/changes?since={}", enc(&c)), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {v}");
+            assert_eq!(v["error"]["code"], "cursor_expired", "{why}: {v}");
+        }
+    };
+    sqlx::query("DELETE FROM changes WHERE seq > 2")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE changes ALTER COLUMN seq RESTART WITH 3")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert_expired(c2.clone(), "at 2, beyond the restored head").await;
+    assert_expired(at_head.clone(), "at the head, beyond the restored head").await;
+    let (status, r) = pg_send(
+        &app,
+        "POST",
+        &format!("/contexts/{}/retract", enc(&v2)),
+        Some(&pg_signed_event_envelope(94, &v2, "retracted")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retract v2 = {r}");
+    let reused = page(String::new()).await;
+    assert_eq!(reused["changes"][0]["seq"], 3);
+    assert_eq!(reused["changes"][0]["ctx_id"], json!(v2));
+    assert_expired(c2.clone(), "at 2, after 3 was reused").await;
+    assert_expired(at_head.clone(), "at the head, after 3 was reused").await;
+    // Past the old head: the anchor (3) is below the head and is checked by
+    // lookup, where it names a different entry.
+    let (status, r) = pg_send(
+        &app,
+        "POST",
+        &format!("/contexts/{}/republish", enc(&v2)),
+        Some(&pg_signed_event_envelope(94, &v2, "republished")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "republish v2 = {r}");
+    assert_eq!(page(String::new()).await["changes"][1]["seq"], 4);
+    assert_expired(c2, "at 2, once the feed grew past it").await;
+    assert_expired(at_head, "at the head, once the feed grew past it").await;
 }
 
 // ── RFC-ACDP-0021 Phase 5: POST/GET /key-attestations ───────────────────────

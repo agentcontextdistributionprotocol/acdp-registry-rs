@@ -58,9 +58,9 @@ use acdp_registry_store::key_attestations::{
     KeyAttestationIndexRow, KeyAttestationRecord, SuccessorAttestation, MAX_LIST_LIMIT,
 };
 use acdp_registry_store::{
-    CreateSubscriptionOutcome, EventReceiptMinter, ExtendedRegistryStore, FeedHead, FeedPage,
-    FeedQuery, FeedRow, NewSubscription, Page, StoredReceipt, SubscriptionCounts,
-    SubscriptionProgress, SubscriptionRecord,
+    CreateSubscriptionOutcome, EventReceiptMinter, ExtendedRegistryStore, FeedFingerprint,
+    FeedHead, FeedPage, FeedQuery, FeedRow, NewSubscription, Page, StoredReceipt,
+    SubscriptionCounts, SubscriptionProgress, SubscriptionRecord,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -90,6 +90,7 @@ struct Feed {
     /// The last seq assigned; positions are never reused.
     last_seq: u64,
     pruned_through: u64,
+    pruned_through_fp: Option<FeedFingerprint>,
 }
 
 impl Feed {
@@ -112,10 +113,11 @@ impl Feed {
     }
 
     fn head(&self) -> FeedHead {
-        FeedHead {
-            head: self.last_seq,
-            pruned_through: self.pruned_through,
-        }
+        FeedHead::from_snapshot(
+            self.rows.last().map(|r| (r.seq, r.fingerprint())),
+            self.pruned_through,
+            self.pruned_through_fp,
+        )
     }
 }
 
@@ -527,8 +529,9 @@ impl ExtendedRegistryStore for MemoryStore {
             .take(batch.max(1) as usize)
             .take_while(|r| r.appended_at_ms < older_than_ms)
             .count();
-        if n > 0 {
-            feed.pruned_through = feed.pruned_through.max(feed.rows[n - 1].seq);
+        if n > 0 && feed.rows[n - 1].seq >= feed.pruned_through {
+            feed.pruned_through = feed.rows[n - 1].seq;
+            feed.pruned_through_fp = Some(feed.rows[n - 1].fingerprint());
         }
         feed.rows.drain(..n);
         Ok(n as u64)

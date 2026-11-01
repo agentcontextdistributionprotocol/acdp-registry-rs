@@ -29,7 +29,10 @@ use acdp::types::search::{SearchParams, SearchResponse};
 use acdp_registry_types::config::RESERVED_TENANT;
 use async_trait::async_trait;
 
-pub use changes::{FeedAppend, FeedHead, FeedPage, FeedQuery, FeedRow};
+pub use changes::{
+    feed_fingerprint, FeedAppend, FeedFingerprint, FeedHead, FeedPage, FeedQuery, FeedRow,
+    FEED_ORIGIN_FP,
+};
 pub use cursor::{decode_cursor, encode_cursor};
 pub use event_receipts::{EventReceiptMinter, StoredReceipt, SweepReport};
 pub use key_attestations::{KeyAttestationFilter, KeyAttestationIndexRow, KeyAttestationRecord};

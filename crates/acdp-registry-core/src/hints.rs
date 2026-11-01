@@ -59,7 +59,7 @@ use zeroize::Zeroize as _;
 
 use crate::callback::resolve_allowed;
 use crate::changes_key::{ChangesKey, SealError};
-use crate::handlers::{evaluate_changes, ChangesRequest, Since};
+use crate::handlers::{evaluate_changes, head_cursor, ChangesRequest, Since};
 use crate::state::AppState;
 
 /// The header carrying the hint's HMAC (§8.2).
@@ -363,7 +363,8 @@ async fn hint_one<S: ExtendedRegistryStore + 'static>(
         limit: 1,
         filter: sub.filter.clone(),
     };
-    let head = store.changes_head().await?.head;
+    let feed = store.changes_head().await?;
+    let head = feed.head;
     let tenant = sub.tenant_id.as_deref();
     let resp = match evaluate_changes(state, key, Some(&owner), tenant, &req).await {
         Ok((resp, _)) => resp,
@@ -380,9 +381,12 @@ async fn hint_one<S: ExtendedRegistryStore + 'static>(
     };
     if resp.changes.is_empty() {
         // Nothing the owner may see: advance to where the scan stopped.
-        let pos = key.decode_cursor(&resp.next_cursor).map_err(|_| {
-            RegistryError::Internal("hint worker: its own cursor does not decode".into())
-        })?;
+        let pos = key
+            .decode_cursor(&resp.next_cursor)
+            .map_err(|_| {
+                RegistryError::Internal("hint worker: its own cursor does not decode".into())
+            })?
+            .pos;
         let p = SubscriptionProgress::healthy(pos, now_ms);
         return finish(p, HintOutcome::NothingVisible).await;
     }
@@ -415,7 +419,7 @@ async fn hint_one<S: ExtendedRegistryStore + 'static>(
     let hint = ChangeHint::new(
         sub.subscription_id.clone(),
         hint_authority(&state.config.registry.authority),
-        key.encode_cursor(head),
+        head_cursor(key, &feed),
     );
     let body = serde_json::to_vec(&hint)
         .map_err(|e| RegistryError::Internal(format!("change hint: {e}")))?;

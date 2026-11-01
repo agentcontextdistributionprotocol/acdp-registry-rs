@@ -539,15 +539,22 @@ first boot against it; there is no online restore path.
    without the profile, so the binary logs at `ERROR` and exits non-zero. Set
    the flag to match the backup — see
    [CONFIGURATION.md `[lifecycle]`](CONFIGURATION.md#lifecycle-acdp-030).
-5. **If `[changes]` is enabled, rotate its key after restoring an older
-   backup.** The restore rolls the feed's `seq` back. A cursor issued past
-   the restored head is refused (`cursor_expired`) only until new changes
-   push the head past it; from then on it is accepted, and a consumer
-   holding one silently skips the entries that reuse those numbers. Rotating (new key,
-   new `key_id`, see [Changes key](#changes-key)) turns every outstanding
-   cursor into `cursor_expired`, which makes consumers resync. Existing
-   subscriptions stop receiving hints and are disabled 72 hours later;
-   owners re-create them.
+5. **If `[changes]` is enabled, raise `[changes] cursor_epoch` after
+   restoring an older backup.** The restore rolls the feed's `seq` back, and
+   RFC-ACDP-0018 §5.3 requires refusing **every** cursor issued before the
+   reset. The registry catches the dangerous ones without help: each cursor
+   carries the feed head it was issued at and a fingerprint of that row, so a
+   cursor issued past the backup point is `cursor_expired` both while it is
+   beyond the restored head and after new entries reuse its numbers.
+   A cursor issued *before* the backup point names rows the restore put back,
+   so it still resumes, and it skips nothing. Only a value outside the
+   database can expire it, which is what the epoch is for. Set
+   `ACDP_REGISTRY_CHANGES__CURSOR_EPOCH` to one more than its current value
+   (unset means `0`) on every replica before the first boot. Every older
+   cursor then answers `cursor_expired`, and consumers resync from `since`
+   absent or `head` (§7). Unlike a key rotation, the epoch leaves
+   subscription secrets readable, so hints keep flowing. Never lower it: an
+   epoch that comes back makes its old cursors valid again.
 6. **Verify readiness, not liveness.** `GET /healthz` reports storage
    readiness and answers `503` if the backend is not usable; `GET /livez` says
    only that the process is up and will answer `200` against a broken database.
@@ -598,7 +605,7 @@ changed**: rows removed, reordered, or rewritten. The realistic causes are a
 database restore that rolled the log back, a partial restore that mixed two
 datasets, or direct writes to the log table.
 
-**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
+**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
 (pinned spec): a registry whose tree is lost **MUST NOT serve a reconstructed
 history under the same `log_id`**; it MUST start a new instantiation with a new
 `<instance>` component, and SHOULD publish an operational notice. "Serve" here

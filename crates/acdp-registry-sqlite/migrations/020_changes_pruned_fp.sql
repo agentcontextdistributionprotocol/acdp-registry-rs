@@ -1,0 +1,12 @@
+-- RFC-ACDP-0018 §5.3/§5.4: the fingerprint of the row at `pruned_through`.
+--
+-- Mirrors crates/acdp-registry-pg/migrations/020_changes_pruned_fp.sql.
+--
+-- A `/changes` cursor carries the feed head it was issued at and that row's
+-- fingerprint (FeedRow::fingerprint); a cursor whose anchor row no longer
+-- matches was issued before a sequence reset and is refused. When retention
+-- prunes the anchor row itself, this column keeps its fingerprint, written
+-- in the same transaction as the delete. NULL on a feed pruned before this
+-- migration; until the next append, new cursors on such a feed anchor on
+-- position 0 instead (handlers::changes::anchor_at).
+ALTER TABLE changes_meta ADD COLUMN pruned_through_fp BLOB;

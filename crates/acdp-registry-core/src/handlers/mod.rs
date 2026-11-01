@@ -10,8 +10,8 @@ mod subscriptions;
 
 pub use auth::{issue_challenge, issue_token, revoke_token};
 pub use changes::{
-    changes, evaluate_changes, parse_request, ChangesRequest, Since, MIN_SCAN_ROWS,
-    REFILL_MAX_SCANS,
+    anchor_at, changes, evaluate_changes, head_cursor, parse_request, ChangesRequest, Since,
+    MIN_SCAN_ROWS, REFILL_MAX_SCANS,
 };
 pub(crate) use context::caller_from_headers;
 pub(crate) use context::version_at_least;

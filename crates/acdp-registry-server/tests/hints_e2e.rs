@@ -415,7 +415,7 @@ fn assert_valid_hint(seen: &Seen, sub: &Subscription, at_ms: i64, head: u64) {
     assert_eq!(hint.hint_version, "acdp-change-hint/1");
     assert_eq!(hint.subscription_id, sub.subscription_id);
     assert_eq!(hint.registry_authority, AUTHORITY);
-    assert_eq!(key().decode_cursor(&hint.head_cursor).unwrap(), head);
+    assert_eq!(key().decode_cursor(&hint.head_cursor).unwrap().pos, head);
 }
 
 // ─── rec-007 C: a signed hint, coalesced ────────────────────────────────────

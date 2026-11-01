@@ -2614,6 +2614,11 @@ where
         "[{label}] a fresh feed is empty"
     );
     assert_eq!(
+        (empty.head_fp, empty.pruned_through_fp),
+        (Some(crate::FEED_ORIGIN_FP), None),
+        "[{label}] an empty feed's head is the origin"
+    );
+    assert_eq!(
         plain.prune_changes(i64::MAX, 100).await.expect("prune"),
         0,
         "[{label}] pruning an empty feed deletes nothing"
@@ -2640,6 +2645,23 @@ where
     }
     let head = plain.changes_head().await.unwrap();
     assert_eq!(head.head, 3, "[{label}]");
+    // §5.3 anchors: every backend fingerprints the same columns the same way.
+    let all = plain
+        .changes_page(&crate::FeedQuery {
+            after: 0,
+            scan_limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let fp: Vec<_> = all.rows.iter().map(crate::FeedRow::fingerprint).collect();
+    assert_eq!(fp.len(), 3, "[{label}]");
+    assert_eq!(
+        head.head_fp,
+        Some(fp[2]),
+        "[{label}] the head row's fingerprint"
+    );
+    assert_eq!(all.head_fp, head.head_fp, "[{label}] a page carries it too");
     assert_eq!(
         plain.prune_changes(0, 100).await.unwrap(),
         0,
@@ -2652,6 +2674,11 @@ where
     );
     let after = plain.changes_head().await.unwrap();
     assert_eq!((after.head, after.pruned_through), (3, 2), "[{label}]");
+    assert_eq!(
+        (after.head_fp, after.pruned_through_fp),
+        (Some(fp[2]), Some(fp[1])),
+        "[{label}] the prune recorded the boundary row's fingerprint"
+    );
     let page = plain
         .changes_page(&crate::FeedQuery {
             after: 0,
@@ -2675,6 +2702,11 @@ where
         (drained.head, drained.pruned_through),
         (3, 3),
         "[{label}] an emptied feed keeps its head: positions are never reused"
+    );
+    assert_eq!(
+        (drained.head_fp, drained.pruned_through_fp),
+        (Some(fp[2]), Some(fp[2])),
+        "[{label}] a drained head keeps its fingerprint through the marker"
     );
     // The next append continues past the pruned positions.
     let ctx_id = &ids[0];
@@ -2710,6 +2742,11 @@ where
     assert!(
         page.rows[0].seq > 3,
         "[{label}] seq is never reused after a prune"
+    );
+    assert_eq!(
+        plain.changes_head().await.unwrap().head_fp,
+        Some(page.rows[0].fingerprint()),
+        "[{label}] the new head row anchors cursors again"
     );
 }
 
