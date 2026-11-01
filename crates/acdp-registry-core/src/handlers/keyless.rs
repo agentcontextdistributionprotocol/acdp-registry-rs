@@ -31,7 +31,6 @@
 //! event (R13). `handlers/context.rs` only calls them, and only with the
 //! profile on.
 
-use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -191,18 +190,10 @@ async fn mint_attestation<S: ExtendedRegistryStore + 'static>(
 
     // Step 1: the per-IP budget, charged on arrival, before the body is
     // read. The client IP is the auth limiter's: the TCP peer, or the
-    // trusted proxy chain's `X-Forwarded-For`.
+    // `X-Forwarded-For` hop the `[rate_limit]` policy trusts.
     if let Some(limiter) = &kl.ip_limiter {
-        let peer = req
-            .extensions()
-            .get::<PeerIp>()
-            .and_then(|p| p.0)
-            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-        let xff = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok());
-        let ip = crate::rate_limit::client_ip(peer, xff, &state.trusted_proxies);
+        let peer = req.extensions().get::<PeerIp>().and_then(|p| p.0);
+        let ip = state.client_ip(peer, req.headers());
         limiter
             .check(&format!("ip:{ip}"))
             .map_err(|s| rate_limited(RateLimitScope::KeylessPerIp, s))?;

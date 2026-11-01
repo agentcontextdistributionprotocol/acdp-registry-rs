@@ -144,6 +144,7 @@ fn config(playground: bool) -> RegistryConfig {
         webhook: WebhookConfig::default(),
         limits: LimitsConfig::default(),
         rate_limit: Default::default(),
+        read_limits: Default::default(),
         metrics: Default::default(),
         playground: PlaygroundConfig {
             enabled: playground,

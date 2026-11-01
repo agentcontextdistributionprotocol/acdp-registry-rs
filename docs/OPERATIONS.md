@@ -262,6 +262,38 @@ replica — every deployment recipe in this repo runs exactly one. Its counters 
 ephemeral by design (the table is `UNLOGGED`): after a database crash or standby
 promotion one window's budget resets once.
 
+### Read rate limits (RFC-ACDP-0008 §4.3)
+
+`[read_limits]` (off by default) bounds every data-plane `GET`/`HEAD`: per
+client address for anonymous reads, per requester DID for authenticated
+ones. Keys and defaults are in
+[CONFIGURATION.md · `[read_limits]`](CONFIGURATION.md#read_limits-acdp-050).
+Things to know before turning it on:
+
+- **Per replica.** The read buckets are in memory only; the Postgres backend
+  above does not cover them. With N replicas a client can read up to N × the
+  budget. A read limiter that cost a database round trip on every read would
+  be a worse trade.
+- **Behind a proxy, trust the forwarded header first.** Without
+  `trusted_proxies` (or `rate_limit.forwarded_header_trust = "any_peer"`)
+  every anonymous client shares the proxy's address and so one bucket: the
+  first busy client throttles everyone. On a platform whose edge addresses
+  cannot be listed, `any_peer` reads the rightmost `X-Forwarded-For` hop from
+  every peer. Use it only when the registry is reachable solely through that
+  edge. To check, send a request with a forged `X-Forwarded-For: 1.2.3.4`,
+  then one with two forged header lines (`X-Forwarded-For: 1.2.3.4` and
+  `X-Forwarded-For: 5.6.7.8`): each must land in the same bucket as a request
+  without the header. The second probe catches an edge that appends to the
+  first line and passes a later client line through untouched.
+- **Watch** `acdp_registry_rate_limit_rejections_total{scope="read_anonymous"}`
+  and `{scope="read_principal"}`. A steady rise in `read_anonymous` from many
+  clients usually means the budget is too low for a shared NAT or the proxy
+  trust is missing, not abuse.
+- The budgets are not advertised in capabilities unless `read_limits.advertise`
+  is set. Keep it off while any consumer is on acdp 0.19 or older: they reject
+  a `limits` key they do not know, and with it the whole capabilities
+  document.
+
 ## Metrics
 
 Set `metrics.enabled = true` to mount `GET /metrics` (Prometheus text

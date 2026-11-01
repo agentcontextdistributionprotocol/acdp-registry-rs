@@ -32,6 +32,23 @@ bearer tokens, 0.5.0 Draft; RFC-ACDP-0007 `limits` open from 0.5.0; RFC-ACDP-001
   (whose `Limits` refuses unknown fields) still parses this registry's capabilities.
 - **Every 429 now carries `Retry-After`**, including one that originates as an SDK-layer
   `rate_limited` error without a delay (60 s default), as RFC-ACDP-0008 §4.3 requires from 0.5.0.
+- **Read rate limits (RFC-ACDP-0008 §4.3), off by default.** The new `[read_limits]` section caps
+  data-plane `GET`/`HEAD` per client address (`anonymous_per_minute`, default 600) and per requester
+  DID (`authenticated_per_minute`, default 1200), with `429 rate_limited` + `Retry-After`. Nothing
+  changes unless `read_limits.enabled = true`. Behind a proxy, configure the forwarded-header trust
+  first ([OPERATIONS.md](OPERATIONS.md#read-rate-limits-rfc-acdp-0008-43)).
+  `read_limits.advertise` (default off) adds `limits.max_reads_per_minute` /
+  `max_anonymous_reads_per_minute` to capabilities; consumers on acdp 0.19 or older reject that
+  document, so leave it off until they upgrade.
+- **`rate_limit.forwarded_header_trust`** (`trusted_proxies`, the default, or `any_peer`) now governs
+  `X-Forwarded-For` for every per-IP limiter (`/auth/*`, keyless and anonymous reads). The default
+  keeps today's trust decision. One change applies in every mode: several `X-Forwarded-For` header
+  lines are now read as one list in arrival order (previously only the first line was read), and a
+  non-ASCII line makes the whole header fall back to the TCP peer. Behind a trusted proxy that adds
+  its hop as a separate line, `/auth/*` and keyless buckets now key on that proxy's view of the
+  client, as intended.
+- Metric `acdp_registry_rate_limit_rejections_total` gains scopes `read_anonymous` and
+  `read_principal`.
 - **Hard Seam:** unchanged. acdp 0.20 adds no `KeyAuthorization` or `RevocationTrustClass` variant;
   `AcdpError::RateLimited` became a struct variant carrying the parsed `Retry-After`.
 

@@ -266,7 +266,16 @@ The binary validates config before serving and refuses to boot on a misconfig
   trust XFF, and under `trusted_proxies` tenant trust, from every peer). A
   non-empty `trusted_proxies` with `rate_limit.enabled
   = false` is refused (the list would be parsed for nothing) — unless
-  `auth.tenant_header_trust = "trusted_proxies"`, the list's second consumer.
+  `read_limits.enabled = true` or `auth.tenant_header_trust =
+  "trusted_proxies"`, the list's other consumers.
+  `rate_limit.forwarded_header_trust = "any_peer"` boots with a warning that
+  names its assumption (see [`[rate_limit]`](#rate_limit-feat-06)).
+- **Read limits (RFC-ACDP-0008 §4.3)** — `read_limits.enabled = true` with
+  both `anonymous_per_minute` and `authenticated_per_minute` at `0` is refused
+  (a limiter that limits nothing), and so is `advertise = true` without
+  `enabled` (a ceiling the registry would not enforce). `advertise = true`
+  logs a warning naming acdp 0.19 consumers, or a different one when no
+  ceiling qualifies.
 - **Metrics (FEAT-10)** — when `metrics.enabled`, `duration_buckets` must be
   non-empty, positive, finite, and strictly increasing (Prometheus histogram
   bounds).
@@ -413,6 +422,7 @@ attacker-independent.
 | `per_ip_per_minute` | u32 | `60` | Per-resolved-client-IP cap on `/auth/*`; `0` disables the per-IP bound. |
 | `global_per_minute` | u32 | `6000` | Whole-process ceiling across all IPs; `0` disables it. Bounds a source-IP-rotating flood. |
 | `trusted_proxies` | list\<CIDR\> | `[]` | Reverse-proxy CIDRs whose `X-Forwarded-For` is trusted. Empty = never trust XFF. Also the gateway list for `auth.tenant_header_trust = "trusted_proxies"`, matched against the immediate TCP peer; allowed with `enabled = false` in that mode. Entries are matched as written against the IPv4-canonicalised peer: list IPv4 gateways in IPv4 form (an `::ffff:…` entry never matches). A `/0` entry is refused at startup. |
+| `forwarded_header_trust` | `"trusted_proxies"` \| `"any_peer"` | `"trusted_proxies"` | When `X-Forwarded-For` may name the client for **every** per-IP limiter: `/auth/*`, keyless minting and anonymous reads ([`[read_limits]`](#read_limits-acdp-050)). `trusted_proxies`: only from a TCP peer in `trusted_proxies`. `any_peer`: from every peer — for a platform edge whose addresses cannot be listed. See below. |
 | `backend` | `"memory"` \| `"postgres"` | `"memory"` | Where the two ceilings above are counted. `memory`: per process (each replica counts for itself). `postgres`: counted once across every replica sharing the database — see **Shared backend** below. |
 | `backend_unavailable` | `"allow"` \| `"deny"` | `"allow"` | Only with `backend = "postgres"`. What to do when the database cannot answer a check: `allow` falls back to the per-process limit; `deny` refuses with `429` + `Retry-After: 5`. |
 | `backend_timeout_ms` | u64 | `250` | Only with `backend = "postgres"`. Per-check timeout against the database; must be `> 0`. |
@@ -443,9 +453,22 @@ is **never** trusted unless the socket peer is itself in one of the
 evade the per-IP budget or frame another address. When the peer *is* a trusted
 proxy, the real client is taken from the rightmost `X-Forwarded-For` entry that
 is not itself a trusted proxy (walking a chain of trusted hops from the right).
+Several `X-Forwarded-For` header lines are read as one list in arrival order,
+so a proxy that adds its hop as a new line rather than appending still has
+the last word.
 List **only** proxies you operate; a wrong entry is a spoofing hole. CIDRs are
 validated at startup — a malformed entry fails the boot rather than silently
 disabling XFF trust.
+
+`forwarded_header_trust = "any_peer"` treats every TCP peer as a trusted
+proxy, so the rightmost `X-Forwarded-For` entry not itself in
+`trusted_proxies` names the client. It exists for platforms (Railway, for
+example) whose edge addresses cannot be enumerated. It is safe **only** when
+every request reaches the registry through a proxy that always appends the
+address it received the request from: a client can then forge entries only to
+the left of that hop, and those are never read. If the registry is reachable
+directly, a client picks its own bucket. Startup logs a warning naming this
+assumption. A malformed or zone-scoped hop falls back to the TCP peer.
 
 > Which ceilings are per replica depends on `backend`. With the default
 > `backend = "memory"` this is the same per-process, in-memory caveat as
@@ -458,6 +481,40 @@ disabling XFF trust.
 > The `[limits]` per-agent budgets stay per-process under either backend.
 > Requests are admitted or rejected *before* any DID resolution, so the
 > SSRF/DNS path never runs for a throttled request.
+
+### `[read_limits]` *(ACDP 0.5.0)*
+
+RFC-ACDP-0008 §4.3 read rate limits on every data-plane `GET`/`HEAD` route
+(contexts, search, lineages, `/log/*`, `/changes`, `GET /subscriptions/{id}`,
+`GET /key-attestations`). A refused read is `429 rate_limited` with
+`Retry-After`, decided before the handler runs, so a throttled consumer never
+sees a `404` or `403`. Capabilities, `did.json`, JWKS, health, `/metrics`,
+`/admin/*` and `/auth/*` are never read-limited. See
+[HTTP-API.md · Rate limits](HTTP-API.md#rate-limits-429).
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `false` | Master switch. |
+| `anonymous_per_minute` | u32 | `600` | Per client address (an IPv6 client by its /64), resolved by the `[rate_limit]` forwarded-header policy. `0`: anonymous reads unlimited. |
+| `authenticated_per_minute` | u32 | `1200` | Per requester DID, for a request carrying a valid bearer token. `0`: authenticated reads unlimited. |
+| `advertise` | bool | `false` | Advertise the budgets as `limits.max_reads_per_minute` (only with `auth.enabled`) and `limits.max_anonymous_reads_per_minute` (only with `auth.anonymous_public_reads`), RFC-ACDP-0007 §3.2. A `0` budget is never advertised. Needs `enabled`. **Leave off while any consumer is on acdp 0.19 or older (Seam included):** their `limits` is closed and they reject the whole capabilities document. |
+
+Each budget is a fixed 60-second window, in memory and **per replica**: with
+N replicas behind a balancer a client can get up to N × the budget. Behind a
+proxy, set `rate_limit.trusted_proxies` (or `forwarded_header_trust =
+"any_peer"`) before enabling this; otherwise every client shares the proxy's
+address and therefore one bucket. A request with a present but invalid bearer
+token is charged to its client address, then refused `403`.
+
+Enforcing and advertising are separate on purpose (RFC-ACDP-0007 §3.2
+rollout note): RFC-ACDP-0008 §4.3 says a registry SHOULD NOT advertise the
+read ceilings until the consumers it serves track the 0.5.0 schema. An
+advertised ceiling is per replica, so it is a floor a client can rely on.
+
+Env: `ACDP_REGISTRY_READ_LIMITS__ENABLED`,
+`ACDP_REGISTRY_READ_LIMITS__ANONYMOUS_PER_MINUTE`,
+`ACDP_REGISTRY_READ_LIMITS__AUTHENTICATED_PER_MINUTE`,
+`ACDP_REGISTRY_READ_LIMITS__ADVERTISE`.
 
 ### `[metrics]` *(FEAT-10)*
 

@@ -117,6 +117,7 @@ fn config(playground: bool) -> RegistryConfig {
         webhook: WebhookConfig::default(),
         limits: LimitsConfig::default(),
         rate_limit: Default::default(),
+        read_limits: Default::default(),
         metrics: MetricsConfig {
             enabled: true,
             bearer_token: String::new(),

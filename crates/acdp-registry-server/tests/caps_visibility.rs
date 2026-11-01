@@ -102,6 +102,7 @@ fn base_config() -> RegistryConfig {
         webhook: WebhookConfig::default(),
         limits: LimitsConfig::default(),
         rate_limit: Default::default(),
+        read_limits: Default::default(),
         metrics: Default::default(),
         playground: PlaygroundConfig::default(),
         receipt: Default::default(),

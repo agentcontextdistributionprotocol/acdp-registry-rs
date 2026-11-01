@@ -26,6 +26,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+/// Response headers as served: lowercased names, trimmed values, in order.
+pub type Headers = Vec<(String, String)>;
+
 /// One running registry process. Killed on drop.
 pub struct SpawnedRegistry {
     child: Child,
@@ -139,6 +142,22 @@ impl SpawnedRegistry {
             .unwrap_or_else(|e| panic!("GET {path}: {e}\n{}", self.output()))
     }
 
+    /// `GET path` with extra request headers, returning the status, the
+    /// response headers (names lowercased) and the parsed body. Used by the
+    /// rate-002 self-test in `conformance.rs`, which needs `Retry-After`.
+    #[allow(dead_code)]
+    pub fn get_with_headers(&self, path: &str, headers: &[(&str, &str)]) -> (u16, Headers, Value) {
+        let (status, head, body) = self
+            .request_full("GET", path, headers, None)
+            .unwrap_or_else(|e| panic!("GET {path}: {e}\n{}", self.output()));
+        let v = if body.trim().is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(&body).unwrap_or(Value::String(body))
+        };
+        (status, head, v)
+    }
+
     /// [`Self::request_raw`], with the body parsed. A non-JSON body comes back
     /// as `Value::String`, an empty one as `Null`.
     fn request(
@@ -164,6 +183,19 @@ impl SpawnedRegistry {
         path: &str,
         body: Option<&Value>,
     ) -> std::io::Result<(u16, String)> {
+        self.request_full(method, path, &[], body)
+            .map(|(status, _, body)| (status, body))
+    }
+
+    /// One request with extra headers; the status, the response headers
+    /// (lowercased names) and the dechunked body.
+    fn request_full(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<&Value>,
+    ) -> std::io::Result<(u16, Headers, String)> {
         let mut s = TcpStream::connect(("127.0.0.1", self.port))?;
         s.set_read_timeout(Some(Duration::from_secs(10)))?;
         let payload = body
@@ -176,6 +208,9 @@ impl SpawnedRegistry {
         );
         if body.is_some() {
             req.push_str("Content-Type: application/json\r\n");
+        }
+        for (name, value) in headers {
+            req.push_str(&format!("{name}: {value}\r\n"));
         }
         req.push_str("\r\n");
         s.write_all(req.as_bytes())?;
@@ -199,7 +234,13 @@ impl SpawnedRegistry {
         } else {
             rest.to_string()
         };
-        Ok((status, body))
+        let response_headers = head
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split_once(':'))
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+            .collect();
+        Ok((status, response_headers, body))
     }
 }
 

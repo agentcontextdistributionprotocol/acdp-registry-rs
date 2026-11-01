@@ -6,7 +6,7 @@ use acdp::client::CrossRegistryResolver;
 use acdp::registry::RegistryServer;
 use acdp_registry_auth::AuthService;
 use acdp_registry_store::{ExtendedRegistryStore, SharedRateLimitBackend};
-use acdp_registry_types::config::UnavailablePostureConfig;
+use acdp_registry_types::config::{ForwardedHeaderTrust, UnavailablePostureConfig};
 use acdp_registry_types::{PlaygroundConfig, RegistryConfig, TenantHeaderTrust};
 use acdp_registry_webhook::WebhookEmitter;
 
@@ -60,6 +60,18 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// default) means `X-Forwarded-For` is never trusted and the TCP socket
     /// peer is always used as the client IP.
     pub trusted_proxies: TrustedProxies,
+    /// `[rate_limit] forwarded_header_trust`: whether `X-Forwarded-For` is
+    /// read only from a peer in `trusted_proxies` or from every peer. One
+    /// setting for every per-IP limiter; see [`Self::client_ip`].
+    pub forwarded_header_trust: ForwardedHeaderTrust,
+    /// RFC-ACDP-0008 §4.3 anonymous read limiter, keyed by
+    /// [`crate::rate_limit::read_bucket_key`]. `None` when `[read_limits]` is
+    /// off or `anonymous_per_minute == 0`.
+    pub read_anonymous_limiter: Option<Arc<AgentRateLimiter>>,
+    /// RFC-ACDP-0008 §4.3 authenticated read limiter, keyed by the requester
+    /// DID. `None` when `[read_limits]` is off or
+    /// `authenticated_per_minute == 0`.
+    pub read_principal_limiter: Option<Arc<AgentRateLimiter>>,
     /// #374: the `auth.tenant_header_trust` mode in effect (the config value,
     /// or `none` when the key is absent, #386).
     pub tenant_header_trust: TenantHeaderTrust,
@@ -120,6 +132,36 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
 }
 
 impl<S: ExtendedRegistryStore> AppStateInner<S> {
+    /// The client address every per-IP limiter keys on: the TCP `peer`, or
+    /// the `X-Forwarded-For` hop the `[rate_limit]` forwarded-header policy
+    /// trusts (see [`crate::rate_limit::resolve_client_ip`]). `None` peer (no
+    /// recorded connection, e.g. an in-process test) is `0.0.0.0`, so such
+    /// requests share one bucket rather than escaping the limit.
+    pub fn client_ip(
+        &self,
+        peer: Option<std::net::IpAddr>,
+        headers: &axum::http::HeaderMap,
+    ) -> std::net::IpAddr {
+        let peer = peer.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        // Every `X-Forwarded-For` line, in order, folded into one list
+        // (RFC 9110 §5.3). Reading only the first line would let a client
+        // pick its own bucket behind a proxy that adds its hop as a separate
+        // line instead of appending to the client's. A non-ASCII line makes
+        // the whole header unusable, so it falls back to the peer.
+        let lines: Option<Vec<&str>> = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .map(|v| v.to_str().ok())
+            .collect();
+        let xff = lines.filter(|l| !l.is_empty()).map(|l| l.join(","));
+        crate::rate_limit::resolve_client_ip(
+            peer,
+            xff.as_deref(),
+            &self.trusted_proxies,
+            self.forwarded_header_trust,
+        )
+    }
+
     /// Route the `/auth/*` ceilings through a shared (cluster-wide) backend.
     /// A no-op when `shared` is `None`.
     ///
@@ -344,6 +386,13 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             .clone()
             .map(|l| l as Arc<dyn SharedRateLimitBackend>);
         let trusted_proxies = TrustedProxies::parse_lossy(&rl.trusted_proxies);
+        let forwarded_header_trust = rl.forwarded_header_trust;
+        let reads = &config.read_limits;
+        let read_limiter = |per_minute: u32| {
+            (reads.enabled && per_minute > 0).then(|| Arc::new(AgentRateLimiter::new(per_minute)))
+        };
+        let read_anonymous_limiter = read_limiter(reads.anonymous_per_minute);
+        let read_principal_limiter = read_limiter(reads.authenticated_per_minute);
         let tenant_header_trust = config.auth.effective_tenant_header_trust();
         let tenant_trusted_proxies =
             TrustedProxies::parse(&rl.trusted_proxies).unwrap_or_else(|e| {
@@ -375,6 +424,9 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             auth_ip_limiter,
             auth_limit_backend,
             trusted_proxies,
+            forwarded_header_trust,
+            read_anonymous_limiter,
+            read_principal_limiter,
             tenant_header_trust,
             tenant_trusted_proxies,
             metrics,

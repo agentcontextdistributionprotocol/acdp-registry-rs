@@ -9,15 +9,18 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use acdp_registry_store::{LimitDecision, SharedLimitScope, SharedRateLimitBackend};
+use acdp_registry_types::config::ForwardedHeaderTrust;
 use async_trait::async_trait;
 
 const WINDOW: Duration = Duration::from_secs(60);
-/// Opportunistic prune threshold — keeps the agent map from growing without
-/// bound when many distinct agents publish once and never return.
+/// Opportunistic prune floor — keeps the agent map from growing without
+/// bound when many distinct agents publish once and never return. The live
+/// threshold doubles past this (see [`AgentRateLimiter::prune_if_due`]).
 const PRUNE_AT: usize = 4096;
 
 /// Seconds a rejected client should wait: the remainder of the window, floored
@@ -36,6 +39,9 @@ struct Bucket {
 pub struct AgentRateLimiter {
     limit: u32,
     buckets: Mutex<HashMap<String, Bucket>>,
+    /// Map size that triggers the next prune. Only read and written while
+    /// `buckets` is locked; atomic just to keep `&self` methods.
+    prune_threshold: AtomicUsize,
     /// Process-wide ceiling per window. `u32::MAX` ⇒ effectively disabled.
     /// Defends the unauthenticated `/auth/challenge` endpoint (#24): the
     /// per-agent key is attacker-controlled, so varying `agent_id` bypasses
@@ -58,6 +64,7 @@ impl AgentRateLimiter {
         Self {
             limit: limit_per_minute,
             buckets: Mutex::new(HashMap::new()),
+            prune_threshold: AtomicUsize::new(PRUNE_AT),
             global_limit: global_limit_per_minute,
             global: Mutex::new(Bucket {
                 window_start: Instant::now(),
@@ -146,9 +153,7 @@ impl AgentRateLimiter {
 
     fn record_at(&self, agent_id: &str, now: Instant) {
         let mut map = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        if map.len() >= PRUNE_AT {
-            map.retain(|_, b| now.duration_since(b.window_start) < WINDOW);
-        }
+        self.prune_if_due(&mut map, now);
         let bucket = map.entry(agent_id.to_string()).or_insert(Bucket {
             window_start: now,
             count: 0,
@@ -160,6 +165,26 @@ impl AgentRateLimiter {
         // Saturating rather than wrapping: a wrapped count would silently reset
         // the bucket to 0 and hand the agent a fresh budget.
         bucket.count = bucket.count.saturating_add(1);
+    }
+
+    /// Evict expired buckets once the map reaches the prune threshold, then
+    /// set the next threshold to twice what survived (never below
+    /// [`PRUNE_AT`]).
+    ///
+    /// A fixed threshold re-scans the whole map on every insert once more
+    /// than `PRUNE_AT` keys are live in one window: on the read limiter that
+    /// is every anonymous GET from a busy registry, or from one client
+    /// rotating through a /48, all under this one mutex. Doubling makes the
+    /// scan amortised O(1) per insert while still bounding the map at about
+    /// twice the peak number of keys live in one window (stale entries left
+    /// after a burst wait for the next prune).
+    fn prune_if_due(&self, map: &mut HashMap<String, Bucket>, now: Instant) {
+        if map.len() < self.prune_threshold.load(Ordering::Relaxed) {
+            return;
+        }
+        map.retain(|_, b| now.duration_since(b.window_start) < WINDOW);
+        let next = map.len().saturating_mul(2).max(PRUNE_AT);
+        self.prune_threshold.store(next, Ordering::Relaxed);
     }
 
     /// Number of keys in the bucket map. Test-only: lets a handler-level test
@@ -177,9 +202,7 @@ impl AgentRateLimiter {
 
     fn check_at(&self, agent_id: &str, now: Instant) -> Result<(), u64> {
         let mut map = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        if map.len() >= PRUNE_AT {
-            map.retain(|_, b| now.duration_since(b.window_start) < WINDOW);
-        }
+        self.prune_if_due(&mut map, now);
         let bucket = map.entry(agent_id.to_string()).or_insert(Bucket {
             window_start: now,
             count: 0,
@@ -438,7 +461,28 @@ impl TrustedProxies {
 /// absent/garbage), we fall back to `peer`. When `trusted` is empty, XFF is
 /// never consulted.
 pub fn client_ip(peer: IpAddr, xff: Option<&str>, trusted: &TrustedProxies) -> IpAddr {
-    if trusted.is_empty() || !trusted.contains(peer) {
+    resolve_client_ip(peer, xff, trusted, ForwardedHeaderTrust::TrustedProxies)
+}
+
+/// [`client_ip`] under an explicit `[rate_limit] forwarded_header_trust`.
+///
+/// `TrustedProxies` is [`client_ip`] exactly. `AnyPeer` treats the TCP peer
+/// as a trusted hop whatever its address: the rightmost `X-Forwarded-For`
+/// entry that is not itself in `trusted` names the client. Only entries the
+/// fronting proxy appended are read, so a client-forged entry to their left
+/// never changes the result. Garbage (an unparseable hop, an IPv6 zone id)
+/// still falls back to `peer`.
+pub fn resolve_client_ip(
+    peer: IpAddr,
+    xff: Option<&str>,
+    trusted: &TrustedProxies,
+    mode: ForwardedHeaderTrust,
+) -> IpAddr {
+    let peer_trusted = match mode {
+        ForwardedHeaderTrust::AnyPeer => true,
+        ForwardedHeaderTrust::TrustedProxies => !trusted.is_empty() && trusted.contains(peer),
+    };
+    if !peer_trusted {
         return peer;
     }
     let Some(xff) = xff else {
@@ -467,6 +511,19 @@ pub fn client_ip(peer: IpAddr, xff: Option<&str>, trusted: &TrustedProxies) -> I
 /// listener's dual-stack representation.
 pub fn canonical_ip(ip: IpAddr) -> IpAddr {
     ip.to_canonical()
+}
+
+/// The anonymous read bucket for a client address: `ip:<v4>` for IPv4, and
+/// `ip:<v6 /64>/64` for IPv6, since one subscriber is routinely handed a
+/// whole /64 and could otherwise rotate through it to multiply its budget.
+pub fn read_bucket_key(ip: IpAddr) -> String {
+    match canonical_ip(ip) {
+        IpAddr::V4(v4) => format!("ip:{v4}"),
+        IpAddr::V6(v6) => {
+            let net = u128::from(v6) & (u128::MAX << 64);
+            format!("ip:{}/64", std::net::Ipv6Addr::from(net))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -947,6 +1004,38 @@ mod tests {
         assert_eq!(len, 1, "stale buckets must be pruned, got {len} entries");
     }
 
+    #[test]
+    fn prune_threshold_doubles_while_keys_stay_live_and_shrinks_after() {
+        let rl = AgentRateLimiter::new(10);
+        let t0 = Instant::now();
+        for i in 0..PRUNE_AT {
+            assert!(rl.check_at(&format!("live-{i}"), t0).is_ok());
+        }
+        // The insert at the threshold prunes, keeps every live key, and moves
+        // the next prune out to twice the survivors, so the inserts after it
+        // do not each re-scan the map.
+        assert!(rl.check_at("one-more", t0).is_ok());
+        assert_eq!(
+            rl.prune_threshold.load(Ordering::Relaxed),
+            2 * PRUNE_AT,
+            "a prune that evicts nothing must push the next one out"
+        );
+        // Below the new threshold, inserts leave the map alone.
+        assert!(rl.check_at("below", t0).is_ok());
+        assert_eq!(rl.buckets.lock().unwrap().len(), PRUNE_AT + 2);
+        // Fill to the threshold so a prune is due, then let it run a window
+        // later: everything is stale, the map empties, and the threshold
+        // falls back to the floor.
+        for i in 0..PRUNE_AT - 2 {
+            assert!(rl.check_at(&format!("second-{i}"), t0).is_ok());
+        }
+        let mut map = rl.buckets.lock().unwrap();
+        assert!(map.len() >= rl.prune_threshold.load(Ordering::Relaxed));
+        rl.prune_if_due(&mut map, t0 + Duration::from_secs(61));
+        assert!(map.is_empty());
+        assert_eq!(rl.prune_threshold.load(Ordering::Relaxed), PRUNE_AT);
+    }
+
     // ── CIDR + client-IP resolution (FEAT-06) ───────────────────────
 
     fn ip(s: &str) -> IpAddr {
@@ -1029,6 +1118,79 @@ mod tests {
         let trusted = TrustedProxies::parse(&["10.0.0.0/8".into()]).unwrap();
         let got = client_ip(ip("10.0.0.5"), Some("garbage"), &trusted);
         assert_eq!(got, ip("10.0.0.5"));
+    }
+
+    #[test]
+    fn any_peer_reads_the_rightmost_hop_from_an_unlisted_peer() {
+        let none = TrustedProxies::default();
+        let any = ForwardedHeaderTrust::AnyPeer;
+        // The proxy appended 198.51.100.7; the client forged the left entry.
+        assert_eq!(
+            resolve_client_ip(ip("100.64.0.2"), Some("6.6.6.6, 198.51.100.7"), &none, any),
+            ip("198.51.100.7")
+        );
+        // A forged left-hand entry never changes the bucket.
+        assert_eq!(
+            resolve_client_ip(ip("100.64.0.2"), Some("1.2.3.4, 198.51.100.7"), &none, any),
+            resolve_client_ip(ip("100.64.0.2"), Some("198.51.100.7"), &none, any)
+        );
+        // No header, garbage, or an IPv6 zone id: the peer.
+        assert_eq!(
+            resolve_client_ip(ip("100.64.0.2"), None, &none, any),
+            ip("100.64.0.2")
+        );
+        for bad in ["not-an-ip", "fe80::1%eth0", ""] {
+            assert_eq!(
+                resolve_client_ip(ip("100.64.0.2"), Some(bad), &none, any),
+                ip("100.64.0.2"),
+                "{bad:?}"
+            );
+        }
+        // Listed proxies inside the chain are still skipped.
+        let p = TrustedProxies::parse(&["10.0.0.0/8".into()]).unwrap();
+        assert_eq!(
+            resolve_client_ip(ip("100.64.0.2"), Some("203.0.113.9, 10.1.1.1"), &p, any),
+            ip("203.0.113.9")
+        );
+    }
+
+    #[test]
+    fn trusted_proxies_mode_is_client_ip_exactly() {
+        let p = TrustedProxies::parse(&["10.0.0.0/8".into()]).unwrap();
+        let mode = ForwardedHeaderTrust::TrustedProxies;
+        for (peer, xff) in [
+            ("10.0.0.1", Some("203.0.113.9")),
+            ("198.51.100.1", Some("203.0.113.9")),
+            ("10.0.0.1", None),
+        ] {
+            assert_eq!(
+                resolve_client_ip(ip(peer), xff, &p, mode),
+                client_ip(ip(peer), xff, &p)
+            );
+        }
+        // An unlisted peer's XFF is ignored in this mode.
+        assert_eq!(
+            resolve_client_ip(ip("198.51.100.1"), Some("203.0.113.9"), &p, mode),
+            ip("198.51.100.1")
+        );
+    }
+
+    #[test]
+    fn read_bucket_key_groups_ipv6_by_slash_64() {
+        assert_eq!(read_bucket_key(ip("203.0.113.9")), "ip:203.0.113.9");
+        assert_eq!(read_bucket_key(ip("::ffff:203.0.113.9")), "ip:203.0.113.9");
+        assert_eq!(
+            read_bucket_key(ip("2001:db8:1:2:aaaa::1")),
+            read_bucket_key(ip("2001:db8:1:2:ffff:ffff:ffff:ffff"))
+        );
+        assert_eq!(
+            read_bucket_key(ip("2001:db8:1:2::9")),
+            "ip:2001:db8:1:2::/64"
+        );
+        assert_ne!(
+            read_bucket_key(ip("2001:db8:1:2::1")),
+            read_bucket_key(ip("2001:db8:1:3::1"))
+        );
     }
 
     #[test]
