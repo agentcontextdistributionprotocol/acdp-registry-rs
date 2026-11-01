@@ -89,7 +89,7 @@ test_workspace = true
 copy_vcs = true
 
 # ---------------------------------------------------------------------------
-# THE RATCHETING SCOPE — 399 mutants, and every inclusion below is deliberate
+# THE RATCHETING SCOPE — 405 mutants, and every inclusion below is deliberate
 # ---------------------------------------------------------------------------
 # MEASURED by mutants.yml run 40283754611 (workflow_dispatch on feat/rfc0018-retraction-recall;
 # re-pin for RFC-ACDP-0018 retraction recall), whose outcomes.json is committed as
@@ -98,12 +98,20 @@ copy_vcs = true
 #
 #     cargo mutants --list            # config is auto-read from this file
 #
-#     crates/acdp-registry-core/src/handlers/context.rs   138
+#     crates/acdp-registry-core/src/handlers/context.rs   144
 #     crates/acdp-registry-core/src/handlers/log.rs        65
 #     crates/acdp-registry-core/src/receipt.rs             16
 #     crates/acdp-registry-sqlite/src/store.rs            180
 #     ----------------------------------------------------------
-#     total                                               399
+#     total                                               405
+#
+# 399 -> 405 (#523, bearer_static read tokens): context.rs 138 -> 144 (the read
+# principal threaded through the read handlers); log.rs 65, receipt.rs 16 and store.rs
+# 180 unchanged. Measured by run 41305942267, the first sharded run (2 x round-robin,
+# merged by the ratchet job): 261 caught / 8 missed / 135 unviable / 1 timeout; the
+# same eight survivors, five on shifted lines (context.rs :86, :87, :668, :1310;
+# log.rs :133), timeout :1346, no new MISSED. Ledger:
+# docs/mutation-runs/run41305942267-scope-405-outcomes.json.
 #
 # 390 -> 399 (RFC-ACDP-0021 keyless publish): context.rs 137 -> 138 (one `delete !` in
 # publish_inner, the keyless call site) and store.rs 172 -> 180 (return-replacement
