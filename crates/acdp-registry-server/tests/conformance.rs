@@ -9810,8 +9810,12 @@ const EXCUSED: &[(&str, &str)] = &[
          consumer's \u{a7}7 envelope check over entries it receives, likewise no registry \
          obligation. rec-010 (bucket filters, RFC-ACDP-0018 \u{a7}6.1): registry \
          scenarios A-F are conditional on limits.max_change_bucket_length, which this \
-         registry does not advertise, and G-I are acdp-consumer-recall, as is rec-006 \
-         scenario N. rec-001 scenario H (the \u{a7}5.2 1 MiB page bound) is a SHOULD of \
+         registry advertises only when [changes] max_change_bucket_length is set; they \
+         and the bucket-derivation vectors are DISCHARGED when advertised: \
+         rec010_bucket_filters_registry_side asserts the advertisement on the shipped \
+         binary, runs A-F and the vectors, and checks that a default build omits the \
+         limit and refuses bucket parameters (EXERCISED_FIXTURES). G-I are \
+         acdp-consumer-recall, as is rec-006 scenario N. rec-001 scenario H (the \u{a7}5.2 1 MiB page bound) is a SHOULD of \
          acdp-registry-changes that rec_changes_registry_side does not yet exercise. \
          None of the family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
@@ -14284,8 +14288,10 @@ macro_rules! exercised_by {
 /// the spawned binary (auth off) does not issue. Twenty with the six
 /// `acdp-registry-keyless` fixtures (kl-001..004, kl-007, kl-009), once
 /// RFC-ACDP-0021 Phase 7 switched the profile on. Twenty-one with `rate-002`,
-/// once the read limiter (RFC-ACDP-0008 §4.3) shipped.
-const EXERCISED_FIXTURES_AT_PIN: usize = 21;
+/// once the read limiter (RFC-ACDP-0008 §4.3) shipped. Twenty-two with
+/// `rec-010`, once `[changes] max_change_bucket_length` (RFC-ACDP-0018 §6.1)
+/// shipped; its vectors run inside the same registered test.
+const EXERCISED_FIXTURES_AT_PIN: usize = 22;
 
 #[rustfmt::skip]
 const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
@@ -14312,6 +14318,9 @@ const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
     exercised_by!("rec-002", rec_changes_registry_side),
     exercised_by!("rec-005", rec_changes_registry_side),
     exercised_by!("rec-003", rec003_filters_registry_side),
+    // §6.1: conditional on limits.max_change_bucket_length, which the test
+    // asserts the spawned binary advertises before running A-F.
+    exercised_by!("rec-010", rec010_bucket_filters_registry_side),
     // RFC-ACDP-0021: the acdp-registry-keyless fixtures against the keyless
     // kit (keyless on; profile-off and 0.4.0 kits where a scenario says so).
     exercised_by!("kl-001", kl001_golden_attestation_pop_and_supersession_table),
@@ -18218,10 +18227,21 @@ fn served_auth_toml(enabled: bool) -> String {
 /// every optional registry profile (receipts, head receipts, lifecycle,
 /// transparency log, change feed with §6.1 bucket filters).
 fn served_full_features_toml() -> String {
+    served_features_toml(Some(8))
+}
+
+/// [`served_full_features_toml`] with `[changes] max_change_bucket_length`
+/// set to `bucket_len`, or left out (bucket filters off, the default) with
+/// `None`. One `[changes]` table either way: a second would be a TOML
+/// duplicate-table error.
+fn served_features_toml(bucket_len: Option<u16>) -> String {
+    let bucket = bucket_len
+        .map(|n| format!("max_change_bucket_length = {n}\n"))
+        .unwrap_or_default();
     format!(
         "[receipt]\nsigning_key_seed_b64 = \"{}\"\nhead_receipts = true\n\n\
          [lifecycle]\nenabled = true\n\n[log]\nenabled = true\n\n\
-         [changes]\nenabled = true\nkey_b64 = \"{}\"\nmax_change_bucket_length = 8\n",
+         [changes]\nenabled = true\nkey_b64 = \"{}\"\n{bucket}",
         b64_32(0x2c),
         b64_32(0x2d)
     )
@@ -19491,6 +19511,411 @@ fn rec003_filters_registry_side() {
         (400, Some("schema_violation")),
         "F: {f}"
     );
+}
+
+/// Check rec-010's bucket-derivation vectors as `scripts/conformance-runner.py`
+/// (`check_change_bucket`) does: the SDK's `bucket` over the value exactly
+/// as served reproduces `sha256_hex`, every `expected` prefix, and never the
+/// `not_bucket_4` trap. The store's full-length column hash agrees.
+fn check_rec010_vectors(fx: &Value) {
+    use acdp::types::change::bucket;
+    let vectors = fx["vectors"].as_array().expect("rec-010 vectors[]");
+    assert!(!vectors.is_empty(), "rec-010 has no vectors");
+    for v in vectors {
+        let name = v["name"].as_str().expect("vector name");
+        let value = v["bucket_of"].as_str().expect("bucket_of");
+        let sha = v["sha256_hex"].as_str().expect("sha256_hex");
+        assert_eq!(bucket(value, 64), sha, "{name}");
+        assert_eq!(acdp_registry_store::bucket_hash(value), sha, "{name}");
+        let expected = v["expected"].as_object().expect("expected{}");
+        assert!(!expected.is_empty(), "{name}: no expected prefixes");
+        for (n, want) in expected {
+            let n: usize = n.parse().expect("expected keys are lengths");
+            assert_eq!(
+                bucket(value, n),
+                want.as_str().expect("prefix"),
+                "{name} at {n}"
+            );
+        }
+        if let Some(wrong) = v["not_bucket_4"].as_str() {
+            assert_ne!(bucket(value, 4), wrong, "{name}: the not_bucket_4 trap");
+        }
+    }
+}
+
+/// rec-010's vectors alone, spawning nothing, so a derivation regression
+/// fails in milliseconds. Not registered in [`EXERCISED_FIXTURES`]:
+/// [`rec010_bucket_filters_registry_side`] runs the same check.
+#[test]
+fn rec010_bucket_vectors_reproduce() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping rec-010 vectors");
+        return;
+    };
+    let fx = find_fixture_by_id(&fixtures, "rec-010").expect("rec-010 at the pinned spec");
+    check_rec010_vectors(&fx);
+}
+
+/// rec-010 A–F (RFC-ACDP-0018 §6.1) and its derivation vectors against the
+/// shipped binary. The fixture is conditional on
+/// `limits.max_change_bucket_length`, so the test first asserts the spawned
+/// registry advertises it (8), as dk-003 and idem-007 assert theirs, and
+/// then spawns a default build to check the other side of the condition:
+/// no limit, and bucket parameters refused rather than ignored.
+///
+/// Expected sets come from an oracle over the unfiltered feed (the SDK's
+/// registry-side `WatchFilter::matches`), not hard-coded: R's revocation
+/// entry has its own lineage, which may legitimately share a bucket.
+///
+/// F's visibility half and its budget-exhausted empty page (`has_more:
+/// true`) need per-requester bearers and hundreds of hidden rows, which
+/// this auth-off harness does not have: `tests/changes_http.rs`
+/// (`rec010_bucket_pages_equal_the_whole_bucket`,
+/// `rec004_empty_page_is_not_the_end`) runs them in-process, as for rec-004.
+#[test]
+fn rec010_bucket_filters_registry_side() {
+    use acdp::types::change::{bucket, Change, WatchFilter};
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping rec-010");
+        return;
+    };
+    let fx = find_fixture_by_id(&fixtures, "rec-010").expect("rec-010 at the pinned spec");
+    let names: Vec<&str> = fx["scenarios"]
+        .as_array()
+        .expect("rec-010 scenarios[]")
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    for prefix in ["A ", "B ", "C ", "D ", "E ", "F ", "G ", "H ", "I "] {
+        assert!(
+            names.iter().any(|n| n.starts_with(prefix)),
+            "rec-010 no longer has scenario {prefix}— re-read the fixture: {names:?}"
+        );
+    }
+    check_rec010_vectors(&fx);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let extra = format!(
+        "{}\n{}",
+        served_auth_toml(false),
+        served_features_toml(Some(8))
+    );
+    let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "rec10", "", &extra);
+    let (status, caps) = reg.get("/.well-known/acdp.json");
+    assert_eq!(status, 200, "capabilities: {caps}");
+    // The condition, from the binary's own document, before any behaviour.
+    assert_eq!(
+        caps["limits"]["max_change_bucket_length"], 8,
+        "rec-010 A-F bind only a registry advertising limits.max_change_bucket_length: {caps}"
+    );
+
+    let p_seed = [0x9a; 32];
+    let q_seed = [0x9b; 32];
+    let did = |seed: &[u8; 32]| {
+        acdp::did::key::did_key_from_ed25519(&SigningKey::from_bytes(seed).verifying_key_bytes())
+    };
+    let created = |req: &acdp::types::publish::PublishRequest, what: &str| -> Value {
+        let (status, v) = reg.post("/contexts", &serde_json::to_value(req).unwrap());
+        assert_eq!(status, 201, "{what}: {v}\n{}", reg.output());
+        v
+    };
+    let publish = |seed: &[u8; 32], title: &str| -> (String, String) {
+        let req = Producer::new_did_key(SigningKey::from_bytes(seed))
+            .publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("publish request");
+        let v = created(&req, title);
+        (
+            v["ctx_id"].as_str().expect("ctx_id").to_string(),
+            v["lineage_id"].as_str().expect("lineage_id").to_string(),
+        )
+    };
+    let enc = |s: &str| pct_encode_path_segment(s);
+    let retract = |seed: &[u8; 32], ctx_id: &str| {
+        let key = SigningKey::from_bytes(seed);
+        let agent = did(seed);
+        let key_id = acdp::did::key::did_key_url(&agent).expect("did:key url");
+        let e = LifecycleEvent::new(
+            uuid::Uuid::new_v4().to_string(),
+            CtxId(ctx_id.to_string()),
+            LifecycleEventType::Retracted,
+            chrono::Utc::now(),
+            AgentDid::new(agent),
+            None,
+        )
+        .expect("valid event")
+        .sign_with(key, key_id)
+        .expect("signed event");
+        let (status, v) = reg.post(
+            &format!("/contexts/{}/retract", enc(ctx_id)),
+            &json!({ "event": e }),
+        );
+        assert_eq!(status, 200, "retract {ctx_id}: {v}");
+    };
+
+    // Setup: candidates for P until two lineages share their first hash
+    // digit and differ in the 4-digit prefix. Unretracted candidates record
+    // nothing (§3). Bounded: a hit is expected within about ten.
+    const MAX_CANDIDATES: usize = 64;
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let (x, y) = 'search: loop {
+        assert!(
+            seen.len() < MAX_CANDIDATES,
+            "no two of {MAX_CANDIDATES} lineages share a first digit with differing 4-digit \
+             prefixes: {:?}",
+            seen.iter().map(|(_, l)| bucket(l, 4)).collect::<Vec<_>>()
+        );
+        let cand = publish(&p_seed, &format!("rec010 candidate {}", seen.len()));
+        for prev in &seen {
+            if bucket(&prev.1, 1) == bucket(&cand.1, 1) && bucket(&prev.1, 4) != bucket(&cand.1, 4)
+            {
+                break 'search (prev.clone(), cand);
+            }
+        }
+        seen.push(cand);
+    };
+    let (lx, ly) = (x.1.clone(), y.1.clone());
+    retract(&p_seed, &x.0); // 1
+    retract(&p_seed, &y.0); // 2
+    let fp = acdp::crypto::fingerprint::fingerprint_ed25519(
+        &SigningKey::from_bytes(&[0x9c; 32]).verifying_key_bytes(),
+    );
+    let r = created(
+        &Producer::new_did_key(SigningKey::from_bytes(&p_seed))
+            .publish_request()
+            .title("rec010 R")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .metadata(json!({
+                "revoked_key_fingerprint": fp,
+                "compromised_since": "2026-10-01T00:00:00.000Z",
+            }))
+            .build()
+            .expect("revocation request"),
+        "key revocation R",
+    ); // 3
+    let r_id = r["ctx_id"].as_str().expect("ctx_id").to_string();
+    let v = (0..MAX_CANDIDATES)
+        .map(|i| publish(&q_seed, &format!("rec010 V candidate {i}")))
+        .find(|(_, l)| bucket(l, 1) != bucket(&lx, 1))
+        .expect("a Q lineage outside Lx's 1-digit bucket");
+    let lv = v.1.clone();
+    retract(&q_seed, &v.0); // 4
+
+    let get = |q: &str| -> Value {
+        let (status, body) = reg.get(&format!("/changes?{q}"));
+        assert_eq!(status, 200, "/changes?{q}: {body}");
+        body
+    };
+    let feed: Vec<Change> = get("limit=100")["changes"]
+        .as_array()
+        .expect("changes[]")
+        .iter()
+        .map(|e| Change::from_value(e).expect("entry"))
+        .collect();
+    assert_eq!(feed.len(), 4, "X, Y, R, V: {feed:?}");
+    let seq_of = |ctx: &str| {
+        feed.iter()
+            .find(|c| c.ctx_id().as_str() == ctx)
+            .map(|c| c.seq())
+            .unwrap_or_else(|| panic!("{ctx} has no entry"))
+    };
+    let (sx, sy, sr, sv) = (seq_of(&x.0), seq_of(&y.0), seq_of(&r_id), seq_of(&v.0));
+    // One request against the oracle; returns the served seqs.
+    let check = |q: &str, filter: &WatchFilter| -> Vec<u64> {
+        let body = get(q);
+        let got: Vec<u64> = body["changes"]
+            .as_array()
+            .expect("changes[]")
+            .iter()
+            .map(|e| e["seq"].as_u64().expect("seq"))
+            .collect();
+        let want: Vec<u64> = feed
+            .iter()
+            .filter(|c| filter.matches(c, |_| None))
+            .map(|c| c.seq())
+            .collect();
+        assert_eq!(got, want, "/changes?{q}: {body}");
+        // F: ascending, and a cursor on every page.
+        assert!(got.windows(2).all(|w| w[0] < w[1]), "{q}: {got:?}");
+        assert!(body["next_cursor"].is_string(), "{q}: {body}");
+        got
+    };
+
+    // A: the whole 1-digit bucket, X and Y both, not V.
+    let a = check(
+        &format!("lineage_bucket={}", bucket(&lx, 1)),
+        &WatchFilter::new().lineage_bucket(bucket(&lx, 1)),
+    );
+    assert!(
+        a.contains(&sx) && a.contains(&sy) && !a.contains(&sv),
+        "A: {a:?}"
+    );
+    // B: 4 digits narrow to X.
+    let b = check(
+        &format!("lineage_bucket={}", bucket(&lx, 4)),
+        &WatchFilter::new().lineage_bucket(bucket(&lx, 4)),
+    );
+    assert!(b.contains(&sx) && !b.contains(&sy), "B: {b:?}");
+    // Round-1 item 7b: the lineage with the smaller hash; the other shares
+    // its first digit and sorts above its 4-digit range, so a range scan
+    // without an upper bound would return it.
+    let (low, high, s_high) = if bucket(&lx, 64) < bucket(&ly, 64) {
+        (&lx, &ly, sy)
+    } else {
+        (&ly, &lx, sx)
+    };
+    assert!(bucket(high, 64) > bucket(low, 64));
+    let upper = check(
+        &format!("lineage_bucket={}", bucket(low, 4)),
+        &WatchFilter::new().lineage_bucket(bucket(low, 4)),
+    );
+    assert!(!upper.contains(&s_high), "upper bound: {upper:?}");
+    // C: P's agent bucket hears X, Y and R (controller P).
+    let pb = bucket(&did(&p_seed), 4);
+    let c = check(
+        &format!("agent_bucket={pb}"),
+        &WatchFilter::new().agent_bucket(pb.clone()),
+    );
+    assert!([sx, sy, sr].iter().all(|s| c.contains(s)), "C: {c:?}");
+    // D: buckets OR'd, kind AND'd: R only.
+    let d = check(
+        &format!(
+            "lineage_bucket={}&agent_bucket={pb}&kind=key_revocation",
+            bucket(&lv, 4)
+        ),
+        &WatchFilter::new()
+            .lineage_bucket(bucket(&lv, 4))
+            .agent_bucket(pb.clone())
+            .kind(acdp::types::change::ChangeKind::KeyRevocation),
+    );
+    assert_eq!(d, vec![sr], "D");
+    // D: an exact id OR'd with a bucket in one request.
+    let q_did = did(&q_seed);
+    let or = check(
+        &format!("agent_id={}&lineage_bucket={}", enc(&q_did), bucket(&lx, 4)),
+        &WatchFilter::new()
+            .agent_id(AgentDid::new(q_did.clone()))
+            .lineage_bucket(bucket(&lx, 4)),
+    );
+    assert!(
+        or.contains(&sx) && or.contains(&sv),
+        "D (exact OR bucket): {or:?}"
+    );
+    // D: bucket values count toward max_change_filters.
+    let max = caps["limits"]["max_change_filters"]
+        .as_u64()
+        .expect("max_change_filters") as usize;
+    let at = format!(
+        "kind=lifecycle&{}",
+        vec!["agent_bucket=ab"; max - 1].join("&")
+    );
+    assert_eq!(reg.get(&format!("/changes?{at}")).0, 200, "{max} values");
+    let over = format!("kind=lifecycle&{}", vec!["agent_bucket=ab"; max].join("&"));
+    let (status, body) = reg.get(&format!("/changes?{over}"));
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (400, Some("schema_violation")),
+        "D: {} values: {body}",
+        max + 1
+    );
+    // E: malformed values, each 400 naming the parameter.
+    for q in [
+        "lineage_bucket=",
+        "lineage_bucket=1F54",
+        "agent_bucket=1g",
+        "lineage_bucket=123456789",
+    ] {
+        let (status, body) = reg.get(&format!("/changes?{q}"));
+        assert_eq!(
+            (status, body["error"]["code"].as_str()),
+            (400, Some("schema_violation")),
+            "E {q}: {body}"
+        );
+        let field = q.split('=').next().unwrap();
+        assert_eq!(body["error"]["details"]["field"], field, "E {q}: {body}");
+    }
+    // F: an unmatched bucket is an empty page with a cursor; `has_more` is
+    // false only because the scan reached the head.
+    let used: Vec<String> = feed
+        .iter()
+        .flat_map(|c| {
+            [
+                bucket(c.lineage_id().as_str(), 4),
+                bucket(c.agent_id().as_str(), 4),
+            ]
+        })
+        .collect();
+    let empty = (0u32..=0xffff)
+        .map(|i| format!("{i:04x}"))
+        .find(|b| !used.contains(b))
+        .expect("an unused 4-digit bucket");
+    let f = get(&format!("lineage_bucket={empty}&limit=1"));
+    assert_eq!(f["changes"], json!([]), "F: {f}");
+    assert_eq!(f["has_more"], false, "F: {f}");
+    assert!(f["next_cursor"].is_string(), "F: {f}");
+    // F: limit=1 through P's agent bucket visits each match once.
+    let mut paged = Vec::new();
+    let mut since: Option<String> = None;
+    for _ in 0..10 {
+        let mut q = format!("agent_bucket={pb}&limit=1");
+        if let Some(cur) = &since {
+            q.push_str(&format!("&since={}", enc(cur)));
+        }
+        let page = get(&q);
+        paged.extend(
+            page["changes"]
+                .as_array()
+                .expect("changes[]")
+                .iter()
+                .map(|e| e["seq"].as_u64().expect("seq")),
+        );
+        since = Some(page["next_cursor"].as_str().expect("next_cursor").into());
+        if page["has_more"] == false {
+            break;
+        }
+    }
+    assert_eq!(paged, c, "F: limit=1 paging");
+
+    // The other side of the condition: a default build (changes on, no
+    // bucket length) omits the limit and refuses bucket parameters.
+    let extra = format!(
+        "{}\n{}",
+        served_auth_toml(false),
+        served_features_toml(None)
+    );
+    let plain = spawned_registry::SpawnedRegistry::start(dir.path(), "rec10off", "", &extra);
+    let (status, caps) = plain.get("/.well-known/acdp.json");
+    assert_eq!(status, 200, "capabilities: {caps}");
+    assert!(
+        caps["profiles"]
+            .as_array()
+            .expect("profiles")
+            .iter()
+            .any(|p| p == "acdp-registry-changes"),
+        "{caps}"
+    );
+    assert!(
+        caps["limits"].get("max_change_bucket_length").is_none(),
+        "default build advertises a bucket length: {caps}"
+    );
+    for (q, field) in [
+        ("lineage_bucket=a", "lineage_bucket"),
+        ("agent_bucket=ab", "agent_bucket"),
+    ] {
+        let (status, body) = plain.get(&format!("/changes?{q}"));
+        assert_eq!(
+            (status, body["error"]["code"].as_str()),
+            (400, Some("schema_violation")),
+            "unadvertised {q}: {body}"
+        );
+        assert_eq!(body["error"]["details"]["field"], field, "{body}");
+    }
 }
 
 // ── RFC-ACDP-0021 keyless signing (kl-*) ─────────────────────────────────────
