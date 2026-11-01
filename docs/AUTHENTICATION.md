@@ -5,7 +5,7 @@ flow that mints a short-lived JWT, and authenticates **producers** (publishers)
 implicitly via the signature over `content_hash` carried in the publish request.
 This doc covers the first. Publish signing belongs to the protocol, not this
 registry — how a producer builds and signs a `PublishRequest` is documented in
-[acdp-rs · Producing](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.19.0/docs/producing.md), and where the registry verifies it in
+[acdp-rs · Producing](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/producing.md), and where the registry verifies it in
 [ARCHITECTURE.md](ARCHITECTURE.md#publish-pipeline).
 
 All of this lives in `crates/acdp-registry-auth/` and is mounted only when
@@ -78,7 +78,7 @@ In order (`service.rs`):
    HTTPS-only, SSRF-policy-gated, LRU-cached, the *same* resolver used for
    publish. Its defenses (IP-literal rejection, DNS-time SSRF filtering,
    size/redirect caps) are documented in
-   [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.19.0/docs/security.md#defenses-applied-by-default).
+   [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/security.md#defenses-applied-by-default).
    If the cached document lacks the fragment, one re-fetch is forced (at most
    one per DID per hour, the resolver's default). Failures split the way the
    publish path splits them (RFC-ACDP-0001 §5.11 step 3, conformance fixture
@@ -98,7 +98,7 @@ In order (`service.rs`):
    in the document's `assertionMethod` set.
 8. If the verification method declares an algorithm, it must match the request's
    `algorithm` (algorithm-downgrade defense, RFC-ACDP-0001 §5.10 — enforced by
-   `acdp`; see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.19.0/docs/security.md#defenses-applied-by-default)).
+   `acdp`; see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/security.md#defenses-applied-by-default)).
 9. The signature is verified against the resolved public key.
 10. A JWT is minted and its `jti` is recorded as *issued* in the revocation
     store. If that write fails, the whole request fails — a token that can't be
@@ -172,9 +172,9 @@ rejected with `403 not_authorized`.
 ### Spec conformance (`bearer_jwt`)
 
 This flow is the `bearer_jwt` read-authentication method, registered in the spec's
-[`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/0ba958247f0aaa4b6e307ff88555d1b23ba5fb7f/registries/auth-methods.md)
+[`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/registries/auth-methods.md)
 with its requirements in
-[RFC-ACDP-0008 §6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/0ba958247f0aaa4b6e307ff88555d1b23ba5fb7f/rfcs/RFC-ACDP-0008-security.md#62-read-authentication).
+[RFC-ACDP-0008 §6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0008-security.md#62-read-authentication).
 Where this registry meets each one:
 
 | Requirement (RFC-ACDP-0008 §6.2) | Here |

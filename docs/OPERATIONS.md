@@ -201,7 +201,7 @@ configured feed count. Full behavior:
 With `registry.cross_registry_resolution = true`, a `GET /contexts/{ctx_id}` for
 a foreign authority is resolved against that registry **anonymously** (no
 caller-credential forwarding), so only remote `public` contexts are surfaced.
-The `acdp` `SsrfPolicy` (see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.19.0/docs/security.md#ssrfpolicy)) rejects
+The `acdp` `SsrfPolicy` (see [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/security.md#ssrfpolicy)) rejects
 private/internal authorities with `502 cross_registry_resolution_failed`. Set
 the key to `false` to return `404` for foreign ids instead.
 
@@ -559,7 +559,7 @@ changed**: rows removed, reordered, or rewritten. The realistic causes are a
 database restore that rolled the log back, a partial restore that mixed two
 datasets, or direct writes to the log table.
 
-**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/0ba958247f0aaa4b6e307ff88555d1b23ba5fb7f/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
+**The rule every recovery must follow.** [RFC-ACDP-0012 §7.4](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0012-transparency-log.md#74-log-instantiation-and-reset)
 (pinned spec): a registry whose tree is lost **MUST NOT serve a reconstructed
 history under the same `log_id`**; it MUST start a new instantiation with a new
 `<instance>` component, and SHOULD publish an operational notice. "Serve" here

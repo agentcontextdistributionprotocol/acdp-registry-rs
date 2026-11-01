@@ -262,7 +262,7 @@ fn acdp_wire_code(err: &AcdpError) -> &'static str {
         AcdpError::NotAuthorized(_) => "not_authorized",
         AcdpError::InvalidCursor(_) => "invalid_cursor",
         AcdpError::CursorExpired => "cursor_expired",
-        AcdpError::RateLimited(_) => "rate_limited",
+        AcdpError::RateLimited { .. } => "rate_limited",
         AcdpError::CrossRegistryResolutionFailed(_) => "cross_registry_resolution_failed",
         _ => "internal_error",
     }
@@ -301,7 +301,7 @@ fn http_status_for_acdp(err: &AcdpError) -> u16 {
             // race), Other → static client error.
             _ => 400,
         },
-        AcdpError::RateLimited(_) => 429,
+        AcdpError::RateLimited { .. } => 429,
         // 502 is the right status for both "upstream is unreachable" and
         // "upstream returned garbage" — the registry itself is healthy,
         // the gateway hop failed. Matches `KeyResolutionUnreachable`.
@@ -318,6 +318,11 @@ fn http_status_for_acdp(err: &AcdpError) -> u16 {
         _ => 500,
     }
 }
+
+/// `Retry-After` for a 429 whose cause did not name a delay (an SDK
+/// `RateLimited` without one). RFC-ACDP-0008 §4.3 (0.5.0) makes the header
+/// mandatory on every 429, so it is never omitted.
+pub const DEFAULT_RETRY_AFTER_SECONDS: u64 = 60;
 
 #[cfg(feature = "axum")]
 impl axum::response::IntoResponse for RegistryError {
@@ -337,12 +342,26 @@ impl axum::response::IntoResponse for RegistryError {
             CONTENT_TYPE,
             HeaderValue::from_static("application/acdp+json"),
         );
-        // RFC-ACDP-0008 §4.3 SHOULD: bound 429s with a Retry-After header.
-        if let Self::RateLimited {
-            retry_after_seconds,
-        } = &self
-        {
-            if let Ok(v) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+        // RFC-ACDP-0008 §4.3 (0.5.0): every 429 MUST carry Retry-After, from
+        // either rate-limit variant. An SDK error without a delay gets the
+        // conservative default rather than a bare 429.
+        let retry_after = match &self {
+            Self::RateLimited {
+                retry_after_seconds,
+            } => Some(*retry_after_seconds),
+            Self::Acdp(AcdpError::RateLimited { retry_after, .. }) => Some(
+                retry_after
+                    .map(|d| {
+                        d.as_secs()
+                            .saturating_add(u64::from(d.subsec_nanos() > 0))
+                            .max(1)
+                    })
+                    .unwrap_or(DEFAULT_RETRY_AFTER_SECONDS),
+            ),
+            _ => None,
+        };
+        if let Some(secs) = retry_after {
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
                 resp.headers_mut().insert(RETRY_AFTER, v);
             }
         }
@@ -726,7 +745,14 @@ mod tests {
             acdp(AcdpError::NotAuthorized("x".into())).http_status(),
             403
         );
-        assert_eq!(acdp(AcdpError::RateLimited("x".into())).http_status(), 429);
+        assert_eq!(
+            acdp(AcdpError::RateLimited {
+                message: "x".into(),
+                retry_after: None
+            })
+            .http_status(),
+            429
+        );
     }
 
     /// The registry-layer rate-limit variant projects to 429 + `rate_limited`,
@@ -772,6 +798,44 @@ mod tests {
             "application/acdp+json"
         );
         assert_eq!(resp.headers().get("retry-after").unwrap(), "42");
+    }
+
+    /// An SDK-layer `RateLimited` is a 429 too, and MUST carry `Retry-After`
+    /// (RFC-ACDP-0008 §4.3, 0.5.0): its own delay when it has one (rounded up to
+    /// whole seconds, so sub-second becomes 1), the default when it has none.
+    #[cfg(feature = "axum")]
+    #[test]
+    fn acdp_rate_limited_response_always_sets_retry_after() {
+        use axum::response::IntoResponse;
+        let with = acdp(AcdpError::RateLimited {
+            message: "x".into(),
+            retry_after: Some(std::time::Duration::from_secs(7)),
+        })
+        .into_response();
+        assert_eq!(with.status().as_u16(), 429);
+        assert_eq!(with.headers().get("retry-after").unwrap(), "7");
+        let sub = acdp(AcdpError::RateLimited {
+            message: "x".into(),
+            retry_after: Some(std::time::Duration::from_millis(200)),
+        })
+        .into_response();
+        assert_eq!(sub.headers().get("retry-after").unwrap(), "1");
+        // Rounded up, never down: retrying at 7 s would be early.
+        let frac = acdp(AcdpError::RateLimited {
+            message: "x".into(),
+            retry_after: Some(std::time::Duration::from_millis(7_900)),
+        })
+        .into_response();
+        assert_eq!(frac.headers().get("retry-after").unwrap(), "8");
+        let without = acdp(AcdpError::RateLimited {
+            message: "x".into(),
+            retry_after: None,
+        })
+        .into_response();
+        assert_eq!(
+            without.headers().get("retry-after").unwrap(),
+            DEFAULT_RETRY_AFTER_SECONDS.to_string().as_str()
+        );
     }
 
     /// A non-429 error still carries the ACDP media type but MUST NOT carry a

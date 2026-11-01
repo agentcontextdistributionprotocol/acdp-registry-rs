@@ -707,6 +707,9 @@ fn caps() -> CapabilitiesDocument {
             max_change_filters: None,
             max_changes_page: None,
             max_subscriptions_per_requester: None,
+            max_reads_per_minute: None,
+            max_anonymous_reads_per_minute: None,
+            extensions: Default::default(),
         },
         read_authentication_methods: vec![],
         anonymous_public_reads: true,
@@ -7875,13 +7878,13 @@ fn lin_vectors_reproduce_lineage_derivation() {
     );
 }
 
-/// The exact number of caps-* fixture ids at spec pin d1f06d0, and the
-/// exact number of outcome assertions this test makes (7 base-case
-/// fixtures + caps-007's 3 `reject_variants`). Two separate constants
+/// The exact number of caps-* fixture ids at spec pin dd5486c, and the
+/// exact number of outcome assertions this test makes (8 base-case
+/// fixtures + caps-007's 3 and caps-008's 3 `reject_variants`). Two separate constants
 /// because they answer two separate "did this silently shrink" questions:
 /// fixtures found on disk, and outcomes actually checked.
-const EXPECTED_CAPS_FIXTURE_COUNT: usize = 7;
-const EXPECTED_CAPS_ASSERTION_COUNT: usize = 10;
+const EXPECTED_CAPS_FIXTURE_COUNT: usize = 8;
+const EXPECTED_CAPS_ASSERTION_COUNT: usize = 14;
 
 /// Deserializes `body` as a [`CapabilitiesDocument`] and, if that
 /// succeeds, runs `acdp::validation::validate_capabilities` on it --
@@ -7922,13 +7925,14 @@ fn assert_capabilities_outcome(body: &Value, want_outcome: &str, ctx: &str) {
 ///
 /// Per-fixture outcome is read from each fixture's own `expected.outcome`,
 /// never assumed: measured against spec pin d1f06d0, caps-001/006/007
-/// (base case) expect `"accept"` and caps-002/003/004/005 plus caps-007's
-/// three `reject_variants` expect `"reject"` -- i.e. 4 rejecting fixtures,
-/// not 6. caps-006 in particular is a POSITIVE case: the CapabilitiesDocument
+/// and caps-008 (base cases) expect `"accept"` and caps-002/003/004/005 plus
+/// caps-007's and caps-008's three `reject_variants` each expect `"reject"`.
+/// caps-006 in particular is a POSITIVE case: the CapabilitiesDocument
 /// schema is open at the top level (unknown top-level fields, e.g.
 /// `future_capability_x`, are tolerated and land in `extensions` via
-/// `#[serde(flatten)]`), while only its `limits` sub-object is closed
-/// (`#[serde(deny_unknown_fields)]`). Treating caps-006 as a rejection
+/// `#[serde(flatten)]`), and from 0.5.0 its `limits` sub-object is open
+/// too (RFC-ACDP-0007 §3.3.1, schema-010; acdp 0.20 `Limits::extensions`),
+/// while known limits keep their constraints. Treating caps-006 as a rejection
 /// would invert this family's most important forward-compatibility
 /// invariant.
 #[test]
@@ -7947,6 +7951,7 @@ fn caps_vectors_validate_capabilities_document() {
 
     for id in [
         "caps-001", "caps-002", "caps-003", "caps-004", "caps-005", "caps-006", "caps-007",
+        "caps-008",
     ] {
         let Some(fx) = find_fixture_by_id(&fixtures, id) else {
             continue;
@@ -7960,36 +7965,47 @@ fn caps_vectors_validate_capabilities_document() {
         assert_capabilities_outcome(&body, want, &format!("{id} base case"));
         asserted += 1;
 
-        if id == "caps-007" {
-            let variants = fx["reject_variants"].as_array().unwrap_or_else(|| {
-                panic!("caps-007: reject_variants missing or not an array: {fx}")
-            });
+        if let Some(variants) = fx.get("reject_variants") {
+            let variants = variants
+                .as_array()
+                .unwrap_or_else(|| panic!("{id}: reject_variants is not an array: {fx}"));
             assert_eq!(
                 variants.len(),
                 3,
-                "caps-007 must carry exactly 3 reject_variants at spec pin d1f06d0: {fx}"
+                "{id} must carry exactly 3 reject_variants at spec pin dd5486c: {fx}"
             );
             for v in variants {
                 let name = v["name"].as_str().unwrap_or("?");
-                // Hand-applied: every caps-007 reject_variant overrides the
-                // same single dotted path, `limits.max_publish_per_minute`
-                // -- not a generic JSON-path engine, just the one field
-                // this fixture's own reject_variants ever touch.
-                let override_value = &v["response_body_override"]["limits.max_publish_per_minute"];
+                // Hand-applied, not a JSON-path engine: every caps-* variant at
+                // this pin overrides exactly ONE `limits.<field>` dotted path
+                // (caps-007 max_publish_per_minute, caps-008 the read
+                // ceilings). Anything else is refused, so a fixture that grows
+                // a different shape fails here instead of being half-applied.
+                let overrides = v["response_body_override"].as_object().unwrap_or_else(|| {
+                    panic!("{id} variant {name:?}: response_body_override missing: {v}")
+                });
+                assert_eq!(
+                    overrides.len(),
+                    1,
+                    "{id} variant {name:?}: expected exactly one override path: {v}"
+                );
+                let (path, value) = overrides.iter().next().expect("len checked");
+                let field = path.strip_prefix("limits.").unwrap_or_else(|| {
+                    panic!("{id} variant {name:?}: override path {path:?} is not limits.<field>")
+                });
                 assert!(
-                    !override_value.is_null(),
-                    "caps-007 variant {name:?}: response_body_override.\"limits.\
-                     max_publish_per_minute\" missing or null: {v}"
+                    !field.contains('.') && !value.is_null(),
+                    "{id} variant {name:?}: unsupported override {path:?} = {value}"
                 );
                 let mut overridden = body.clone();
-                overridden["limits"]["max_publish_per_minute"] = override_value.clone();
+                overridden["limits"][field] = value.clone();
                 let want_variant = v["expected"]["outcome"].as_str().unwrap_or_else(|| {
-                    panic!("caps-007 variant {name:?}: expected.outcome missing: {v}")
+                    panic!("{id} variant {name:?}: expected.outcome missing: {v}")
                 });
                 assert_capabilities_outcome(
                     &overridden,
                     want_variant,
-                    &format!("caps-007 reject_variant {name:?}"),
+                    &format!("{id} reject_variant {name:?}"),
                 );
                 asserted += 1;
             }
@@ -7999,13 +8015,13 @@ fn caps_vectors_validate_capabilities_document() {
     assert_eq!(
         found_ids.len(),
         EXPECTED_CAPS_FIXTURE_COUNT,
-        "expected exactly {EXPECTED_CAPS_FIXTURE_COUNT} caps-* fixtures at spec pin d1f06d0: \
+        "expected exactly {EXPECTED_CAPS_FIXTURE_COUNT} caps-* fixtures at spec pin dd5486c: \
          found {found_ids:?}"
     );
     assert_eq!(
         asserted, EXPECTED_CAPS_ASSERTION_COUNT,
-        "expected exactly {EXPECTED_CAPS_ASSERTION_COUNT} caps-* outcome assertions (7 base \
-         cases + caps-007's 3 reject_variants) at spec pin d1f06d0 -- a silently-shrinking \
+        "expected exactly {EXPECTED_CAPS_ASSERTION_COUNT} caps-* outcome assertions (8 base \
+         cases + caps-007's and caps-008's 3 reject_variants each) at spec pin dd5486c -- a silently-shrinking \
          count here is exactly the vacuous-pass failure mode this ratchet exists to prevent"
     );
 }
@@ -8915,11 +8931,12 @@ type SchemaBodyPatch = (&'static str, fn(&mut Value, &Value));
 /// (`acdp_version`, `registry_did`, `supported_signature_algorithms`,
 /// `supported_did_methods`, `profiles`). Deserializing that excerpt
 /// verbatim as `CapabilitiesDocument` fails at those MISSING top-level
-/// fields before `Limits`'s `deny_unknown_fields` ever gets a chance to
-/// reject the excerpt's `limits.extra` key -- `schema_violation` either
-/// way, but for the wrong reason: a naive splice-verbatim test would report
-/// coverage of "limits is a closed sub-object" that does not actually
-/// exist. So this test instead takes this registry's OWN real, already-
+/// fields before the excerpt's `limits.extra` key is ever considered --
+/// `schema_violation`, but for the wrong reason: a naive splice-verbatim
+/// test would report an outcome about `limits` that the excerpt never
+/// reached. (Through 0.4.0 `limits` was closed and schema-010 rejected; from
+/// 0.5.0 it is open and schema-010 accepts, the outcome read from the
+/// fixture's own `consumer_outcome`.) So this test instead takes this registry's OWN real, already-
 /// valid capabilities document (`caps()` --
 /// self-checked as `"accept"` first) and splices ONLY the fixture's
 /// malformed `limits` object onto it, isolating the exact field this
@@ -9014,8 +9031,8 @@ async fn schema_vectors_openness_and_absent_vs_null_enforced() {
         asserted += 1;
     }
 
-    // schema-010: closed `limits` sub-object inside the open capabilities
-    // document -- MERGED onto this registry's OWN real, valid document
+    // schema-010: the `limits` sub-object, open from 0.5.0 (accept; closed and
+    // rejecting through 0.4.0), inside the open capabilities document -- MERGED onto this registry's OWN real, valid document
     // (never the fixture's bare `{"limits": {...}}` excerpt, and never a
     // wholesale replacement of the base's own `limits` object either -- see
     // this test's doc comment for why either would fail for the wrong
@@ -9024,9 +9041,9 @@ async fn schema_vectors_openness_and_absent_vs_null_enforced() {
     // §3.2) then requires `limits.idempotency_key_ttl_seconds` for; the
     // fixture's own `limits` fragment never carries that key at all, so a
     // wholesale `overridden["limits"] = ...` replacement would ALSO reject
-    // -- correctly, but for a second, unintended reason (a missing
-    // required TTL, the caps-004 violation) that would mask whether the
-    // `extra` key rejection this fixture exists to prove is even reached.
+    // -- for a second, unintended reason (a missing required TTL, the
+    // caps-004 violation) that would turn the fixture's `accept` of an
+    // unknown `limits` key into a spurious rejection.
     // Merging the fixture's keys onto a clone of the base's own `limits`
     // object -- same technique as caps-007's reject_variants
     // (`conformance.rs`, `caps_vectors_validate_capabilities_document`),
@@ -9768,7 +9785,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "rec",
-        "RFC-ACDP-0018 retraction recall, spec pin 81bbe3f: 8 fixtures, none carrying an \
+        "RFC-ACDP-0018 retraction recall, spec pin dd5486c: 9 fixtures, none carrying an \
          endpoint (rec-007's vectors array is the hint-hmac-001 HMAC known-answer \
          vector, not an HTTP exchange). Two grounds, split by fixture. rec-001..005 and \
          rec-008 apply_to acdp-registry-changes, and rec-007 scenarios A-C and F-H to \
@@ -9786,12 +9803,14 @@ const EXCUSED: &[(&str, &str)] = &[
          and hints it receives (RFC-ACDP-0018 \u{a7}7, \u{a7}8.2 receiver duty), which no \
          harness configuration would make this registry responsible for; \
          tests/recall_e2e.rs runs the SDK consumer (acdp::client::verify_change, \
-         ChangeFeed) against this registry to prove the entries it serves verify. None of the \
-         family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
+         ChangeFeed) against this registry to prove the entries it serves verify. rec-009 \
+         (entry envelope known answers, applies_to acdp-consumer-recall) is the \
+         consumer's \u{a7}7 envelope check over entries it receives, likewise no registry \
+         obligation. None of the family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
     (
         "mcp",
-        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin 0ba9582: 7 fixtures, all \
+        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin dd5486c: 7 fixtures, all \
          applies_to_profiles = [acdp-producer-mcp-proxy], none carrying an endpoint \
          (mcp-001's vectors array is a known-answer set). They are obligations of an MCP \
          signing proxy, a producer: an acdp:mcp-tool-result body is an ordinary signed \
@@ -9801,7 +9820,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "trust",
-        "RFC-ACDP-0020 registry trust lists (Draft), spec pin 0ba9582: 7 fixtures, all \
+        "RFC-ACDP-0020 registry trust lists (Draft), spec pin dd5486c: 7 fixtures, all \
          applies_to_profiles = [acdp-consumer-trust-list], none carrying an endpoint \
          (trust-001's vectors array is a known-answer set). Selecting, validating and \
          applying signed acdp:trust-list bodies is the consumer's evaluation; an \
@@ -10186,13 +10205,14 @@ enum Unexercised {
 /// replayer's own per-family tally (pub 3 + ret 1 + vis 26 = 30, matching its
 /// `replayed 30`).
 const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
-    // EMPTY. Every fixture once listed here is now requested by a named test
+    // EMPTY through 0ba9582 (one graded row at dd5486c, below). Every fixture
+    // once listed here is now requested by a named test
     // registered in `EXERCISED_FIXTURES` (compile-bound to that test and checked
     // at runtime by `exercised_fixtures_are_really_requested`), or is replayed.
-    // With the list empty, every loop over it passes vacuously; the counts in
-    // `fixture_accounting_totals_are_exact` (required 0, conditional 0) are what
-    // keep it honest, and a spec bump that adds a new unexercised obligation
-    // lands here as a graded row with a tracking issue.
+    // The counts in `fixture_accounting_totals_are_exact` (required 0,
+    // conditional 1 at dd5486c) are what keep it honest, and a spec bump that
+    // adds a new unexercised obligation lands here as a graded row with a
+    // tracking issue (or, for `rate-002`, the plan phase that retires it).
     //
     // History, so the retirements stay traceable. `pub` had 11 rows beside its 3
     // replayed fixtures (pub-004/005/008). U-527 removed `pub-002`, `pub-012`,
@@ -10208,6 +10228,14 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
     // shape (201 + a percent-encoded `Location`), so it could only be retired
     // once a fresh publish answered that way; it is now driven by
     // `pub007_publish_response_shape_and_location`.
+    //
+    // `rate-002` arrived with the dd5486c bump in `acdp-registry-core`'s
+    // `conditional_fixtures` (capability_match ">=0.5.0", which this registry
+    // advertises). It is satisfied vacuously while reads are not rate-limited,
+    // and nothing requests it yet. Tracked by plans/bearer-static-read-limits.md
+    // Phase 2, which ships the read limiter and retires this row by registering
+    // `rate002_read_rate_limit_trips_429_with_retry_after` in EXERCISED_FIXTURES.
+    ("rate-002", Unexercised::ConditionalOnCapability),
 ];
 
 /// Total fixtures in the pinned spec's `schemas/conformance`, as an **equality**.
@@ -10223,11 +10251,13 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// still 202 after the `bf37195` bump (RFC-ACDP-0021 draft.3: kl fixtures only
 /// modified), after the `546b8c8` bump (error-codes.md only), and after the `1560e0f`
 /// bump (kl-005 M/N added in place; RFC-0019/0020 promotions), and after the
-/// `0ba9582` bump (docs only: the profile table).
+/// `0ba9582` bump (docs only: the profile table); 205 after the `dd5486c` bump
+/// (caps-008, rate-002 and rec-009 added; RFC-ACDP-0008 read limits and static
+/// bearer tokens, RFC-ACDP-0007 open `limits`, RFC-ACDP-0018 clarifications).
 /// A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 202;
+const TOTAL_FIXTURES_AT_PIN: usize = 205;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
@@ -15407,6 +15437,13 @@ async fn err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing()
     );
 }
 
+/// rate-* fixtures THIS test requests. The pin `dd5486c` carries two:
+/// `rate-001` (publish limit, `acdp-registry-core` required_fixtures) and
+/// `rate-002` (the read-path 429 shape, RFC-ACDP-0008 §4.3). `rate-002` is in
+/// `acdp-registry-core`'s `conditional_fixtures` (">=0.5.0") and graded in
+/// `UNEXERCISED_FIXTURES` until the read limiter exists; then it is requested by
+/// `rate002_read_rate_limit_trips_429_with_retry_after`
+/// (plans/bearer-static-read-limits.md Phase 2), not here.
 const EXPECTED_RATE_FIXTURE_COUNT: usize = 1;
 const EXPECTED_RATE_ASSERTION_COUNT: usize = 5;
 
@@ -17150,11 +17187,15 @@ async fn fixture_accounting_totals_are_exact() {
     // number can only go UP again via a spec bump adding a conditional fixture --
     // which is exactly the event that should stop the build and force a human to
     // classify it, as `err-002` was not when it arrived with the 16211e6 bump.
+    //
+    // ONE at dd5486c: `rate-002` (read rate limiting, RFC-ACDP-0008 §4.3) arrived
+    // in `conditional_fixtures` and is graded until the read limiter ships
+    // (plans/bearer-static-read-limits.md Phase 2), which returns this to zero.
     assert_eq!(
-        conditional, 0,
-        "expected 0 conditional-but-unexercised; U-553 retired dk-003, err-002 and \
-         idem-007. A NEW conditional fixture arriving from a spec bump lands here: \
-         classify it and write the test, do not relax this to a floor"
+        conditional, 1,
+        "expected 1 conditional-but-unexercised (rate-002); U-553 retired dk-003, \
+         err-002 and idem-007. A NEW conditional fixture arriving from a spec bump \
+         lands here: classify it and write the test, do not relax this to a floor"
     );
     assert_eq!(
         required + conditional,
@@ -17389,10 +17430,12 @@ async fn no_fixture_declaring_an_endpoint_is_classified_non_http() {
     // a scan that silently matched none of them would report a clean pass.
     // At pin `9deb7e7`, 66: `rev-003` is new and carries `input.endpoint`
     // (`rev-004` does not -- its precondition is `input.existing_context`,
-    // no `input.endpoint` key at all).
+    // no `input.endpoint` key at all). At pin `dd5486c`, 68: `caps-008`
+    // (`GET /.well-known/acdp.json`) and `rate-002` (any read endpoint) are
+    // new and carry one; `rec-009` is a known-answer vector set with none.
     assert_eq!(
-        checked, 66,
-        "expected 66 endpoint-declaring fixtures at the pin, scanned {checked} — the \
+        checked, 68,
+        "expected 68 endpoint-declaring fixtures at the pin, scanned {checked} — the \
          scan itself is broken or the spec moved, and either way its empty result \
          would have meant nothing"
     );
@@ -18120,7 +18163,8 @@ fn served_keyless_toml() -> String {
 /// served document that just passed, so a validator that accepts everything
 /// (or silently skips a `$ref` it could not resolve) cannot pass this test:
 ///   * the hyphenated `bearer-jwt` id that shipped through 0.2.0 (#372);
-///   * an extra key in `limits`, a closed sub-object;
+///   * a mistyped KNOWN key in `limits` (open from 0.5.0, so an unknown key is
+///     asserted ACCEPTED, while known keys keep their constraints);
 ///   * a `registry_did` that is not a DID. That rule lives in
 ///     `acdp-common.schema.json` and is reached only through the cross-file
 ///     `$ref`, so this one proves the offline registry resolves it.
@@ -18223,13 +18267,27 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
     let on = &served["auth-on"];
     let mut hyphenated = on.clone();
     hyphenated["read_authentication_methods"] = json!(["bearer-jwt"]);
+    // `limits` is open from 0.5.0 (RFC-ACDP-0007 §3.3.1, schema-010): an
+    // unknown member MUST be tolerated, while a KNOWN member keeps its
+    // constraints. Both halves are asserted, so a validator that accepted
+    // everything in `limits` fails the second.
     let mut open_limits = on.clone();
     open_limits["limits"]["not_a_spec_limit"] = json!(1);
+    assert!(
+        schema.violations(&open_limits).is_empty(),
+        "the pinned schema's limits object is open from 0.5.0, yet an unknown member was refused: {:?}",
+        schema.violations(&open_limits)
+    );
+    let mut bad_known_limit = on.clone();
+    bad_known_limit["limits"]["max_reads_per_minute"] = json!("many");
     let mut bad_did = on.clone();
     bad_did["registry_did"] = json!("not-a-did");
     for (what, doc) in [
         ("the hyphenated bearer-jwt id (#372)", &hyphenated),
-        ("an extra key in the closed limits object", &open_limits),
+        (
+            "a mistyped known limit (open limits keep known-field constraints)",
+            &bad_known_limit,
+        ),
         ("a non-DID registry_did (cross-file $ref)", &bad_did),
     ] {
         assert!(
@@ -18852,7 +18910,8 @@ fn the_shipped_binary_sweeps_legacy_events_on_startup() {
 /// ascending `seq`; `limit=2` pages with `has_more` and an always-present
 /// `next_cursor`; polling at the head is empty until a fourth change, which
 /// then appears alone; `since=head` sees nothing older; an entry read twice
-/// is byte-identical; `limit=0` and `kind=bogus` are `schema_violation`.
+/// is byte-identical; `limit=0` and `kind=bogus` are `schema_violation`;
+/// G, a `limit` above `max_changes_page` is clamped, not refused.
 /// rec-002 A, C, E, F: the retraction's `event` / `event_receipt` are the
 /// served `registry_state` values and `recorded_at` is the receipt's
 /// `accepted_at`; the supersession names the new version and carries its
@@ -18876,7 +18935,7 @@ fn rec_changes_registry_side() {
     };
     let root = spec_root().expect("spec root");
     for (id, wanted) in [
-        ("rec-001", &["A ", "B ", "C ", "D ", "E ", "F "][..]),
+        ("rec-001", &["A ", "B ", "C ", "D ", "E ", "F ", "G "][..]),
         ("rec-002", &["A ", "B ", "C ", "E ", "F "][..]),
         ("rec-005", &["C ", "D "][..]),
     ] {
@@ -19093,6 +19152,26 @@ fn rec_changes_registry_side() {
         seqs(&changes(&format!("?since={}", cursor(&head)))),
         vec![4]
     );
+
+    // rec-001 G (§5.1): a limit above the advertised maximum is clamped,
+    // never refused. Four entries exist, all fewer than the maximum, so the
+    // clamped page holds all of them and `has_more` is false; well above the
+    // maximum (u32::MAX) is clamped the same way.
+    let max_page = limit("max_changes_page");
+    for over in [max_page + 1, u64::from(u32::MAX)] {
+        let page = changes(&format!("?limit={over}"));
+        let got = seqs(&page);
+        assert!(
+            got.len() as u64 <= max_page,
+            "limit={over}: a clamped page holds at most {max_page}: {page}"
+        );
+        assert_eq!(
+            (got, page["has_more"].clone()),
+            (vec![1, 2, 3, 4], json!(false)),
+            "limit={over} must be clamped to {max_page}, not refused"
+        );
+        assert!(page["next_cursor"].is_string(), "{page}");
+    }
 
     // rec-001 F; rec-005 C.
     refused("?limit=0", "schema_violation");
