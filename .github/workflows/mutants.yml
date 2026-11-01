@@ -560,6 +560,15 @@ jobs:
     timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7
+      # Run 41331301973 (feat/changes-buckets, scope 405) filled the runner:
+      # every mutant from about the 70th on failed to link with "Disk quota
+      # exceeded (os error 122)" and was scored Unviable or Caught. The
+      # preinstalled SDKs this job never uses are ~25 GB; drop them first.
+      - name: free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
@@ -636,6 +645,10 @@ jobs:
       # readable report at all, so a crashed run cannot slip through as success.
       - name: cargo mutants (scope and test command come from .cargo/mutants.toml)
         env:
+          # No debuginfo in the per-mutant builds: it is most of the target dir's
+          # size and nothing here reads a backtrace. Same 41331301973 incident.
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
           # Inherited by the `cargo test` that cargo-mutants runs for each mutant,
           # which is how the 63 fixture-replay tests above actually execute.
           # REQUIRE mode on purpose: it turns a broken spec checkout into a hard
@@ -729,6 +742,19 @@ jobs:
       #
       # The 50% threshold sits in a gap an order of magnitude wide, so it is not a
       # tuned number. It is deliberately a CEILING that fails, not a warning.
+      # A full disk scores mutants Unviable (the link fails) or Caught (a test
+      # cannot write its database), so the ratchet would read an infrastructure
+      # failure as kills and order survivor lines deleted. Refuse the run.
+      - name: harness check — no mutant log may show a full disk
+        run: |
+          set -uo pipefail
+          hits=$(grep -alE 'Disk quota exceeded|No space left on device' mutants.out/log/*.log | wc -l | tr -d ' ')
+          if [ "$hits" -gt 0 ]; then
+            echo "::error::$hits mutant log(s) report a full disk. Their verdicts are infrastructure failures, not mutation results; fix the runner's disk and re-run."
+            exit 1
+          fi
+          echo "no disk-exhaustion errors in any mutant log."
+
       - name: harness check (AC8) — no verdict may rest on an unrelated failure
         run: |
           set -uo pipefail
