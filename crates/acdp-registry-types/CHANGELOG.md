@@ -1,5 +1,12 @@
 
 
+## [0.11.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.10.0...acdp-registry-types/v0.11.0) - 2026-11-01
+
+### Added
+
+- *(auth)* bearer_static read tokens (RFC-ACDP-0008 §6.2) ([#523](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/523))
+
+
 ## [0.10.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.9.0...acdp-registry-types/v0.10.0) - 2026-11-01
 
 ### Added

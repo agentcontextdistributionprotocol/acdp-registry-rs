@@ -1,5 +1,12 @@
 
 
+## [0.11.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-auth/v0.10.0...acdp-registry-auth/v0.11.0) - 2026-11-01
+
+### Added
+
+- *(auth)* bearer_static read tokens (RFC-ACDP-0008 §6.2) ([#523](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/523))
+
+
 ## [0.10.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-auth/v0.9.0...acdp-registry-auth/v0.10.0) - 2026-11-01
 
 No changes. This crate is released at 0.10.0 because the workspace shares a
