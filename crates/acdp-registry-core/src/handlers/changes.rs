@@ -214,7 +214,7 @@ fn parse_bucket(
 }
 
 /// Parse the raw query string. Unknown parameters are ignored, as on
-/// search, except the two bucket parameters (see [`parse_bucket`]).
+/// search, except the two bucket parameters (see `parse_bucket`).
 /// `since` and `limit` may appear at most once; the filter members repeat
 /// (§5.1). `max_bucket_len` is the advertised
 /// `limits.max_change_bucket_length`.
