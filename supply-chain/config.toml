@@ -41,55 +41,55 @@ audit-as-crates-io = false
 audit-as-crates-io = false
 
 [[exemptions.acdp]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-chain]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-client]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-crypto]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-did]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-jcs]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-primitives]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-producer]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-safe-http]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-server]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-types]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-validation]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.acdp-verify]]
-version = "0.20.0"
+version = "0.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ahash]]
