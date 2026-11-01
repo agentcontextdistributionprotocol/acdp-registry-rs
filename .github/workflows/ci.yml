@@ -417,6 +417,9 @@ jobs:
       # its own PR job (mutants-pins.yml) skips its check on PRs that touch no
       # scoped file or pin, so a PR that breaks the script must go red HERE.
       #
+      # test_merge_mutants_shards.py rides here for the same reason: mutants.yml
+      # merges its shard reports with it, and that workflow has no PR trigger.
+      #
       # test_check_crypto_exemptions.py (#405) rides here too, so a broken
       # crypto exemption guard goes red in a required context even while the
       # advisory cargo-vet job is red for another reason (e.g. `cargo vet
@@ -429,7 +432,7 @@ jobs:
           ACDP_CRYPTO_GUARD_SKIP_REAL_TREE: "1"
         run: |
           set -uo pipefail
-          for suite in test_classify_removed_survivors.py test_check_mutants_pins.py test_check_crypto_exemptions.py; do
+          for suite in test_classify_removed_survivors.py test_merge_mutants_shards.py test_check_mutants_pins.py test_check_crypto_exemptions.py; do
             # The exit code is captured rather than left to `set -e` ON PURPOSE.
             # A suite that collects ZERO tests exits 5 on Python 3.12+ and 0 on
             # older versions -- so under `set -e` the run would abort before the
