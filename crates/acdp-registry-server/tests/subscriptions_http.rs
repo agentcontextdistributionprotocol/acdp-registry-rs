@@ -399,6 +399,19 @@ async fn request_validation_names_the_field() {
             json!({"filter": {"agent_id": [did_of(1)], "tenant": ["x"]}, "callback_url": url}),
             "filter",
         ),
+        // §8.1: a subscription filter carries no bucket member, even
+        // beside a valid id (acdp 0.21 types the member, so this is the
+        // registry's refusal, not an unknown-field one).
+        (
+            "lineage bucket",
+            json!({"filter": {"lineage_bucket": ["ab"]}, "callback_url": url}),
+            "filter",
+        ),
+        (
+            "agent bucket beside an id",
+            json!({"filter": {"agent_id": [did_of(1)], "agent_bucket": ["ab"]}, "callback_url": url}),
+            "filter",
+        ),
         (
             "missing callback_url",
             json!({"filter": agent_filter(1)}),

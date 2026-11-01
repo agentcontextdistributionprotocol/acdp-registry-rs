@@ -6,8 +6,15 @@
 //! registries that do not advertise `acdp-registry-changes`.
 //!
 //! Error semantics (§5.1, §5.4):
-//! - too many filter values, an unknown or empty `kind`, a malformed id,
-//!   a repeated `since` / `limit` → `schema_violation` (400);
+//! - too many filter values (bucket values count, §5.1), an unknown or
+//!   empty `kind`, a malformed id, a repeated `since` / `limit` →
+//!   `schema_violation` (400);
+//! - a `lineage_bucket` / `agent_bucket` while `limits.max_change_bucket_length`
+//!   is not advertised, or one that is not 1 to that many lowercase hex
+//!   digits → `schema_violation` naming the parameter in `details.field`
+//!   (§6.1). Parsing runs before the anonymous-reader refusal, so a
+//!   malformed or unsupported parameter is a 400 for every caller, as for
+//!   every other malformed parameter;
 //! - a `limit` that is not a positive integer → `schema_violation` with
 //!   `details.field = "limit"`; one above `limits.max_changes_page` is
 //!   clamped to it (§5.1 only requires accepting values up to the max;
@@ -28,6 +35,12 @@
 //!   consumer recovers exactly as from a pruned cursor (§7: re-verify,
 //!   resume from `since=head`).
 //!
+//! Bucket filters (§6.1) match the whole bucket: every entry whose
+//! `lineage_id` or `agent_id` hashes into a requested prefix, OR'd with the
+//! exact ids and AND'd with `kind`. They have no key-revocation counterpart
+//! (only an exact `ctx_id` watch pulls in its producer's revocations); a
+//! producer's revocations match its `agent_bucket`.
+//!
 //! Visibility (§5.5) is a post-filter over the store's matching rows, one
 //! batched `visible_ctx_ids` per scanned page. A hidden entry never ends a
 //! page early (§5.2): the handler keeps scanning up to
@@ -39,10 +52,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use acdp::error::AcdpError;
-use acdp::types::change::{ChangeKind, ChangesResponse, WatchFilter, MAX_CURSOR_LEN};
+use acdp::types::change::{
+    ChangeKind, ChangesResponse, WatchFilter, MAX_CHANGE_BUCKET_LENGTH, MAX_CURSOR_LEN,
+};
 use acdp::types::primitives::{AgentDid, CtxId, LineageId};
 use acdp_registry_store::changes::{FeedFingerprint, FeedHead, FeedQuery, FeedRow, FEED_ORIGIN_FP};
-use acdp_registry_store::ExtendedRegistryStore;
+use acdp_registry_store::{Bucket, ExtendedRegistryStore};
 use acdp_registry_types::RegistryError;
 use axum::extract::{RawQuery, State};
 use axum::http::HeaderMap;
@@ -145,7 +160,9 @@ async fn anchor_holds<S: ExtendedRegistryStore + ?Sized>(
     Ok(stored == Some(anchor.fp))
 }
 
-/// A parsed `GET /changes` request.
+/// A parsed `GET /changes` request. `filter` carries the bucket values too
+/// (`WatchFilter::{lineage_bucket, agent_bucket}`), already checked against
+/// the advertised `limits.max_change_bucket_length`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangesRequest {
     pub since: Since,
@@ -167,14 +184,46 @@ fn limit_violation(max: u64, raw: &str) -> RegistryError {
     }
 }
 
+/// One `lineage_bucket` / `agent_bucket` value (§6.1), against the advertised
+/// `max_bucket_len`. Without one the registry serves no bucket filter, and
+/// the parameter is refused rather than ignored: ignoring it would answer
+/// an unfiltered page the consumer reads as filtered.
+fn parse_bucket(
+    field: &'static str,
+    raw: &str,
+    max_bucket_len: Option<u16>,
+) -> Result<String, RegistryError> {
+    let Some(max) = max_bucket_len else {
+        return Err(RegistryError::FieldViolation {
+            field,
+            message: format!(
+                "bucket filters are not supported: limits.max_change_bucket_length is not \
+                 advertised, so {field} is refused (RFC-ACDP-0018 §6.1)"
+            ),
+        });
+    };
+    Bucket::parse(raw, max)
+        .map(|b| b.as_str().to_owned())
+        .map_err(|e| RegistryError::FieldViolation {
+            field,
+            message: match e {
+                AcdpError::SchemaViolation(m) => format!("{field}: {m}"),
+                other => format!("{field}: {other}"),
+            },
+        })
+}
+
 /// Parse the raw query string. Unknown parameters are ignored, as on
-/// search. `since` and `limit` may appear at most once; the filter members
-/// repeat (§5.1).
+/// search, except the two bucket parameters (see [`parse_bucket`]).
+/// `since` and `limit` may appear at most once; the filter members repeat
+/// (§5.1). `max_bucket_len` is the advertised
+/// `limits.max_change_bucket_length`.
 pub fn parse_request(
     raw: Option<&str>,
     key: &ChangesKey,
     max_change_filters: u64,
     max_changes_page: u64,
+    max_bucket_len: Option<u16>,
 ) -> Result<ChangesRequest, RegistryError> {
     let mut since: Option<String> = None;
     let mut limit: Option<String> = None;
@@ -193,9 +242,21 @@ pub fn parse_request(
             "lineage_id" => filter.lineage_id.push(LineageId::parse(v.into_owned())?),
             "agent_id" => filter.agent_id.push(AgentDid::parse(v.into_owned())?),
             "kind" => filter.kind.push(ChangeKind::parse(&v)?),
+            "lineage_bucket" => {
+                filter
+                    .lineage_bucket
+                    .push(parse_bucket("lineage_bucket", &v, max_bucket_len)?)
+            }
+            "agent_bucket" => {
+                filter
+                    .agent_bucket
+                    .push(parse_bucket("agent_bucket", &v, max_bucket_len)?)
+            }
             _ => {}
         }
     }
+    // The SDK's count includes the bucket values, duplicates too (§5.1:
+    // "every value of every filter parameter counts").
     filter.validate(Some(max_change_filters))?;
     let limit = match limit {
         None => DEFAULT_LIMIT.min(max_changes_page),
@@ -230,6 +291,17 @@ pub fn parse_request(
         limit,
         filter,
     })
+}
+
+/// The store form of a filter's bucket values. A request from
+/// [`parse_request`] holds only values it checked against the advertised
+/// length; this re-check against the schema maximum is the store's own
+/// guard for any other caller.
+fn buckets(values: &[String]) -> Result<Vec<Bucket>, RegistryError> {
+    values
+        .iter()
+        .map(|b| Bucket::parse(b, MAX_CHANGE_BUCKET_LENGTH).map_err(RegistryError::Acdp))
+        .collect()
 }
 
 /// The id a row's visibility turns on (§5.5): the affected context for
@@ -319,8 +391,8 @@ pub async fn evaluate_changes<S: ExtendedRegistryStore + 'static>(
             .map(|a| a.as_str().to_string())
             .collect(),
         revocation_agents,
-        lineage_buckets: Vec::new(),
-        agent_buckets: Vec::new(),
+        lineage_buckets: buckets(&req.filter.lineage_bucket)?,
+        agent_buckets: buckets(&req.filter.agent_bucket)?,
         kinds: req.filter.kind.clone(),
         scan_limit: u32::try_from(req.limit)
             .unwrap_or(u32::MAX)
@@ -420,7 +492,18 @@ async fn serve<S: ExtendedRegistryStore + 'static>(
         ))
     })?;
     let cfg = &state.config.changes;
-    let req = parse_request(raw, key, cfg.max_change_filters, cfg.max_changes_page)?;
+    // Accepted exactly when advertised: the served capabilities document is
+    // the one source for both.
+    let max_bucket_len = state.server.capabilities().limits.max_change_bucket_length;
+    // Before the anonymous refusal below, on purpose: a malformed or
+    // unsupported parameter is a 400 for every caller.
+    let req = parse_request(
+        raw,
+        key,
+        cfg.max_change_filters,
+        cfg.max_changes_page,
+        max_bucket_len,
+    )?;
     let requester = principal.requester();
     // As on search: with the public arm closed an anonymous reader has no
     // visible entries but key revocations, and is refused rather than
@@ -445,7 +528,7 @@ mod tests {
     }
 
     fn parse(q: &str) -> Result<ChangesRequest, RegistryError> {
-        parse_request(Some(q), &key(), 100, 100)
+        parse_request(Some(q), &key(), 100, 100, None)
     }
 
     fn code(r: Result<ChangesRequest, RegistryError>) -> &'static str {
@@ -454,7 +537,7 @@ mod tests {
 
     #[test]
     fn defaults_are_oldest_and_100() {
-        let r = parse_request(None, &key(), 100, 100).unwrap();
+        let r = parse_request(None, &key(), 100, 100, None).unwrap();
         assert_eq!(r.since, Since::Oldest);
         assert_eq!(r.limit, 100);
         assert!(r.filter.is_empty());
@@ -557,5 +640,102 @@ mod tests {
     #[test]
     fn unknown_parameters_are_ignored() {
         assert!(parse("cursor=x&q=y").is_ok());
+    }
+
+    fn parse_b(q: &str, max: Option<u16>) -> Result<ChangesRequest, RegistryError> {
+        parse_request(Some(q), &key(), 100, 100, max)
+    }
+
+    fn field_of(r: Result<ChangesRequest, RegistryError>) -> (&'static str, String) {
+        match r.expect_err("must be refused") {
+            RegistryError::FieldViolation { field, message } => (field, message),
+            other => panic!("not a field violation: {other:?}"),
+        }
+    }
+
+    /// §6.1: without an advertised length the bucket parameters are refused,
+    /// never ignored, and the message names the missing feature even when
+    /// the value is malformed too.
+    #[test]
+    fn bucket_parameters_are_refused_unless_advertised() {
+        for (q, want) in [
+            ("lineage_bucket=a", "lineage_bucket"),
+            ("agent_bucket=ab", "agent_bucket"),
+            ("lineage_bucket=", "lineage_bucket"),
+            ("lineage_bucket", "lineage_bucket"),
+            ("agent_bucket=XYZ", "agent_bucket"),
+            ("kind=lifecycle&agent_bucket=0", "agent_bucket"),
+        ] {
+            let (field, msg) = field_of(parse_b(q, None));
+            assert_eq!(field, want, "{q}");
+            assert!(msg.contains("not supported"), "{q}: {msg}");
+            assert!(msg.contains("max_change_bucket_length"), "{q}: {msg}");
+        }
+    }
+
+    #[test]
+    fn bucket_grammar_is_checked_against_the_advertised_length() {
+        let nine = "a".repeat(9);
+        let seventeen = "0".repeat(17);
+        for (q, want) in [
+            ("lineage_bucket=", "lineage_bucket"),
+            ("lineage_bucket", "lineage_bucket"),
+            ("lineage_bucket=AB", "lineage_bucket"),
+            ("agent_bucket=g1", "agent_bucket"),
+            ("agent_bucket=%C3%A9", "agent_bucket"),
+            ("agent_bucket=a%20", "agent_bucket"),
+            (&*format!("lineage_bucket={nine}"), "lineage_bucket"),
+            (&*format!("agent_bucket={seventeen}"), "agent_bucket"),
+        ] {
+            let (field, msg) = field_of(parse_b(q, Some(8)));
+            assert_eq!(field, want, "{q}");
+            assert!(msg.starts_with(want), "{q}: {msg}");
+            assert!(msg.contains("1 to 8"), "{q}: {msg}");
+        }
+        // 1..=max is served; `%61` decodes to `a`.
+        let ok = parse_b(
+            "lineage_bucket=a&lineage_bucket=deadbeef&agent_bucket=%61&agent_bucket=0f",
+            Some(8),
+        )
+        .unwrap();
+        assert_eq!(ok.filter.lineage_bucket, ["a", "deadbeef"]);
+        assert_eq!(ok.filter.agent_bucket, ["a", "0f"]);
+        assert!(ok.filter.lineage_id.is_empty() && ok.filter.agent_id.is_empty());
+        assert!(!ok.filter.is_empty(), "buckets alone are an id clause");
+        let sixteen = "f".repeat(16);
+        assert!(parse_b(&format!("lineage_bucket={sixteen}"), Some(16)).is_ok());
+        assert!(parse_b("lineage_bucket=1&kind=key_revocation", Some(4)).is_ok());
+    }
+
+    /// Bucket values count toward `max_change_filters`, duplicates included.
+    #[test]
+    fn bucket_values_count_toward_the_filter_limit() {
+        let buckets = |n: usize| {
+            (0..n)
+                .map(|_| "lineage_bucket=ab")
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        let at = format!("{}&kind=lifecycle", buckets(99));
+        assert!(parse_b(&at, Some(8)).is_ok());
+        let over = format!("{}&kind=lifecycle", buckets(100));
+        let e = parse_b(&over, Some(8)).expect_err("101 values");
+        assert_eq!(e.wire_code(), "schema_violation");
+        assert!(e.to_string().contains("101"), "{e}");
+        let mixed = format!("{}&agent_bucket=1", buckets(100));
+        assert_eq!(code(parse_b(&mixed, Some(8))), "schema_violation");
+    }
+
+    #[test]
+    fn the_store_form_rechecks_bucket_values() {
+        assert_eq!(
+            buckets(&["ab".into(), "0".into()]).unwrap(),
+            [
+                Bucket::parse("ab", 16).unwrap(),
+                Bucket::parse("0", 16).unwrap()
+            ]
+        );
+        assert!(buckets(&["AB".into()]).is_err());
+        assert!(buckets(&["0".repeat(17)]).is_err());
     }
 }

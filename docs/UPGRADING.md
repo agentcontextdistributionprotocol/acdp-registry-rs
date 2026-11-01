@@ -53,6 +53,21 @@ and fills them for every existing row, on every deployment, `[changes]` on or of
   that backup, and a restore is a sequence reset, so raise `[changes] cursor_epoch` before serving
   again ([OPERATIONS.md](OPERATIONS.md#restore), step 5).
 
+**`GET /changes` refuses `lineage_bucket` / `agent_bucket` unless bucket filters are on (behaviour
+change).** These parameters used to be ignored like any unknown parameter, which answered an
+unfiltered page. They are now `400 schema_violation`, with `details.field` naming the parameter,
+on every registry that does not advertise `limits.max_change_bucket_length` (RFC-ACDP-0018 §6.1).
+The check runs before the anonymous-reader refusal, so an anonymous caller gets the 400 even where
+public reads are closed. Bucket values count toward `max_change_filters`.
+
+**New: `[changes] max_change_bucket_length`** (`ACDP_REGISTRY_CHANGES__MAX_CHANGE_BUCKET_LENGTH`,
+unset by default, 4 to 16, only with `[changes] enabled = true`). Setting it serves bucket filters
+and advertises `limits.max_change_bucket_length`. With it unset the capabilities document is
+unchanged. **Do not set it until every consumer runs acdp 0.20 or newer**: acdp 0.19 and older
+reject a capabilities document carrying that key, and startup logs a warning saying so. **Rolling
+back with it set:** `[changes]` refuses unknown keys, so an older binary refuses to start. Remove
+`max_change_bucket_length` (or its env var) before rolling back.
+
 ## 0.10.0
 
 **Railway (and any edge that appends its own hop): set `rate_limit.forwarded_skip_rightmost`.**

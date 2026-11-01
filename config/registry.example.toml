@@ -289,6 +289,13 @@ enabled = false
 # max_change_filters     = 100       # 100..=1000
 # max_changes_page       = 100       # 100..=1000
 # prune_interval_seconds = 3600
+# Bucket filters (§6.1: lineage_bucket / agent_bucket), advertised as
+# limits.max_change_bucket_length. Off when unset; 4..=16, and only with
+# enabled = true. Consumers on acdp 0.19 or older reject a capabilities
+# document carrying it, so set it only once every consumer is on acdp 0.20+.
+# Remove it before rolling back to a binary that predates it, which refuses
+# to start with an unknown [changes] key.
+# max_change_bucket_length = 8
 
 [events]
 # Change-hint subscriptions (RFC-ACDP-0018 §8): /subscriptions and the

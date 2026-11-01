@@ -755,7 +755,26 @@ registry does with them:
   `key_revocation` entries for that context's producer. More than
   `max_change_filters` filter values in total, a repeated `since`/`limit`, a
   malformed id or an unknown `kind` → `400 schema_violation` (`limit` errors
-  name `details.field = "limit"`). Unknown parameters are ignored.
+  name `details.field = "limit"`). Unknown parameters are ignored, except
+  `lineage_bucket` and `agent_bucket` (below).
+- **Bucket filters (§6.1).** Served only when `[changes]
+  max_change_bucket_length` is set, which advertises
+  `limits.max_change_bucket_length`. `lineage_bucket` and `agent_bucket`
+  repeat; each value is 1 to that many lowercase hex digits, a prefix of
+  lowercase hex(SHA-256(UTF-8(value))) of the `lineage_id` or `agent_id`
+  exactly as served. They OR with each other and with the id filters, `kind`
+  ANDs with the result, and their values count toward `max_change_filters`.
+  The page holds the **whole bucket**: every visible entry whose id hashes
+  into a requested prefix, so the consumer keeps the exact ids it watches and
+  discards the rest. There is no key-revocation counterpart: only an exact
+  `ctx_id` watch matches its producer's `key_revocation` entries, so watch the
+  producer's `agent_bucket` to hear those. Visibility, refill and cursors are
+  unchanged. Not advertised (the default), either parameter is
+  `400 schema_violation` with `details.field` naming it, whatever its value,
+  rather than being ignored; advertised, an empty, upper-case, non-hex or
+  over-long value is the same 400. Parameters are checked before the
+  anonymous-reader refusal below, so a malformed or unsupported bucket
+  parameter is a 400 for an anonymous caller too.
 - **Response.** `{changes, next_cursor, has_more}`; `next_cursor` is always
   present, including on an empty page, and resumes strictly after the last
   entry returned when the page is full, otherwise after the last position

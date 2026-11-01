@@ -18216,12 +18216,12 @@ fn served_auth_toml(enabled: bool) -> String {
 
 /// The `[receipt]`, `[lifecycle]`, `[log]` and `[changes]` tables that back
 /// every optional registry profile (receipts, head receipts, lifecycle,
-/// transparency log, change feed).
+/// transparency log, change feed with §6.1 bucket filters).
 fn served_full_features_toml() -> String {
     format!(
         "[receipt]\nsigning_key_seed_b64 = \"{}\"\nhead_receipts = true\n\n\
          [lifecycle]\nenabled = true\n\n[log]\nenabled = true\n\n\
-         [changes]\nenabled = true\nkey_b64 = \"{}\"\n",
+         [changes]\nenabled = true\nkey_b64 = \"{}\"\nmax_change_bucket_length = 8\n",
         b64_32(0x2c),
         b64_32(0x2d)
     )
@@ -18362,7 +18362,18 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
             );
         }
     }
+    // RFC-ACDP-0018 §6.1: the bucket length only where configured.
+    for tag in ["auth-off", "auth-on"] {
+        assert!(
+            served[tag]["limits"]
+                .get("max_change_bucket_length")
+                .is_none(),
+            "{tag}: {}",
+            served[tag]
+        );
+    }
     let limits = &served["all-profiles"]["limits"];
+    assert_eq!(limits["max_change_bucket_length"], 8, "{limits}");
     assert_eq!(limits["max_reads_per_minute"], 3000, "{limits}");
     assert_eq!(limits["max_anonymous_reads_per_minute"], 1200, "{limits}");
     // §9: each RFC-ACDP-0018 profile brings its limits.
