@@ -229,7 +229,7 @@ this section records only what **this registry** emits in each one
 | `supported_signature_algorithms` | `["ed25519", "ecdsa-p256"]`, fixed by the build; not configurable. |
 | `supported_did_methods` | `auth.did_methods`; may include `"did:key"`. |
 | `profiles` | `registry.profiles` (default: `acdp-registry-core`, `acdp-registry-discovery`) plus the receipts, head-receipts, lifecycle, transparency-log, `acdp-registry-changes` (`[changes]`) and `acdp-registry-events` (`[events]`) profiles when their config sections enable them. |
-| `limits` | `max_payload_bytes`, `max_embedded_bytes` and `idempotency_key_ttl_seconds` from `[limits]`; `change_retention_seconds`, `max_change_filters` and `max_changes_page` from `[changes]` when it is enabled; `max_subscriptions_per_requester` from `[events]` when it is enabled; `max_publish_per_minute` is never emitted. |
+| `limits` | `max_payload_bytes`, `max_embedded_bytes` and `idempotency_key_ttl_seconds` from `[limits]`; `change_retention_seconds`, `max_change_filters` and `max_changes_page` from `[changes]` when it is enabled, plus `max_change_bucket_length` only when `[changes] max_change_bucket_length` is also set; `max_subscriptions_per_requester` from `[events]` when it is enabled; `max_publish_per_minute` is never emitted. |
 | `supports_idempotency_key` | Always `true`. |
 | `anonymous_public_reads` | `auth.anonymous_public_reads`; always present (default `false`). |
 | `read_authentication_methods` | `["bearer_jwt"]` when `auth.enabled = true`, plus `"bearer_static"` when `[[auth.read_tokens]]` is configured; omitted otherwise. |
@@ -755,7 +755,26 @@ registry does with them:
   `key_revocation` entries for that context's producer. More than
   `max_change_filters` filter values in total, a repeated `since`/`limit`, a
   malformed id or an unknown `kind` → `400 schema_violation` (`limit` errors
-  name `details.field = "limit"`). Unknown parameters are ignored.
+  name `details.field = "limit"`). Unknown parameters are ignored, except
+  `lineage_bucket` and `agent_bucket` (below).
+- **Bucket filters (§6.1).** Served only when `[changes]
+  max_change_bucket_length` is set, which advertises
+  `limits.max_change_bucket_length`. `lineage_bucket` and `agent_bucket`
+  repeat; each value is 1 to that many lowercase hex digits, a prefix of
+  lowercase hex(SHA-256(UTF-8(value))) of the `lineage_id` or `agent_id`
+  exactly as served. They OR with each other and with the id filters, `kind`
+  ANDs with the result, and their values count toward `max_change_filters`.
+  The page holds the **whole bucket**: every visible entry whose id hashes
+  into a requested prefix, so the consumer keeps the exact ids it watches and
+  discards the rest. There is no key-revocation counterpart: only an exact
+  `ctx_id` watch matches its producer's `key_revocation` entries, so watch the
+  producer's `agent_bucket` to hear those. Visibility, refill and cursors are
+  unchanged. Not advertised (the default), either parameter is
+  `400 schema_violation` with `details.field` naming it, whatever its value,
+  rather than being ignored; advertised, an empty, upper-case, non-hex or
+  over-long value is the same 400. Parameters are checked before the
+  anonymous-reader refusal below, so a malformed or unsupported bucket
+  parameter is a 400 for an anonymous caller too.
 - **Response.** `{changes, next_cursor, has_more}`; `next_cursor` is always
   present, including on an empty page, and resumes strictly after the last
   entry returned when the page is full, otherwise after the last position
@@ -806,7 +825,10 @@ This section records what this registry does:
   [`acdp-subscription-request`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/3f5069756baab02148dccef306b52dceebc36794/schemas/json/acdp-subscription-request.schema.json):
   a `filter` with the `GET /changes` semantics (at least one member, no
   empty or duplicate values, at most `max_change_filters` values in total)
-  and an `https` `callback_url`. The `callback_url` is refused unless it is
+  and an `https` `callback_url`. A filter carrying `lineage_bucket` or
+  `agent_bucket` is `400 schema_violation` (`details.field = "filter"`),
+  whether or not `GET /changes` serves bucket filters: a subscription filter
+  has no bucket member (RFC-ACDP-0018 §8.1, §6.1). The `callback_url` is refused unless it is
   `https`, names a host rather than an IP literal, and every address that
   host resolves to is public unicast (RFC-ACDP-0006 §7). A public IP
   literal is refused too: stricter than §8.3, which constrains only the

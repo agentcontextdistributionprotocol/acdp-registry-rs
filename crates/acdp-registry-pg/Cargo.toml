@@ -26,6 +26,9 @@ metrics     = { workspace = true }
 uuid        = { workspace = true }
 
 [dev-dependencies]
+# tests/migration_rollback.rs builds "a database at migration N" from a
+# tempdir copy of the first N migrations.
+tempfile = "3"
 # `features = ["test-support"]` pulls in the shared cross-backend parity
 # assertions that tests/parity.rs runs against this backend.
 acdp-registry-store = { path = "../acdp-registry-store", version = "0.10.1", features = ["test-support"] }

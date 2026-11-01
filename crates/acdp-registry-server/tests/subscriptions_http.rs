@@ -68,6 +68,7 @@ fn caps() -> CapabilitiesDocument {
             change_retention_seconds: None,
             max_change_filters: None,
             max_changes_page: None,
+            max_change_bucket_length: None,
             max_subscriptions_per_requester: None,
             max_reads_per_minute: None,
             max_anonymous_reads_per_minute: None,
@@ -396,6 +397,19 @@ async fn request_validation_names_the_field() {
         (
             "unknown filter member",
             json!({"filter": {"agent_id": [did_of(1)], "tenant": ["x"]}, "callback_url": url}),
+            "filter",
+        ),
+        // §8.1: a subscription filter carries no bucket member, even
+        // beside a valid id (acdp 0.21 types the member, so this is the
+        // registry's refusal, not an unknown-field one).
+        (
+            "lineage bucket",
+            json!({"filter": {"lineage_bucket": ["ab"]}, "callback_url": url}),
+            "filter",
+        ),
+        (
+            "agent bucket beside an id",
+            json!({"filter": {"agent_id": [did_of(1)], "agent_bucket": ["ab"]}, "callback_url": url}),
             "filter",
         ),
         (

@@ -21,6 +21,39 @@ belongs in the per-crate changelogs.
 
 ---
 
+## Unreleased
+
+**Migration `021_changes_bucket_hashes` backfills the change feed at startup (Postgres: size it
+first).** It adds `lineage_hash` / `agent_hash` to `changes` for RFC-ACDP-0018 §6.1 bucket filters
+and fills them for every existing row, on every deployment, `[changes]` on or off. Details in
+[OPERATIONS.md](OPERATIONS.md#migration-021-change-feed-bucket-hashes).
+- **Postgres: before deploying, run `SELECT count(*) FROM changes;`.** For the backfill and two
+  index builds the migration holds `ACCESS EXCLUSIVE` on `changes`, which blocks `/changes` reads,
+  hints, prune, lifecycle events and superseding or revocation publishes (not plain publishes).
+  Measured rate: about 28,000 rows/s on PostgreSQL 16 (plan with 25,000). Compare count ÷ rate with
+  the platform's startup health-check grace; above half of it, raise the grace for this deploy or
+  pick a quiet window. The migration gives up after `lock_timeout = 5s` if it cannot get the lock:
+  the new replica fails startup, the old ones keep serving, retry. Additive and N-1 safe: an insert
+  trigger fills the hashes for an older binary, so rolling back needs no step.
+- **SQLite: take a backup first.** Not N-1 safe, as before: rolling back past 021 means restoring
+  that backup, and a restore is a sequence reset, so raise `[changes] cursor_epoch` before serving
+  again ([OPERATIONS.md](OPERATIONS.md#restore), step 5).
+
+**`GET /changes` refuses `lineage_bucket` / `agent_bucket` unless bucket filters are on (behaviour
+change).** These parameters used to be ignored like any unknown parameter, which answered an
+unfiltered page. They are now `400 schema_violation`, with `details.field` naming the parameter,
+on every registry that does not advertise `limits.max_change_bucket_length` (RFC-ACDP-0018 §6.1).
+The check runs before the anonymous-reader refusal, so an anonymous caller gets the 400 even where
+public reads are closed. Bucket values count toward `max_change_filters`.
+
+**New: `[changes] max_change_bucket_length`** (`ACDP_REGISTRY_CHANGES__MAX_CHANGE_BUCKET_LENGTH`,
+unset by default, 4 to 16, only with `[changes] enabled = true`). Setting it serves bucket filters
+and advertises `limits.max_change_bucket_length`. With it unset the capabilities document is
+unchanged. **Do not set it until every consumer runs acdp 0.20 or newer**: acdp 0.19 and older
+reject a capabilities document carrying that key, and startup logs a warning saying so. **Rolling
+back with it set:** `[changes]` refuses unknown keys, so an older binary refuses to start. Remove
+`max_change_bucket_length` (or its env var) before rolling back.
+
 ## 0.10.1
 
 **Static read tokens (RFC-ACDP-0008 §6.2 `bearer_static`), off unless configured.** New

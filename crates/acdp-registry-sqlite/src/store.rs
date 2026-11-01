@@ -166,6 +166,7 @@ impl ExtendedRegistryStore for SqliteStore {
             .run(&self.pool)
             .await
             .map_err(|e| AcdpError::RegistryInternal(format!("migrate: {e}")))?;
+        crate::changes::backfill_hashes(&self.pool).await?;
         Ok(())
     }
 

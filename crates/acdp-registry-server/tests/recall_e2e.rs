@@ -81,6 +81,7 @@ fn caps() -> CapabilitiesDocument {
             change_retention_seconds: Some(2_592_000),
             max_change_filters: Some(100),
             max_changes_page: Some(100),
+            max_change_bucket_length: None,
             max_subscriptions_per_requester: None,
             max_reads_per_minute: None,
             max_anonymous_reads_per_minute: None,
