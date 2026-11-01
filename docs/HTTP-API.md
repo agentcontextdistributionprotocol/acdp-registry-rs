@@ -182,7 +182,8 @@ check's own `auth_global` or `auth_per_ip` scope.
 > publish/retract/republish `POST`s — answers with
 > `Cache-Control: private` and `Vary: authorization, x-tenant-id`, so a shared
 > cache cannot reuse one requester's view for another (`POST /subscriptions`
-> answers `no-store`, since it carries the secret). `/auth/*`, `/admin/*`,
+> answers `no-store`, since it carries the secret). `GET /changes` also varies on
+> `accept-encoding` (it is the only gzip-compressed route; see below). `/auth/*`, `/admin/*`,
 > `GET /healthz`, `GET /livez` and `GET /metrics` answer `Cache-Control:
 > no-store`. The three `/.well-known/*` documents are requester-invariant and
 > keep `Cache-Control: public, max-age=300` — `public` is the half that
@@ -801,6 +802,17 @@ registry does with them:
   left out. A single entry larger than that on its own is served alone on
   its page, so the feed always moves forward. With the default
   `max_changes_page = 100` real pages stay far below the bound.
+- **Compression.** `GET /changes` is the only compressed route, and gzip
+  the only coding: with `Accept-Encoding: gzip` (or `x-gzip`, or `*`, at
+  any q > 0, case-insensitive) a response body of at least 32 bytes comes
+  back `Content-Encoding: gzip` without `Content-Length`; error bodies
+  included. The response carries `Vary: accept-encoding` whether or not it
+  is compressed. **It never answers 406**: an `Accept-Encoding` that rules
+  out gzip, even one that also rules out identity (`identity;q=0`,
+  `*;q=0`, `br, identity;q=0`), gets the handler's own status with an
+  identity body (RFC 9110 §12.5.3), and a malformed header is treated as
+  absent. A `403` from read authentication is never compressed. Every
+  other route ignores `Accept-Encoding`.
 - **Retention.** Entries are kept at least `change_retention_seconds`
   (advertised; at least 30 days) and pruned oldest-first by a background
   task. A cursor pointing before the oldest retained entry, past the head, or
