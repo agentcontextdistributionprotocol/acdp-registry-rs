@@ -806,11 +806,11 @@ registry does with them:
   the only coding: with `Accept-Encoding: gzip` (or `x-gzip`, or `*`, at
   any q > 0, case-insensitive) a response body of at least 32 bytes comes
   back `Content-Encoding: gzip` without `Content-Length`; error bodies
-  included. The response carries `Vary: accept-encoding` whether or not it
-  is compressed. **It never answers 406**: an `Accept-Encoding` that rules
+  included. Every response the handler produces carries `Vary: accept-encoding`,
+  whether or not it is compressed. **It never answers 406**: an `Accept-Encoding` that rules
   out gzip, even one that also rules out identity (`identity;q=0`,
   `*;q=0`, `br, identity;q=0`), gets the handler's own status with an
-  identity body (RFC 9110 §12.5.3), and a malformed header is treated as
+  identity body (RFC 9110 §12.1, §12.5.3, §15.5.7), and a malformed header is treated as
   absent. A `403` from read authentication is never compressed. Every
   other route ignores `Accept-Encoding`.
 - **Retention.** Entries are kept at least `change_retention_seconds`

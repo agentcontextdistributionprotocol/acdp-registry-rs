@@ -9,8 +9,10 @@
 //!
 //! The registry never answers 406 on `/changes`: a feed consumer with an
 //! over-strict header keeps the feed, and an ACDP 400 is never masked. RFC
-//! 9110 §12.5.3 lets an origin server send a response without any content
-//! coding when nothing listed is acceptable. [`normalize_accept_encoding`]
+//! 9110 lets an origin server send a response without any content coding
+//! when nothing listed is acceptable (§12.5.3), and prefer a
+//! non-conforming response over 406 even when identity is ruled out
+//! (§12.1, §15.5.7). [`normalize_accept_encoding`]
 //! runs before the compression layer and reduces the header to the only two
 //! outcomes we can serve:
 //!
