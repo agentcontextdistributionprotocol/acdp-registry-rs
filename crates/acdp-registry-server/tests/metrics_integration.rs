@@ -105,6 +105,7 @@ fn metrics_config() -> RegistryConfig {
             trusted_proxies: vec![],
             ..RateLimitConfig::default()
         },
+        read_limits: Default::default(),
         metrics: MetricsConfig {
             enabled: true,
             bearer_token: String::new(),
@@ -1278,5 +1279,53 @@ async fn an_over_budget_lifecycle_actor_is_counted_under_lifecycle_per_agent() {
         ),
         1.0,
         "exactly one lifecycle_per_agent rejection\n{body}"
+    );
+}
+
+/// RFC-ACDP-0008 §4.3: an anonymous read over budget is counted under
+/// `read_anonymous`, and only once per refusal.
+#[tokio::test]
+async fn an_over_budget_anonymous_read_is_counted_under_read_anonymous() {
+    let mut cfg = metrics_config();
+    cfg.read_limits.enabled = true;
+    cfg.read_limits.anonymous_per_minute = 1;
+    let h = harness(cfg).await;
+    let needles = [
+        "acdp_registry_rate_limit_rejections_total",
+        "scope=\"read_anonymous\"",
+    ];
+    let before = metric_sum(&scrape(&h.router).await.2, &needles);
+    let read = || {
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/contexts/search")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            "203.0.113.77:40000"
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+        ));
+        req
+    };
+    let statuses = [
+        h.router.clone().oneshot(read()).await.unwrap().status(),
+        h.router.clone().oneshot(read()).await.unwrap().status(),
+        h.router.clone().oneshot(read()).await.unwrap().status(),
+    ];
+    assert_eq!(
+        statuses,
+        [
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::TOO_MANY_REQUESTS
+        ]
+    );
+    let (status, _ct, body) = scrape(&h.router).await;
+    assert_eq!(status, StatusCode::OK, "metrics scrape");
+    assert_eq!(
+        metric_sum(&body, &needles) - before,
+        2.0,
+        "two read_anonymous rejections\n{body}"
     );
 }

@@ -157,6 +157,7 @@ fn config(playground: bool) -> RegistryConfig {
         webhook: WebhookConfig::default(),
         limits: LimitsConfig::default(),
         rate_limit: Default::default(),
+        read_limits: Default::default(),
         metrics: Default::default(),
         playground: PlaygroundConfig {
             enabled: playground,
@@ -13981,5 +13982,325 @@ async fn token_handshake_classifies_did_resolution_failures_like_did001() {
             &format!("contrast: rate limit off, #{key}"),
             handshake(&unlimited, &did, &format!("{did}#{key}"), SEED).await,
         );
+    }
+}
+
+// ── RFC-ACDP-0008 §4.3: read rate limits ────────────────────────────────────
+
+/// A data-plane read from `peer`, optionally with an `X-Forwarded-For` and a
+/// bearer token. `ConnectInfo` mirrors production so the peer is real.
+fn read_from(
+    method: &str,
+    uri: &str,
+    peer: &str,
+    xff: Option<&str>,
+    bearer: Option<&str>,
+) -> Request<Body> {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let mut b = Request::builder().method(method).uri(uri);
+    if let Some(xff) = xff {
+        b = b.header("x-forwarded-for", xff);
+    }
+    if let Some(t) = bearer {
+        b = b.header("authorization", format!("Bearer {t}"));
+    }
+    let mut req = b.body(Body::empty()).unwrap();
+    let addr: SocketAddr = format!("{peer}:40000").parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+    req
+}
+
+/// A bearer token for `sub`, valid against the default harness's HS256 secret.
+fn bearer_for(sub: &str) -> String {
+    let secret = JwtSecret::from_bytes(&[42u8; 32]);
+    let signer = JwtSigner::new(secret, format!("did:web:{AUTHORITY}"), AUTHORITY.into(), 30);
+    let now = chrono::Utc::now().timestamp();
+    signer
+        .sign(&BearerClaims {
+            iss: format!("did:web:{AUTHORITY}"),
+            sub: sub.into(),
+            aud: AUTHORITY.into(),
+            jti: format!("read-limit-{sub}"),
+            iat: now,
+            exp: now + 3600,
+            acdp: AcdpClaims {
+                registry: AUTHORITY.into(),
+                key_id: format!("{sub}#key-1"),
+            },
+            tenant: None,
+        })
+        .unwrap()
+}
+
+fn read_limit_cfg(anonymous: u32, authenticated: u32) -> RegistryConfig {
+    let mut cfg = config(false);
+    cfg.read_limits.enabled = true;
+    cfg.read_limits.anonymous_per_minute = anonymous;
+    cfg.read_limits.authenticated_per_minute = authenticated;
+    cfg
+}
+
+/// Status, `Retry-After` and body of one request.
+async fn send(router: &axum::Router, req: Request<Body>) -> (StatusCode, Option<String>, Value) {
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let retry = resp
+        .headers()
+        .get("retry-after")
+        .map(|v| v.to_str().unwrap().to_string());
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap().to_string());
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        assert_eq!(ct.as_deref(), Some("application/acdp+json"), "{v}");
+    }
+    (status, retry, v)
+}
+
+fn assert_rate_limited(what: &str, (status, retry, v): &(StatusCode, Option<String>, Value)) {
+    assert_eq!(*status, StatusCode::TOO_MANY_REQUESTS, "{what}: {v}");
+    assert_eq!(v["error"]["code"], "rate_limited", "{what}: {v}");
+    let secs: u64 = retry
+        .as_deref()
+        .unwrap_or_else(|| panic!("{what}: 429 without Retry-After"))
+        .parse()
+        .unwrap_or_else(|e| panic!("{what}: Retry-After not integer seconds: {e}"));
+    assert!((1..=60).contains(&secs), "{what}: Retry-After {secs}");
+}
+
+/// Every GET route of the `data` group is limited: the 4th anonymous read
+/// from one address is 429 `rate_limited` with an integer `Retry-After`,
+/// never the 404/403/501 the handler would have built. Each route gets its
+/// own address so the routes cannot share a bucket by accident.
+#[tokio::test]
+async fn read_limit_covers_every_get_data_route() {
+    let h = harness_from_config(read_limit_cfg(3, 100)).await;
+    let gets: Vec<_> = DATA_PLANE_ROUTES
+        .iter()
+        .filter(|(m, _, _)| *m == "GET")
+        .collect();
+    assert!(gets.len() >= 10, "{gets:?}");
+    for (i, (_, uri, _)) in gets.iter().enumerate() {
+        let peer = format!("203.0.113.{}", i + 1);
+        for n in 1..=3 {
+            let (status, _, v) = send(&h.router, read_from("GET", uri, &peer, None, None)).await;
+            assert_ne!(status, StatusCode::TOO_MANY_REQUESTS, "{uri} read {n}: {v}");
+        }
+        let r = send(&h.router, read_from("GET", uri, &peer, None, None)).await;
+        assert_rate_limited(uri, &r);
+    }
+}
+
+/// HEAD draws on the same budget; capabilities, writes and other addresses
+/// do not; and an exhausted window does not leak into a fresh address.
+#[tokio::test]
+async fn read_limit_scope_head_writes_capabilities_and_other_addresses() {
+    let h = harness_from_config(read_limit_cfg(3, 100)).await;
+    let peer = "198.51.100.5";
+    for m in ["GET", "HEAD", "GET"] {
+        let (s, _, v) = send(
+            &h.router,
+            read_from(m, "/contexts/search", peer, None, None),
+        )
+        .await;
+        assert_ne!(s, StatusCode::TOO_MANY_REQUESTS, "{m}: {v}");
+    }
+    let r = send(
+        &h.router,
+        read_from("HEAD", "/contexts/search", peer, None, None),
+    )
+    .await;
+    assert_eq!(r.0, StatusCode::TOO_MANY_REQUESTS, "HEAD counts as a read");
+    assert_rate_limited(
+        "GET after HEAD",
+        &send(&h.router, read_from("GET", "/changes", peer, None, None)).await,
+    );
+
+    // Capabilities is outside the data group: never limited.
+    for _ in 0..5 {
+        let (s, _, v) = send(
+            &h.router,
+            read_from("GET", "/.well-known/acdp.json", peer, None, None),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+    }
+    // A write from the exhausted address is not a read.
+    let mut post = read_from("POST", "/contexts", peer, None, None);
+    *post.body_mut() = Body::from("{}");
+    post.headers_mut()
+        .insert("content-type", "application/acdp+json".parse().unwrap());
+    let (s, _, v) = send(&h.router, post).await;
+    assert_ne!(s, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    // Another address has its own budget.
+    let (s, _, v) = send(
+        &h.router,
+        read_from("GET", "/contexts/search", "198.51.100.6", None, None),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+/// Authenticated reads are keyed by the requester DID, not the address: two
+/// DIDs behind one address each get their own budget, and an exhausted DID
+/// is 429 even on a public resource. A present-but-invalid token is charged
+/// to the address and still refused 403 by the handler.
+#[tokio::test]
+async fn read_limit_keys_authenticated_reads_by_did() {
+    let mut cfg = read_limit_cfg(2, 3);
+    cfg.auth.enabled = true;
+    let h = harness_from_config(cfg).await;
+    let peer = "192.0.2.10";
+    let alice = bearer_for(&format!("did:web:{AUTHORITY}:agents:alice"));
+    let bob = bearer_for(&format!("did:web:{AUTHORITY}:agents:bob"));
+    for n in 1..=3 {
+        let (s, _, v) = send(
+            &h.router,
+            read_from("GET", "/contexts/search", peer, None, Some(&alice)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "alice read {n}: {v}");
+    }
+    assert_rate_limited(
+        "alice's 4th read",
+        &send(
+            &h.router,
+            read_from("GET", "/contexts/search", peer, None, Some(&alice)),
+        )
+        .await,
+    );
+    // Bob, same address, own budget.
+    let (s, _, v) = send(
+        &h.router,
+        read_from("GET", "/contexts/search", peer, None, Some(&bob)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // Alice's spending did not touch the address's anonymous budget (2).
+    for n in 1..=2 {
+        let (s, _, v) = send(
+            &h.router,
+            read_from("GET", "/contexts/search", peer, None, None),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "anonymous read {n}: {v}");
+    }
+    assert_rate_limited(
+        "anonymous 3rd read",
+        &send(
+            &h.router,
+            read_from("GET", "/contexts/search", peer, None, None),
+        )
+        .await,
+    );
+
+    // A bad token from a fresh address: the handler's 403 while budget lasts,
+    // charged to the address, then 429.
+    let fresh = "192.0.2.11";
+    for n in 1..=2 {
+        let (s, _, v) = send(
+            &h.router,
+            read_from("GET", "/contexts/search", fresh, None, Some("garbage")),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "bad token {n}: {v}");
+        assert_eq!(v["error"]["code"], "not_authorized", "{v}");
+    }
+    assert_rate_limited(
+        "bad token over the address budget",
+        &send(
+            &h.router,
+            read_from("GET", "/contexts/search", fresh, None, Some("garbage")),
+        )
+        .await,
+    );
+}
+
+/// `forwarded_header_trust`: under `trusted_proxies` with an empty list,
+/// `X-Forwarded-For` never moves the bucket; under `any_peer` the rightmost
+/// hop is the client and a forged left-hand entry changes nothing.
+#[tokio::test]
+async fn read_limit_forwarded_header_trust_modes() {
+    let h = harness_from_config(read_limit_cfg(1, 100)).await;
+    let proxy = "100.64.0.2";
+    let (s, _, _) = send(
+        &h.router,
+        read_from("GET", "/changes", proxy, Some("203.0.113.1"), None),
+    )
+    .await;
+    assert_ne!(s, StatusCode::TOO_MANY_REQUESTS);
+    // A different XFF from the same untrusted peer is the same bucket.
+    let r = send(
+        &h.router,
+        read_from("GET", "/changes", proxy, Some("203.0.113.2"), None),
+    )
+    .await;
+    assert_rate_limited("XFF from an untrusted peer is ignored", &r);
+
+    let mut cfg = read_limit_cfg(1, 100);
+    cfg.rate_limit.forwarded_header_trust =
+        acdp_registry_types::config::ForwardedHeaderTrust::AnyPeer;
+    let h = harness_from_config(cfg).await;
+    let (s, _, _) = send(
+        &h.router,
+        read_from("GET", "/changes", proxy, Some("203.0.113.1"), None),
+    )
+    .await;
+    assert_ne!(s, StatusCode::TOO_MANY_REQUESTS);
+    // Forging a left-hand entry does not buy a new bucket.
+    let r = send(
+        &h.router,
+        read_from("GET", "/changes", proxy, Some("9.9.9.9, 203.0.113.1"), None),
+    )
+    .await;
+    assert_rate_limited("forged left-hand XFF", &r);
+    // A different real client behind the same proxy has its own budget.
+    let (s, _, v) = send(
+        &h.router,
+        read_from("GET", "/changes", proxy, Some("203.0.113.2"), None),
+    )
+    .await;
+    assert_ne!(s, StatusCode::TOO_MANY_REQUESTS, "{v}");
+}
+
+/// A proxy that adds its hop as a separate `X-Forwarded-For` line (rather
+/// than appending to the client's) does not let the client's own line pick
+/// the bucket: every line is folded, in order, before the right-to-left walk.
+#[tokio::test]
+async fn read_limit_folds_every_forwarded_for_line() {
+    let mut cfg = read_limit_cfg(1, 100);
+    cfg.rate_limit.forwarded_header_trust =
+        acdp_registry_types::config::ForwardedHeaderTrust::AnyPeer;
+    let h = harness_from_config(cfg).await;
+    let two_lines = |forged: &str| {
+        let mut req = read_from("GET", "/changes", "100.64.0.2", Some(forged), None);
+        req.headers_mut()
+            .append("x-forwarded-for", "203.0.113.7".parse().unwrap());
+        req
+    };
+    let (s, _, v) = send(&h.router, two_lines("6.6.6.1")).await;
+    assert_ne!(s, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    let r = send(&h.router, two_lines("6.6.6.2")).await;
+    assert_rate_limited("a forged first XFF line", &r);
+}
+
+/// Off by default: 50 reads from one address in one window all succeed.
+#[tokio::test]
+async fn read_limits_off_by_default() {
+    assert!(!config(false).read_limits.enabled);
+    let h = harness(false).await;
+    for _ in 0..50 {
+        let (s, _, v) = send(
+            &h.router,
+            read_from("GET", "/contexts/search", "203.0.113.50", None, None),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
     }
 }

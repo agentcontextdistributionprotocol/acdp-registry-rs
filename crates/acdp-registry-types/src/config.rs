@@ -23,6 +23,10 @@ pub struct RegistryConfig {
     /// endpoints, on top of the per-agent `[limits]` budgets.
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    /// RFC-ACDP-0008 §4.3 read rate limits on the data-plane GET/HEAD
+    /// routes. Off by default.
+    #[serde(default)]
+    pub read_limits: ReadLimitsConfig,
     /// FEAT-10: Prometheus `/metrics` endpoint. Off by default.
     #[serde(default)]
     pub metrics: MetricsConfig,
@@ -271,6 +275,7 @@ impl RegistryConfig {
             webhook: WebhookConfig::default(),
             limits: LimitsConfig::default(),
             rate_limit: RateLimitConfig::default(),
+            read_limits: ReadLimitsConfig::default(),
             metrics: MetricsConfig::default(),
             playground: PlaygroundConfig::default(),
             receipt: ReceiptConfig::default(),
@@ -808,6 +813,8 @@ impl Default for LimitsConfig {
 /// frame another IP). When the peer IS a trusted proxy, the real client is
 /// taken from the rightmost `X-Forwarded-For` entry that is not itself a
 /// trusted proxy (walking right-to-left across a chain of trusted hops).
+/// `forwarded_header_trust = "any_peer"` treats every peer as such a proxy,
+/// for a platform edge whose addresses cannot be listed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RateLimitConfig {
@@ -833,6 +840,13 @@ pub struct RateLimitConfig {
     /// untrusted range lets clients on it spoof their source IP.
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    /// When `X-Forwarded-For` may name the client for every per-IP limiter
+    /// (`/auth/*`, keyless minting, anonymous reads). `trusted_proxies`
+    /// (default): only when the TCP peer is in `trusted_proxies`. `any_peer`:
+    /// from every peer, for a platform whose edge addresses cannot be listed
+    /// but which always appends the real client as the rightmost hop.
+    #[serde(default)]
+    pub forwarded_header_trust: ForwardedHeaderTrust,
     /// Where the two `/auth/*` ceilings are counted. `memory` (default): per
     /// process, each replica enforces its own counters. `postgres`: counted
     /// once across every replica sharing the database, with the in-memory
@@ -854,6 +868,80 @@ pub struct RateLimitConfig {
     /// Must be non-zero.
     #[serde(default = "default_backend_prune_seconds")]
     pub backend_prune_seconds: u64,
+}
+
+/// `[rate_limit] forwarded_header_trust`. See
+/// [`RateLimitConfig::forwarded_header_trust`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardedHeaderTrust {
+    /// `X-Forwarded-For` is read only when the TCP peer is inside
+    /// `rate_limit.trusted_proxies`.
+    #[default]
+    TrustedProxies,
+    /// `X-Forwarded-For` is read from every peer. Safe ONLY behind a proxy
+    /// that always appends the address it received the request from as the
+    /// rightmost hop; the client then controls only entries to its left,
+    /// which are never consulted.
+    AnyPeer,
+}
+
+impl ForwardedHeaderTrust {
+    /// The config spelling, for log lines.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TrustedProxies => "trusted_proxies",
+            Self::AnyPeer => "any_peer",
+        }
+    }
+}
+
+/// `[read_limits]`: RFC-ACDP-0008 §4.3 read rate limiting.
+///
+/// A fixed 60 s window per bucket, in memory and per replica. Anonymous reads
+/// are keyed by client address (an IPv6 client by its /64), resolved by the
+/// same `[rate_limit]` forwarded-header policy as every other per-IP limiter.
+/// Authenticated reads are keyed by the requester DID. A refused read is `429
+/// rate_limited` with `Retry-After`, decided before the handler runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadLimitsConfig {
+    /// Master switch. Default `false`. Behind a proxy, configure
+    /// `rate_limit.trusted_proxies` or `forwarded_header_trust` first, or
+    /// every client shares the proxy's bucket.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Max anonymous GET/HEAD data-plane requests per minute per client
+    /// address. `0` leaves anonymous reads unlimited.
+    #[serde(default = "default_anonymous_reads_per_minute")]
+    pub anonymous_per_minute: u32,
+    /// Max authenticated GET/HEAD data-plane requests per minute per
+    /// requester DID. `0` leaves authenticated reads unlimited.
+    #[serde(default = "default_authenticated_reads_per_minute")]
+    pub authenticated_per_minute: u32,
+    /// Advertise the two budgets as `limits.max_anonymous_reads_per_minute`
+    /// and `limits.max_reads_per_minute` in capabilities. Default `false`:
+    /// consumers on acdp 0.19 and older reject unknown `limits` keys.
+    #[serde(default)]
+    pub advertise: bool,
+}
+
+fn default_anonymous_reads_per_minute() -> u32 {
+    600
+}
+fn default_authenticated_reads_per_minute() -> u32 {
+    1_200
+}
+
+impl Default for ReadLimitsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            anonymous_per_minute: default_anonymous_reads_per_minute(),
+            authenticated_per_minute: default_authenticated_reads_per_minute(),
+            advertise: false,
+        }
+    }
 }
 
 /// Where the `/auth/*` ceilings are counted. See [`RateLimitConfig::backend`].
@@ -896,6 +984,7 @@ impl Default for RateLimitConfig {
             per_ip_per_minute: default_per_ip_per_minute(),
             global_per_minute: default_global_per_minute(),
             trusted_proxies: Vec::new(),
+            forwarded_header_trust: ForwardedHeaderTrust::default(),
             backend: SharedLimitBackendKind::default(),
             backend_unavailable: UnavailablePostureConfig::default(),
             backend_timeout_ms: default_backend_timeout_ms(),
@@ -2116,6 +2205,78 @@ mod tests {
             (d.backend, d.backend_unavailable),
             (rl.backend, rl.backend_unavailable)
         );
+    }
+
+    #[test]
+    fn read_limits_default_off_and_parse_from_toml() {
+        let d = ReadLimitsConfig::default();
+        assert_eq!(
+            (
+                d.enabled,
+                d.anonymous_per_minute,
+                d.authenticated_per_minute,
+                d.advertise
+            ),
+            (false, 600, 1_200, false)
+        );
+        let parsed: ReadLimitsConfig =
+            toml::from_str("enabled = true\nanonymous_per_minute = 3").unwrap();
+        assert_eq!(
+            parsed,
+            ReadLimitsConfig {
+                enabled: true,
+                anonymous_per_minute: 3,
+                ..ReadLimitsConfig::default()
+            }
+        );
+        assert!(toml::from_str::<ReadLimitsConfig>("enabeld = true").is_err());
+        // An old config without the table loads with the limiter off.
+        assert_eq!(RegistryConfig::defaults().read_limits, d);
+    }
+
+    #[test]
+    fn forwarded_header_trust_takes_two_spellings_and_rejects_a_third() {
+        assert_eq!(
+            RateLimitConfig::default().forwarded_header_trust,
+            ForwardedHeaderTrust::TrustedProxies
+        );
+        for (v, want) in [
+            ("trusted_proxies", ForwardedHeaderTrust::TrustedProxies),
+            ("any_peer", ForwardedHeaderTrust::AnyPeer),
+        ] {
+            let rl: RateLimitConfig =
+                toml::from_str(&format!("forwarded_header_trust = \"{v}\"")).unwrap();
+            assert_eq!(rl.forwarded_header_trust, want);
+            assert_eq!(want.as_str(), v);
+        }
+        assert!(toml::from_str::<RateLimitConfig>("forwarded_header_trust = \"all\"").is_err());
+    }
+
+    #[test]
+    fn read_limits_and_forwarded_trust_load_from_env() {
+        let mut env = EnvGuard::new();
+        env.unset("ACDP_REGISTRY_CONFIG");
+        let path = toml_fixture(FIXTURE);
+        env.set("ACDP_REGISTRY_READ_LIMITS__ENABLED", "true");
+        env.set("ACDP_REGISTRY_READ_LIMITS__ANONYMOUS_PER_MINUTE", "1200");
+        env.set(
+            "ACDP_REGISTRY_READ_LIMITS__AUTHENTICATED_PER_MINUTE",
+            "3000",
+        );
+        env.set(
+            "ACDP_REGISTRY_RATE_LIMIT__FORWARDED_HEADER_TRUST",
+            "any_peer",
+        );
+        let cfg = RegistryConfig::load(Some(path.to_str().unwrap())).expect("loads");
+        assert!(cfg.read_limits.enabled);
+        assert_eq!(cfg.read_limits.anonymous_per_minute, 1200);
+        assert_eq!(cfg.read_limits.authenticated_per_minute, 3000);
+        assert!(!cfg.read_limits.advertise);
+        assert_eq!(
+            cfg.rate_limit.forwarded_header_trust,
+            ForwardedHeaderTrust::AnyPeer
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

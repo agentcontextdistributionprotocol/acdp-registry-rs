@@ -129,9 +129,23 @@ never `0`). Each limiter is a fixed 60-second window, and the sources are:
 | Lifecycle per-agent budget | `POST /contexts/{ctx_id}/retract`, `/republish` | the event `actor` | the same per-agent bucket as publish |
 | Keyless per-IP budget | `POST /key-attestations` | resolved client IP | `keyless.rate_per_ip_per_minute` (default 30) |
 | Keyless per-identity budget | `POST /key-attestations` | the workload identity `(type, issuer, subject)` | `keyless.rate_per_identity_per_minute` (default 10); charged only after the token verifies |
+| Anonymous read budget | every data-plane `GET`/`HEAD` (contexts, search, lineages, `/log/*`, `/changes`, `GET /subscriptions/{id}`, `GET /key-attestations`) | resolved client IP (an IPv6 client by its /64) | `read_limits.anonymous_per_minute` (default 600) when `read_limits.enabled` |
+| Authenticated read budget | the same routes, with a valid bearer token | the requester DID | `read_limits.authenticated_per_minute` (default 1200) when `read_limits.enabled` |
 
-The admin lifecycle routes and the read routes have no registry-side rate
-limit. The challenge, publish and lifecycle budgets are always per process,
+The read budgets (RFC-ACDP-0008 §4.3) are off by default. When on, the read
+is refused before its handler runs, so a throttled read is always `429`,
+never a `404` or `403`. `HEAD` draws on the same budget as `GET`. A request
+carrying a present but invalid bearer token is charged to its client IP and
+then refused `403` as usual, so rotating bad tokens buys no extra budget.
+Capabilities, `did.json`, JWKS, `/healthz`, `/livez`, `/metrics`, `/admin/*`
+and `/auth/*` are never read-limited. The read budgets are per process.
+
+"Resolved client IP" is the same for every per-IP budget (`/auth/*`, keyless
+and anonymous reads): it is the TCP peer, or the `X-Forwarded-For` hop allowed
+by `rate_limit.forwarded_header_trust` (see
+[CONFIGURATION.md](CONFIGURATION.md#rate_limit-feat-06)).
+
+The admin lifecycle routes have no registry-side rate limit. The challenge, publish and lifecycle budgets are always per process,
 whichever `rate_limit.backend` is configured. Publish and lifecycle charge
 the same way: before signature verification they only *peek* at the bucket
 (an agent already over budget gets `429`; nothing is charged and no bucket is
@@ -387,7 +401,7 @@ unimpeded; when `metrics.bearer_token` is set the endpoint requires
 | `acdp_registry_log_leaves_total` | counter | — | RFC-ACDP-0012 transparency-log leaves appended. |
 | `acdp_registry_lifecycle_event_total` | counter | `event`, `outcome` | Retract / republish outcomes. |
 | `acdp_registry_witness_cosignatures_total` | counter | `outcome` | Witness cosignatures `aggregated` / `rejected` / `store_error`. |
-| `acdp_registry_rate_limit_rejections_total` | counter | `scope` | 429s by scope (`auth_per_ip`, `auth_global`, `challenge_per_agent`, `challenge_global`, `publish_per_agent`, `lifecycle_per_agent`, `keyless_per_ip`, `keyless_per_identity`). |
+| `acdp_registry_rate_limit_rejections_total` | counter | `scope` | 429s by scope (`auth_per_ip`, `auth_global`, `challenge_per_agent`, `challenge_global`, `publish_per_agent`, `lifecycle_per_agent`, `keyless_per_ip`, `keyless_per_identity`, `read_anonymous`, `read_principal`). |
 | `acdp_registry_keyless_key_fetch_total` | counter | `outcome` | RFC-ACDP-0021 issuer key fetches (JWKS, SPIFFE bundle, OIDC discovery): `ok`, `transport`, `bad_status`, `too_large`, `bad_document`, `bad_discovery` or `policy_refused` (the address is outside public unicast). Emitted only with `keyless.enabled`. |
 | `acdp_registry_keyless_key_stale_served_total` | counter | — | Token verifications answered from an issuer key set past its TTL because the refetch failed (stale-if-error, bounded by `keyless.jwks_max_stale_seconds`). |
 | `acdp_registry_rate_limit_shared_total` | counter | `scope`, `outcome` | Round trips to the shared (cluster-wide) `/auth/*` limiter backend: `scope` is `auth_per_ip` or `auth_global`, `outcome` is `allow`, `deny` or `unavailable`. Counts which layer answered; a client-visible 429 still increments the rejections counter above. Emitted only when a shared backend is configured. |
@@ -1255,7 +1269,7 @@ This page documents only what **this registry** answers and when.
 | 413 | `payload_too_large` | Body over `max_payload_bytes`. |
 | 413 | `embedded_too_large` | Embedded data over `max_embedded_bytes`. |
 | 415 | `unsupported_media_type` | A body-bearing request (`POST /contexts`, `POST /key-attestations`, the lifecycle and admin lifecycle routes, `/auth/*`) whose `Content-Type` is present but neither `application/json` nor `application/*+json` (parameters such as `charset` are ignored). An absent `Content-Type` is accepted on those routes except `/auth/*`, where it is also a 415. How to treat an absent header is registry choice under RFC-ACDP-0007 §4.1; this is ours. |
-| 429 | `rate_limited` | A rate-limit bucket drained (`/auth/*`, challenge, publish, lifecycle or `POST /key-attestations`; see [Rate limits](#rate-limits-429)), or the shared `/auth/*` backend unavailable under `backend_unavailable = "deny"`; carries `Retry-After`. |
+| 429 | `rate_limited` | A rate-limit bucket drained (`/auth/*`, challenge, publish, lifecycle, `POST /key-attestations` or a data-plane read; see [Rate limits](#rate-limits-429)), or the shared `/auth/*` backend unavailable under `backend_unavailable = "deny"`; carries `Retry-After`. |
 | 500 | `internal_error` | Storage/config/internal failure (detail logged, not returned). |
 | 501 | `not_implemented` | Unimplemented protocol feature (incl. `/log/*`, `/changes`, `/subscriptions`, `/key-attestations` and lifecycle endpoints when their profiles are not enabled). |
 | 502 | `key_resolution_unreachable` / `cross_registry_resolution_failed` | DID document or foreign registry unreachable (on publish, and on `POST /auth/token` since 0.5.1). A foreign registry refused by the SSRF policy is also `cross_registry_resolution_failed`, and so is one that serves a context document this registry cannot parse (not JSON, an unknown or missing field); a refused DID host is not (it is 400 `key_resolution_failed`). |

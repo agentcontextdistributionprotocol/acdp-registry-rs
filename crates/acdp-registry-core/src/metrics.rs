@@ -309,6 +309,8 @@ rate_limit_scopes! {
     LifecyclePerAgent => "lifecycle_per_agent",
     KeylessPerIp      => "keyless_per_ip",
     KeylessPerIdentity => "keyless_per_identity",
+    ReadAnonymous     => "read_anonymous",
+    ReadPrincipal     => "read_principal",
 }
 
 /// What the shared (cluster-wide) rate-limit backend answered. A closed enum,

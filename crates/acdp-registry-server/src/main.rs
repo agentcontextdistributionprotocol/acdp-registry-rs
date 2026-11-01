@@ -68,7 +68,7 @@ use acdp_registry_auth::{AuthService, ChallengeStore, JwtSecret, JwtSigner, Revo
 use acdp_registry_auth::{InMemoryChallengeStore, InMemoryRevocationStore};
 use acdp_registry_core::{build_router_shared, AppStateInner};
 use acdp_registry_store::ExtendedRegistryStore;
-use acdp_registry_types::config::SharedLimitBackendKind;
+use acdp_registry_types::config::{ForwardedHeaderTrust, SharedLimitBackendKind};
 use acdp_registry_types::{
     RegistryConfig, StorageBackend, TenantHeaderTrust, REGISTRY_ADVERTISABLE_PROFILES,
 };
@@ -650,20 +650,26 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("rate_limit.trusted_proxies: {e}"))?;
     refuse_match_all_trusted_proxies(&cfg.rate_limit.trusted_proxies)?;
     // FEAT-06: a non-empty trusted_proxies list only makes sense with a
-    // consumer. It has two: the limiter (XFF trust) and, since #374, the
-    // `X-Tenant-Id` trust boundary under `auth.tenant_header_trust =
-    // "trusted_proxies"`. With neither, the list is parsed for nothing.
+    // consumer. It has three: the `/auth/*` limiter (XFF trust), the read
+    // limiter (RFC-ACDP-0008 §4.3) and, since #374, the `X-Tenant-Id` trust
+    // boundary under `auth.tenant_header_trust = "trusted_proxies"`. With
+    // none, the list is parsed for nothing.
     if !cfg.rate_limit.enabled
+        && !cfg.read_limits.enabled
         && !cfg.rate_limit.trusted_proxies.is_empty()
         && cfg.auth.effective_tenant_header_trust() != TenantHeaderTrust::TrustedProxies
     {
         anyhow::bail!(
-            "rate_limit.trusted_proxies is configured but rate_limit.enabled=false and \
-             auth.tenant_header_trust is not \"trusted_proxies\"; enable the limiter, set \
-             auth.tenant_header_trust = \"trusted_proxies\", or drop the trusted_proxies list"
+            "rate_limit.trusted_proxies is configured but rate_limit.enabled=false, \
+             read_limits.enabled=false and auth.tenant_header_trust is not \
+             \"trusted_proxies\"; enable a limiter, set auth.tenant_header_trust = \
+             \"trusted_proxies\", or drop the trusted_proxies list"
         );
     }
     for w in tenant_header_trust_checks(cfg)? {
+        tracing::warn!("{w}");
+    }
+    for w in read_limit_checks(cfg)? {
         tracing::warn!("{w}");
     }
     validate_shared_rate_limit(cfg)?;
@@ -733,6 +739,31 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Startup rules for `[read_limits]` and `rate_limit.forwarded_header_trust`
+/// (RFC-ACDP-0008 §4.3). Refusals are `Err`; warnings are returned, the same
+/// shape as [`tenant_header_trust_checks`].
+fn read_limit_checks(cfg: &RegistryConfig) -> anyhow::Result<Vec<String>> {
+    let reads = &cfg.read_limits;
+    if reads.enabled && reads.anonymous_per_minute == 0 && reads.authenticated_per_minute == 0 {
+        anyhow::bail!(
+            "read_limits.enabled = true but anonymous_per_minute and authenticated_per_minute \
+             are both 0, so no read is ever limited. Set a budget or disable read_limits."
+        );
+    }
+    let mut warnings = Vec::new();
+    if cfg.rate_limit.forwarded_header_trust == ForwardedHeaderTrust::AnyPeer {
+        warnings.push(
+            "rate_limit.forwarded_header_trust = \"any_peer\": X-Forwarded-For is read from \
+             every peer, and its rightmost hop keys every per-IP limiter (/auth/*, keyless, \
+             anonymous reads). This is safe ONLY behind a proxy that always appends the \
+             address it received the request from; reached directly, a client chooses its \
+             own bucket."
+                .to_string(),
+        );
+    }
+    Ok(warnings)
 }
 
 /// #374: startup rules for `auth.tenant_header_trust`. Refusals are `Err`;
@@ -3395,6 +3426,46 @@ mod tests {
         // The tenant-header boundary is a consumer.
         cfg.auth.tenant_header_trust = Some(TenantHeaderTrust::TrustedProxies);
         assert!(validate_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn the_read_limiter_is_a_trusted_proxies_consumer() {
+        let mut cfg = trust_cfg();
+        cfg.rate_limit.enabled = false;
+        cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into()];
+        assert!(validate_config(&cfg).is_err());
+        cfg.read_limits.enabled = true;
+        assert!(validate_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn read_limits_with_no_budget_is_refused() {
+        let mut cfg = trust_cfg();
+        cfg.read_limits.enabled = true;
+        cfg.read_limits.anonymous_per_minute = 0;
+        cfg.read_limits.authenticated_per_minute = 0;
+        let err = validate_config(&cfg).expect_err("a limiter that limits nothing");
+        assert!(err.to_string().contains("read_limits.enabled"), "{err}");
+        // One budget is enough; off with no budget is just off.
+        cfg.read_limits.authenticated_per_minute = 1;
+        assert!(validate_config(&cfg).is_ok());
+        cfg.read_limits.enabled = false;
+        cfg.read_limits.authenticated_per_minute = 0;
+        assert!(read_limit_checks(&cfg).unwrap().is_empty());
+    }
+
+    #[test]
+    fn any_peer_forwarded_trust_warns_naming_the_assumption() {
+        let mut cfg = trust_cfg();
+        assert!(read_limit_checks(&cfg).unwrap().is_empty());
+        cfg.rate_limit.forwarded_header_trust = ForwardedHeaderTrust::AnyPeer;
+        let w = read_limit_checks(&cfg).unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].contains("any_peer") && w[0].contains("appends"),
+            "{w:?}"
+        );
+        assert!(validate_config(&cfg).is_ok(), "a warning, not a refusal");
     }
 
     /// #391: a /0 entry matches every address of its family, so it is

@@ -745,6 +745,7 @@ fn config() -> RegistryConfig {
         webhook: WebhookConfig::default(),
         limits: LimitsConfig::default(),
         rate_limit: Default::default(),
+        read_limits: Default::default(),
         metrics: Default::default(),
         // The playground bypasses DID verification, which lets the
         // harness replay synthetic fixtures without standing up a TLS
@@ -10205,14 +10206,14 @@ enum Unexercised {
 /// replayer's own per-family tally (pub 3 + ret 1 + vis 26 = 30, matching its
 /// `replayed 30`).
 const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
-    // EMPTY through 0ba9582 (one graded row at dd5486c, below). Every fixture
+    // EMPTY. Every fixture
     // once listed here is now requested by a named test
     // registered in `EXERCISED_FIXTURES` (compile-bound to that test and checked
     // at runtime by `exercised_fixtures_are_really_requested`), or is replayed.
-    // The counts in `fixture_accounting_totals_are_exact` (required 0,
-    // conditional 1 at dd5486c) are what keep it honest, and a spec bump that
-    // adds a new unexercised obligation lands here as a graded row with a
-    // tracking issue (or, for `rate-002`, the plan phase that retires it).
+    // With the list empty, every loop over it passes vacuously; the counts in
+    // `fixture_accounting_totals_are_exact` (required 0, conditional 0) are what
+    // keep it honest, and a spec bump that adds a new unexercised obligation
+    // lands here as a graded row with a tracking issue.
     //
     // History, so the retirements stay traceable. `pub` had 11 rows beside its 3
     // replayed fixtures (pub-004/005/008). U-527 removed `pub-002`, `pub-012`,
@@ -10228,14 +10229,9 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
     // shape (201 + a percent-encoded `Location`), so it could only be retired
     // once a fresh publish answered that way; it is now driven by
     // `pub007_publish_response_shape_and_location`.
-    //
-    // `rate-002` arrived with the dd5486c bump in `acdp-registry-core`'s
-    // `conditional_fixtures` (capability_match ">=0.5.0", which this registry
-    // advertises). It is satisfied vacuously while reads are not rate-limited,
-    // and nothing requests it yet. Tracked by plans/bearer-static-read-limits.md
-    // Phase 2, which ships the read limiter and retires this row by registering
-    // `rate002_read_rate_limit_trips_429_with_retry_after` in EXERCISED_FIXTURES.
-    ("rate-002", Unexercised::ConditionalOnCapability),
+    // `rate-002` arrived with the dd5486c bump as a conditional row and was
+    // retired once the read limiter shipped; it is now driven by
+    // `rate002_read_rate_limit_trips_429_with_retry_after`.
 ];
 
 /// Total fixtures in the pinned spec's `schemas/conformance`, as an **equality**.
@@ -14278,8 +14274,9 @@ macro_rules! exercised_by {
 /// with `tests/changes_http.rs`: its scenarios need per-requester bearers
 /// the spawned binary (auth off) does not issue. Twenty with the six
 /// `acdp-registry-keyless` fixtures (kl-001..004, kl-007, kl-009), once
-/// RFC-ACDP-0021 Phase 7 switched the profile on.
-const EXERCISED_FIXTURES_AT_PIN: usize = 20;
+/// RFC-ACDP-0021 Phase 7 switched the profile on. Twenty-one with `rate-002`,
+/// once the read limiter (RFC-ACDP-0008 §4.3) shipped.
+const EXERCISED_FIXTURES_AT_PIN: usize = 21;
 
 #[rustfmt::skip]
 const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
@@ -14314,6 +14311,9 @@ const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
     exercised_by!("kl-004", kl004_supersession_and_event_refusal),
     exercised_by!("kl-007", kl007_registry_fail_closed),
     exercised_by!("kl-009", kl009_identity_removal_and_listing),
+    // RFC-ACDP-0008 §4.3: the read limiter against the shipped binary with
+    // `[read_limits]` on (configured by the test itself).
+    exercised_by!("rate-002", rate002_read_rate_limit_trips_429_with_retry_after),
 ];
 
 /// Every fixture this suite claims to have retired must really be requested by
@@ -15439,16 +15439,98 @@ async fn err001_internal_error_envelope_matches_pinned_shape_and_leaks_nothing()
 
 /// rate-* fixtures THIS test requests. The pin `dd5486c` carries two:
 /// `rate-001` (publish limit, `acdp-registry-core` required_fixtures) and
-/// `rate-002` (the read-path 429 shape, RFC-ACDP-0008 §4.3). `rate-002` is in
-/// `acdp-registry-core`'s `conditional_fixtures` (">=0.5.0") and graded in
-/// `UNEXERCISED_FIXTURES` until the read limiter exists; then it is requested by
-/// `rate002_read_rate_limit_trips_429_with_retry_after`
-/// (plans/bearer-static-read-limits.md Phase 2), not here.
+/// `rate-002` (the read-path 429 shape, RFC-ACDP-0008 §4.3, in
+/// `acdp-registry-core`'s `conditional_fixtures` at ">=0.5.0"). `rate-002` is
+/// requested by `rate002_read_rate_limit_trips_429_with_retry_after`, not
+/// here.
 const EXPECTED_RATE_FIXTURE_COUNT: usize = 1;
 const EXPECTED_RATE_ASSERTION_COUNT: usize = 5;
 
 fn rate_producer(seed: u8) -> Producer {
     common::producer("rate", seed)
+}
+
+/// rate-002 (RFC-ACDP-0008 §4.3, read path; `acdp-registry-core`
+/// `conditional_fixtures` at ">=0.5.0"): the fixture's implementer self-test
+/// recipe, step 4 (anonymous), against the shipped binary with
+/// `[read_limits]` on, an anonymous budget of 3 and anonymous public reads. The 4th read from one
+/// address is HTTP 429, `application/acdp+json`, `error.code ==
+/// "rate_limited"`, with an integer `Retry-After` -- on a context that does
+/// not exist too, so a throttled read is never answered 404. Capabilities
+/// stays readable. The refusal does not echo the source address.
+///
+/// Steps 2-3 (authenticated, keyed by `effective_requester_did`) need
+/// bearer tokens this auth-off binary does not issue; they are
+/// `read_limit_keys_authenticated_reads_by_did` in `http_integration.rs`.
+/// Step 5 (a read after the indicated wait succeeds) is the limiter's window
+/// reset, `window_resets_after_60s` in `acdp-registry-core`'s rate_limit
+/// tests, rather than a 60 s sleep here.
+#[test]
+fn rate002_read_rate_limit_trips_429_with_retry_after() {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping rate-002");
+        return;
+    };
+    let fx = find_fixture_by_id(&fixtures, "rate-002").expect("rate-002 at the pinned spec");
+    let expected = &fx["expected"];
+    let want_status = expected["http_status"].as_u64().expect("http_status");
+    let want_code = expected["response_body_constraints"]["error_code_MUST_be"]
+        .as_str()
+        .expect("error_code_MUST_be");
+    assert_eq!((want_status, want_code), (429, "rate_limited"), "{fx}");
+    assert!(
+        fx["implementer_self_test_recipe"]
+            .as_array()
+            .is_some_and(|r| r.len() == 5),
+        "rate-002's recipe changed shape -- re-read it: {fx}"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = spawned_registry::SpawnedRegistry::start(
+        dir.path(),
+        "rate002",
+        "",
+        &format!(
+            "{}\n[read_limits]\nenabled = true\nanonymous_per_minute = 3\n",
+            served_auth_toml(false)
+        ),
+    );
+    let accept = [("Accept", "application/acdp+json")];
+    let header = |h: &[(String, String)], name: &str| {
+        h.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    };
+    // Every request comes from loopback, so all paths share one bucket:
+    // spend it on a real read, then probe three routes over budget.
+    for n in 1..=3 {
+        let (status, _, v) = reg.get_with_headers("/contexts/search", &accept);
+        assert_eq!(status, 200, "read {n} is within budget: {v}");
+    }
+    for path in [
+        "/contexts/search",
+        "/contexts/ctx_does_not_exist",
+        "/changes",
+    ] {
+        let (status, h, v) = reg.get_with_headers(path, &accept);
+        assert_eq!(u64::from(status), want_status, "{path}: {v}");
+        assert_eq!(v["error"]["code"], want_code, "{path}: {v}");
+        assert!(v["error"]["message"].is_string(), "{path}: {v}");
+        assert_eq!(
+            header(&h, "content-type").as_deref(),
+            Some("application/acdp+json"),
+            "{path}"
+        );
+        let retry: u64 = header(&h, "retry-after")
+            .unwrap_or_else(|| panic!("{path}: 429 without Retry-After"))
+            .parse()
+            .unwrap_or_else(|e| panic!("{path}: Retry-After not integer seconds: {e}"));
+        assert!((1..=60).contains(&retry), "{path}: Retry-After {retry}");
+        assert!(
+            !v.to_string().contains("127.0.0.1"),
+            "{path}: echoes the address: {v}"
+        );
+    }
+    let (status, _, v) = reg.get_with_headers("/.well-known/acdp.json", &accept);
+    assert_eq!(status, 200, "capabilities is never read-limited: {v}");
 }
 
 /// rate-001 (RFC-ACDP-0008 §4.3, `acdp-registry-core`'s own
@@ -17187,15 +17269,13 @@ async fn fixture_accounting_totals_are_exact() {
     // number can only go UP again via a spec bump adding a conditional fixture --
     // which is exactly the event that should stop the build and force a human to
     // classify it, as `err-002` was not when it arrived with the 16211e6 bump.
-    //
-    // ONE at dd5486c: `rate-002` (read rate limiting, RFC-ACDP-0008 §4.3) arrived
-    // in `conditional_fixtures` and is graded until the read limiter ships
-    // (plans/bearer-static-read-limits.md Phase 2), which returns this to zero.
+    // `rate-002` arrived at dd5486c and was retired with the read limiter.
     assert_eq!(
-        conditional, 1,
-        "expected 1 conditional-but-unexercised (rate-002); U-553 retired dk-003, \
-         err-002 and idem-007. A NEW conditional fixture arriving from a spec bump \
-         lands here: classify it and write the test, do not relax this to a floor"
+        conditional, 0,
+        "expected 0 conditional-but-unexercised; U-553 retired dk-003, err-002 and \
+         idem-007, and the read limiter retired rate-002. A NEW conditional fixture \
+         arriving from a spec bump lands here: classify it and write the test, do not \
+         relax this to a floor"
     );
     assert_eq!(
         required + conditional,
@@ -17657,6 +17737,7 @@ const CROSS_BINARY_GUARDS: &[(&str, &[&str])] = &[
             "empty_anchors_still_rejected_downstream_once_gate_passes",
             "gate_fires_before_sdk_empty_vec_check_on_sub_0_5_0_registry",
             "publish_enforces_the_err002_media_type_matrix",
+            "read_limit_keys_authenticated_reads_by_did",
             "search_paginates_past_fully_hidden_pages",
         ],
     ),
