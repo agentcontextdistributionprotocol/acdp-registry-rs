@@ -7879,7 +7879,7 @@ fn lin_vectors_reproduce_lineage_derivation() {
     );
 }
 
-/// The exact number of caps-* fixture ids at spec pin c40671e, and the
+/// The exact number of caps-* fixture ids at spec pin 3f50697, and the
 /// exact number of outcome assertions this test makes (8 base-case
 /// fixtures + caps-007's 3 and caps-008's 3 `reject_variants`). Two separate constants
 /// because they answer two separate "did this silently shrink" questions:
@@ -7973,7 +7973,7 @@ fn caps_vectors_validate_capabilities_document() {
             assert_eq!(
                 variants.len(),
                 3,
-                "{id} must carry exactly 3 reject_variants at spec pin c40671e: {fx}"
+                "{id} must carry exactly 3 reject_variants at spec pin 3f50697: {fx}"
             );
             for v in variants {
                 let name = v["name"].as_str().unwrap_or("?");
@@ -8016,13 +8016,13 @@ fn caps_vectors_validate_capabilities_document() {
     assert_eq!(
         found_ids.len(),
         EXPECTED_CAPS_FIXTURE_COUNT,
-        "expected exactly {EXPECTED_CAPS_FIXTURE_COUNT} caps-* fixtures at spec pin c40671e: \
+        "expected exactly {EXPECTED_CAPS_FIXTURE_COUNT} caps-* fixtures at spec pin 3f50697: \
          found {found_ids:?}"
     );
     assert_eq!(
         asserted, EXPECTED_CAPS_ASSERTION_COUNT,
         "expected exactly {EXPECTED_CAPS_ASSERTION_COUNT} caps-* outcome assertions (8 base \
-         cases + caps-007's and caps-008's 3 reject_variants each) at spec pin c40671e -- a silently-shrinking \
+         cases + caps-007's and caps-008's 3 reject_variants each) at spec pin 3f50697 -- a silently-shrinking \
          count here is exactly the vacuous-pass failure mode this ratchet exists to prevent"
     );
 }
@@ -9786,7 +9786,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "rec",
-        "RFC-ACDP-0018 retraction recall, spec pin c40671e: 9 fixtures, none carrying an \
+        "RFC-ACDP-0018 retraction recall, spec pin 3f50697: 10 fixtures, none carrying an \
          endpoint (rec-007's vectors array is the hint-hmac-001 HMAC known-answer \
          vector, not an HTTP exchange). Two grounds, split by fixture. rec-001..005 and \
          rec-008 apply_to acdp-registry-changes, and rec-007 scenarios A-C and F-H to \
@@ -9807,11 +9807,16 @@ const EXCUSED: &[(&str, &str)] = &[
          ChangeFeed) against this registry to prove the entries it serves verify. rec-009 \
          (entry envelope known answers, applies_to acdp-consumer-recall) is the \
          consumer's \u{a7}7 envelope check over entries it receives, likewise no registry \
-         obligation. None of the family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
+         obligation. rec-010 (bucket filters, RFC-ACDP-0018 \u{a7}6.1): registry \
+         scenarios A-F are conditional on limits.max_change_bucket_length, which this \
+         registry does not advertise, and G-I are acdp-consumer-recall, as is rec-006 \
+         scenario N. rec-001 scenario H (the \u{a7}5.2 1 MiB page bound) is a SHOULD of \
+         acdp-registry-changes that rec_changes_registry_side does not yet exercise. \
+         None of the family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
     (
         "mcp",
-        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin c40671e: 7 fixtures, all \
+        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin 3f50697: 7 fixtures, all \
          applies_to_profiles = [acdp-producer-mcp-proxy], none carrying an endpoint \
          (mcp-001's vectors array is a known-answer set). They are obligations of an MCP \
          signing proxy, a producer: an acdp:mcp-tool-result body is an ordinary signed \
@@ -9821,7 +9826,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "trust",
-        "RFC-ACDP-0020 registry trust lists (Draft), spec pin c40671e: 7 fixtures, all \
+        "RFC-ACDP-0020 registry trust lists (Draft), spec pin 3f50697: 7 fixtures, all \
          applies_to_profiles = [acdp-consumer-trust-list], none carrying an endpoint \
          (trust-001's vectors array is a known-answer set). Selecting, validating and \
          applying signed acdp:trust-list bodies is the consumer's evaluation; an \
@@ -10249,11 +10254,14 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// bump (kl-005 M/N added in place; RFC-0019/0020 promotions), and after the
 /// `0ba9582` bump (docs only: the profile table); 205 after the `dd5486c` bump
 /// (caps-008, rate-002 and rec-009 added; RFC-ACDP-0008 read limits and static
-/// bearer tokens, RFC-ACDP-0007 open `limits`, RFC-ACDP-0018 clarifications).
+/// bearer tokens, RFC-ACDP-0007 open `limits`, RFC-ACDP-0018 clarifications);
+/// still 205 after the `c40671e` bump (RFC-ACDP-0018 sequence-reset text); 206 after
+/// the `3f50697` bump (rec-010 added; rec-001 H and rec-006 N added in place;
+/// RFC-ACDP-0018 §5.2 page size and compression, §6.1 bucket filters).
 /// A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 205;
+const TOTAL_FIXTURES_AT_PIN: usize = 206;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this

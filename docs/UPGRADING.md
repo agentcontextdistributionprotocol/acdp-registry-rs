@@ -21,6 +21,10 @@ belongs in the per-crate changelogs.
 
 ---
 
+## Unreleased
+
+**Spec pin 3f50697** (RFC-ACDP-0018 §5.2 page size and compression, §6.1 bucket filters; rec-010 added). Measurement only: no behaviour change, no operator action.
+
 ## 0.10.0
 
 **Railway (and any edge that appends its own hop): set `rate_limit.forwarded_skip_rightmost`.**
