@@ -83,7 +83,7 @@ uuid           = { workspace = true }
 # Serialize PG integration tests so they don't fight over the shared
 # truncate-and-test database. SQLite tests use disposable tempfiles so
 # they don't need this.
-serial_test    = "3"
+serial_test    = "4"
 # U-521 option B: generate the did:web fixture's CA+leaf chain at test runtime
 # instead of committing PEM files. `.gitignore:39-43` forbids TLS material
 # repo-wide (`*.pem`/`*.crt`/`*.key`) with its only negation an empty
@@ -141,4 +141,4 @@ reqwest        = { workspace = true }
 # schema is registered locally by its `$id`, so an unregistered `$ref` fails the
 # build of the validator instead of reaching the network. Dev-only under
 # resolver 2 (see the note on `rcgen` above).
-jsonschema     = { version = "0.58", default-features = false }
+jsonschema     = { version = "0.60", default-features = false }
