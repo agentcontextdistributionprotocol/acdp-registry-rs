@@ -64,6 +64,9 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// read only from a peer in `trusted_proxies` or from every peer. One
     /// setting for every per-IP limiter; see [`Self::client_ip`].
     pub forwarded_header_trust: ForwardedHeaderTrust,
+    /// `[rate_limit] forwarded_skip_rightmost`: the fronting edge's own
+    /// trailing `X-Forwarded-For` hops, discarded before the client is read.
+    pub forwarded_skip_rightmost: u8,
     /// RFC-ACDP-0008 §4.3 anonymous read limiter, keyed by
     /// [`crate::rate_limit::read_bucket_key`]. `None` when `[read_limits]` is
     /// off or `anonymous_per_minute == 0`.
@@ -134,7 +137,7 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
 impl<S: ExtendedRegistryStore> AppStateInner<S> {
     /// The client address every per-IP limiter keys on: the TCP `peer`, or
     /// the `X-Forwarded-For` hop the `[rate_limit]` forwarded-header policy
-    /// trusts (see [`crate::rate_limit::resolve_client_ip`]). `None` peer (no
+    /// trusts (see [`crate::rate_limit::resolve_client_ip_skipping`]). `None` peer (no
     /// recorded connection, e.g. an in-process test) is `0.0.0.0`, so such
     /// requests share one bucket rather than escaping the limit.
     pub fn client_ip(
@@ -154,11 +157,12 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             .map(|v| v.to_str().ok())
             .collect();
         let xff = lines.filter(|l| !l.is_empty()).map(|l| l.join(","));
-        crate::rate_limit::resolve_client_ip(
+        crate::rate_limit::resolve_client_ip_skipping(
             peer,
             xff.as_deref(),
             &self.trusted_proxies,
             self.forwarded_header_trust,
+            usize::from(self.forwarded_skip_rightmost),
         )
     }
 
@@ -387,6 +391,7 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             .map(|l| l as Arc<dyn SharedRateLimitBackend>);
         let trusted_proxies = TrustedProxies::parse_lossy(&rl.trusted_proxies);
         let forwarded_header_trust = rl.forwarded_header_trust;
+        let forwarded_skip_rightmost = rl.forwarded_skip_rightmost;
         let reads = &config.read_limits;
         let read_limiter = |per_minute: u32| {
             (reads.enabled && per_minute > 0).then(|| Arc::new(AgentRateLimiter::new(per_minute)))
@@ -425,6 +430,7 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             auth_limit_backend,
             trusted_proxies,
             forwarded_header_trust,
+            forwarded_skip_rightmost,
             read_anonymous_limiter,
             read_principal_limiter,
             tenant_header_trust,

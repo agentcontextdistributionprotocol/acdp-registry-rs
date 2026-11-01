@@ -14290,6 +14290,64 @@ async fn read_limit_folds_every_forwarded_for_line() {
     assert_rate_limited("a forged first XFF line", &r);
 }
 
+/// #524: behind an edge that rewrites `X-Forwarded-For` to `<client>, <edge>`
+/// with a different edge address (and internal peer) per request, as Railway
+/// does, `forwarded_skip_rightmost = 1` keys one client's reads into one
+/// bucket. Without the skip the same traffic rotates through the edge's
+/// buckets and is never limited: the prod observation the issue records.
+#[tokio::test]
+async fn read_limit_skips_the_edge_hop_behind_a_rewriting_edge() {
+    use acdp_registry_types::config::ForwardedHeaderTrust;
+    let edge = [
+        ("100.64.0.2", "73.170.42.96, 152.233.76.10"),
+        ("100.64.0.3", "73.170.42.96, 79.127.217.66"),
+        ("100.64.0.1", "73.170.42.96, 152.233.76.11"),
+    ];
+    for skip in [0u8, 1] {
+        let mut cfg = read_limit_cfg(2, 100);
+        cfg.rate_limit.forwarded_header_trust = ForwardedHeaderTrust::AnyPeer;
+        cfg.rate_limit.forwarded_skip_rightmost = skip;
+        let h = harness_from_config(cfg).await;
+        let mut limited = None;
+        for (peer, xff) in edge {
+            let r = send(
+                &h.router,
+                read_from("GET", "/changes", peer, Some(xff), None),
+            )
+            .await;
+            if r.0 == StatusCode::TOO_MANY_REQUESTS {
+                limited = Some(r);
+            }
+        }
+        if skip == 0 {
+            assert!(
+                limited.is_none(),
+                "without the skip each edge address is its own bucket"
+            );
+            continue;
+        }
+        assert_rate_limited(
+            "third read from one client via three edge addresses",
+            limited
+                .as_ref()
+                .expect("the client's third read is limited"),
+        );
+        // Another client behind the same edge keeps its own budget.
+        let (s, _, v) = send(
+            &h.router,
+            read_from(
+                "GET",
+                "/changes",
+                "100.64.0.2",
+                Some("198.51.100.20, 152.233.76.10"),
+                None,
+            ),
+        )
+        .await;
+        assert_ne!(s, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    }
+}
+
 /// Off by default: 50 reads from one address in one window all succeed.
 #[tokio::test]
 async fn read_limits_off_by_default() {

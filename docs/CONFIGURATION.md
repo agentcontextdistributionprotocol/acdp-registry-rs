@@ -423,6 +423,7 @@ attacker-independent.
 | `global_per_minute` | u32 | `6000` | Whole-process ceiling across all IPs; `0` disables it. Bounds a source-IP-rotating flood. |
 | `trusted_proxies` | list\<CIDR\> | `[]` | Reverse-proxy CIDRs whose `X-Forwarded-For` is trusted. Empty = never trust XFF. Also the gateway list for `auth.tenant_header_trust = "trusted_proxies"`, matched against the immediate TCP peer; allowed with `enabled = false` in that mode. Entries are matched as written against the IPv4-canonicalised peer: list IPv4 gateways in IPv4 form (an `::ffff:…` entry never matches). A `/0` entry is refused at startup. |
 | `forwarded_header_trust` | `"trusted_proxies"` \| `"any_peer"` | `"trusted_proxies"` | When `X-Forwarded-For` may name the client for **every** per-IP limiter: `/auth/*`, keyless minting and anonymous reads ([`[read_limits]`](#read_limits-acdp-050)). `trusted_proxies`: only from a TCP peer in `trusted_proxies`. `any_peer`: from every peer — for a platform edge whose addresses cannot be listed. See below. |
+| `forwarded_skip_rightmost` | u8 (0–4) | `0` | How many rightmost `X-Forwarded-For` entries the edge appends **after** the client, discarded before the client is read. Railway rewrites the header to `<client>, <edge address>`, so it needs `1`. Refused at startup above 4, or while the header is never read (`trusted_proxies` mode with no `trusted_proxies`). See below. |
 | `backend` | `"memory"` \| `"postgres"` | `"memory"` | Where the two ceilings above are counted. `memory`: per process (each replica counts for itself). `postgres`: counted once across every replica sharing the database — see **Shared backend** below. |
 | `backend_unavailable` | `"allow"` \| `"deny"` | `"allow"` | Only with `backend = "postgres"`. What to do when the database cannot answer a check: `allow` falls back to the per-process limit; `deny` refuses with `429` + `Retry-After: 5`. |
 | `backend_timeout_ms` | u64 | `250` | Only with `backend = "postgres"`. Per-check timeout against the database; must be `> 0`. |
@@ -469,6 +470,23 @@ address it received the request from: a client can then forge entries only to
 the left of that hop, and those are never read. If the registry is reachable
 directly, a client picks its own bucket. Startup logs a warning naming this
 assumption. A malformed or zone-scoped hop falls back to the TCP peer.
+
+`forwarded_skip_rightmost = N` discards the last N entries before that walk,
+for an edge that appends its own address after the client's. Railway is one:
+whatever `X-Forwarded-For` the client sends, the app receives
+`<client>, <edge address>`, and the edge address changes from request to
+request. With the default `0` every per-IP limiter keys on the edge address,
+so one client rotates through several buckets and many clients share each one
+(#524). Railway needs `any_peer` with `forwarded_skip_rightmost = 1`. A chain
+too short to hold a client after the skip, or a skipped entry that is not an
+address, falls back to the TCP peer.
+
+To find N, look at what your edge actually delivers. For example, deploy a
+throwaway echo container (such as `mendhak/http-https-echo`) behind the same
+edge and send it a request with a forged `X-Forwarded-For: 203.0.113.9`. N is
+the number of entries to the right of your real address. If the forged value
+survives, the edge appends rather than rewrites, and the hop just left of the
+skipped ones must be the one the edge wrote.
 
 > Which ceilings are per replica depends on `backend`. With the default
 > `backend = "memory"` this is the same per-process, in-memory caveat as

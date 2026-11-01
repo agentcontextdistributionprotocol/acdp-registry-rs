@@ -280,11 +280,18 @@ Things to know before turning it on:
   first busy client throttles everyone. On a platform whose edge addresses
   cannot be listed, `any_peer` reads the rightmost `X-Forwarded-For` hop from
   every peer. Use it only when the registry is reachable solely through that
-  edge. To check, send a request with a forged `X-Forwarded-For: 1.2.3.4`,
-  then one with two forged header lines (`X-Forwarded-For: 1.2.3.4` and
-  `X-Forwarded-For: 5.6.7.8`): each must land in the same bucket as a request
-  without the header. The second probe catches an edge that appends to the
-  first line and passes a later client line through untouched.
+  edge. If the edge appends its own address after the client's (Railway
+  does), also set `rate_limit.forwarded_skip_rightmost` to the number of
+  edge hops, or every limiter keys on the edge instead of the client
+  ([CONFIGURATION.md](CONFIGURATION.md) shows how to find the number).
+  Then check two things. First, the key is the client: from one machine,
+  send more anonymous reads in one minute than `anonymous_per_minute`
+  allows; the excess must answer `429`. Second, it cannot be forged: repeat
+  with a different forged `X-Forwarded-For` on every request, then with
+  two forged header lines (`X-Forwarded-For: 1.2.3.4` and
+  `X-Forwarded-For: 5.6.7.8`); the excess must still answer `429`. Spoofing
+  probes alone are not enough: a key on the edge address passes them, and
+  limits nobody.
 - **Watch** `acdp_registry_rate_limit_rejections_total{scope="read_anonymous"}`
   and `{scope="read_principal"}`. A steady rise in `read_anonymous` from many
   clients usually means the budget is too low for a shared NAT or the proxy

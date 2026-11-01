@@ -21,6 +21,17 @@ belongs in the per-crate changelogs.
 
 ---
 
+## Unreleased
+
+**Railway (and any edge that appends its own hop): set `rate_limit.forwarded_skip_rightmost`.**
+Railway rewrites `X-Forwarded-For` to `<client>, <edge address>`, and the edge address changes per
+request. Under `forwarded_header_trust = "any_peer"` 0.9.0 keyed every per-IP limiter (`/auth/*`,
+keyless, anonymous reads) on that edge address, not the client (#524). The new
+`forwarded_skip_rightmost` (default `0`, unchanged behaviour) discards that many trailing edge hops.
+Railway needs `ACDP_REGISTRY_RATE_LIMIT__FORWARDED_HEADER_TRUST=any_peer` with
+`ACDP_REGISTRY_RATE_LIMIT__FORWARDED_SKIP_RIGHTMOST=1`. Startup refuses a value above 4, or a non-zero
+value while `X-Forwarded-For` is never read.
+
 ## 0.9.0
 
 **No upgrade steps.** The spec pin moves to `dd5486c` (RFC-ACDP-0008 read rate limits and static
