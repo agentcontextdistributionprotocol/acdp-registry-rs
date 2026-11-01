@@ -54,6 +54,12 @@ reject a capabilities document carrying that key, and startup logs a warning say
 back with it set:** `[changes]` refuses unknown keys, so an older binary refuses to start. Remove
 `max_change_bucket_length` (or its env var) before rolling back.
 
+**`GET /changes` pages now stop at 1 MiB (RFC-ACDP-0018 §5.2).** A page whose serialized body
+would pass 1,048,576 bytes ends early with `has_more: true` and a cursor at the first entry left
+out; a single entry larger than that is served alone. With the default `max_changes_page = 100`
+this does not bite in practice. Consumers that follow `has_more` and `next_cursor`, as the
+protocol requires, need no change. New counter: `acdp_registry_changes_pages_byte_capped_total`.
+
 ## 0.10.1
 
 **Static read tokens (RFC-ACDP-0008 §6.2 `bearer_static`), off unless configured.** New

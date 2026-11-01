@@ -128,6 +128,10 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// [`MIN_SCAN_ROWS`](crate::handlers::MIN_SCAN_ROWS) unless a
     /// test lowered it with [`Self::with_changes_min_scan_rows`].
     pub changes_min_scan_rows: u32,
+    /// The §5.2 serialized `/changes` page bound:
+    /// [`MAX_PAGE_BYTES`](crate::handlers::MAX_PAGE_BYTES) unless a test
+    /// changed it with [`Self::with_changes_max_page_bytes`].
+    pub changes_max_page_bytes: usize,
     /// RFC-ACDP-0021 §5.2 step 3: the configured keyless issuers' published
     /// keys, one slot per `[keyless]` issuer or trust domain. Empty, and
     /// never fetched from, while `keyless.enabled` is false.
@@ -252,6 +256,14 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
     #[must_use]
     pub fn with_changes_min_scan_rows(mut self, rows: u32) -> Self {
         self.changes_min_scan_rows = rows.clamp(1, crate::handlers::MIN_SCAN_ROWS);
+        self
+    }
+
+    /// Change the `/changes` page byte bound (tests: cap a page with a few
+    /// small entries, or lift the cap to show a test would catch its loss).
+    #[must_use]
+    pub fn with_changes_max_page_bytes(mut self, bytes: usize) -> Self {
+        self.changes_max_page_bytes = bytes;
         self
     }
 
@@ -451,6 +463,7 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             hint_extra_roots: Vec::new(),
             hint_timeouts: crate::hints::HintTimeouts::default(),
             changes_min_scan_rows: crate::handlers::MIN_SCAN_ROWS,
+            changes_max_page_bytes: crate::handlers::MAX_PAGE_BYTES,
             keyless_jwks,
             keyless,
         })

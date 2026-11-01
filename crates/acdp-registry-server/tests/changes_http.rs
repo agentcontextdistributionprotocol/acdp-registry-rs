@@ -1421,3 +1421,256 @@ async fn rec010_bucket_pages_equal_the_whole_bucket() {
     assert!(p.changes.is_empty() && !p.has_more, "{p:?}");
     assert_eq!(key().decode_cursor(&p.next_cursor).map(|c| c.pos), Ok(head));
 }
+
+// ─── rec-001 H / §5.2: the serialized page bound ────────────────────────────
+
+/// `/changes?{query}`: status and the raw body bytes.
+async fn raw_changes(
+    app: &axum::Router,
+    query: &str,
+    bearer: Option<&str>,
+) -> (StatusCode, Vec<u8>) {
+    let mut b = Request::builder().uri(format!("/changes?{query}"));
+    if let Some(t) = bearer {
+        b = b.header("authorization", format!("Bearer {t}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(b.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, bytes.to_vec())
+}
+
+/// A harness serving a feed of `entries` public lifecycle entries (retract
+/// and republish, alternating, on one context), with the page byte bound at
+/// `max_bytes`.
+async fn byte_capped_harness(entries: usize) -> (SeededHarness, RegistryConfig) {
+    let (cfg, caps) = common::with_anonymous_public_reads(config(true), caps(), true);
+    let h = SeededHarness::new(cfg.clone(), caps, AUTHORITY).await;
+    let (ctx, _) = publish_ctx(&h, 140, "rec001 h", Visibility::Public).await;
+    for i in 0..entries {
+        if i % 2 == 0 {
+            retract(&h, 140, &ctx).await;
+        } else {
+            lifecycle(&h, 140, &ctx, "republish", "republished").await;
+        }
+    }
+    (h, cfg)
+}
+
+fn set_page_bytes(h: &mut SeededHarness, cfg: &RegistryConfig, bytes: usize) {
+    h.rebuild_shared_with(cfg.clone(), |s| s.with_changes_max_page_bytes(bytes));
+}
+
+/// Every entry's served size, and the envelope's (`has_more: false`, a real
+/// cursor; every cursor has the same length).
+async fn sizes(app: &axum::Router) -> (Vec<acdp::types::change::Change>, Vec<usize>, usize) {
+    let p = page(app, "limit=100", None).await;
+    let sizes = p
+        .changes
+        .iter()
+        .map(|c| serde_json::to_vec(c).unwrap().len())
+        .collect();
+    let envelope = serde_json::to_vec(&acdp::types::change::ChangesResponse {
+        changes: Vec::new(),
+        next_cursor: p.next_cursor.clone(),
+        has_more: false,
+    })
+    .unwrap()
+    .len();
+    (p.changes, sizes, envelope)
+}
+
+/// The serialized size of a `has_more: false` page holding `entries`.
+fn page_len(envelope: usize, entries: &[usize]) -> usize {
+    envelope + entries.iter().sum::<usize>() + entries.len().saturating_sub(1)
+}
+
+/// Pages from the start under the current bound: per page, the raw body
+/// length and the parsed page. Asserts every page is within `bound` unless
+/// it holds a single entry.
+async fn byte_pages(
+    app: &axum::Router,
+    filters: &str,
+    limit: u64,
+    bearer: Option<&str>,
+    bound: usize,
+) -> Vec<(usize, acdp::types::change::ChangesResponse)> {
+    let mut out = Vec::new();
+    let mut since: Option<String> = None;
+    for _ in 0..200 {
+        let mut q = format!("limit={limit}{filters}");
+        if let Some(c) = &since {
+            q.push_str(&format!("&since={}", enc(c)));
+        }
+        let (status, raw) = raw_changes(app, &q, bearer).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{q}: {}",
+            String::from_utf8_lossy(&raw)
+        );
+        let v: Value = serde_json::from_slice(&raw).unwrap();
+        let p = acdp::types::change::ChangesResponse::from_value(&v).unwrap();
+        assert!(
+            raw.len() <= bound || p.changes.len() == 1,
+            "{q}: {} bytes over the {bound}-byte bound with {} entries",
+            raw.len(),
+            p.changes.len()
+        );
+        since = Some(p.next_cursor.clone());
+        let more = p.has_more;
+        out.push((raw.len(), p));
+        if !more {
+            return out;
+        }
+    }
+    panic!("never reached has_more=false");
+}
+
+fn union_seqs(pages: &[(usize, acdp::types::change::ChangesResponse)]) -> Vec<u64> {
+    pages.iter().flat_map(|(_, p)| seqs(p)).collect()
+}
+
+/// rec-001 H: with the bound set to exactly N entries' worth, a request for
+/// N+5 gets N with `has_more` and the next page starts at entry N+1; one
+/// byte less and the page holds N-1 (the bound is checked against the
+/// `has_more: false` size, at most one byte early). A final page that fits
+/// exactly is served whole, with `has_more: false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rec001_h_pages_end_before_the_byte_bound() {
+    const N: usize = 3;
+    let (mut h, cfg) = byte_capped_harness(10).await;
+    let (feed, sizes, envelope) = sizes(&h.router).await;
+    assert_eq!(feed.len(), 10);
+    let all: Vec<u64> = feed.iter().map(|c| c.seq()).collect();
+
+    // Exact fit on a `has_more: true` page.
+    let fit = page_len(envelope, &sizes[..N]);
+    set_page_bytes(&mut h, &cfg, fit);
+    let (status, raw) = raw_changes(&h.router, &format!("limit={}", N + 5), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let first =
+        acdp::types::change::ChangesResponse::from_value(&serde_json::from_slice(&raw).unwrap())
+            .unwrap();
+    assert_eq!(seqs(&first), all[..N], "exactly N entries");
+    assert!(first.has_more);
+    assert_eq!(
+        raw.len(),
+        fit - 1,
+        "`true` is one byte shorter than `false`"
+    );
+    let next = page(
+        &h.router,
+        &format!("limit={}&since={}", N + 5, enc(&first.next_cursor)),
+        None,
+    )
+    .await;
+    assert_eq!(
+        next.changes.first().map(|c| c.seq()),
+        Some(all[N]),
+        "resumes at N+1"
+    );
+
+    // One byte under: N-1.
+    set_page_bytes(&mut h, &cfg, fit - 1);
+    let short = page(&h.router, &format!("limit={}", N + 5), None).await;
+    assert_eq!(seqs(&short), all[..N - 1]);
+    assert!(short.has_more);
+
+    // Exact fit on the final page: the last N entries, `has_more: false`.
+    set_page_bytes(&mut h, &cfg, usize::MAX);
+    let before = page(&h.router, &format!("limit={}", feed.len() - N), None).await;
+    assert_eq!(before.changes.len(), feed.len() - N);
+    let tail = page_len(envelope, &sizes[sizes.len() - N..]);
+    set_page_bytes(&mut h, &cfg, tail);
+    let (_, raw) = raw_changes(
+        &h.router,
+        &format!("limit=100&since={}", enc(&before.next_cursor)),
+        None,
+    )
+    .await;
+    let last =
+        acdp::types::change::ChangesResponse::from_value(&serde_json::from_slice(&raw).unwrap())
+            .unwrap();
+    assert_eq!(seqs(&last), all[feed.len() - N..]);
+    assert!(!last.has_more);
+    assert_eq!(raw.len(), tail, "an exact fit is allowed");
+
+    // Multi-page union: about 2.5 entries per page, nothing skipped or
+    // repeated, every page within the bound (and, in debug builds, the
+    // handler's own size accounting asserted on each).
+    let bound = page_len(envelope, &sizes[..2]) + sizes[2] / 2;
+    set_page_bytes(&mut h, &cfg, bound);
+    let pages = byte_pages(&h.router, "", 100, None, bound).await;
+    assert!(pages.len() >= 4, "{} pages", pages.len());
+    assert_eq!(union_seqs(&pages), all);
+}
+
+/// rec-001 H's last sentence: an entry larger than the bound is served
+/// alone, never dropped, and paging continues one entry per page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rec001_h_an_oversized_entry_is_served_alone() {
+    let (mut h, cfg) = byte_capped_harness(5).await;
+    let all: Vec<u64> = seqs(&page(&h.router, "", None).await);
+    set_page_bytes(&mut h, &cfg, 1);
+    let pages = byte_pages(&h.router, "", 100, None, 1).await;
+    assert!(
+        pages.iter().all(|(_, p)| p.changes.len() == 1),
+        "one entry per page"
+    );
+    assert!(pages[..pages.len() - 1].iter().all(|(_, p)| p.has_more));
+    assert_eq!(union_seqs(&pages), all);
+}
+
+/// Hidden rows around the cut: an anonymous reader's pages skip the
+/// restricted entries without losing or repeating a visible one, and the
+/// audience's pages include them, under the same bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rec001_h_hidden_rows_around_the_cut() {
+    const OWNER: u8 = 141;
+    const AUDIENCE: u8 = 142;
+    let (cfg, caps) = common::with_anonymous_public_reads(config(true), caps(), true);
+    let mut h = SeededHarness::new(cfg.clone(), caps, AUTHORITY).await;
+    let (public, _) = publish_ctx(&h, 143, "rec001 h public", Visibility::Public).await;
+    let (hidden, _) = publish_for(
+        &h,
+        OWNER,
+        "rec001 h restricted",
+        Visibility::Restricted,
+        &[AUDIENCE],
+    )
+    .await;
+    for i in 0..4 {
+        let (ctx, seed) = if i % 2 == 0 {
+            (&public, 143)
+        } else {
+            (&hidden, OWNER)
+        };
+        retract(&h, seed, ctx).await;
+        lifecycle(&h, seed, ctx, "republish", "republished").await;
+    }
+    let audience = bearer_for(AUDIENCE);
+    let anon_all = seqs(&page(&h.router, "", None).await);
+    let audience_all = seqs(&page(&h.router, "", Some(&audience)).await);
+    assert_eq!((anon_all.len(), audience_all.len()), (4, 8));
+    let (_, sizes, envelope) = sizes(&h.router).await;
+    // Two public entries per page: the restricted pair sits right after
+    // each cut.
+    let bound = page_len(envelope, &sizes[..2]);
+    set_page_bytes(&mut h, &cfg, bound);
+    let anon = byte_pages(&h.router, "", 100, None, bound).await;
+    assert_eq!(union_seqs(&anon), anon_all);
+    // The audience's entries differ in size; a generous bound of about
+    // three still splits its eight across pages.
+    let bound = page_len(envelope, &sizes[..2]) + sizes[0];
+    set_page_bytes(&mut h, &cfg, bound);
+    let mine = byte_pages(&h.router, "", 100, Some(&audience), bound).await;
+    assert!(mine.len() >= 3, "{} pages", mine.len());
+    assert_eq!(union_seqs(&mine), audience_all);
+}
