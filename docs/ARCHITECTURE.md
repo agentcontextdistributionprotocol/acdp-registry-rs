@@ -135,6 +135,22 @@ decided in one place, the pure functions in
 - **Reads** run in one snapshot (a deferred read transaction on SQLite;
   REPEATABLE READ, READ ONLY on Postgres), so the rows, `head` and
   `pruned_through` agree.
+- **Bucket hashes (§6.1, migration 021).** Every row also stores
+  `lineage_hash` and `agent_hash`: all 64 lowercase hex digits of
+  SHA-256 over the `lineage_id` / `agent_id` string the entry serves
+  (`acdp-registry-store/src/change_bucket.rs`, built on the SDK's
+  `acdp::types::change::bucket`). They are computed with the rest of the row
+  in `changes.rs`, which also refuses a row whose served ids differ from its
+  columns, so no backend derives them on its own. A `lineage_bucket` or
+  `agent_bucket` of any length is a prefix of them, and `FeedQuery` serves it
+  as one more OR arm: the index range scan `hash >= prefix AND hash <
+  prefix+1` (`Bucket::range`). Buckets never feed `revocation_agents`: §6.1
+  has no counterpart of the `ctx_id` rule. The columns are NOT NULL on
+  Postgres, where an insert trigger also fills them for an older binary
+  during a rolling deploy; SQLite enforces the same with triggers that refuse
+  a NULL, and backfills existing rows in Rust from `SqliteStore::migrate`.
+  The hashes are not part of `FeedRow::fingerprint`, so cursors are
+  unaffected.
 - **Pruning** deletes only a prefix of `seq` older than the cutoff. It moves
   `pruned_through` in the same transaction, so a cursor below the marker is
   detectably expired, never silently short.

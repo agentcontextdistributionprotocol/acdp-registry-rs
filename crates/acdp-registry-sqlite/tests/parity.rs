@@ -449,6 +449,13 @@ async fn change_feed_matches_the_cross_backend_contract() {
     parity::assert_change_feed(&plain, &minting, "sqlite").await;
 }
 
+/// RFC-ACDP-0018 §6.1: bucket filters over the stored hashes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_feed_bucket_filter_matches_the_cross_backend_contract() {
+    let (plain, _tmp) = store().await;
+    parity::assert_change_feed_bucket_filter(&plain, "sqlite").await;
+}
+
 /// RFC-ACDP-0018 §4: one row per receipted event, matching registry_state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn change_feed_lifecycle_rows_match_registry_state() {
@@ -508,8 +515,10 @@ async fn migration_017_creates_the_change_feed() {
         found,
         vec![
             "idx_changes_agent",
+            "idx_changes_agent_hash",
             "idx_changes_ctx",
-            "idx_changes_lineage"
+            "idx_changes_lineage",
+            "idx_changes_lineage_hash",
         ]
     );
     let marker: Vec<(i64, i64)> = sqlx::query_as("SELECT id, pruned_through FROM changes_meta")
@@ -517,6 +526,9 @@ async fn migration_017_creates_the_change_feed() {
         .await
         .expect("read changes_meta");
     assert_eq!(marker, vec![(1, 0)], "one marker row, starting at 0");
+    // Valid bucket hashes (migration 021), so each refusal is the kind or
+    // event CHECK and not the trigger refusing a hash-less row.
+    let hash = acdp_registry_store::bucket_hash;
     for (kind, event, superseded_by) in [
         ("lifecycle", None::<&str>, None::<&str>),
         ("superseded", None, None),
@@ -525,15 +537,32 @@ async fn migration_017_creates_the_change_feed() {
     ] {
         let res = sqlx::query(
             "INSERT INTO changes (kind, ctx_id, lineage_id, agent_id, superseded_by, \
-             event, receipt, appended_at_ms) VALUES (?, 'c', 'l', 'a', ?, ?, '{}', 0)",
+             event, receipt, appended_at_ms, lineage_hash, agent_hash) \
+             VALUES (?, 'c', 'l', 'a', ?, ?, '{}', 0, ?, ?)",
         )
         .bind(kind)
         .bind(superseded_by)
         .bind(event)
+        .bind(hash("l"))
+        .bind(hash("a"))
         .execute(store.pool())
         .await;
-        assert!(res.is_err(), "a malformed {kind} row must be refused");
+        let err = res.expect_err(kind).to_string();
+        assert!(
+            err.contains("CHECK constraint failed"),
+            "a malformed {kind} row must be refused by its CHECK: {err}"
+        );
     }
+    sqlx::query(
+        "INSERT INTO changes (kind, ctx_id, lineage_id, agent_id, \
+         receipt, appended_at_ms, lineage_hash, agent_hash) \
+         VALUES ('key_revocation', 'c', 'l', 'a', '{}', 0, ?, ?)",
+    )
+    .bind(hash("l"))
+    .bind(hash("a"))
+    .execute(store.pool())
+    .await
+    .expect("a well-formed row is accepted (positive control)");
     let res = sqlx::query("INSERT INTO changes_meta (id, pruned_through) VALUES (2, 0)")
         .execute(store.pool())
         .await;

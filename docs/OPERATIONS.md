@@ -136,6 +136,59 @@ unused by the older binary; to fully retire a migration, delete its row from
 such tolerance: a SQLite database migrated by a newer release does not start
 under an older one.
 
+### Migration 021: change feed bucket hashes
+
+Migration `021_changes_bucket_hashes` adds `lineage_hash` and `agent_hash` to
+the `changes` table (RFC-ACDP-0018 §6.1 bucket filters), fills them for every
+existing row, and indexes them. It runs at startup on every deployment, with
+`[changes]` on or off, because the feed is written whenever a `[receipt]` key
+is configured.
+
+**Postgres.** The migration runs in one transaction and holds `ACCESS
+EXCLUSIVE` on `changes` from its first `ALTER` through the backfill `UPDATE`,
+`SET NOT NULL`, two CHECKs and two index builds, until it commits. While it
+holds that lock, `GET /changes`, the hint worker, the prune task, lifecycle
+events and superseding or key-revocation publishes wait, on old and new
+replicas alike. Plain first publishes do not touch `changes` and carry on.
+
+- **Size the hold before deploying.** Run `SELECT count(*) FROM changes;`
+  and divide by the backfill rate: about 28,000 rows/s measured on
+  PostgreSQL 16 (27,500 to 35,400 over four runs of 100,000 rows with
+  receipt-sized JSONB, backfill and both index builds included; use 25,000
+  for planning). The feed is bounded by `retention_seconds`, so the count is
+  the last 30 days of lifecycle events, supersessions and revocations.
+- **Compare it with the platform's startup health-check grace.** Migrations
+  run before the listener binds. If the platform kills the new replica
+  mid-migration, the transaction rolls back cleanly and the old replicas keep
+  serving, but the deploy loops. If the estimate exceeds half the grace,
+  raise the grace for this deploy or pick a quiet window.
+- **Acquiring the lock is bounded.** The migration sets `lock_timeout =
+  '5s'` for its own transaction. If a long read holds `changes`, it gives up
+  with `canceling statement due to lock timeout` (SQLSTATE `55P03`), the new
+  replica fails startup, and the old replicas keep serving. Retry the deploy.
+  Without the timeout, the waiting `ALTER` would queue every later reader and
+  writer behind it.
+- **N-1 safe.** An insert trigger fills the hashes when a binary does not
+  supply them, so an older binary running during a rolling deploy, or after a
+  rollback, still writes correct rows, and the columns can be `NOT NULL`.
+  A rollback leaves the columns, indexes and trigger in place, harmlessly.
+- **Abandoning the feature entirely** (never needed for a rollback): `DROP
+  TRIGGER changes_fill_bucket_hashes ON changes; DROP FUNCTION
+  changes_fill_bucket_hashes(); DROP INDEX idx_changes_lineage_hash,
+  idx_changes_agent_hash; ALTER TABLE changes DROP COLUMN lineage_hash, DROP
+  COLUMN agent_hash;`, then `DELETE FROM _sqlx_migrations WHERE version = 21;`.
+
+**SQLite.** SQLite has no SHA-256 function, so the SQL adds nullable columns,
+the indexes and two triggers that refuse a row without both hashes or an
+update that clears one; `migrate()` then backfills existing rows in Rust, in
+batches of 1000 under `BEGIN IMMEDIATE`, and refuses to start if any row is
+left without hashes. A crash mid-backfill is safe: the next start resumes.
+As with every SQLite migration, there is no N-1 tolerance: rolling back past
+021 means restoring the pre-upgrade backup, and a restore is a sequence reset,
+so follow the [restore runbook](#restore) in full, including raising
+`[changes] cursor_epoch` before serving again. Row-anchor detection covers
+only the cursors whose anchor row was overwritten; the epoch covers the rest.
+
 ## Admin endpoints
 
 All six are bearer-gated against `auth.admin_tokens` (constant-time compare;

@@ -15,8 +15,11 @@
 //!
 //! What gets appended is decided here, not in the backends:
 //! [`lifecycle_append`] and [`feed_appends_for_publish`] are the §4 rules,
-//! and every backend only persists their output.
+//! and every backend only persists their output. That includes each row's
+//! §6.1 bucket hashes ([`crate::change_bucket`]), computed here from the
+//! strings the row serves.
 
+use crate::change_bucket::{bucket_hash, Bucket};
 use acdp::error::AcdpError;
 use acdp::types::body::Body;
 use acdp::types::change::{Change, ChangeKind};
@@ -42,6 +45,37 @@ pub struct FeedAppend {
     /// The event receipt (`lifecycle`) or the new version's registry receipt
     /// (`superseded`, `key_revocation`).
     pub receipt: Value,
+    /// [`bucket_hash`] of `lineage_id`, which `lineage_bucket` filters on.
+    pub lineage_hash: String,
+    /// [`bucket_hash`] of `agent_id`, which `agent_bucket` filters on.
+    pub agent_hash: String,
+}
+
+impl FeedAppend {
+    /// A row with its bucket hashes derived from `lineage_id` and
+    /// `agent_id`, the only way this module builds one.
+    #[allow(clippy::too_many_arguments)]
+    fn derive(
+        kind: ChangeKind,
+        ctx_id: String,
+        lineage_id: String,
+        agent_id: String,
+        superseded_by: Option<String>,
+        event: Option<Value>,
+        receipt: Value,
+    ) -> Self {
+        Self {
+            kind,
+            lineage_hash: bucket_hash(&lineage_id),
+            agent_hash: bucket_hash(&agent_id),
+            ctx_id,
+            lineage_id,
+            agent_id,
+            superseded_by,
+            event,
+            receipt,
+        }
+    }
 }
 
 /// One stored feed row.
@@ -58,6 +92,10 @@ pub struct FeedRow {
     /// When the row was appended, by the backend's clock. Drives retention
     /// only; the served `recorded_at` comes from the receipt.
     pub appended_at_ms: i64,
+    /// [`FeedAppend::lineage_hash`], as stored.
+    pub lineage_hash: String,
+    /// [`FeedAppend::agent_hash`], as stored.
+    pub agent_hash: String,
 }
 
 impl FeedRow {
@@ -73,6 +111,8 @@ impl FeedRow {
         event: Option<Value>,
         receipt: Value,
         appended_at_ms: i64,
+        lineage_hash: String,
+        agent_hash: String,
     ) -> Result<Self, AcdpError> {
         let seq = u64::try_from(seq).map_err(|_| {
             AcdpError::RegistryInternal(format!("stored change seq {seq} is negative"))
@@ -90,6 +130,8 @@ impl FeedRow {
             event,
             receipt,
             appended_at_ms,
+            lineage_hash,
+            agent_hash,
         })
     }
 
@@ -142,13 +184,17 @@ impl FeedRow {
 ///
 /// - id clause: `ctx_id ∈ ctx_ids` OR `lineage_id ∈ lineage_ids` OR
 ///   `agent_id ∈ agent_ids` OR (`kind = key_revocation` AND
-///   `agent_id ∈ revocation_agents`). Empty lists drop out of the OR; when
-///   all four are empty the clause matches every row.
+///   `agent_id ∈ revocation_agents`) OR `lineage_hash` starts with one of
+///   `lineage_buckets` OR `agent_hash` starts with one of `agent_buckets`.
+///   Empty lists drop out of the OR; when all six are empty the clause
+///   matches every row.
 /// - kind clause: `kind ∈ kinds`, or every kind when `kinds` is empty.
 ///
 /// `revocation_agents` is how a `ctx_id` watch also matches key revocations
 /// of that context's producer (§6). The caller resolves producers only for
-/// contexts the requester may see.
+/// contexts the requester may see. Buckets never feed it: §6.1 gives the
+/// `ctx_id` rule no bucket counterpart, so a consumer watching by bucket
+/// also watches its producers' `agent_bucket`s.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FeedQuery {
     /// Return rows with `seq > after`.
@@ -157,6 +203,11 @@ pub struct FeedQuery {
     pub lineage_ids: Vec<String>,
     pub agent_ids: Vec<String>,
     pub revocation_agents: Vec<String>,
+    /// §6.1 `lineage_bucket` values. Each is a range scan over
+    /// `lineage_hash` ([`Bucket::range`]).
+    pub lineage_buckets: Vec<Bucket>,
+    /// §6.1 `agent_bucket` values, over `agent_hash`.
+    pub agent_buckets: Vec<Bucket>,
     pub kinds: Vec<ChangeKind>,
     /// At most this many matching rows. Zero is treated as one.
     pub scan_limit: u32,
@@ -172,7 +223,9 @@ impl FeedQuery {
         !(self.ctx_ids.is_empty()
             && self.lineage_ids.is_empty()
             && self.agent_ids.is_empty()
-            && self.revocation_agents.is_empty())
+            && self.revocation_agents.is_empty()
+            && self.lineage_buckets.is_empty()
+            && self.agent_buckets.is_empty())
     }
 
     /// The filter part of the query (not `after`), for backends that
@@ -184,7 +237,15 @@ impl FeedQuery {
             || has(&self.lineage_ids, &row.lineage_id)
             || has(&self.agent_ids, &row.agent_id)
             || (row.kind == ChangeKind::KeyRevocation
-                && has(&self.revocation_agents, &row.agent_id));
+                && has(&self.revocation_agents, &row.agent_id))
+            || self
+                .lineage_buckets
+                .iter()
+                .any(|b| b.contains(&row.lineage_hash))
+            || self
+                .agent_buckets
+                .iter()
+                .any(|b| b.contains(&row.agent_hash));
         let kind_ok = self.kinds.is_empty() || self.kinds.contains(&row.kind);
         id_ok && kind_ok
     }
@@ -335,15 +396,15 @@ pub fn lifecycle_append(
     };
     let event = serde_json::to_value(event)
         .map_err(|e| AcdpError::RegistryInternal(format!("encode lifecycle event: {e}")))?;
-    let append = FeedAppend {
-        kind: ChangeKind::Lifecycle,
-        ctx_id: body.ctx_id.as_str().to_string(),
-        lineage_id: body.lineage_id.as_str().to_string(),
-        agent_id: body.agent_id.as_str().to_string(),
-        superseded_by: None,
-        event: Some(event),
-        receipt: receipt.clone(),
-    };
+    let append = FeedAppend::derive(
+        ChangeKind::Lifecycle,
+        body.ctx_id.as_str().to_string(),
+        body.lineage_id.as_str().to_string(),
+        body.agent_id.as_str().to_string(),
+        None,
+        Some(event),
+        receipt.clone(),
+    );
     check_servable(&append)?;
     Ok(Some(append))
 }
@@ -362,26 +423,26 @@ pub fn feed_appends_for_publish(
     };
     let mut out = Vec::new();
     if let Some(prev) = predecessor {
-        out.push(FeedAppend {
-            kind: ChangeKind::Superseded,
-            ctx_id: prev.ctx_id.clone(),
-            lineage_id: body.lineage_id.as_str().to_string(),
-            agent_id: prev.agent_id.clone(),
-            superseded_by: Some(body.ctx_id.as_str().to_string()),
-            event: None,
-            receipt: receipt.clone(),
-        });
+        out.push(FeedAppend::derive(
+            ChangeKind::Superseded,
+            prev.ctx_id.clone(),
+            body.lineage_id.as_str().to_string(),
+            prev.agent_id.clone(),
+            Some(body.ctx_id.as_str().to_string()),
+            None,
+            receipt.clone(),
+        ));
     }
     if body.context_type.is_key_revocation() {
-        out.push(FeedAppend {
-            kind: ChangeKind::KeyRevocation,
-            ctx_id: body.ctx_id.as_str().to_string(),
-            lineage_id: body.lineage_id.as_str().to_string(),
-            agent_id: revoked_key_controller(body)?,
-            superseded_by: None,
-            event: None,
-            receipt: receipt.clone(),
-        });
+        out.push(FeedAppend::derive(
+            ChangeKind::KeyRevocation,
+            body.ctx_id.as_str().to_string(),
+            body.lineage_id.as_str().to_string(),
+            revoked_key_controller(body)?,
+            None,
+            None,
+            receipt.clone(),
+        ));
     }
     for a in &out {
         check_servable(a)?;
@@ -408,8 +469,15 @@ fn revoked_key_controller(body: &Body) -> Result<String, AcdpError> {
 /// Refuse to persist a row the read path could not serve: a malformed row
 /// would fail every `/changes` page that reaches it, for its whole
 /// retention. The publish or event it belongs to fails instead.
+///
+/// It also pins the bucket hashes to the entry as served: a `superseded` or
+/// `key_revocation` entry takes its `lineage_id` from the receipt, not the
+/// column, and an `agent_id` passes through `AgentDid::parse`. A row whose
+/// served id differs from its column, or whose hash is not over that
+/// column, would sit in the wrong §6.1 bucket and be silently missed by
+/// every consumer watching the right one.
 fn check_servable(append: &FeedAppend) -> Result<(), AcdpError> {
-    FeedRow {
+    let change = FeedRow {
         seq: 1,
         kind: append.kind,
         ctx_id: append.ctx_id.clone(),
@@ -419,9 +487,33 @@ fn check_servable(append: &FeedAppend) -> Result<(), AcdpError> {
         event: append.event.clone(),
         receipt: append.receipt.clone(),
         appended_at_ms: 0,
+        lineage_hash: append.lineage_hash.clone(),
+        agent_hash: append.agent_hash.clone(),
     }
-    .to_change()
-    .map(drop)
+    .to_change()?;
+    let bucketed = |member: &str, served: &str, column: &str, hash: &str| {
+        if served != column || hash != bucket_hash(served) {
+            return Err(AcdpError::RegistryInternal(format!(
+                "{} row for {} would serve {member} {served:?} but bucket {column:?} \
+                 (RFC-ACDP-0018 §6.1)",
+                append.kind.as_str(),
+                append.ctx_id
+            )));
+        }
+        Ok(())
+    };
+    bucketed(
+        "lineage_id",
+        change.lineage_id().as_str(),
+        &append.lineage_id,
+        &append.lineage_hash,
+    )?;
+    bucketed(
+        "agent_id",
+        change.agent_id().as_str(),
+        &append.agent_id,
+        &append.agent_hash,
+    )
 }
 
 #[cfg(test)]
@@ -501,6 +593,8 @@ mod tests {
             event: None,
             receipt: Value::Null,
             appended_at_ms: 0,
+            lineage_hash: bucket_hash(lineage),
+            agent_hash: bucket_hash(agent),
         }
     }
 
@@ -633,9 +727,13 @@ mod tests {
                 event: a.event,
                 receipt: a.receipt,
                 appended_at_ms: 0,
+                lineage_hash: a.lineage_hash,
+                agent_hash: a.agent_hash,
             };
             let change = row.to_change().expect("servable");
             assert_eq!(change.seq(), row.seq);
+            assert_eq!(row.lineage_hash, bucket_hash(change.lineage_id().as_str()));
+            assert_eq!(row.agent_hash, bucket_hash(change.agent_id().as_str()));
         }
     }
 
@@ -735,6 +833,94 @@ mod tests {
         );
         let kinds_only = q(|q| q.kinds = vec![Lifecycle]);
         assert!(kinds_only.matches(&lc) && !kinds_only.matches(&kr));
+    }
+
+    /// Every derived row carries the bucket hashes of the ids it serves.
+    #[test]
+    fn appends_carry_the_bucket_hashes_of_their_served_ids() {
+        let b = body(ContextType::KeyRevocation, None);
+        let r = registry_receipt(&b);
+        let prev = Predecessor {
+            ctx_id: "acdp://r.example/00000000-0000-4000-8000-000000000000".into(),
+            agent_id: "did:web:agents.test:older".into(),
+        };
+        let rows = feed_appends_for_publish(&b, Some(&r), Some(&prev)).unwrap();
+        assert_eq!(rows.len(), 2);
+        for a in &rows {
+            assert_eq!(a.lineage_hash, bucket_hash(b.lineage_id.as_str()));
+            assert_eq!(a.agent_hash, bucket_hash(&a.agent_id));
+        }
+        assert_eq!(rows[0].agent_hash, bucket_hash("did:web:agents.test:older"));
+        assert_eq!(rows[1].agent_hash, bucket_hash(AGENT));
+    }
+
+    /// `check_servable` refuses a row whose hash is not over the served
+    /// string, or whose served id is not its column.
+    #[test]
+    fn a_row_bucketed_off_its_served_ids_is_refused() {
+        let b = body(ContextType::KeyRevocation, None);
+        let r = registry_receipt(&b);
+        let good = feed_appends_for_publish(&b, Some(&r), None).unwrap()[0].clone();
+        check_servable(&good).expect("derived rows are servable");
+        let mut wrong_hash = good.clone();
+        wrong_hash.agent_hash = bucket_hash("did:web:agents.test:other");
+        let mut wrong_lineage_hash = good.clone();
+        wrong_lineage_hash.lineage_hash = "0".repeat(64);
+        // A key_revocation entry serves the RECEIPT's lineage: a column that
+        // disagrees (with a hash over the column) is bucketed wrongly.
+        let other_lineage = acdp::crypto::derive_lineage_id(&CtxId(
+            "acdp://r.example/00000000-0000-4000-8000-0000000000ff".into(),
+        ));
+        let mut wrong_column = good.clone();
+        wrong_column.lineage_id = other_lineage.as_str().to_string();
+        wrong_column.lineage_hash = bucket_hash(other_lineage.as_str());
+        for (what, a) in [
+            ("agent hash", wrong_hash),
+            ("lineage hash", wrong_lineage_hash),
+            ("lineage column", wrong_column),
+        ] {
+            let err = check_servable(&a).expect_err(what);
+            assert!(
+                matches!(&err, AcdpError::RegistryInternal(m) if m.contains("§6.1")),
+                "{what}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn matches_bucket_arms_are_ored_with_ids_and_anded_with_kind() {
+        use ChangeKind::*;
+        let lc = row(1, Lifecycle, "c1", "l1", "a1");
+        let kr = row(2, KeyRevocation, "c2", "l2", "a2");
+        let b = |v: &str, n: usize| Bucket::parse(&bucket_hash(v)[..n], 16).unwrap();
+        let q = |lineage: Vec<Bucket>, agent: Vec<Bucket>| FeedQuery {
+            lineage_buckets: lineage,
+            agent_buckets: agent,
+            ..FeedQuery::default()
+        };
+        let by_lineage = q(vec![b("l1", 4)], vec![]);
+        assert!(by_lineage.matches(&lc) && !by_lineage.matches(&kr));
+        let longer = q(vec![b("l1", 16)], vec![]);
+        assert!(longer.matches(&lc) && !longer.matches(&kr));
+        let by_agent = q(vec![], vec![b("a2", 1)]);
+        assert!(by_agent.matches(&kr));
+        assert_eq!(
+            by_agent.matches(&lc),
+            bucket_hash("a1")[..1] == bucket_hash("a2")[..1],
+            "a 1-digit bucket is the whole bucket, collisions included"
+        );
+        // Overlapping buckets are one OR, not two matches.
+        let overlap = q(vec![b("l1", 1), b("l1", 4)], vec![]);
+        assert!(overlap.matches(&lc));
+        // OR with an id arm, AND with kind.
+        let mut or = q(vec![b("l1", 4)], vec![]);
+        or.ctx_ids = vec!["c2".into()];
+        assert!(or.matches(&lc) && or.matches(&kr));
+        or.kinds = vec![KeyRevocation];
+        assert!(!or.matches(&lc) && or.matches(&kr));
+        // A bucket on a member that does not match is not a wildcard.
+        let miss = q(vec![b("l9", 16)], vec![]);
+        assert!(!miss.matches(&lc) && !miss.matches(&kr));
     }
 
     #[test]

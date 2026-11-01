@@ -4,6 +4,7 @@
 //! protocol-level store contract — paginated listing, a backend health
 //! check, and migration runner.
 
+pub mod change_bucket;
 pub mod changes;
 pub mod cursor;
 pub mod event_receipts;
@@ -29,6 +30,7 @@ use acdp::types::search::{SearchParams, SearchResponse};
 use acdp_registry_types::config::RESERVED_TENANT;
 use async_trait::async_trait;
 
+pub use change_bucket::{bucket_hash, Bucket};
 pub use changes::{
     feed_fingerprint, FeedAppend, FeedFingerprint, FeedHead, FeedPage, FeedQuery, FeedRow,
     FEED_ORIGIN_FP,

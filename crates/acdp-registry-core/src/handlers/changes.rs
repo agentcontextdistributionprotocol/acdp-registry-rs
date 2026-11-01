@@ -319,6 +319,8 @@ pub async fn evaluate_changes<S: ExtendedRegistryStore + 'static>(
             .map(|a| a.as_str().to_string())
             .collect(),
         revocation_agents,
+        lineage_buckets: Vec::new(),
+        agent_buckets: Vec::new(),
         kinds: req.filter.kind.clone(),
         scan_limit: u32::try_from(req.limit)
             .unwrap_or(u32::MAX)

@@ -108,6 +108,8 @@ impl Feed {
                 event: a.event,
                 receipt: a.receipt,
                 appended_at_ms: now_ms,
+                lineage_hash: a.lineage_hash,
+                agent_hash: a.agent_hash,
             });
         }
     }
@@ -1277,6 +1279,13 @@ mod tests {
         let (signer, _) = receipt_signer(90);
         let minting = Arc::new(plain.as_ref().clone().with_event_receipt_minter(signer));
         parity::assert_change_feed(&plain, &minting, "memory").await;
+    }
+
+    /// RFC-ACDP-0018 §6.1: bucket filters over the stored hashes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn change_feed_bucket_filter_matches_the_cross_backend_contract() {
+        let plain = Arc::new(MemoryStore::new());
+        parity::assert_change_feed_bucket_filter(&plain, "memory").await;
     }
 
     /// RFC-ACDP-0018 §4: one row per receipted event, matching registry_state.

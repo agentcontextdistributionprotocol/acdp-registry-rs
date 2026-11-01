@@ -4616,10 +4616,12 @@ mod tests {
         for i in 0..old + 3 {
             let at = if i < old { cutoff - 1 } else { cutoff + 1 };
             sqlx::query(
-                "INSERT INTO changes (kind, ctx_id, lineage_id, agent_id, receipt, appended_at_ms) \
-                 VALUES ('key_revocation', 'c', 'l', 'a', '{}', ?)",
+                "INSERT INTO changes (kind, ctx_id, lineage_id, agent_id, receipt, appended_at_ms, \
+                 lineage_hash, agent_hash) VALUES ('key_revocation', 'c', 'l', 'a', '{}', ?, ?, ?)",
             )
             .bind(at)
+            .bind(acdp_registry_store::bucket_hash("l"))
+            .bind(acdp_registry_store::bucket_hash("a"))
             .execute(store.pool())
             .await
             .unwrap();

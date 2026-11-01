@@ -37,6 +37,22 @@ the client address's anonymous read bucket. Second, two `Authorization` headers 
 
 **Spec pin 3f50697** (RFC-ACDP-0018 §5.2 page size and compression, §6.1 bucket filters; rec-010 added). Measurement only: no behaviour change, no operator action.
 
+**Migration `021_changes_bucket_hashes` backfills the change feed at startup (Postgres: size it
+first).** It adds `lineage_hash` / `agent_hash` to `changes` for RFC-ACDP-0018 §6.1 bucket filters
+and fills them for every existing row, on every deployment, `[changes]` on or off. Details in
+[OPERATIONS.md](OPERATIONS.md#migration-021-change-feed-bucket-hashes).
+- **Postgres: before deploying, run `SELECT count(*) FROM changes;`.** For the backfill and two
+  index builds the migration holds `ACCESS EXCLUSIVE` on `changes`, which blocks `/changes` reads,
+  hints, prune, lifecycle events and superseding or revocation publishes (not plain publishes).
+  Measured rate: about 28,000 rows/s on PostgreSQL 16 (plan with 25,000). Compare count ÷ rate with
+  the platform's startup health-check grace; above half of it, raise the grace for this deploy or
+  pick a quiet window. The migration gives up after `lock_timeout = 5s` if it cannot get the lock:
+  the new replica fails startup, the old ones keep serving, retry. Additive and N-1 safe: an insert
+  trigger fills the hashes for an older binary, so rolling back needs no step.
+- **SQLite: take a backup first.** Not N-1 safe, as before: rolling back past 021 means restoring
+  that backup, and a restore is a sequence reset, so raise `[changes] cursor_epoch` before serving
+  again ([OPERATIONS.md](OPERATIONS.md#restore), step 5).
+
 ## 0.10.0
 
 **Railway (and any edge that appends its own hop): set `rate_limit.forwarded_skip_rightmost`.**
