@@ -4,6 +4,7 @@
 
 pub mod challenge_store;
 pub mod jwt;
+pub mod read_token;
 pub mod revocation_poller;
 pub mod revocation_store;
 pub mod service;
@@ -12,6 +13,10 @@ pub use challenge_store::{
     ChallengeRecord, ChallengeStore, InMemoryChallengeStore, PgChallengeStore, SqliteChallengeStore,
 };
 pub use jwt::{JwtSecret, JwtSigner};
+pub use read_token::{
+    generate_read_token, is_read_token, read_token_sha256_hex, ReadTokenError, ReadTokens,
+    StaticReadPrincipal, READ_TOKEN_PREFIX,
+};
 pub use revocation_store::{
     tombstone_cutoff, InMemoryRevocationStore, PgRevocationStore, RevocationRecord,
     RevocationStore, SqliteRevocationStore,

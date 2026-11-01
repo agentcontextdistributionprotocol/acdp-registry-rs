@@ -183,9 +183,70 @@ Where this registry meets each one:
 | `sub` is the requester's DID, verified before minting | [Token issuance checks](#token-issuance-checks-authtoken) |
 | `exp` present, short lifetime | `auth.token_ttl_seconds` (default 3600 s); `exp`, `iss` and `aud` are required claims |
 | `aud` identifies the issuing registry; other audiences rejected | [Validation](#validation) |
-| Listed in `read_authentication_methods` | `["bearer_jwt"]` whenever `auth.enabled = true` ([HTTP-API.md](HTTP-API.md#get-well-knownacdpjson)) |
+| Listed in `read_authentication_methods` | `"bearer_jwt"` whenever `auth.enabled = true`, followed by `"bearer_static"` when `[[auth.read_tokens]]` is configured ([HTTP-API.md](HTTP-API.md#get-well-knownacdpjson), [static read tokens](#static-read-tokens-bearer_static)) |
 | Reads only; never replaces a producer signature | Publish and lifecycle writes verify the producer's signature over the body or event whether or not a bearer is presented (the opt-in unpinned `[playground]` publish mode excepted); a bearer never stands in for it |
 | Sent over TLS only | A deployment duty: terminate TLS upstream or set `[registry.tls]` ([CONFIGURATION.md](CONFIGURATION.md#registrytls)). The registry cannot see an upstream TLS hop, so it does not refuse plain-HTTP bearers. |
+
+## Static read tokens (`bearer_static`)
+
+RFC-ACDP-0008 §6.2 `bearer_static`: a long-lived, operator-issued token that
+authenticates **reads** as one requester DID, for a client that cannot run the
+challenge flow (a dashboard, a cron job, a server-side integration). It is
+configured in `[[auth.read_tokens]]` ([CONFIGURATION.md](CONFIGURATION.md#authread_tokens))
+and requires `auth.enabled = true`. While at least one entry is configured,
+capabilities list `"bearer_static"` after `"bearer_jwt"`.
+
+**Minting.** `acdp-registry read-token generate` prints a new token and the
+entry to paste into the config. The token is `acdp_rt_` followed by 43
+base64url characters: 32 bytes (256 bits) from the operating system's CSPRNG.
+The registry stores only the SHA-256 (`sha256`) of the full token string. Hand
+the token to the DID's holder, then discard it. It cannot be recovered from the
+config.
+
+**Binding.** Each entry binds exactly one DID. Configuration may bind a token
+only to a DID **this operator administers**, so `operator_administered = true`
+is mandatory and startup refuses an entry without it. Binding someone else's DID
+needs proof of control, which a config file cannot provide. Each entry also
+gets an optional `tenant`, falling back to the DID's `[[auth.tenant_agents]]`
+binding. The tenant is authoritative, exactly like a tenant-bound JWT's claim:
+a disagreeing `X-Tenant-Id` is `403`.
+
+**Presenting.** The token is accepted only as `Authorization: Bearer
+acdp_rt_…` on the data plane's `GET`/`HEAD` routes. Parsing is the same as for
+any bearer (`extract_bearer`), and the `acdp_rt_` prefix routes the token to
+the static table instead of JWT validation. It is never read from the query
+string or a form body. While `bearer_static` is active, a request with an
+`access_token` query parameter is refused `400 schema_violation` rather than
+served anonymously. Two `Authorization` headers are refused `400` rather than
+picking one.
+
+**Refusal.** An unknown, expired or malformed static token is `403
+not_authorized`, decided by the read gate (`crates/acdp-registry-core/src/read_gate.rs`)
+**before** the handler looks anything up. An existing private context and a
+missing one therefore answer identically, and the request never falls back to
+anonymous, not even for a public context. The same holds for an invalid JWT on
+these routes. The refusal is charged to the client address's anonymous read
+bucket first (when `[read_limits]` is on), so guessing tokens spends budget.
+Once that bucket is exhausted the answer is `429`. A valid token is charged to
+its DID's bucket wherever it comes from.
+
+**Reads only.** Every bearer-authenticated write and credential operation
+(retract, republish, `/subscriptions`, token revocation) refuses a static
+token with `403 not_authorized`. Publish never consults `Authorization`.
+
+**Rotation, revocation, expiry.** A DID may hold several valid tokens at once
+(at least 2, `auth.max_read_tokens_per_did`, default 5): add the new entry,
+move the client over, then remove the old one. Removing an entry and restarting
+the registry revokes the token. Revocation therefore takes effect within one
+deploy, the documented bound. `expires_at` (RFC 3339) makes a token stop
+validating at that instant. Startup warns about an entry that has already
+expired.
+
+**Never logged.** Validation compares hashes in constant time over every entry,
+and no error message carries the token. The request span logs the URI with any
+`access_token` value, and any query value or path segment containing
+`acdp_rt_`, replaced by `[redacted]`. `tests/read_token_logging.rs` pins this
+at TRACE level.
 
 ## Presenting a bearer
 
@@ -239,8 +300,10 @@ id that does not exist. That is why `[events]` requires
 
 ### Unrecognised means anonymous on the ordinary routes
 
-`caller_from_headers` (`crates/acdp-registry-core/src/handlers/context.rs`)
-returns `Ok(None)` — an anonymous caller — in three cases:
+The read gate's `resolve` (`crates/acdp-registry-core/src/read_gate.rs`, for
+data-plane reads) and `caller_from_headers`
+(`crates/acdp-registry-core/src/handlers/context.rs`, for bearer-authenticated
+writes) both yield an anonymous caller in three cases:
 
 - `auth.enabled = false`, regardless of what the client sent;
 - no `Authorization` header, or a value the HTTP layer will not hand over as a

@@ -1562,6 +1562,7 @@ fn every_directly_read_env_var_is_documented() {
     // the gate: add the name below and document it in docs/CONFIGURATION.md.
     let expected = [
         "ACDP_LOG_FORMAT",
+        "ACDP_REGISTRY_AUTH__READ_TOKENS_JSON",
         "ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON",
         "ACDP_REGISTRY_CONFIG",
         "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON",

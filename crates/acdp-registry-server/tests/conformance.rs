@@ -18289,7 +18289,10 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
                 served_full_features_toml(),
                 served_keyless_toml(),
                 "[read_limits]\nenabled = true\nanonymous_per_minute = 1200\n\
-                 authenticated_per_minute = 3000\nadvertise = true\n"
+                 authenticated_per_minute = 3000\nadvertise = true\n\n\
+                 [[auth.read_tokens]]\nid = \"conformance\"\ndid = \"did:web:ops.example\"\n\
+                 sha256 = \"ab00000000000000000000000000000000000000000000000000000000000000\"\n\
+                 operator_administered = true\n"
             ),
         ),
     ];
@@ -18315,6 +18318,11 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
     assert_eq!(
         served["auth-on"]["read_authentication_methods"],
         json!(["bearer_jwt"])
+    );
+    // RFC-ACDP-0008 §6.2: a configured read token adds `bearer_static`.
+    assert_eq!(
+        served["all-profiles"]["read_authentication_methods"],
+        json!(["bearer_jwt", "bearer_static"])
     );
     let advertised: std::collections::BTreeSet<&str> = served["all-profiles"]["profiles"]
         .as_array()

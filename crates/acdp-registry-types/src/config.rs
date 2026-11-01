@@ -93,6 +93,7 @@ impl RegistryConfig {
                 k != "ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON"
                     && k != "ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON"
                     && k != "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON"
+                    && k != "ACDP_REGISTRY_AUTH__READ_TOKENS_JSON"
             })
             // #271: an EMPTY prefixed override is treated as ABSENT, not as an
             // override with the empty value. `Self::empty_env_overrides_ignored`
@@ -203,6 +204,22 @@ impl RegistryConfig {
                 config::ConfigError::Message(format!(
                     "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON: invalid JSON array of \
                      {{issuer, jwks_uri?}}: {e}"
+                ))
+            })?;
+        }
+
+        // `auth.read_tokens` is `Vec<ReadTokenEntry>` — same problem, same
+        // fix, so an env-only deployment can bind read tokens. The values are
+        // hashes, never tokens; validation is the binary's, as for TOML.
+        if let Ok(json) = std::env::var("ACDP_REGISTRY_AUTH__READ_TOKENS_JSON")
+            .ok()
+            .filter(|j| !j.trim().is_empty())
+            .ok_or(())
+        {
+            cfg.auth.read_tokens = serde_json::from_str(&json).map_err(|e| {
+                config::ConfigError::Message(format!(
+                    "ACDP_REGISTRY_AUTH__READ_TOKENS_JSON: invalid JSON array of \
+                     {{id, did, sha256, expires_at?, tenant?, operator_administered}}: {e}"
                 ))
             })?;
         }
@@ -535,6 +552,49 @@ pub struct AuthConfig {
     /// outranks the header, whatever this says.
     #[serde(default)]
     pub tenant_header_trust: Option<TenantHeaderTrust>,
+
+    /// `[[auth.read_tokens]]`: `bearer_static` read tokens bound by
+    /// configuration (RFC-ACDP-0008 §6.2). Only the SHA-256 of each token is
+    /// configured. §6.2 allows a configuration binding only for a DID the
+    /// operator itself administers, so every entry must say
+    /// `operator_administered = true`. Needs `enabled`. Env:
+    /// `ACDP_REGISTRY_AUTH__READ_TOKENS_JSON` (a JSON array).
+    #[serde(default)]
+    pub read_tokens: Vec<ReadTokenEntry>,
+
+    /// Most `[[auth.read_tokens]]` entries one DID may hold. At least 2, so a
+    /// consumer can rotate without an outage (§6.2).
+    #[serde(default = "default_max_read_tokens_per_did")]
+    pub max_read_tokens_per_did: usize,
+}
+
+fn default_max_read_tokens_per_did() -> usize {
+    5
+}
+
+/// One configured `bearer_static` read token. Only its hash is stored; the
+/// token itself is shown once by `acdp-registry read-token generate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadTokenEntry {
+    /// Operator label for logs and rotation (never the token).
+    pub id: String,
+    /// The requester DID the token authenticates as.
+    pub did: String,
+    /// Lowercase hex SHA-256 of the full token string (64 characters).
+    pub sha256: String,
+    /// When the token stops validating (RFC 3339). Absent: no expiry.
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Tenant the token's reads are scoped to. Absent: the DID's
+    /// `[[auth.tenant_agents]]` binding, if any.
+    #[serde(default)]
+    pub tenant: Option<String>,
+    /// The operator's statement that it administers `did` (§6.2). Must be
+    /// `true`: any other DID needs a proof of control, which configuration
+    /// cannot give.
+    #[serde(default)]
+    pub operator_administered: bool,
 }
 
 /// `[auth] tenant_header_trust`: when an `X-Tenant-Id` header may select the
@@ -688,6 +748,8 @@ impl Default for AuthConfig {
             tenant_agents: Vec::new(),
             require_tenant: false,
             tenant_header_trust: None,
+            read_tokens: Vec::new(),
+            max_read_tokens_per_did: default_max_read_tokens_per_did(),
         }
     }
 }
@@ -2929,6 +2991,11 @@ backend = "sqlite"
                 "ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON",
                 r#"[{"issuer":"https://token.actions.githubusercontent.com"}]"#,
             ),
+            // And for `auth.read_tokens` (Vec<ReadTokenEntry>).
+            (
+                "ACDP_REGISTRY_AUTH__READ_TOKENS_JSON",
+                r#"[{"id":"seam-1","did":"did:web:x","sha256":"00","expires_at":"2030-01-01T00:00:00Z","operator_administered":true}]"#,
+            ),
             // A prefixed but un-nested var must NOT trip `deny_unknown_fields`
             // via the env source. `..._TEST_PG_URL` is the CI test harness var;
             // `ACDP_REGISTRY_CONFIG` is the same shape but is excluded here
@@ -2979,6 +3046,16 @@ backend = "sqlite"
             "https://token.actions.githubusercontent.com"
         );
         assert_eq!(cfg.keyless.oidc_issuers[0].jwks_uri, None);
+        assert_eq!(cfg.auth.read_tokens.len(), 1);
+        let rt = &cfg.auth.read_tokens[0];
+        assert_eq!((rt.id.as_str(), rt.did.as_str()), ("seam-1", "did:web:x"));
+        assert!(rt.operator_administered);
+        assert_eq!(rt.tenant, None);
+        assert_eq!(
+            rt.expires_at.map(|t| t.timestamp()),
+            Some(1_893_456_000),
+            "RFC 3339 expiry"
+        );
 
         // Malformed JSON is rejected with an attributed error. This used to be
         // described as "a second, sequential round-trip within this same test,
@@ -3006,6 +3083,42 @@ backend = "sqlite"
             err.to_string().contains("OIDC_ISSUERS_JSON"),
             "expected an OIDC_ISSUERS_JSON-attributed error, got: {err}"
         );
+
+        // A read-token entry with an unknown member (a pasted token, say) is
+        // refused, naming the variable.
+        env.set(
+            "ACDP_REGISTRY_AUTH__READ_TOKENS_JSON",
+            r#"[{"id":"a","did":"did:web:x","sha256":"00","token":"acdp_rt_x"}]"#,
+        );
+        let err = RegistryConfig::load(None).unwrap_err();
+        env.unset("ACDP_REGISTRY_AUTH__READ_TOKENS_JSON");
+        assert!(
+            err.to_string().contains("READ_TOKENS_JSON"),
+            "expected a READ_TOKENS_JSON-attributed error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_tokens_parse_from_toml_with_defaults() {
+        let toml = r#"
+[[read_tokens]]
+id = "ops"
+did = "did:web:registry.example"
+sha256 = "ab"
+operator_administered = true
+tenant = "t1"
+"#;
+        let cfg: AuthConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.max_read_tokens_per_did, 5);
+        assert_eq!(cfg.read_tokens.len(), 1);
+        assert_eq!(cfg.read_tokens[0].tenant.as_deref(), Some("t1"));
+        assert_eq!(cfg.read_tokens[0].expires_at, None);
+        // `operator_administered` defaults to false, which startup refuses.
+        let cfg: AuthConfig =
+            toml::from_str("[[read_tokens]]\nid = \"x\"\ndid = \"did:web:a\"\nsha256 = \"ab\"\n")
+                .unwrap();
+        assert!(!cfg.read_tokens[0].operator_administered);
+        assert!(AuthConfig::default().read_tokens.is_empty());
     }
 
     /// `anonymous_public_reads` is a CONFIG-FILE KEY, and nothing else in this

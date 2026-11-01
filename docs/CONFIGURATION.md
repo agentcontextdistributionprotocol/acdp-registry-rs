@@ -57,6 +57,7 @@ win if both a TOML file and the variable are present:
 | Variable | Sets | Value |
 |----------|------|-------|
 | `ACDP_REGISTRY_AUTH__TENANT_AGENTS_JSON` | `auth.tenant_agents` | JSON array of `{agent_did, tenant_id}` |
+| `ACDP_REGISTRY_AUTH__READ_TOKENS_JSON` | `auth.read_tokens` | JSON array of `{id, did, sha256, operator_administered, expires_at?, tenant?}` (hashes only, never tokens) |
 | `ACDP_REGISTRY_PLAYGROUND__PINNED_KEYS_JSON` | `playground.pinned_keys` | JSON array of `{agent_did, public_key_b64, algorithm?, valid_from?, valid_until?}` |
 | `ACDP_REGISTRY_KEYLESS__OIDC_ISSUERS_JSON` | `keyless.oidc_issuers` | JSON array of `{issuer, jwks_uri?}` |
 
@@ -357,6 +358,7 @@ values for illustration. Env var = `ACDP_REGISTRY_` + the bracketed path.
 | `require_tenant` | bool | `false` | Strict multi-tenancy: requests resolving to no tenant are denied. See [MULTI-TENANCY.md](MULTI-TENANCY.md). |
 | `tenant_header_trust` | `"none"` \| `"trusted_proxies"` \| `"any_peer"` | unset: `"none"` in every mode (0.4.0, #386; 0.3.x used `"any_peer"` when `require_tenant = false`) | Who may select a tenant with `X-Tenant-Id` when no signed claim or agent binding applies. `trusted_proxies`: only when the immediate TCP peer (not `X-Forwarded-For`) is in `rate_limit.trusted_proxies`. An untrusted header that disagrees with the claim/binding, or has none to agree with, is 403 `not_authorized`. See [MULTI-TENANCY.md](MULTI-TENANCY.md#who-may-send-x-tenant-id). |
 | `admin_tokens` | string[] | `[]` | Bearer tokens for `/admin/*`. Entries must be non-empty and not whitespace-only (startup validation). An empty *list* disables every admin-bearer-gated route: `/admin/status`, `/admin/lineages/{id}/audit`, `/admin/contexts/{id}/retract`, `/admin/contexts/{id}/republish`, `GET /admin/contexts`, `/admin/pinned-keys/reload`. See [HTTP-API.md#admin](HTTP-API.md#admin). |
+| `max_read_tokens_per_did` | usize | `5` | Most `[[auth.read_tokens]]` entries one DID may hold. At least 2, so a token can be rotated without a gap. |
 
 #### `[[auth.tenant_agents]]`
 
@@ -366,6 +368,27 @@ Repeatable. Binds a producing/consuming agent to a tenant.
 |-----|------|-------|
 | `agent_did` | string | Full DID of the agent. |
 | `tenant_id` | string | Tenant the agent is scoped to (`default` is reserved). |
+
+#### `[[auth.read_tokens]]`
+
+Repeatable. One RFC-ACDP-0008 §6.2 `bearer_static` read token, stored as a
+hash. Requires `auth.enabled = true`. Mint with `acdp-registry read-token
+generate`. See [AUTHENTICATION.md](AUTHENTICATION.md#static-read-tokens-bearer_static).
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `id` | string | Operator label, unique. Appears in startup messages; the token never does. |
+| `did` | string | The requester DID the token reads as. Must use a method in `auth.did_methods`. |
+| `sha256` | string | Lowercase hex SHA-256 of the full token (64 characters), unique. |
+| `operator_administered` | bool | Must be `true`: config may bind only a DID this operator administers. |
+| `expires_at` | RFC 3339 timestamp | Optional. The token stops validating at this instant. |
+| `tenant` | string | Optional tenant binding (not `default`); falls back to the DID's `[[auth.tenant_agents]]` entry. |
+
+Startup refuses entries while `auth.enabled = false`, `max_read_tokens_per_did`
+below 2, an empty or duplicate id, a malformed or duplicate hash, a DID of an
+unaccepted method, `operator_administered` other than `true`, an empty or
+reserved `tenant`, and more than `max_read_tokens_per_did` entries per DID. It
+warns about an already-expired entry and about a DID holding a single token. Removing an entry and restarting revokes the token.
 
 #### `[[auth.revocation_feeds]]`
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use acdp::types::primitives::{AgentDid, CtxId, LineageId, Visibility};
 use acdp::types::publish::{PublishRequest, PublishResponse};
 use acdp::types::search::{SearchParams, SearchResponse};
-use acdp_registry_auth::extract_bearer;
+use acdp_registry_auth::{extract_bearer, is_read_token};
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::{event::WebhookEvent, RegistryError};
 use axum::body::Bytes;
@@ -20,6 +20,7 @@ use serde::Deserialize;
 use crate::extract::{AcdpBytes, AcdpQuery};
 use crate::publish_reply::{publish_reply, PublishReply};
 use crate::rate_limit::PublishCharge;
+use crate::read_gate::ReadPrincipal;
 use crate::state::AppState;
 use crate::tenant_trust::PeerIp;
 
@@ -129,6 +130,28 @@ pub(crate) fn tenant_for_request<S: ExtendedRegistryStore + 'static>(
     headers: &HeaderMap,
     peer: Option<IpAddr>,
 ) -> Result<Option<String>, RegistryError> {
+    tenant_with_claim(state, headers, peer, bearer_tenant_claim(state, headers))
+}
+
+/// [`tenant_for_request`] for a data-plane read, whose credential the read
+/// gate already resolved: the claim is the principal's binding (a JWT
+/// `tenant` claim or a `bearer_static` token's configured tenant), so a
+/// static token is tenant-scoped exactly like a tenant-bound JWT.
+pub(crate) fn tenant_for_principal<S: ExtendedRegistryStore + 'static>(
+    state: &AppState<S>,
+    headers: &HeaderMap,
+    peer: Option<IpAddr>,
+    principal: &ReadPrincipal,
+) -> Result<Option<String>, RegistryError> {
+    tenant_with_claim(state, headers, peer, principal.tenant_claim())
+}
+
+fn tenant_with_claim<S: ExtendedRegistryStore + 'static>(
+    state: &AppState<S>,
+    headers: &HeaderMap,
+    peer: Option<IpAddr>,
+    claim: Option<String>,
+) -> Result<Option<String>, RegistryError> {
     let header_tenant = tenant_from_headers(headers);
     reject_reserved_tenant(header_tenant.as_deref())?;
     if !state.config.auth.enabled {
@@ -139,7 +162,7 @@ pub(crate) fn tenant_for_request<S: ExtendedRegistryStore + 'static>(
     // scoped to a tenant.
     let strict = state.config.auth.require_tenant;
 
-    let resolved = match bearer_tenant_claim(state, headers) {
+    let resolved = match claim {
         // Bound token — claim wins; a disagreeing header is rejected.
         Some(c) => reconcile_tenant_sources(Some(c), header_tenant)?,
         // No claim (no bearer, unbound or invalid token): the header decides,
@@ -951,9 +974,10 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     PeerIp(peer): PeerIp,
+    principal: ReadPrincipal,
     Path(ctx_id): Path<String>,
 ) -> Result<Response, RegistryError> {
-    let requester = caller_from_headers(&state, &headers)?;
+    let requester = principal.requester();
 
     let parsed = CtxId::parse(ctx_id.clone()).map_err(RegistryError::Acdp)?;
     if parsed.authority() != state.config.registry.authority {
@@ -1011,7 +1035,7 @@ pub async fn retrieve<S: ExtendedRegistryStore + 'static>(
     // Resolve the tenant scope up front (before the DB read) so a strict-mode
     // default-deny fails fast and doesn't create a 404-vs-403 existence oracle
     // between a missing row and an unscoped request.
-    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
+    let requested_tenant = tenant_for_principal(&state, &headers, peer, &principal)?;
 
     let server = state.server.clone();
     let ctx_id_typed = CtxId(ctx_id.clone());
@@ -1058,10 +1082,11 @@ pub async fn retrieve_body<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     PeerIp(peer): PeerIp,
+    principal: ReadPrincipal,
     Path(ctx_id): Path<String>,
 ) -> Result<Json<acdp::types::body::Body>, RegistryError> {
-    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
-    let requester = caller_from_headers(&state, &headers)?;
+    let requested_tenant = tenant_for_principal(&state, &headers, peer, &principal)?;
+    let requester = principal.requester();
     // Tenant gate before fetching the body — saves work when the
     // caller can't see this row anyway.
     if let Some(ref tenant) = requested_tenant {
@@ -1144,12 +1169,13 @@ pub async fn search<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     PeerIp(peer): PeerIp,
+    principal: ReadPrincipal,
     AcdpQuery(q): AcdpQuery<SearchQuery>,
 ) -> Result<Json<SearchResponse>, RegistryError> {
-    let requester = caller_from_headers(&state, &headers)?;
+    let requester = principal.requester();
     let query_text = q.q.clone();
     let (params, visibility_filter) = q.into_params();
-    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
+    let requested_tenant = tenant_for_principal(&state, &headers, peer, &principal)?;
 
     let resp = run_search_with_refill(
         &state,
@@ -1353,10 +1379,11 @@ pub async fn lineage<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     PeerIp(peer): PeerIp,
+    principal: ReadPrincipal,
     Path(lineage_id): Path<String>,
 ) -> Result<Json<Vec<acdp::types::body::FullContext>>, RegistryError> {
-    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
-    let requester = caller_from_headers(&state, &headers)?;
+    let requested_tenant = tenant_for_principal(&state, &headers, peer, &principal)?;
+    let requester = principal.requester();
     let server = state.server.clone();
     let id = LineageId(lineage_id);
     let mut items = tokio::task::spawn_blocking(move || server.lineage(&id, requester.as_ref()))
@@ -1382,10 +1409,11 @@ pub async fn current<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     PeerIp(peer): PeerIp,
+    principal: ReadPrincipal,
     Path(lineage_id): Path<String>,
 ) -> Result<Json<acdp::types::body::FullContext>, RegistryError> {
-    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
-    let requester = caller_from_headers(&state, &headers)?;
+    let requested_tenant = tenant_for_principal(&state, &headers, peer, &principal)?;
+    let requester = principal.requester();
     let server = state.server.clone();
     let id = LineageId(lineage_id);
     let ctx = tokio::task::spawn_blocking(move || server.current(&id, requester.as_ref()))
@@ -1729,6 +1757,14 @@ pub(crate) fn caller_from_headers<S: ExtendedRegistryStore + 'static>(
     let Some(token) = extract_bearer(value) else {
         return Ok(None);
     };
+    if is_read_token(token) {
+        // RFC-ACDP-0008 §6.2: a `bearer_static` token authenticates reads
+        // only. Every caller of this function is a write or a credential
+        // operation, so the token is refused outright, never parsed as a JWT.
+        return Err(RegistryError::AuthToken(
+            "a bearer_static read token cannot authorize this operation".into(),
+        ));
+    }
     Ok(Some(state.auth.validate_bearer(token)?))
 }
 

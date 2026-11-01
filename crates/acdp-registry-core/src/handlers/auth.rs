@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use acdp::error::AcdpError;
-use acdp_registry_auth::extract_bearer;
+use acdp_registry_auth::{extract_bearer, is_read_token};
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::{AuthChallenge, RegistryError, TokenRequest, TokenResponse};
 use axum::extract::State;
@@ -105,6 +105,19 @@ pub async fn revoke_token<S: ExtendedRegistryStore + 'static>(
     // `RegistryError` (not a hand-built body) so the envelope, status and
     // code come from the one `http_status`/`error_code` table the
     // conformance gate scans.
+    // RFC-ACDP-0008 §6.2: a `bearer_static` read token never authorizes a
+    // credential operation. Refused first, so the answer does not depend on
+    // whether revocation is configured.
+    if headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer)
+        .is_some_and(is_read_token)
+    {
+        return Err(RegistryError::AuthToken(
+            "a bearer_static read token cannot authorize this operation".into(),
+        ));
+    }
     if state.auth.revocations.is_none() {
         return Err(RegistryError::Acdp(AcdpError::NotImplemented(
             "token revocation is not configured on this registry".into(),
