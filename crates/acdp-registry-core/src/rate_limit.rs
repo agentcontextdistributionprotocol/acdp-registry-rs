@@ -478,6 +478,26 @@ pub fn resolve_client_ip(
     trusted: &TrustedProxies,
     mode: ForwardedHeaderTrust,
 ) -> IpAddr {
+    resolve_client_ip_skipping(peer, xff, trusted, mode, 0)
+}
+
+/// [`resolve_client_ip`] behind an edge that appends `skip_rightmost` hops of
+/// its own after the client (`rate_limit.forwarded_skip_rightmost`).
+///
+/// Those entries are discarded before the right-to-left walk, so the walk
+/// starts at the address the edge received the request from. Railway, for
+/// one, rewrites the header to `<client>, <edge address>` with a different
+/// edge address per request: without the skip every client would share (and
+/// rotate through) the edge's buckets. A chain too short to hold the client
+/// after the skip, or a skipped entry that does not parse, falls back to
+/// `peer`, the same fail-closed answer as any other unusable chain.
+pub fn resolve_client_ip_skipping(
+    peer: IpAddr,
+    xff: Option<&str>,
+    trusted: &TrustedProxies,
+    mode: ForwardedHeaderTrust,
+    skip_rightmost: usize,
+) -> IpAddr {
     let peer_trusted = match mode {
         ForwardedHeaderTrust::AnyPeer => true,
         ForwardedHeaderTrust::TrustedProxies => !trusted.is_empty() && trusted.contains(peer),
@@ -488,15 +508,17 @@ pub fn resolve_client_ip(
     let Some(xff) = xff else {
         return peer;
     };
-    // Right-to-left: the last entry is the address the trusted peer saw.
-    for hop in xff.rsplit(',') {
-        let hop = hop.trim();
-        // XFF entries may carry a port (rare) — strip anything after the IP.
-        let candidate = hop.parse::<IpAddr>().ok().map(canonical_ip).or_else(|| {
-            hop.parse::<std::net::SocketAddr>()
-                .ok()
-                .map(|s| canonical_ip(s.ip()))
-        });
+    let mut hops = xff.rsplit(',').map(parse_hop);
+    // The edge's own trailing hops: they must be well formed, and are never
+    // the client.
+    for _ in 0..skip_rightmost {
+        match hops.next() {
+            Some(Some(_)) => {}
+            Some(None) | None => return peer,
+        }
+    }
+    // Right-to-left: the next entry is the address the trusted peer saw.
+    for candidate in hops {
         match candidate {
             Some(ip) if trusted.contains(ip) => continue, // another trusted hop
             Some(ip) => return ip,                        // first untrusted → the client
@@ -504,6 +526,17 @@ pub fn resolve_client_ip(
         }
     }
     peer
+}
+
+/// One `X-Forwarded-For` entry as an address. Entries may carry a port
+/// (rare), which is dropped; anything else unparseable is `None`.
+fn parse_hop(hop: &str) -> Option<IpAddr> {
+    let hop = hop.trim();
+    hop.parse::<IpAddr>().ok().map(canonical_ip).or_else(|| {
+        hop.parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|s| canonical_ip(s.ip()))
+    })
 }
 
 /// Canonicalise an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its IPv4
@@ -1152,6 +1185,86 @@ mod tests {
             resolve_client_ip(ip("100.64.0.2"), Some("203.0.113.9, 10.1.1.1"), &p, any),
             ip("203.0.113.9")
         );
+    }
+
+    /// #524: Railway rewrites `X-Forwarded-For` to `<client>, <edge>` with a
+    /// different edge address per request (observed in prod: 152.233.76.10,
+    /// 152.233.76.11, 79.127.217.66 for one client within seconds).
+    #[test]
+    fn skip_rightmost_keys_on_the_client_behind_an_edge_that_appends_itself() {
+        let none = TrustedProxies::default();
+        let any = ForwardedHeaderTrust::AnyPeer;
+        let resolve = |peer: &str, xff: Option<&str>, skip| {
+            resolve_client_ip_skipping(ip(peer), xff, &none, any, skip)
+        };
+        // Every observed edge shape lands in the one client bucket.
+        for (peer, xff) in [
+            ("100.64.0.2", "73.170.42.96, 152.233.76.10"),
+            ("100.64.0.3", "73.170.42.96, 79.127.217.66"),
+            ("100.64.0.1", "73.170.42.96, 152.233.76.11"),
+        ] {
+            assert_eq!(resolve(peer, Some(xff), 1), ip("73.170.42.96"), "{xff}");
+            // Without the skip it keys on the edge: the bug.
+            assert_ne!(resolve(peer, Some(xff), 0), ip("73.170.42.96"), "{xff}");
+        }
+        // An edge that appended rather than rewrote: a client-forged entry to
+        // the left of the real client is still never read.
+        assert_eq!(
+            resolve(
+                "100.64.0.2",
+                Some("6.6.6.6, 73.170.42.96, 152.233.76.10"),
+                1
+            ),
+            ip("73.170.42.96")
+        );
+        // Too short to hold a client after the skip, absent, or a skipped hop
+        // that is garbage: the peer.
+        for xff in [
+            Some("152.233.76.10"),
+            Some(""),
+            None,
+            Some("73.170.42.96, junk"),
+        ] {
+            assert_eq!(resolve("100.64.0.2", xff, 1), ip("100.64.0.2"), "{xff:?}");
+        }
+        assert_eq!(
+            resolve(
+                "100.64.0.2",
+                Some("73.170.42.96, 10.0.0.1, 152.233.76.10"),
+                2
+            ),
+            ip("73.170.42.96")
+        );
+        // Listed proxies left of the skipped hops are still walked past.
+        let p = TrustedProxies::parse(&["10.0.0.0/8".into()]).unwrap();
+        assert_eq!(
+            resolve_client_ip_skipping(
+                ip("100.64.0.2"),
+                Some("73.170.42.96, 10.1.1.1, 152.233.76.10"),
+                &p,
+                any,
+                1
+            ),
+            ip("73.170.42.96")
+        );
+        // The skip never makes an untrusted peer's header trusted.
+        assert_eq!(
+            resolve_client_ip_skipping(
+                ip("198.51.100.1"),
+                Some("73.170.42.96, 152.233.76.10"),
+                &p,
+                ForwardedHeaderTrust::TrustedProxies,
+                1
+            ),
+            ip("198.51.100.1")
+        );
+        // skip 0 is resolve_client_ip exactly.
+        for xff in [Some("6.6.6.6, 198.51.100.7"), None, Some("junk")] {
+            assert_eq!(
+                resolve("100.64.0.2", xff, 0),
+                resolve_client_ip(ip("100.64.0.2"), xff, &none, any)
+            );
+        }
     }
 
     #[test]

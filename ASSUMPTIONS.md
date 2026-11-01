@@ -5247,4 +5247,5 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** `any_peer` trust mode, verified in Phase 7 by a forged-XFF probe; fallback 6000/min per peer without header trust.
 - **Alternatives:** no header trust (all users share Railway's proxy IP bucket).
 - **Blast radius if wrong:** spoofable anonymous bucket keys (a client could evade or exhaust others' buckets); config-reversible.
+- **Evidence (2026-11-01, Phase 7):** half wrong. Railway rewrites XFF to `<client>, <edge-ip>` and drops client-supplied values (not spoofable), but the rightmost hop is a per-request edge address, so `any_peer` keyed on the edge (#524). Prod moved to the fallback; fix = `rate_limit.forwarded_skip_rightmost = 1` (fix/xff-skip-rightmost).
 - **Status:** UNCONFIRMED

@@ -68,7 +68,9 @@ use acdp_registry_auth::{AuthService, ChallengeStore, JwtSecret, JwtSigner, Revo
 use acdp_registry_auth::{InMemoryChallengeStore, InMemoryRevocationStore};
 use acdp_registry_core::{build_router_shared, AppStateInner};
 use acdp_registry_store::ExtendedRegistryStore;
-use acdp_registry_types::config::{ForwardedHeaderTrust, SharedLimitBackendKind};
+use acdp_registry_types::config::{
+    ForwardedHeaderTrust, SharedLimitBackendKind, MAX_FORWARDED_SKIP_RIGHTMOST,
+};
 use acdp_registry_types::{
     RegistryConfig, StorageBackend, TenantHeaderTrust, REGISTRY_ADVERTISABLE_PROFILES,
 };
@@ -759,6 +761,24 @@ fn read_limit_checks(cfg: &RegistryConfig) -> anyhow::Result<Vec<String>> {
              turn advertise off."
         );
     }
+    let skip = cfg.rate_limit.forwarded_skip_rightmost;
+    if skip > MAX_FORWARDED_SKIP_RIGHTMOST {
+        anyhow::bail!(
+            "rate_limit.forwarded_skip_rightmost = {skip} exceeds {MAX_FORWARDED_SKIP_RIGHTMOST}: \
+             no edge appends that many hops of its own, and every request would key on the \
+             TCP peer."
+        );
+    }
+    if skip > 0
+        && cfg.rate_limit.forwarded_header_trust == ForwardedHeaderTrust::TrustedProxies
+        && cfg.rate_limit.trusted_proxies.is_empty()
+    {
+        anyhow::bail!(
+            "rate_limit.forwarded_skip_rightmost = {skip} has no effect: X-Forwarded-For is \
+             never read (forwarded_header_trust = \"trusted_proxies\" with no trusted_proxies). \
+             List the proxies, set forwarded_header_trust = \"any_peer\", or set the skip to 0."
+        );
+    }
     let mut warnings = Vec::new();
     if reads.advertise {
         if advertised_reads_per_minute(cfg).is_none()
@@ -781,14 +801,14 @@ fn read_limit_checks(cfg: &RegistryConfig) -> anyhow::Result<Vec<String>> {
         }
     }
     if cfg.rate_limit.forwarded_header_trust == ForwardedHeaderTrust::AnyPeer {
-        warnings.push(
+        warnings.push(format!(
             "rate_limit.forwarded_header_trust = \"any_peer\": X-Forwarded-For is read from \
-             every peer, and its rightmost hop keys every per-IP limiter (/auth/*, keyless, \
-             anonymous reads). This is safe ONLY behind a proxy that always appends the \
-             address it received the request from; reached directly, a client chooses its \
-             own bucket."
-                .to_string(),
-        );
+             every peer, and the hop the edge received the request from (the rightmost, \
+             after forwarded_skip_rightmost = {skip} edge hops) keys every per-IP limiter \
+             (/auth/*, keyless, anonymous reads). This is safe ONLY behind a proxy that always \
+             appends the address it received the request from; reached directly, a client \
+             chooses its own bucket."
+        ));
     }
     Ok(warnings)
 }
@@ -3625,6 +3645,40 @@ mod tests {
             "{w:?}"
         );
         assert!(validate_config(&cfg).is_ok(), "a warning, not a refusal");
+    }
+
+    /// #524: the skip is bounded, and refused where the header is never read.
+    #[test]
+    fn forwarded_skip_rightmost_is_bounded_and_needs_a_trusted_header() {
+        let mut cfg = trust_cfg();
+        cfg.rate_limit.forwarded_skip_rightmost = 1;
+        let err = read_limit_checks(&cfg)
+            .expect_err("no header trust")
+            .to_string();
+        assert!(err.contains("has no effect"), "{err}");
+
+        cfg.rate_limit.forwarded_header_trust = ForwardedHeaderTrust::AnyPeer;
+        let w = read_limit_checks(&cfg).expect("any_peer + skip 1 starts");
+        assert!(
+            w.iter().any(|w| w.contains("forwarded_skip_rightmost = 1")),
+            "{w:?}"
+        );
+        assert!(validate_config(&cfg).is_ok());
+
+        cfg.rate_limit.forwarded_header_trust = ForwardedHeaderTrust::TrustedProxies;
+        cfg.rate_limit.trusted_proxies = vec!["10.0.0.0/8".into()];
+        assert!(
+            read_limit_checks(&cfg).is_ok(),
+            "listed proxies: the header is read"
+        );
+
+        cfg.rate_limit.forwarded_skip_rightmost = MAX_FORWARDED_SKIP_RIGHTMOST;
+        assert!(read_limit_checks(&cfg).is_ok());
+        cfg.rate_limit.forwarded_skip_rightmost = MAX_FORWARDED_SKIP_RIGHTMOST + 1;
+        let err = read_limit_checks(&cfg)
+            .expect_err("over the bound")
+            .to_string();
+        assert!(err.contains("exceeds"), "{err}");
     }
 
     /// #391: a /0 entry matches every address of its family, so it is

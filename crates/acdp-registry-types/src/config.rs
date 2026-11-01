@@ -812,9 +812,10 @@ impl Default for LimitsConfig {
 /// otherwise any client could spoof its IP and evade the per-IP budget (or
 /// frame another IP). When the peer IS a trusted proxy, the real client is
 /// taken from the rightmost `X-Forwarded-For` entry that is not itself a
-/// trusted proxy (walking right-to-left across a chain of trusted hops).
-/// `forwarded_header_trust = "any_peer"` treats every peer as such a proxy,
-/// for a platform edge whose addresses cannot be listed.
+/// trusted proxy (walking right-to-left across a chain of trusted hops),
+/// after discarding the `forwarded_skip_rightmost` hops the edge appends
+/// after the client. `forwarded_header_trust = "any_peer"` treats every peer
+/// as such a proxy, for a platform edge whose addresses cannot be listed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RateLimitConfig {
@@ -844,9 +845,20 @@ pub struct RateLimitConfig {
     /// (`/auth/*`, keyless minting, anonymous reads). `trusted_proxies`
     /// (default): only when the TCP peer is in `trusted_proxies`. `any_peer`:
     /// from every peer, for a platform whose edge addresses cannot be listed
-    /// but which always appends the real client as the rightmost hop.
+    /// but which always writes the real client into the header itself (as
+    /// the rightmost hop, or followed by `forwarded_skip_rightmost` edge
+    /// hops).
     #[serde(default)]
     pub forwarded_header_trust: ForwardedHeaderTrust,
+    /// How many rightmost `X-Forwarded-For` entries the fronting edge itself
+    /// appends after the client's address, discarded before the client is
+    /// read. Default `0`: the rightmost entry is the client. An edge that
+    /// rewrites the header as `<client>, <edge address>` (Railway) needs `1`,
+    /// or every per-IP limiter keys on the edge instead of the client. Only
+    /// meaningful while the header is trusted (`any_peer`, or a listed
+    /// `trusted_proxies` peer); at most [`MAX_FORWARDED_SKIP_RIGHTMOST`].
+    #[serde(default)]
+    pub forwarded_skip_rightmost: u8,
     /// Where the two `/auth/*` ceilings are counted. `memory` (default): per
     /// process, each replica enforces its own counters. `postgres`: counted
     /// once across every replica sharing the database, with the in-memory
@@ -870,6 +882,11 @@ pub struct RateLimitConfig {
     pub backend_prune_seconds: u64,
 }
 
+/// Upper bound on `rate_limit.forwarded_skip_rightmost`. No real edge chain
+/// is this deep; a larger value is a typo that would pin every request to the
+/// TCP peer.
+pub const MAX_FORWARDED_SKIP_RIGHTMOST: u8 = 4;
+
 /// `[rate_limit] forwarded_header_trust`. See
 /// [`RateLimitConfig::forwarded_header_trust`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -880,9 +897,10 @@ pub enum ForwardedHeaderTrust {
     #[default]
     TrustedProxies,
     /// `X-Forwarded-For` is read from every peer. Safe ONLY behind a proxy
-    /// that always appends the address it received the request from as the
-    /// rightmost hop; the client then controls only entries to its left,
-    /// which are never consulted.
+    /// that always writes the address it received the request from, as the
+    /// rightmost hop or just left of `forwarded_skip_rightmost` edge hops;
+    /// the client then controls only entries to its left, which are never
+    /// consulted.
     AnyPeer,
 }
 
@@ -985,6 +1003,7 @@ impl Default for RateLimitConfig {
             global_per_minute: default_global_per_minute(),
             trusted_proxies: Vec::new(),
             forwarded_header_trust: ForwardedHeaderTrust::default(),
+            forwarded_skip_rightmost: 0,
             backend: SharedLimitBackendKind::default(),
             backend_unavailable: UnavailablePostureConfig::default(),
             backend_timeout_ms: default_backend_timeout_ms(),
@@ -2253,6 +2272,15 @@ mod tests {
     }
 
     #[test]
+    fn forwarded_skip_rightmost_defaults_to_zero_and_parses() {
+        assert_eq!(RateLimitConfig::default().forwarded_skip_rightmost, 0);
+        let rl: RateLimitConfig = toml::from_str("forwarded_skip_rightmost = 1").unwrap();
+        assert_eq!(rl.forwarded_skip_rightmost, 1);
+        assert!(toml::from_str::<RateLimitConfig>("forwarded_skip_rightmost = -1").is_err());
+        assert!(toml::from_str::<RateLimitConfig>("forwarded_skip_rightmost = 256").is_err());
+    }
+
+    #[test]
     fn read_limits_and_forwarded_trust_load_from_env() {
         let mut env = EnvGuard::new();
         env.unset("ACDP_REGISTRY_CONFIG");
@@ -2267,6 +2295,7 @@ mod tests {
             "ACDP_REGISTRY_RATE_LIMIT__FORWARDED_HEADER_TRUST",
             "any_peer",
         );
+        env.set("ACDP_REGISTRY_RATE_LIMIT__FORWARDED_SKIP_RIGHTMOST", "1");
         let cfg = RegistryConfig::load(Some(path.to_str().unwrap())).expect("loads");
         assert!(cfg.read_limits.enabled);
         assert_eq!(cfg.read_limits.anonymous_per_minute, 1200);
@@ -2276,6 +2305,7 @@ mod tests {
             cfg.rate_limit.forwarded_header_trust,
             ForwardedHeaderTrust::AnyPeer
         );
+        assert_eq!(cfg.rate_limit.forwarded_skip_rightmost, 1);
         let _ = std::fs::remove_file(&path);
     }
 
