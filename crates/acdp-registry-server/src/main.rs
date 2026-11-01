@@ -2142,6 +2142,9 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
                 .enabled
                 .then_some(cfg.changes.max_change_filters),
             max_changes_page: cfg.changes.enabled.then_some(cfg.changes.max_changes_page),
+            // RFC-ACDP-0018 §6.1 bucket filters: not supported yet, so never
+            // advertised (acdp 0.19 consumers reject the unknown key).
+            max_change_bucket_length: None,
             // §9: MUST be present with acdp-registry-events.
             max_subscriptions_per_requester: cfg
                 .events
