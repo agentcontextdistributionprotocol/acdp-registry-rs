@@ -752,7 +752,34 @@ fn read_limit_checks(cfg: &RegistryConfig) -> anyhow::Result<Vec<String>> {
              are both 0, so no read is ever limited. Set a budget or disable read_limits."
         );
     }
+    if reads.advertise && !reads.enabled {
+        anyhow::bail!(
+            "read_limits.advertise = true but read_limits.enabled = false: capabilities would \
+             advertise read ceilings the registry does not enforce. Enable read_limits or \
+             turn advertise off."
+        );
+    }
     let mut warnings = Vec::new();
+    if reads.advertise {
+        if advertised_reads_per_minute(cfg).is_none()
+            && advertised_anonymous_reads_per_minute(cfg).is_none()
+        {
+            warnings.push(
+                "read_limits.advertise = true but no read ceiling qualifies (authenticated \
+                 reads need auth.enabled, anonymous reads need auth.anonymous_public_reads, \
+                 and a budget of 0 is never advertised), so capabilities carry neither."
+                    .to_string(),
+            );
+        } else {
+            warnings.push(
+                "read_limits.advertise = true: capabilities carry limits.max_reads_per_minute / \
+                 max_anonymous_reads_per_minute. Consumers on acdp 0.19 or older (closed \
+                 `limits`) reject that document; advertise only once every consumer tracks \
+                 the ACDP 0.5.0 schema."
+                    .to_string(),
+            );
+        }
+    }
     if cfg.rate_limit.forwarded_header_trust == ForwardedHeaderTrust::AnyPeer {
         warnings.push(
             "rate_limit.forwarded_header_trust = \"any_peer\": X-Forwarded-For is read from \
@@ -1839,6 +1866,29 @@ fn validate_changes(cfg: &RegistryConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// RFC-ACDP-0007 §3.2 `limits.max_reads_per_minute`: the per-requester-DID
+/// read budget, only with `read_limits.advertise` (default off: a consumer on
+/// acdp 0.19 or older rejects an unknown `limits` key, §3.3.1) and only when
+/// authenticated reads exist and are limited. A 0 budget means "not limited"
+/// and is never advertised as a ceiling.
+fn advertised_reads_per_minute(cfg: &RegistryConfig) -> Option<u64> {
+    let reads = &cfg.read_limits;
+    (reads.advertise && reads.enabled && cfg.auth.enabled && reads.authenticated_per_minute > 0)
+        .then_some(u64::from(reads.authenticated_per_minute))
+}
+
+/// `limits.max_anonymous_reads_per_minute`: the per-address budget, under the
+/// same gate, and only with `anonymous_public_reads` (it is meaningful only
+/// then, §3.2).
+fn advertised_anonymous_reads_per_minute(cfg: &RegistryConfig) -> Option<u64> {
+    let reads = &cfg.read_limits;
+    (reads.advertise
+        && reads.enabled
+        && cfg.auth.anonymous_public_reads
+        && reads.anonymous_per_minute > 0)
+        .then_some(u64::from(reads.anonymous_per_minute))
+}
+
 fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
     CapabilitiesDocument {
         // Plan A4 / REG-3 Phase 4: each rung of the claim is gated on what
@@ -1926,8 +1976,8 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
                 .events
                 .enabled
                 .then_some(cfg.events.max_subscriptions_per_requester),
-            max_reads_per_minute: None,
-            max_anonymous_reads_per_minute: None,
+            max_reads_per_minute: advertised_reads_per_minute(cfg),
+            max_anonymous_reads_per_minute: advertised_anonymous_reads_per_minute(cfg),
             extensions: Default::default(),
         },
         read_authentication_methods: if cfg.auth.enabled {
@@ -3452,6 +3502,115 @@ mod tests {
         cfg.read_limits.enabled = false;
         cfg.read_limits.authenticated_per_minute = 0;
         assert!(read_limit_checks(&cfg).unwrap().is_empty());
+    }
+
+    #[test]
+    fn advertising_read_limits_needs_the_limiter() {
+        let mut cfg = trust_cfg();
+        cfg.read_limits.advertise = true;
+        let err = validate_config(&cfg).expect_err("advertise without enforcement");
+        assert!(err.to_string().contains("read_limits.advertise"), "{err}");
+        cfg.read_limits.enabled = true;
+        assert!(validate_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn advertising_read_limits_warns_naming_old_consumers() {
+        let mut cfg = trust_cfg();
+        cfg.read_limits.enabled = true;
+        cfg.read_limits.advertise = true;
+        cfg.auth.anonymous_public_reads = true;
+        let w = read_limit_checks(&cfg).unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("acdp 0.19"), "{w:?}");
+        // Nothing qualifies: a different warning, not silence.
+        cfg.auth.anonymous_public_reads = false;
+        cfg.auth.enabled = false;
+        let w = read_limit_checks(&cfg).unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("no read ceiling qualifies"), "{w:?}");
+    }
+
+    #[test]
+    fn read_ceilings_are_advertised_only_behind_the_flag() {
+        let mut cfg = RegistryConfig::defaults();
+        cfg.auth.enabled = true;
+        cfg.auth.anonymous_public_reads = true;
+        cfg.read_limits.enabled = true;
+        cfg.read_limits.anonymous_per_minute = 1200;
+        cfg.read_limits.authenticated_per_minute = 3000;
+        let limits = |cfg: &RegistryConfig| {
+            let l = build_capabilities(cfg).limits;
+            (l.max_reads_per_minute, l.max_anonymous_reads_per_minute)
+        };
+        // Enforcing is not advertising.
+        assert_eq!(limits(&cfg), (None, None));
+        cfg.read_limits.advertise = true;
+        assert_eq!(limits(&cfg), (Some(3000), Some(1200)));
+        // The anonymous ceiling is meaningful only with anonymous reads.
+        cfg.auth.anonymous_public_reads = false;
+        assert_eq!(limits(&cfg), (Some(3000), None));
+        // No authenticated reads with auth off; a 0 budget is "unlimited".
+        cfg.auth.anonymous_public_reads = true;
+        cfg.auth.enabled = false;
+        assert_eq!(limits(&cfg), (None, Some(1200)));
+        cfg.read_limits.anonymous_per_minute = 0;
+        assert_eq!(limits(&cfg), (None, None));
+        // Never without enforcement, even if validation were bypassed.
+        cfg.read_limits.anonymous_per_minute = 1200;
+        cfg.read_limits.enabled = false;
+        assert_eq!(limits(&cfg), (None, None));
+        // On the wire: integers, which the SDK reads back.
+        cfg.read_limits.enabled = true;
+        cfg.auth.enabled = true;
+        let wire = serde_json::to_value(build_capabilities(&cfg)).unwrap();
+        assert_eq!(wire["limits"]["max_reads_per_minute"], 3000);
+        assert_eq!(wire["limits"]["max_anonymous_reads_per_minute"], 1200);
+        let back: CapabilitiesDocument = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.limits.max_reads_per_minute, Some(3000));
+    }
+
+    /// R14: with `advertise` off, every `limits` key the registry can serve is
+    /// one acdp 0.19 knows. Its `Limits` is closed (`deny_unknown_fields`), so
+    /// one extra key and Seam (pinned to 0.19) rejects the whole document.
+    #[test]
+    fn unadvertised_limits_stay_within_the_acdp_0_19_key_set() {
+        // acdp-types 0.19.0 `capabilities::Limits`, verbatim.
+        const ACDP_0_19_LIMITS: &[&str] = &[
+            "max_payload_bytes",
+            "max_embedded_bytes",
+            "idempotency_key_ttl_seconds",
+            "max_publish_per_minute",
+            "change_retention_seconds",
+            "max_change_filters",
+            "max_changes_page",
+            "max_subscriptions_per_requester",
+        ];
+        let mut cfg = RegistryConfig::defaults();
+        cfg.auth.enabled = true;
+        cfg.auth.anonymous_public_reads = true;
+        cfg.changes.enabled = true;
+        cfg.events.enabled = true;
+        cfg.read_limits.enabled = true;
+        let wire = serde_json::to_value(build_capabilities(&cfg)).unwrap();
+        let keys: Vec<&str> = wire["limits"]
+            .as_object()
+            .expect("limits is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        // Every optional member this config can turn on is present, so the
+        // subset check covers more than the defaults.
+        assert!(
+            keys.contains(&"max_subscriptions_per_requester"),
+            "{keys:?}"
+        );
+        for k in &keys {
+            assert!(
+                ACDP_0_19_LIMITS.contains(k),
+                "limits.{k} is unknown to acdp 0.19; with advertise off it must not be served"
+            );
+        }
     }
 
     #[test]

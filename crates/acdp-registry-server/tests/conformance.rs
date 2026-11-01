@@ -18273,12 +18273,15 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
             "all-profiles",
             format!("profiles = [{all_profiles}]"),
             // `[events]` needs `auth.enabled` (§8.1), so it is added here
-            // rather than in the shared feature tables.
+            // rather than in the shared feature tables. Read ceilings are
+            // advertised here (caps-008), so the widest `limits` is checked.
             format!(
-                "{}\n{}\n[events]\nenabled = true\n\n{}",
+                "{}\n{}\n[events]\nenabled = true\n\n{}\n{}",
                 served_auth_toml(true),
                 served_full_features_toml(),
-                served_keyless_toml()
+                served_keyless_toml(),
+                "[read_limits]\nenabled = true\nanonymous_per_minute = 1200\n\
+                 authenticated_per_minute = 3000\nadvertise = true\n"
             ),
         ),
     ];
@@ -18331,8 +18334,21 @@ fn served_capabilities_documents_satisfy_the_pinned_schema() {
         "{}",
         served["all-profiles"]
     );
-    // §9: each RFC-ACDP-0018 profile brings its limits.
+    // caps-008: read ceilings only behind `read_limits.advertise`. The
+    // anonymous-reads-off case is the `build_capabilities` unit test.
+    for tag in ["auth-off", "auth-on"] {
+        for key in ["max_reads_per_minute", "max_anonymous_reads_per_minute"] {
+            assert!(
+                served[tag]["limits"].get(key).is_none(),
+                "{tag}: limits.{key} without advertise: {}",
+                served[tag]
+            );
+        }
+    }
     let limits = &served["all-profiles"]["limits"];
+    assert_eq!(limits["max_reads_per_minute"], 3000, "{limits}");
+    assert_eq!(limits["max_anonymous_reads_per_minute"], 1200, "{limits}");
+    // §9: each RFC-ACDP-0018 profile brings its limits.
     for limit in [
         "change_retention_seconds",
         "max_change_filters",

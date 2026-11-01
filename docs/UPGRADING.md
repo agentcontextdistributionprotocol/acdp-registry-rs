@@ -37,6 +37,9 @@ bearer tokens, 0.5.0 Draft; RFC-ACDP-0007 `limits` open from 0.5.0; RFC-ACDP-001
   DID (`authenticated_per_minute`, default 1200), with `429 rate_limited` + `Retry-After`. Nothing
   changes unless `read_limits.enabled = true`. Behind a proxy, configure the forwarded-header trust
   first ([OPERATIONS.md](OPERATIONS.md#read-rate-limits-rfc-acdp-0008-43)).
+  `read_limits.advertise` (default off) adds `limits.max_reads_per_minute` /
+  `max_anonymous_reads_per_minute` to capabilities; consumers on acdp 0.19 or older reject that
+  document, so leave it off until they upgrade.
 - **`rate_limit.forwarded_header_trust`** (`trusted_proxies`, the default, or `any_peer`) now governs
   `X-Forwarded-For` for every per-IP limiter (`/auth/*`, keyless and anonymous reads). The default
   keeps today's behaviour exactly.

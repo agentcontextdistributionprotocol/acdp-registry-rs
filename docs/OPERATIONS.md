@@ -286,9 +286,10 @@ Things to know before turning it on:
   and `{scope="read_principal"}`. A steady rise in `read_anonymous` from many
   clients usually means the budget is too low for a shared NAT or the proxy
   trust is missing, not abuse.
-- The budgets are never advertised in capabilities yet (`read_limits.advertise`
-  is reserved and not read), so consumers on acdp 0.19 and older keep parsing
-  `limits`.
+- The budgets are not advertised in capabilities unless `read_limits.advertise`
+  is set. Keep it off while any consumer is on acdp 0.19 or older: they reject
+  a `limits` key they do not know, and with it the whole capabilities
+  document.
 
 ## Metrics
 

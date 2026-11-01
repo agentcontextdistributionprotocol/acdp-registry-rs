@@ -272,7 +272,10 @@ The binary validates config before serving and refuses to boot on a misconfig
   names its assumption (see [`[rate_limit]`](#rate_limit-feat-06)).
 - **Read limits (RFC-ACDP-0008 §4.3)** — `read_limits.enabled = true` with
   both `anonymous_per_minute` and `authenticated_per_minute` at `0` is refused
-  (a limiter that limits nothing).
+  (a limiter that limits nothing), and so is `advertise = true` without
+  `enabled` (a ceiling the registry would not enforce). `advertise = true`
+  logs a warning naming acdp 0.19 consumers, or a different one when no
+  ceiling qualifies.
 - **Metrics (FEAT-10)** — when `metrics.enabled`, `duration_buckets` must be
   non-empty, positive, finite, and strictly increasing (Prometheus histogram
   bounds).
@@ -494,7 +497,7 @@ sees a `404` or `403`. Capabilities, `did.json`, JWKS, health, `/metrics`,
 | `enabled` | bool | `false` | Master switch. |
 | `anonymous_per_minute` | u32 | `600` | Per client address (an IPv6 client by its /64), resolved by the `[rate_limit]` forwarded-header policy. `0`: anonymous reads unlimited. |
 | `authenticated_per_minute` | u32 | `1200` | Per requester DID, for a request carrying a valid bearer token. `0`: authenticated reads unlimited. |
-| `advertise` | bool | `false` | Reserved for advertising the budgets in capabilities `limits`; not read yet. |
+| `advertise` | bool | `false` | Advertise the budgets as `limits.max_reads_per_minute` (only with `auth.enabled`) and `limits.max_anonymous_reads_per_minute` (only with `auth.anonymous_public_reads`), RFC-ACDP-0007 §3.2. A `0` budget is never advertised. Needs `enabled`. **Leave off while any consumer is on acdp 0.19 or older (Seam included):** their `limits` is closed and they reject the whole capabilities document. |
 
 Each budget is a fixed 60-second window, in memory and **per replica**: with
 N replicas behind a balancer a client can get up to N × the budget. Behind a
@@ -502,6 +505,11 @@ proxy, set `rate_limit.trusted_proxies` (or `forwarded_header_trust =
 "any_peer"`) before enabling this; otherwise every client shares the proxy's
 address and therefore one bucket. A request with a present but invalid bearer
 token is charged to its client address, then refused `403`.
+
+Enforcing and advertising are separate on purpose (RFC-ACDP-0007 §3.2
+rollout note): RFC-ACDP-0008 §4.3 says a registry SHOULD NOT advertise the
+read ceilings until the consumers it serves track the 0.5.0 schema. An
+advertised ceiling is per replica, so it is a floor a client can rely on.
 
 Env: `ACDP_REGISTRY_READ_LIMITS__ENABLED`,
 `ACDP_REGISTRY_READ_LIMITS__ANONYMOUS_PER_MINUTE`,
