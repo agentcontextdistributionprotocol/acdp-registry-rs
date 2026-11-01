@@ -452,7 +452,7 @@ jobs:
   mutants:
     name: mutation oracle (shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
-    # SHARDED at 405 (#523). At 399 one -j1 run took 307.0 min of the 330 cap and
+    # SHARDED when #523 took the scope to 405. At 399 one -j1 run took 307.0 min of the 330 cap and
     # the first 405 run (41281572799) was CANCELLED at the cap after 371 mutants:
     # build median 60.8 s per viable mutant against 53.9 s at 399, test median
     # unchanged (11.6 vs 10.8 s), so no slow test this time -- the scope and the

@@ -21,6 +21,10 @@ missing or partial is a hard failure here, never a smaller total:
   * shards measured by different cargo-mutants versions;
   * the same mutant name in two shards (a sharding change would double-count).
 
+The merged outcomes are interleaved back into listing order, which assumes
+the shard directories are given in shard order (the workflow's glob sorts
+`mutants-shard-0`, `-1`, ...; fine below ten shards).
+
 A dropped mutant that none of these catch still fails the ratchet, because the
 summed `total_mutants` is checked as an EQUALITY against MUTANTS_EXPECTED_SCOPE.
 
@@ -30,6 +34,7 @@ Exit codes: 0 merged, 1 refused (message on stderr).
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import shutil
@@ -107,6 +112,8 @@ def merge(shard_dirs: list, shards: int, out: str) -> dict:
 
     seen = {}
     mutants_list = []
+    baselines = []
+    per_shard = []
     for k, (shard_dir, report) in enumerate(zip(shard_dirs, reports)):
         # Log and diff file names are only unique WITHIN a run: two different
         # mutants on one line:col get `_001`/`_002` by order, so two shards can
@@ -117,6 +124,7 @@ def merge(shard_dirs: list, shards: int, out: str) -> dict:
         # silently resolve to another shard's file of the same name.
         _copy_prefixed(os.path.join(shard_dir, "log"), os.path.join(out, "log"), prefix)
         _copy_prefixed(os.path.join(shard_dir, "diff"), os.path.join(out, "diff"), prefix)
+        mutants = []
         for outcome in report["outcomes"]:
             name = _mutant_name(outcome)
             if name is not None:
@@ -129,11 +137,21 @@ def merge(shard_dirs: list, shards: int, out: str) -> dict:
                 path = outcome.get(key)
                 if isinstance(path, str) and path.startswith(sub):
                     outcome[key] = sub + prefix + path[len(sub):]
-            merged["outcomes"].append(outcome)
+            (mutants if name is not None else baselines).append(outcome)
+        per_shard.append(mutants)
         listing = os.path.join(shard_dir, "mutants.json")
         if os.path.isfile(listing):
             with open(listing) as fh:
                 mutants_list.extend(json.load(fh))
+
+    # Round-robin sharding put listing mutant i on shard i % N, so taking one
+    # outcome from each shard in turn restores the single-run LISTING ORDER.
+    # That order is not cosmetic: classify_removed_survivors.py breaks ties
+    # between mutants on one line:col by input order, and its prior ledger is a
+    # single-run report.
+    merged["outcomes"] = baselines + [
+        o for row in itertools.zip_longest(*per_shard) for o in row if o is not None
+    ]
 
     for name in LISTS:
         lines = []

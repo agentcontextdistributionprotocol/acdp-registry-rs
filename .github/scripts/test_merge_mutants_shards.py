@@ -88,8 +88,8 @@ class MergeTests(unittest.TestCase):
         with open(os.path.join(self.out, "outcomes.json")) as fh:
             paths = [o["log_path"] for o in json.load(fh)["outcomes"]
                      if m._mutant_name(o)]
-        self.assertEqual(paths, ["log/s0__a_001.log", "log/s0__a_002.log", "log/s1__a_001.log"])
-        for p in paths[:1] + paths[2:]:
+        self.assertEqual(paths, ["log/s0__a_001.log", "log/s1__a_001.log", "log/s0__a_002.log"])
+        for p in paths[:2]:
             self.assertTrue(os.path.isfile(os.path.join(self.out, p)), p)
 
     def test_refuses_a_missing_shard(self):
@@ -128,6 +128,39 @@ class MergeTests(unittest.TestCase):
         a = write_shard(self.root, 0, [mutant("a.rs:1:1: x", "CaughtMutant", "a.log")])
         b = write_shard(self.root, 1, [mutant("a.rs:1:1: x", "CaughtMutant", "a.log")])
         with self.assertRaisesRegex(m.Refused, "appears in shard 0 and shard 1"):
+            m.merge([a, b], 2, self.out)
+
+    def test_outcomes_are_interleaved_back_into_listing_order(self):
+        # Listing a0 b0 a1 b1 a2 sharded round-robin: shard 0 = a0 a1 a2, shard 1 = b0 b1.
+        a = write_shard(self.root, 0, [mutant("a%d" % i, "CaughtMutant", "a%d.log" % i)
+                                       for i in range(3)])
+        b = write_shard(self.root, 1, [mutant("b%d" % i, "CaughtMutant", "b%d.log" % i)
+                                       for i in range(2)])
+        merged = m.merge([a, b], 2, self.out)
+        self.assertEqual([m._mutant_name(o) for o in merged["outcomes"] if m._mutant_name(o)],
+                         ["a0", "b0", "a1", "b1", "a2"])
+        self.assertEqual([o["scenario"] for o in merged["outcomes"][:2]], ["Baseline"] * 2)
+
+    def test_refuses_a_report_missing_a_count(self):
+        a, b = self.two_good_shards()
+        path = os.path.join(b, "outcomes.json")
+        with open(path) as fh:
+            report = json.load(fh)
+        report["missed"] = "1"
+        with open(path, "w") as fh:
+            json.dump(report, fh)
+        with self.assertRaisesRegex(m.Refused, "lacks the integer count 'missed'"):
+            m.merge([a, b], 2, self.out)
+
+    def test_refuses_a_report_without_outcomes(self):
+        a, b = self.two_good_shards()
+        path = os.path.join(b, "outcomes.json")
+        with open(path) as fh:
+            report = json.load(fh)
+        del report["outcomes"]
+        with open(path, "w") as fh:
+            json.dump(report, fh)
+        with self.assertRaisesRegex(m.Refused, "has no outcomes list"):
             m.merge([a, b], 2, self.out)
 
     def test_cli_exit_codes(self):
