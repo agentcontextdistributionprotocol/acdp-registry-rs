@@ -392,7 +392,7 @@ env:
     # same site, `> with <` and `> with ==`, were EQUIVALENT-labelled by U-544 and
     # KILLED by U-552 once probed with a SUPERSEDING request, so this entry is what
     # is left after that correction rather than an inherited assumption.
-    crates/acdp-registry-sqlite/src/store.rs:1255:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
+    crates/acdp-registry-sqlite/src/store.rs:1254:35: replace > with >= in <impl RegistryStore for SqliteStore>::commit_publish
     # store.rs:1330:35 -- UNREACHABLE BY DESIGN, not a coverage gap. It sits inside
     # the `if inserted == 0` branch (store.rs:1297), reached only when a concurrent
     # publish claims the same idempotency key between this transaction's step-1
@@ -426,7 +426,7 @@ env:
     # 40283754611 (scope 390, #471) records :1556:35 and :1233:35, moved again by
     # the same-transaction feed append. Earlier wording, kept:
     # mutants, moved down by the event-receipt mint in commit_publish.
-    crates/acdp-registry-sqlite/src/store.rs:1589:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
+    crates/acdp-registry-sqlite/src/store.rs:1588:35: replace != with == in <impl RegistryStore for SqliteStore>::commit_publish
     # store.rs:2170:5 (was :2052:5 until #471) -- EQUIVALENT (#461). `end_sweep_tx` closes an
     # event-receipt sweep transaction that wrote NOTHING, via an explicit
     # ROLLBACK. Replacing it with `Ok(())` drops the Transaction instead, and
@@ -435,7 +435,7 @@ env:
     # row differs either way; only the instant the write lock is released moves,
     # and no test can observe that without racing the pool. The explicit call is
     # kept because it surfaces a rollback error instead of swallowing it.
-    crates/acdp-registry-sqlite/src/store.rs:2203:5: replace end_sweep_tx -> Result<(), AcdpError> with Ok(())
+    crates/acdp-registry-sqlite/src/store.rs:2202:5: replace end_sweep_tx -> Result<(), AcdpError> with Ok(())
 
   # Mutants whose verdict is TIMEOUT rather than caught or missed. This was an
   # unconditional `timeout != 0` until U-504, on the stated reasoning that "a
