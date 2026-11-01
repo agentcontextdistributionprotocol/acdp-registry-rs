@@ -47,6 +47,13 @@
 //! [`REFILL_MAX_SCANS`] pages, and when the budget runs out it returns the
 //! position it scanned through with `has_more: true`. Cursors name feed
 //! positions, never a requester's view, so they leak nothing (§5.4).
+//!
+//! Page size (§5.2): a serialized page stays within [`MAX_PAGE_BYTES`]
+//! before any content coding. The page ends early, before the entry that
+//! would cross the bound, with `has_more: true` and a cursor at the last
+//! position it consumed, so the next page starts at the omitted entry. A single
+//! entry larger than the bound goes out alone. `max_changes_page` is
+//! unchanged: the bound only ever shortens a page.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -78,6 +85,32 @@ pub const REFILL_MAX_SCANS: usize = 6;
 /// [`AppStateInner::with_changes_min_scan_rows`](crate::state::AppStateInner::with_changes_min_scan_rows)
 /// to reach the scan budget with a dozen rows instead of hundreds.
 pub const MIN_SCAN_ROWS: u32 = 100;
+
+/// The largest serialized `/changes` body, before content coding (§5.2:
+/// a consumer MUST accept pages up to 1 MiB). A test may lower it with
+/// [`AppStateInner::with_changes_max_page_bytes`](crate::state::AppStateInner::with_changes_max_page_bytes).
+pub const MAX_PAGE_BYTES: usize = 1_048_576;
+
+/// An `io::Write` that only counts, so measuring an entry allocates nothing.
+struct ByteCount(usize);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The serialized length of `value`, exactly as the response body writes it.
+fn json_len<T: serde::Serialize>(value: &T) -> Result<usize, RegistryError> {
+    let mut sink = ByteCount(0);
+    serde_json::to_writer(&mut sink, value)
+        .map_err(|e| RegistryError::Internal(format!("serializing a change entry: {e}")))?;
+    Ok(sink.0)
+}
 
 /// The `limit` used when the request has none (§5.1).
 const DEFAULT_LIMIT: u64 = 100;
@@ -400,6 +433,17 @@ pub async fn evaluate_changes<S: ExtendedRegistryStore + 'static>(
     };
 
     let target = usize::try_from(req.limit).unwrap_or(usize::MAX);
+    // §5.2 page bound. `body` is the serialized length so far, an upper
+    // bound that is exact for `has_more: false` (one byte longer than
+    // `true`); every v2 cursor has the same length, so the envelope is
+    // measured once.
+    let max_bytes = state.changes_max_page_bytes;
+    let mut body = json_len(&ChangesResponse {
+        changes: Vec::new(),
+        next_cursor: head_cursor(key, &start),
+        has_more: false,
+    })?;
+    let mut capped = false;
     let check_expiry = matches!(req.since, Since::Cursor(_) | Since::Position(_));
     let mut changes = Vec::new();
     let mut head = start.head;
@@ -440,7 +484,17 @@ pub async fn evaluate_changes<S: ExtendedRegistryStore + 'static>(
                 break 'scan;
             }
             if visibility_subject(row).is_none_or(|id| visible.contains(id)) {
-                changes.push(row.to_change()?);
+                let change = row.to_change()?;
+                let size = json_len(&change)?;
+                // Before `pos` moves, like the `target` break: the omitted
+                // entry is the next page's first. An oversized first entry
+                // is served alone.
+                if !changes.is_empty() && body + 1 + size > max_bytes {
+                    capped = true;
+                    break 'scan;
+                }
+                body += size + usize::from(!changes.is_empty());
+                changes.push(change);
             }
             pos = row.seq;
         }
@@ -458,6 +512,16 @@ pub async fn evaluate_changes<S: ExtendedRegistryStore + 'static>(
     resp.validate().map_err(|e| {
         RegistryError::Internal(format!("changes response failed its own schema: {e}"))
     })?;
+    // The running size is the served size (less the shorter `true`), so the
+    // bound above is measured, not estimated. Debug builds and tests only.
+    debug_assert_eq!(
+        serde_json::to_vec(&resp).map(|b| b.len()).ok(),
+        Some(body - usize::from(resp.has_more)),
+        "the /changes page size accounting drifted from the serialized body"
+    );
+    if capped {
+        crate::metrics::record_changes_page_byte_capped();
+    }
     Ok((resp, scanned))
 }
 

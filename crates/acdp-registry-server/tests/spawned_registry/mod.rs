@@ -134,8 +134,8 @@ impl SpawnedRegistry {
     }
 
     /// `GET path`, returning the body exactly as served (dechunked, not
-    /// re-serialized), for byte-for-byte comparison with a golden file. Used
-    /// by `http_integration.rs` only.
+    /// re-serialized), for byte-for-byte comparison with a golden file
+    /// (`http_integration.rs`) or a measured body size (`conformance.rs`).
     #[allow(dead_code)]
     pub fn get_raw(&self, path: &str) -> (u16, String) {
         self.request_raw("GET", path, None)

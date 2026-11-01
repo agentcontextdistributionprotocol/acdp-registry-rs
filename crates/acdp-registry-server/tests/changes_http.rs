@@ -1421,3 +1421,490 @@ async fn rec010_bucket_pages_equal_the_whole_bucket() {
     assert!(p.changes.is_empty() && !p.has_more, "{p:?}");
     assert_eq!(key().decode_cursor(&p.next_cursor).map(|c| c.pos), Ok(head));
 }
+
+// ─── rec-001 H / §5.2: the serialized page bound ────────────────────────────
+
+/// `/changes?{query}`: status and the raw body bytes.
+async fn raw_changes(
+    app: &axum::Router,
+    query: &str,
+    bearer: Option<&str>,
+) -> (StatusCode, Vec<u8>) {
+    let mut b = Request::builder().uri(format!("/changes?{query}"));
+    if let Some(t) = bearer {
+        b = b.header("authorization", format!("Bearer {t}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(b.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, bytes.to_vec())
+}
+
+/// A harness serving a feed of `entries` public lifecycle entries (retract
+/// and republish, alternating, on one context), with the page byte bound at
+/// `max_bytes`.
+async fn byte_capped_harness(entries: usize) -> (SeededHarness, RegistryConfig) {
+    let (cfg, caps) = common::with_anonymous_public_reads(config(true), caps(), true);
+    let h = SeededHarness::new(cfg.clone(), caps, AUTHORITY).await;
+    let (ctx, _) = publish_ctx(&h, 140, "rec001 h", Visibility::Public).await;
+    for i in 0..entries {
+        if i % 2 == 0 {
+            retract(&h, 140, &ctx).await;
+        } else {
+            lifecycle(&h, 140, &ctx, "republish", "republished").await;
+        }
+    }
+    (h, cfg)
+}
+
+fn set_page_bytes(h: &mut SeededHarness, cfg: &RegistryConfig, bytes: usize) {
+    h.rebuild_shared_with(cfg.clone(), |s| s.with_changes_max_page_bytes(bytes));
+}
+
+/// Every entry's served size, and the envelope's (`has_more: false`, a real
+/// cursor; every cursor has the same length).
+async fn sizes(app: &axum::Router) -> (Vec<acdp::types::change::Change>, Vec<usize>, usize) {
+    let p = page(app, "limit=100", None).await;
+    let sizes = p
+        .changes
+        .iter()
+        .map(|c| serde_json::to_vec(c).unwrap().len())
+        .collect();
+    let envelope = serde_json::to_vec(&acdp::types::change::ChangesResponse {
+        changes: Vec::new(),
+        next_cursor: p.next_cursor.clone(),
+        has_more: false,
+    })
+    .unwrap()
+    .len();
+    (p.changes, sizes, envelope)
+}
+
+/// The serialized size of a `has_more: false` page holding `entries`.
+fn page_len(envelope: usize, entries: &[usize]) -> usize {
+    envelope + entries.iter().sum::<usize>() + entries.len().saturating_sub(1)
+}
+
+/// Pages from the start under the current bound: per page, the raw body
+/// length and the parsed page. Asserts every page is within `bound` unless
+/// it holds a single entry.
+async fn byte_pages(
+    app: &axum::Router,
+    filters: &str,
+    limit: u64,
+    bearer: Option<&str>,
+    bound: usize,
+) -> Vec<(usize, acdp::types::change::ChangesResponse)> {
+    let mut out = Vec::new();
+    let mut since: Option<String> = None;
+    for _ in 0..200 {
+        let mut q = format!("limit={limit}{filters}");
+        if let Some(c) = &since {
+            q.push_str(&format!("&since={}", enc(c)));
+        }
+        let (status, raw) = raw_changes(app, &q, bearer).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{q}: {}",
+            String::from_utf8_lossy(&raw)
+        );
+        let v: Value = serde_json::from_slice(&raw).unwrap();
+        let p = acdp::types::change::ChangesResponse::from_value(&v).unwrap();
+        assert!(
+            raw.len() <= bound || p.changes.len() == 1,
+            "{q}: {} bytes over the {bound}-byte bound with {} entries",
+            raw.len(),
+            p.changes.len()
+        );
+        since = Some(p.next_cursor.clone());
+        let more = p.has_more;
+        out.push((raw.len(), p));
+        if !more {
+            return out;
+        }
+    }
+    panic!("never reached has_more=false");
+}
+
+fn union_seqs(pages: &[(usize, acdp::types::change::ChangesResponse)]) -> Vec<u64> {
+    pages.iter().flat_map(|(_, p)| seqs(p)).collect()
+}
+
+/// rec-001 H: with the bound set to exactly N entries' worth, a request for
+/// N+5 gets N with `has_more` and the next page starts at entry N+1; one
+/// byte less and the page holds N-1 (the bound is checked against the
+/// `has_more: false` size, at most one byte early). A final page that fits
+/// exactly is served whole, with `has_more: false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rec001_h_pages_end_before_the_byte_bound() {
+    const N: usize = 3;
+    let (mut h, cfg) = byte_capped_harness(10).await;
+    let (feed, sizes, envelope) = sizes(&h.router).await;
+    assert_eq!(feed.len(), 10);
+    let all: Vec<u64> = feed.iter().map(|c| c.seq()).collect();
+
+    // Exact fit on a `has_more: true` page.
+    let fit = page_len(envelope, &sizes[..N]);
+    set_page_bytes(&mut h, &cfg, fit);
+    let (status, raw) = raw_changes(&h.router, &format!("limit={}", N + 5), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let first =
+        acdp::types::change::ChangesResponse::from_value(&serde_json::from_slice(&raw).unwrap())
+            .unwrap();
+    assert_eq!(seqs(&first), all[..N], "exactly N entries");
+    assert!(first.has_more);
+    assert_eq!(
+        raw.len(),
+        fit - 1,
+        "`true` is one byte shorter than `false`"
+    );
+    let next = page(
+        &h.router,
+        &format!("limit={}&since={}", N + 5, enc(&first.next_cursor)),
+        None,
+    )
+    .await;
+    assert_eq!(
+        next.changes.first().map(|c| c.seq()),
+        Some(all[N]),
+        "resumes at N+1"
+    );
+
+    // One byte under: N-1.
+    set_page_bytes(&mut h, &cfg, fit - 1);
+    let short = page(&h.router, &format!("limit={}", N + 5), None).await;
+    assert_eq!(seqs(&short), all[..N - 1]);
+    assert!(short.has_more);
+
+    // Exact fit on the final page: the last N entries, `has_more: false`.
+    set_page_bytes(&mut h, &cfg, usize::MAX);
+    let before = page(&h.router, &format!("limit={}", feed.len() - N), None).await;
+    assert_eq!(before.changes.len(), feed.len() - N);
+    let tail = page_len(envelope, &sizes[sizes.len() - N..]);
+    set_page_bytes(&mut h, &cfg, tail);
+    let (_, raw) = raw_changes(
+        &h.router,
+        &format!("limit=100&since={}", enc(&before.next_cursor)),
+        None,
+    )
+    .await;
+    let last =
+        acdp::types::change::ChangesResponse::from_value(&serde_json::from_slice(&raw).unwrap())
+            .unwrap();
+    assert_eq!(seqs(&last), all[feed.len() - N..]);
+    assert!(!last.has_more);
+    assert_eq!(raw.len(), tail, "an exact fit is allowed");
+
+    // Multi-page union: about 2.5 entries per page, nothing skipped or
+    // repeated, every page within the bound (and, in debug builds, the
+    // handler's own size accounting asserted on each).
+    let bound = page_len(envelope, &sizes[..2]) + sizes[2] / 2;
+    set_page_bytes(&mut h, &cfg, bound);
+    let pages = byte_pages(&h.router, "", 100, None, bound).await;
+    assert!(pages.len() >= 4, "{} pages", pages.len());
+    assert_eq!(union_seqs(&pages), all);
+}
+
+/// rec-001 H's last sentence: an entry larger than the bound is served
+/// alone, never dropped, and paging continues one entry per page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rec001_h_an_oversized_entry_is_served_alone() {
+    let (mut h, cfg) = byte_capped_harness(5).await;
+    let all: Vec<u64> = seqs(&page(&h.router, "", None).await);
+    set_page_bytes(&mut h, &cfg, 1);
+    let pages = byte_pages(&h.router, "", 100, None, 1).await;
+    assert!(
+        pages.iter().all(|(_, p)| p.changes.len() == 1),
+        "one entry per page"
+    );
+    assert!(pages[..pages.len() - 1].iter().all(|(_, p)| p.has_more));
+    assert_eq!(union_seqs(&pages), all);
+}
+
+/// Hidden rows around the cut: an anonymous reader's pages skip the
+/// restricted entries without losing or repeating a visible one, and the
+/// audience's pages include them, under the same bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rec001_h_hidden_rows_around_the_cut() {
+    const OWNER: u8 = 141;
+    const AUDIENCE: u8 = 142;
+    let (cfg, caps) = common::with_anonymous_public_reads(config(true), caps(), true);
+    let mut h = SeededHarness::new(cfg.clone(), caps, AUTHORITY).await;
+    let (public, _) = publish_ctx(&h, 143, "rec001 h public", Visibility::Public).await;
+    let (hidden, _) = publish_for(
+        &h,
+        OWNER,
+        "rec001 h restricted",
+        Visibility::Restricted,
+        &[AUDIENCE],
+    )
+    .await;
+    for i in 0..4 {
+        let (ctx, seed) = if i % 2 == 0 {
+            (&public, 143)
+        } else {
+            (&hidden, OWNER)
+        };
+        retract(&h, seed, ctx).await;
+        lifecycle(&h, seed, ctx, "republish", "republished").await;
+    }
+    let audience = bearer_for(AUDIENCE);
+    let anon_all = seqs(&page(&h.router, "", None).await);
+    let audience_all = seqs(&page(&h.router, "", Some(&audience)).await);
+    assert_eq!((anon_all.len(), audience_all.len()), (4, 8));
+    let (_, sizes, envelope) = sizes(&h.router).await;
+    // Two public entries per page: the restricted pair sits right after
+    // each cut.
+    let bound = page_len(envelope, &sizes[..2]);
+    set_page_bytes(&mut h, &cfg, bound);
+    let anon = byte_pages(&h.router, "", 100, None, bound).await;
+    assert_eq!(union_seqs(&anon), anon_all);
+    // The audience's entries differ in size; a generous bound of about
+    // three still splits its eight across pages.
+    let bound = page_len(envelope, &sizes[..2]) + sizes[0];
+    set_page_bytes(&mut h, &cfg, bound);
+    let mine = byte_pages(&h.router, "", 100, Some(&audience), bound).await;
+    assert!(mine.len() >= 3, "{} pages", mine.len());
+    assert_eq!(union_seqs(&mine), audience_all);
+}
+
+// ---------------------------------------------------------------------------
+// gzip on `/changes` only, never 406.
+//
+// `/changes` is the one compressed route. tower-http 0.7 would answer 406
+// (over the handler's own status) to an Accept-Encoding that refuses
+// identity and offers nothing it produces; the normaliser in front of it
+// (`acdp_registry_core::accept_encoding`) turns every such header into
+// identity instead (RFC 9110 §12.5.3).
+// ---------------------------------------------------------------------------
+
+struct Raw {
+    status: StatusCode,
+    headers: axum::http::HeaderMap,
+    body: Vec<u8>,
+}
+
+impl Raw {
+    fn encoding(&self) -> Option<&str> {
+        self.headers
+            .get("content-encoding")
+            .map(|v| v.to_str().unwrap())
+    }
+
+    /// Every `Vary` member, lower-cased, across all `Vary` lines.
+    fn vary(&self) -> Vec<String> {
+        self.headers
+            .get_all("vary")
+            .iter()
+            .flat_map(|v| v.to_str().unwrap().split(','))
+            .map(|m| m.trim().to_ascii_lowercase())
+            .collect()
+    }
+
+    fn gunzipped(&self) -> Vec<u8> {
+        use std::io::Read as _;
+        assert_eq!(self.encoding(), Some("gzip"));
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(&self.body[..])
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+}
+
+async fn raw_request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    accept_encoding: Option<&str>,
+    bearer: Option<&str>,
+) -> Raw {
+    let mut b = Request::builder().method(method).uri(uri);
+    if let Some(ae) = accept_encoding {
+        b = b.header("accept-encoding", ae);
+    }
+    if let Some(t) = bearer {
+        b = b.header("authorization", format!("Bearer {t}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(b.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    Raw {
+        status,
+        headers,
+        body,
+    }
+}
+
+async fn gzip_harness() -> SeededHarness {
+    let h = harness(true).await;
+    for i in 0..3 {
+        publish_ctx(&h, 61, &format!("gzip {i}"), Visibility::Public).await;
+    }
+    h
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changes_gzip_when_asked() {
+    let h = gzip_harness().await;
+    let plain = raw_request(&h.router, "GET", "/changes", None, None).await;
+    assert_eq!(plain.status, StatusCode::OK);
+    assert_eq!(plain.encoding(), None, "no Accept-Encoding, no coding");
+
+    let gz = raw_request(&h.router, "GET", "/changes", Some("gzip"), None).await;
+    assert_eq!(gz.status, StatusCode::OK);
+    assert_ne!(gz.body, plain.body, "the wire body is compressed");
+    assert_eq!(gz.gunzipped(), plain.body, "gunzip gives the identity body");
+    assert!(gz.headers.get("content-length").is_none());
+    let vary = gz.vary();
+    for member in ["accept-encoding", "authorization", "x-tenant-id"] {
+        assert!(
+            vary.iter().any(|m| m == member),
+            "vary {vary:?} lacks {member}"
+        );
+    }
+    // An identity answer varies on Accept-Encoding too.
+    assert!(
+        plain.vary().iter().any(|m| m == "accept-encoding"),
+        "{:?}",
+        plain.vary()
+    );
+
+    // q-values, case and wildcards that accept gzip.
+    for ae in [
+        "gzip;q=0.5",
+        "*;q=0.1",
+        "GZIP",
+        "x-gzip",
+        "br, gzip;q=0.1",
+        "*",
+    ] {
+        let r = raw_request(&h.router, "GET", "/changes", Some(ae), None).await;
+        assert_eq!(r.status, StatusCode::OK, "{ae}");
+        assert_eq!(r.gunzipped(), plain.body, "{ae}");
+    }
+
+    // HEAD: no body either way, and never a 406.
+    let head = raw_request(&h.router, "HEAD", "/changes", Some("gzip"), None).await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert!(head.body.is_empty());
+}
+
+/// Every Accept-Encoding that rules out gzip, including the ones that rule
+/// out identity as well, gets the handler's own status and an identity
+/// body: at 200 and at an ACDP 400, never 406.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changes_never_answers_406() {
+    let h = gzip_harness().await;
+    let ok = raw_request(&h.router, "GET", "/changes", None, None).await;
+    let bad = raw_request(&h.router, "GET", "/changes?limit=0", None, None).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    for ae in [
+        "identity;q=0",
+        "*;q=0",
+        "br, identity;q=0",
+        "gzip;q=0, identity;q=0",
+        "gzip;q=0",
+        "br",
+        "gzip;q=abc",
+        "",
+        "deflate, zstd",
+    ] {
+        for (uri, want) in [("/changes", &ok), ("/changes?limit=0", &bad)] {
+            let r = raw_request(&h.router, "GET", uri, Some(ae), None).await;
+            assert_eq!(r.status, want.status, "{uri} with {ae:?}");
+            assert_eq!(r.encoding(), None, "{uri} with {ae:?}");
+            assert_eq!(r.body, want.body, "{uri} with {ae:?}");
+            assert!(
+                r.vary().iter().any(|m| m == "accept-encoding"),
+                "{uri} with {ae:?}: {:?}",
+                r.vary()
+            );
+        }
+    }
+    // The ACDP 400 keeps its problem body, and a gzip-accepting caller gets
+    // that body compressed.
+    let v: Value = serde_json::from_slice(&bad.body).unwrap();
+    assert_eq!(v["error"]["code"], "schema_violation", "{v}");
+    let gz = raw_request(&h.router, "GET", "/changes?limit=0", Some("gzip"), None).await;
+    assert_eq!(gz.status, StatusCode::BAD_REQUEST);
+    assert_eq!(gz.gunzipped(), bad.body);
+}
+
+/// Only `/changes` is compressed: other routes ignore Accept-Encoding, and a
+/// `read_gate` refusal of `/changes` (outside the per-route layer) is never
+/// compressed, which pins the layer order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gzip_is_scoped_to_the_changes_handler() {
+    let h = gzip_harness().await;
+    for uri in [
+        "/contexts/search",
+        "/.well-known/acdp.json",
+        "/log/checkpoint",
+    ] {
+        let r = raw_request(&h.router, "GET", uri, Some("gzip"), None).await;
+        assert_eq!(r.encoding(), None, "{uri} is compressed ({})", r.status);
+        assert!(
+            !r.vary().iter().any(|m| m == "accept-encoding"),
+            "{uri}: {:?}",
+            r.vary()
+        );
+        let strict = raw_request(&h.router, "GET", uri, Some("identity;q=0"), None).await;
+        assert_eq!(strict.status, r.status, "{uri}");
+    }
+
+    let refused = raw_request(
+        &h.router,
+        "GET",
+        "/changes",
+        Some("gzip"),
+        Some("not-a-token"),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(refused.encoding(), None);
+    assert!(
+        refused.body.len() > 32,
+        "big enough to have been compressed"
+    );
+    serde_json::from_slice::<Value>(&refused.body).expect("plain JSON");
+}
+
+/// Tripwire for a tower-http bump: a bare `CompressionLayer` still answers
+/// 406 to `identity;q=0`, overwriting the handler's status. If this starts
+/// failing, the behaviour the normaliser works around has changed; revisit
+/// `acdp_registry_core::accept_encoding` (it may no longer be needed).
+#[tokio::test]
+async fn bare_tower_http_compression_still_answers_406() {
+    use tower::ServiceBuilder;
+    use tower_http::compression::CompressionLayer;
+    let svc = ServiceBuilder::new()
+        .layer(CompressionLayer::new().gzip(true))
+        .service_fn(|_req: Request<Body>| async {
+            let mut resp = axum::http::Response::new(Body::from("x".repeat(256)));
+            *resp.status_mut() = StatusCode::BAD_REQUEST;
+            Ok::<_, std::convert::Infallible>(resp)
+        });
+    let req = Request::builder()
+        .uri("/")
+        .header("accept-encoding", "identity;q=0")
+        .body(Body::empty())
+        .unwrap();
+    let resp = svc.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+}
