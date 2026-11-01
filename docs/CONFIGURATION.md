@@ -653,7 +653,7 @@ also gets an RFC-ACDP-0017 §10 event receipt (`registry_state.event_receipts`),
 committed atomically with the event.
 
 **Turning the flag off over existing lifecycle state refuses to start.**
-[RFC-ACDP-0013 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints)
+[RFC-ACDP-0013 §6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0013-lifecycle-events.md#6-retraction--republication-endpoints)
 (pinned spec): a registry that does not advertise `acdp-registry-lifecycle`
 MUST NOT emit `lifecycle_events` or the `retracted` status, with no carve-out
 for state recorded while the profile *was* advertised. The stores project
@@ -709,9 +709,9 @@ event is recorded unsigned but still attributed to the registry DID.
 ### `[log]` *(ACDP 0.3.0)*
 
 Registry transparency log
-([RFC-ACDP-0012](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0012-transparency-log.md)): the leaf
+([RFC-ACDP-0012](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0012-transparency-log.md)): the leaf
 encoding, Merkle tree construction and checkpoint format are normative in
-[§4–§6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0012-transparency-log.md#4-leaf-object-and-leaf-encoding-normative)
+[§4–§6](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0012-transparency-log.md#4-leaf-object-and-leaf-encoding-normative)
 and not restated here. When enabled this registry appends one leaf per
 accepted publish **in the same storage transaction as the context row and its
 receipt** (a publish that cannot durably append its leaf fails), serves
@@ -733,10 +733,10 @@ request from the ordered leaf hashes (O(n); the head root is cached).
 Contexts published *before* enablement are not backfilled: no leaf is ever
 appended for them, and there is no backfill command.
 
-**Deviation from a SHOULD in [RFC-ACDP-0012 §7.3](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0012-transparency-log.md#73-backfill)
+**Deviation from a SHOULD in [RFC-ACDP-0012 §7.3](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0012-transparency-log.md#73-backfill)
 (pinned spec):** a registry enabling the profile SHOULD backfill leaves for
 contexts published before enablement (after backfilling their receipts, which
-[RFC-ACDP-0010 §7](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0010-registry-receipts.md#7-issuance)
+[RFC-ACDP-0010 §7](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0010-registry-receipts.md#7-issuance)
 likewise says SHOULD happen and this registry also does not do — see
 [RECEIPTS.md](RECEIPTS.md#backfill-policy-none)). Backfilled leaves would be
 time-unanchored under §7.3 anyway, so what is missing is their inclusion in the
@@ -750,7 +750,7 @@ log, not a timing guarantee.
 ### `[changes]` *(ACDP 0.5.0)*
 
 Registry change feed
-([RFC-ACDP-0018 §5](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0018-retraction-recall.md#5-the-changes-feed-get-changes-normative)):
+([RFC-ACDP-0018 §5](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0018-retraction-recall.md#5-the-changes-feed-get-changes-normative)):
 `GET /changes` and the `acdp-registry-changes` profile. Feed entries are
 appended whenever a `[receipt]` key is configured, **in the same storage
 transaction** as the lifecycle event, superseding publish or key-revocation
@@ -790,7 +790,7 @@ protocol allows; nothing is misread.
 ### `[events]` *(ACDP 0.5.0)*
 
 Change-hint subscriptions
-([RFC-ACDP-0018 §8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0018-retraction-recall.md#8-change-hints-normative)):
+([RFC-ACDP-0018 §8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0018-retraction-recall.md#8-change-hints-normative)):
 `/subscriptions` and the `acdp-registry-events` profile. When disabled (the
 default) every `/subscriptions` request answers `501 not_implemented`. See
 [HTTP-API.md](HTTP-API.md#post-subscriptions-get-subscriptionsid-delete-subscriptionsid-acdp-050)
@@ -822,7 +822,7 @@ replica.
 ### `[keyless]` *(ACDP 0.5.0)*
 
 Keyless signing
-([RFC-ACDP-0021](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0021-keyless-signing.md),
+([RFC-ACDP-0021](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0021-keyless-signing.md),
 Draft): `POST`/`GET /key-attestations`, the keyless publish path and the
 `acdp-registry-keyless` profile. A CI job or workload presents its OIDC ID
 token or SPIFFE JWT-SVID and a proof of possession of an ephemeral key; the
@@ -908,7 +908,7 @@ For each configured witness a background poller GETs
 `<url>?log_id=<this registry's log_id>` over the SSRF-guarded outbound
 client (HTTPS-only, DNS-rebinding-guarded, no redirects — RFC-ACDP-0008
 §4.8) and runs the
-[RFC-ACDP-0015 §8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0015-witness-cosigning.md#8-consumer-verification-procedure-normative)
+[RFC-ACDP-0015 §8](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0015-witness-cosigning.md#8-consumer-verification-procedure-normative)
 verification procedure on every returned cosignature **against this
 registry's own checkpoint** at that `tree_size`, resolving the witness key
 through the `did:web` resolver. A witness cosigning a *different* root (a

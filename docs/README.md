@@ -58,8 +58,8 @@ verification, SSRF defenses, or the canonical error-code registry lives in the
 | SSRF defenses, HTTPS/size/redirect caps, algorithm-downgrade rejection (`WebResolver`) | [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/security.md) |
 | The three-layer model (what is hashed/signed/mutable) | [acdp-rs · Architecture](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/architecture.md) |
 | API reference for the `acdp` crate | [docs.rs/acdp 0.20.0](https://docs.rs/acdp/0.20.0/acdp/) |
-| The IANA-style registries (profiles, error codes, lifecycle event types, signature algorithms) | [spec · registries](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/dd5486cecc8310432a1e8f2a619397a790b3cca4/registries) |
-| Normative protocol rules | [RFC set](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs) |
+| The IANA-style registries (profiles, error codes, lifecycle event types, signature algorithms) | [spec · registries](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/c40671e2493c38c51d2576610e5e7abffa3d4f3b/registries) |
+| Normative protocol rules | [RFC set](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs) |
 
 `acdp-rs` documents its own registry building blocks, not this registry. Where
 its [Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/registry.md) guide describes a deployment
@@ -85,7 +85,7 @@ starting with `/` is served from the website's root, where it 404s.
 
 - **Spec (RFCs, `registries/`, schemas, `VERSIONING.md`):**
   `https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/<ref>/rfcs/RFC-ACDP-00NN-<slug>.md#<anchor>`, where `<ref>` is
-  the `ref:` value in `.spec-pin` (today `dd5486cecc8310432a1e8f2a619397a790b3cca4`). Non-normative
+  the `ref:` value in `.spec-pin` (today `c40671e2493c38c51d2576610e5e7abffa3d4f3b`). Non-normative
   pages under the spec's `docs/` may instead use
   `fb76f6d54ba25f583ce526b2bdee30503a5d8e59`, a docs refresh that once ran
   ahead of the pin (the pin now includes it, so prefer the pin). No other spec
@@ -119,12 +119,12 @@ when a newer tag or SHA carries the page being cited.
   `application/acdp+json`; errors follow the RFC-ACDP-0007 §4 envelope
   (see [HTTP-API.md](HTTP-API.md#error-envelope)).
 - **RFC-ACDP-XXXX** references point at the
-  [protocol spec](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/dd5486cecc8310432a1e8f2a619397a790b3cca4) at the revision pinned in `.spec-pin`.
+  [protocol spec](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/c40671e2493c38c51d2576610e5e7abffa3d4f3b) at the revision pinned in `.spec-pin`.
 
 ## Spec profiles implemented
 
 The profile names, their status, and their prerequisites are defined
-canonically in the spec's [profile registry](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/registries/profiles.md) — this section only
+canonically in the spec's [profile registry](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/registries/profiles.md) — this section only
 records **which** of them this implementation advertises, not what they mean.
 
 `acdp-registry-core` and `acdp-registry-discovery` by default (an operator-set

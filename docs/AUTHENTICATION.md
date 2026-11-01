@@ -172,9 +172,9 @@ rejected with `403 not_authorized`.
 ### Spec conformance (`bearer_jwt`)
 
 This flow is the `bearer_jwt` read-authentication method, registered in the spec's
-[`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/registries/auth-methods.md)
+[`registries/auth-methods.md`](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/registries/auth-methods.md)
 with its requirements in
-[RFC-ACDP-0008 §6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/dd5486cecc8310432a1e8f2a619397a790b3cca4/rfcs/RFC-ACDP-0008-security.md#62-read-authentication).
+[RFC-ACDP-0008 §6.2](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/c40671e2493c38c51d2576610e5e7abffa3d4f3b/rfcs/RFC-ACDP-0008-security.md#62-read-authentication).
 Where this registry meets each one:
 
 | Requirement (RFC-ACDP-0008 §6.2) | Here |
