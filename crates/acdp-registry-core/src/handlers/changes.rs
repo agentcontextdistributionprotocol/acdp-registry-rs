@@ -51,7 +51,7 @@
 //! Page size (§5.2): a serialized page stays within [`MAX_PAGE_BYTES`]
 //! before any content coding. The page ends early, before the entry that
 //! would cross the bound, with `has_more: true` and a cursor at the last
-//! entry it holds, so the next page starts at the omitted one. A single
+//! position it consumed, so the next page starts at the omitted entry. A single
 //! entry larger than the bound goes out alone. `max_changes_page` is
 //! unchanged: the bound only ever shortens a page.
 

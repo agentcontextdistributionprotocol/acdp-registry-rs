@@ -4788,3 +4788,25 @@ by the owner.
 
 **Resulting status:** 0 open entries for this plan. Two changes (the JWKS backoff fix, the binary check), both
 landed in this branch. Nothing blocks `/ship`.
+
+## RFC-ACDP-0018 §5.2 gzip on `/changes`: never 406 — 2026-11-01
+
+**Decided by the coordinator (Opus) under /drive and verified by Fable (PASS).** This is a wire one-way door: once consumers see a
+behaviour, it is hard to take back.
+
+- **Decision:** `GET /changes` never answers 406. A `map_request` normalizer in front of tower-http 0.7's `CompressionLayer`
+  reduces negotiation to two outcomes:
+  - gzip, when the header accepts gzip (`gzip`, `x-gzip` or `*`) at any q > 0;
+  - otherwise identity. That includes `identity;q=0`, `*;q=0` and malformed headers, which are treated as absent.
+- **Why:** RFC 9110 lets a server send a response without content coding when nothing listed is acceptable (§12.5.3).
+  When identity is ruled out too, a server may prefer a non-conforming response over 406 (§12.1). 406 applies only when the server
+  is unwilling to supply a default representation (§15.5.7). The feed's consumers are unattended pollers, so a 406 would be a
+  permanent, self-inflicted outage, and it would mask the handler's own ACDP 400s. nginx, Apache, Caddy and Go behave the same way.
+- **Cost, accepted:** relative preference collapses. A client sending `identity, gzip;q=0.5` gets gzip. §12.1 says preferences are
+  not guaranteed to be honoured.
+- **Guard:** the test `bare_tower_http_compression_still_answers_406` fails if a tower-http bump changes the behaviour being
+  worked around.
+- **Scope:** only `/changes` is compressed. read_gate 403/429 responses sit outside the layer, so they are never compressed and
+  carry no `Vary`.
+
+**Resulting status:** CONFIRMED (2026-11-01). Nothing blocks `/ship`.
