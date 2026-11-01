@@ -1,5 +1,12 @@
 
 
+## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.8.1...acdp-registry-core/v0.9.0) - 2026-11-01
+
+### Added
+
+- read rate limits (RFC-ACDP-0008 §4.3) and read-ceiling advertisement gate ([#521](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/521))
+
+
 ## [0.8.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.8.0...acdp-registry-core/v0.8.1) - 2026-10-31
 
 No changes. This crate is released at 0.8.1 because the workspace shares a

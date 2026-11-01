@@ -1,5 +1,13 @@
 
 
+## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.8.1...acdp-registry-types/v0.9.0) - 2026-11-01
+
+### Added
+
+- read rate limits (RFC-ACDP-0008 §4.3) and read-ceiling advertisement gate ([#521](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/521))
+- adopt spec pin dd5486c and acdp 0.20.0 ([#520](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/520))
+
+
 ## [0.8.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-types/v0.8.0...acdp-registry-types/v0.8.1) - 2026-10-31
 
 ### Added
