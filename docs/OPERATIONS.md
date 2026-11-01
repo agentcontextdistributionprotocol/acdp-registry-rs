@@ -280,8 +280,11 @@ Things to know before turning it on:
   first busy client throttles everyone. On a platform whose edge addresses
   cannot be listed, `any_peer` reads the rightmost `X-Forwarded-For` hop from
   every peer. Use it only when the registry is reachable solely through that
-  edge. To check, send a request with a forged `X-Forwarded-For: 1.2.3.4`:
-  it must land in the same bucket as one without the header.
+  edge. To check, send a request with a forged `X-Forwarded-For: 1.2.3.4`,
+  then one with two forged header lines (`X-Forwarded-For: 1.2.3.4` and
+  `X-Forwarded-For: 5.6.7.8`): each must land in the same bucket as a request
+  without the header. The second probe catches an edge that appends to the
+  first line and passes a later client line through untouched.
 - **Watch** `acdp_registry_rate_limit_rejections_total{scope="read_anonymous"}`
   and `{scope="read_principal"}`. A steady rise in `read_anonymous` from many
   clients usually means the budget is too low for a shared NAT or the proxy

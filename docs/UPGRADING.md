@@ -42,7 +42,11 @@ bearer tokens, 0.5.0 Draft; RFC-ACDP-0007 `limits` open from 0.5.0; RFC-ACDP-001
   document, so leave it off until they upgrade.
 - **`rate_limit.forwarded_header_trust`** (`trusted_proxies`, the default, or `any_peer`) now governs
   `X-Forwarded-For` for every per-IP limiter (`/auth/*`, keyless and anonymous reads). The default
-  keeps today's behaviour exactly.
+  keeps today's trust decision. One change applies in every mode: several `X-Forwarded-For` header
+  lines are now read as one list in arrival order (previously only the first line was read), and a
+  non-ASCII line makes the whole header fall back to the TCP peer. Behind a trusted proxy that adds
+  its hop as a separate line, `/auth/*` and keyless buckets now key on that proxy's view of the
+  client, as intended.
 - Metric `acdp_registry_rate_limit_rejections_total` gains scopes `read_anonymous` and
   `read_principal`.
 - **Hard Seam:** unchanged. acdp 0.20 adds no `KeyAuthorization` or `RevocationTrustClass` variant;

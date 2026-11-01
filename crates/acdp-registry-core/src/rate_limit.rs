@@ -176,7 +176,8 @@ impl AgentRateLimiter {
     /// is every anonymous GET from a busy registry, or from one client
     /// rotating through a /48, all under this one mutex. Doubling makes the
     /// scan amortised O(1) per insert while still bounding the map at about
-    /// twice the live key count.
+    /// twice the peak number of keys live in one window (stale entries left
+    /// after a burst wait for the next prune).
     fn prune_if_due(&self, map: &mut HashMap<String, Bucket>, now: Instant) {
         if map.len() < self.prune_threshold.load(Ordering::Relaxed) {
             return;
