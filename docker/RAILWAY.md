@@ -7,13 +7,13 @@ every `acdp-registry-server/v*` release tag:
 ```
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:latest        # tip of main
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:main          # tip of main
-ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.9.0         # a release tag, leading `v` stripped
-ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.9           # rolling major.minor
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.10.0         # a release tag, leading `v` stripped
+ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.10           # rolling major.minor
 ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every push to main
 ```
 
 > **`:latest` tracks the tip of `main`, not the last release.** Pin a version tag
-> (`:0.9.0`, or `:0.9` to follow patches) for anything you care about keeping
+> (`:0.10.0`, or `:0.10` to follow patches) for anything you care about keeping
 > stable: `:latest` moves on every merge to `main`, a version tag does not.
 > The version tags above name the current or pending minor line: the image for a
 > release tag is pushed, and its GitHub Release created, when that tag is pushed,
@@ -30,7 +30,7 @@ ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every pus
 > **not** describe any of the images above.
 
 > **Which tag to deploy, and what it guarantees.** Deploy a **version tag** —
-> `:0.9` to follow patches within a minor, or an exact `:0.9.0` to pin one
+> `:0.10` to follow patches within a minor, or an exact `:0.10.0` to pin one
 > release. That image is the artifact built from the release tag, and it is the
 > only one whose `org.opencontainers.image.version` label names the release it
 > is. Deploy `:latest` or `:main` only when you deliberately want the tip of
@@ -71,7 +71,7 @@ ghcr.io/agentcontextdistributionprotocol/acdp-registry:sha-<7-hex>   # every pus
 > tag both build the same commit, and the two images differ *deterministically*:
 > the build metadata stamps `org.opencontainers.image.version` as `main` in one
 > and as the version in the other, and each build carries its own provenance
-> attestation. So `:0.9.0` and `:latest` can report different digests for one
+> attestation. So `:0.10.0` and `:latest` can report different digests for one
 > commit with nothing wrong — the release image is the one that knows it is a
 > release, which is why it is built rather than retagged. To confirm two tags
 > came from the same source, compare `org.opencontainers.image.revision`, which
@@ -100,9 +100,9 @@ Railway needs to pull from GHCR. Either:
 ## Creating the Railway service (later)
 
 1. New Project → **Deploy from a Docker image**.
-2. Image: `ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.9` — a
+2. Image: `ghcr.io/agentcontextdistributionprotocol/acdp-registry:0.10` — a
    version tag is the right default for anything you care about keeping stable,
-   and the image tag carries no leading `v`. Pin an exact patch (`:0.9.0`) to
+   and the image tag carries no leading `v`. Pin an exact patch (`:0.10.0`) to
    stop even patch releases from moving under you; use `:latest` only if you
    deliberately want the tip of `main`, per the tag guidance above.
 3. Add a **PostgreSQL** plugin (the image is built with `STORAGE_FEATURE=storage-pg`).
@@ -236,7 +236,7 @@ would keep naming that DID.
 
 This is the configuration of the reference deployment at
 `https://registry.agentcontextdistributionprotocol.io`: the image pinned to
-`:0.9.0`, a Railway Postgres service, the seed injected from Doppler, the
+`:0.10.0`, a Railway Postgres service, the seed injected from Doppler, the
 healthcheck on `/healthz`, and one replica. The full production guide,
 including backups and upgrades, is [docs/DEPLOY.md](../docs/DEPLOY.md).
 
