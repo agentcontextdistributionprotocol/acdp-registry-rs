@@ -23,6 +23,18 @@ belongs in the per-crate changelogs.
 
 ## Unreleased
 
+**Static read tokens (RFC-ACDP-0008 §6.2 `bearer_static`), off unless configured.** New
+`[[auth.read_tokens]]` entries (hashes only, minted with `acdp-registry read-token generate`) let
+an operator-administered DID read with a long-lived `Authorization: Bearer acdp_rt_…` token, and
+capabilities then list `"bearer_static"`. With none configured nothing changes on the wire.
+Two behaviour changes apply whenever `auth.enabled = true`, configured tokens or not. First, an
+invalid bearer on a data-plane `GET`/`HEAD` is now refused `403` by a gate in front of the
+handlers: before any lookup, for every such route (including `/log/checkpoint` and
+`/key-attestations`, which previously ignored the header, and routes whose profile is off, such as
+`/changes` or `/subscriptions/{id}`, which answer 403 here rather than their 501), and charged to
+the client address's anonymous read bucket. Second, two `Authorization` headers on such a read are `400`. With auth off,
+`Authorization` is still ignored entirely.
+
 **Spec pin 3f50697** (RFC-ACDP-0018 §5.2 page size and compression, §6.1 bucket filters; rec-010 added). Measurement only: no behaviour change, no operator action.
 
 ## 0.10.0
@@ -82,17 +94,6 @@ bearer tokens, 0.5.0 Draft; RFC-ACDP-0007 `limits` open from 0.5.0; RFC-ACDP-001
   client, as intended.
 - Metric `acdp_registry_rate_limit_rejections_total` gains scopes `read_anonymous` and
   `read_principal`.
-- **Static read tokens (RFC-ACDP-0008 §6.2 `bearer_static`), off unless configured.** New
-  `[[auth.read_tokens]]` entries (hashes only, minted with `acdp-registry read-token generate`) let
-  an operator-administered DID read with a long-lived `Authorization: Bearer acdp_rt_…` token, and
-  capabilities then list `"bearer_static"`. With none configured nothing changes on the wire.
-  Two behaviour changes apply whenever `auth.enabled = true`, configured tokens or not. First, an
-  invalid bearer on a data-plane `GET`/`HEAD` is now refused `403` by a gate in front of the
-  handlers: before any lookup, for every such route (including `/log/checkpoint` and
-  `/key-attestations`, which previously ignored the header, and routes whose profile is off, such as
-  `/changes` or `/subscriptions/{id}`, which answer 403 here rather than their 501), and charged to
-  the client address's anonymous read bucket. Second, two `Authorization` headers on such a read are `400`. With auth off,
-  `Authorization` is still ignored entirely.
 - **Hard Seam:** unchanged. acdp 0.20 adds no `KeyAuthorization` or `RevocationTrustClass` variant;
   `AcdpError::RateLimited` became a struct variant carrying the parsed `Retry-After`.
 
