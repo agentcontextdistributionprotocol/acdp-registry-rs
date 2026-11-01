@@ -21,7 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## Unreleased
+## 0.9.0
 
 **No upgrade steps.** The spec pin moves to `dd5486c` (RFC-ACDP-0008 read rate limits and static
 bearer tokens, 0.5.0 Draft; RFC-ACDP-0007 `limits` open from 0.5.0; RFC-ACDP-0018 clarifications) and
