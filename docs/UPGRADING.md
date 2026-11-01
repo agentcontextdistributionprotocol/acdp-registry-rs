@@ -21,7 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## Unreleased
+## 0.10.1
 
 **Static read tokens (RFC-ACDP-0008 §6.2 `bearer_static`), off unless configured.** New
 `[[auth.read_tokens]]` entries (hashes only, minted with `acdp-registry read-token generate`) let
