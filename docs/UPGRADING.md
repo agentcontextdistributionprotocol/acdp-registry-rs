@@ -60,6 +60,12 @@ out; a single entry larger than that is served alone. With the default `max_chan
 this does not bite in practice. Consumers that follow `has_more` and `next_cursor`, as the
 protocol requires, need no change. New counter: `acdp_registry_changes_pages_byte_capped_total`.
 
+**`GET /changes` may now be gzip-encoded and carries `Vary: accept-encoding`.** A request with
+`Accept-Encoding: gzip` gets `Content-Encoding: gzip`; one without it gets the same bytes as before.
+Caches and proxies in front of the registry must honour `Vary`. `/changes` never answers 406: a
+client that refuses both identity and gzip gets identity. No other route is compressed, and none
+of their headers change.
+
 ## 0.10.1
 
 **Static read tokens (RFC-ACDP-0008 §6.2 `bearer_static`), off unless configured.** New

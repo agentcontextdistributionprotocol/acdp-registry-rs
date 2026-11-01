@@ -72,6 +72,9 @@ playground     = ["acdp-registry-core/playground"]
 # `producer::keyless::EphemeralKey` (the client half of POST
 # /key-attestations). Its feature lists are empty: no crate, no vet entry.
 acdp           = { workspace = true, features = ["test-transport", "keyless"] }
+# gzip on `GET /changes` (changes_http.rs): the tests gunzip the response.
+# Already in the tree through tower-http's `compression-gzip`.
+flate2         = "1"
 http-body-util = "0.1"
 hex            = { workspace = true }
 serde          = { workspace = true }

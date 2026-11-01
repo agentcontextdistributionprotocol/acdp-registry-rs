@@ -1674,3 +1674,237 @@ async fn rec001_h_hidden_rows_around_the_cut() {
     assert!(mine.len() >= 3, "{} pages", mine.len());
     assert_eq!(union_seqs(&mine), audience_all);
 }
+
+// ---------------------------------------------------------------------------
+// gzip on `/changes` only, never 406.
+//
+// `/changes` is the one compressed route. tower-http 0.7 would answer 406
+// (over the handler's own status) to an Accept-Encoding that refuses
+// identity and offers nothing it produces; the normaliser in front of it
+// (`acdp_registry_core::accept_encoding`) turns every such header into
+// identity instead (RFC 9110 §12.5.3).
+// ---------------------------------------------------------------------------
+
+struct Raw {
+    status: StatusCode,
+    headers: axum::http::HeaderMap,
+    body: Vec<u8>,
+}
+
+impl Raw {
+    fn encoding(&self) -> Option<&str> {
+        self.headers
+            .get("content-encoding")
+            .map(|v| v.to_str().unwrap())
+    }
+
+    /// Every `Vary` member, lower-cased, across all `Vary` lines.
+    fn vary(&self) -> Vec<String> {
+        self.headers
+            .get_all("vary")
+            .iter()
+            .flat_map(|v| v.to_str().unwrap().split(','))
+            .map(|m| m.trim().to_ascii_lowercase())
+            .collect()
+    }
+
+    fn gunzipped(&self) -> Vec<u8> {
+        use std::io::Read as _;
+        assert_eq!(self.encoding(), Some("gzip"));
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(&self.body[..])
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+}
+
+async fn raw_request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    accept_encoding: Option<&str>,
+    bearer: Option<&str>,
+) -> Raw {
+    let mut b = Request::builder().method(method).uri(uri);
+    if let Some(ae) = accept_encoding {
+        b = b.header("accept-encoding", ae);
+    }
+    if let Some(t) = bearer {
+        b = b.header("authorization", format!("Bearer {t}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(b.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    Raw {
+        status,
+        headers,
+        body,
+    }
+}
+
+async fn gzip_harness() -> SeededHarness {
+    let h = harness(true).await;
+    for i in 0..3 {
+        publish_ctx(&h, 61, &format!("gzip {i}"), Visibility::Public).await;
+    }
+    h
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changes_gzip_when_asked() {
+    let h = gzip_harness().await;
+    let plain = raw_request(&h.router, "GET", "/changes", None, None).await;
+    assert_eq!(plain.status, StatusCode::OK);
+    assert_eq!(plain.encoding(), None, "no Accept-Encoding, no coding");
+
+    let gz = raw_request(&h.router, "GET", "/changes", Some("gzip"), None).await;
+    assert_eq!(gz.status, StatusCode::OK);
+    assert_ne!(gz.body, plain.body, "the wire body is compressed");
+    assert_eq!(gz.gunzipped(), plain.body, "gunzip gives the identity body");
+    assert!(gz.headers.get("content-length").is_none());
+    let vary = gz.vary();
+    for member in ["accept-encoding", "authorization", "x-tenant-id"] {
+        assert!(
+            vary.iter().any(|m| m == member),
+            "vary {vary:?} lacks {member}"
+        );
+    }
+    // An identity answer varies on Accept-Encoding too.
+    assert!(
+        plain.vary().iter().any(|m| m == "accept-encoding"),
+        "{:?}",
+        plain.vary()
+    );
+
+    // q-values, case and wildcards that accept gzip.
+    for ae in [
+        "gzip;q=0.5",
+        "*;q=0.1",
+        "GZIP",
+        "x-gzip",
+        "br, gzip;q=0.1",
+        "*",
+    ] {
+        let r = raw_request(&h.router, "GET", "/changes", Some(ae), None).await;
+        assert_eq!(r.status, StatusCode::OK, "{ae}");
+        assert_eq!(r.gunzipped(), plain.body, "{ae}");
+    }
+
+    // HEAD: no body either way, and never a 406.
+    let head = raw_request(&h.router, "HEAD", "/changes", Some("gzip"), None).await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert!(head.body.is_empty());
+}
+
+/// Every Accept-Encoding that rules out gzip, including the ones that rule
+/// out identity as well, gets the handler's own status and an identity
+/// body: at 200 and at an ACDP 400, never 406.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changes_never_answers_406() {
+    let h = gzip_harness().await;
+    let ok = raw_request(&h.router, "GET", "/changes", None, None).await;
+    let bad = raw_request(&h.router, "GET", "/changes?limit=0", None, None).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    for ae in [
+        "identity;q=0",
+        "*;q=0",
+        "br, identity;q=0",
+        "gzip;q=0, identity;q=0",
+        "gzip;q=0",
+        "br",
+        "gzip;q=abc",
+        "",
+        "deflate, zstd",
+    ] {
+        for (uri, want) in [("/changes", &ok), ("/changes?limit=0", &bad)] {
+            let r = raw_request(&h.router, "GET", uri, Some(ae), None).await;
+            assert_eq!(r.status, want.status, "{uri} with {ae:?}");
+            assert_eq!(r.encoding(), None, "{uri} with {ae:?}");
+            assert_eq!(r.body, want.body, "{uri} with {ae:?}");
+            assert!(
+                r.vary().iter().any(|m| m == "accept-encoding"),
+                "{uri} with {ae:?}: {:?}",
+                r.vary()
+            );
+        }
+    }
+    // The ACDP 400 keeps its problem body, and a gzip-accepting caller gets
+    // that body compressed.
+    let v: Value = serde_json::from_slice(&bad.body).unwrap();
+    assert_eq!(v["error"]["code"], "schema_violation", "{v}");
+    let gz = raw_request(&h.router, "GET", "/changes?limit=0", Some("gzip"), None).await;
+    assert_eq!(gz.status, StatusCode::BAD_REQUEST);
+    assert_eq!(gz.gunzipped(), bad.body);
+}
+
+/// Only `/changes` is compressed: other routes ignore Accept-Encoding, and a
+/// `read_gate` refusal of `/changes` (outside the per-route layer) is never
+/// compressed, which pins the layer order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gzip_is_scoped_to_the_changes_handler() {
+    let h = gzip_harness().await;
+    for uri in [
+        "/contexts/search",
+        "/.well-known/acdp.json",
+        "/log/checkpoint",
+    ] {
+        let r = raw_request(&h.router, "GET", uri, Some("gzip"), None).await;
+        assert_eq!(r.encoding(), None, "{uri} is compressed ({})", r.status);
+        assert!(
+            !r.vary().iter().any(|m| m == "accept-encoding"),
+            "{uri}: {:?}",
+            r.vary()
+        );
+        let strict = raw_request(&h.router, "GET", uri, Some("identity;q=0"), None).await;
+        assert_eq!(strict.status, r.status, "{uri}");
+    }
+
+    let refused = raw_request(
+        &h.router,
+        "GET",
+        "/changes",
+        Some("gzip"),
+        Some("not-a-token"),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(refused.encoding(), None);
+    assert!(
+        refused.body.len() > 32,
+        "big enough to have been compressed"
+    );
+    serde_json::from_slice::<Value>(&refused.body).expect("plain JSON");
+}
+
+/// Tripwire for a tower-http bump: a bare `CompressionLayer` still answers
+/// 406 to `identity;q=0`, overwriting the handler's status. If this starts
+/// failing, the behaviour the normaliser works around has changed; revisit
+/// `acdp_registry_core::accept_encoding` (it may no longer be needed).
+#[tokio::test]
+async fn bare_tower_http_compression_still_answers_406() {
+    use tower::ServiceBuilder;
+    use tower_http::compression::CompressionLayer;
+    let svc = ServiceBuilder::new()
+        .layer(CompressionLayer::new().gzip(true))
+        .service_fn(|_req: Request<Body>| async {
+            let mut resp = axum::http::Response::new(Body::from("x".repeat(256)));
+            *resp.status_mut() = StatusCode::BAD_REQUEST;
+            Ok::<_, std::convert::Infallible>(resp)
+        });
+    let req = Request::builder()
+        .uri("/")
+        .header("accept-encoding", "identity;q=0")
+        .body(Body::empty())
+        .unwrap();
+    let resp = svc.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+}
