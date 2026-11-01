@@ -21,21 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## 0.10.1
-
-**Static read tokens (RFC-ACDP-0008 §6.2 `bearer_static`), off unless configured.** New
-`[[auth.read_tokens]]` entries (hashes only, minted with `acdp-registry read-token generate`) let
-an operator-administered DID read with a long-lived `Authorization: Bearer acdp_rt_…` token, and
-capabilities then list `"bearer_static"`. With none configured nothing changes on the wire.
-Two behaviour changes apply whenever `auth.enabled = true`, configured tokens or not. First, an
-invalid bearer on a data-plane `GET`/`HEAD` is now refused `403` by a gate in front of the
-handlers: before any lookup, for every such route (including `/log/checkpoint` and
-`/key-attestations`, which previously ignored the header, and routes whose profile is off, such as
-`/changes` or `/subscriptions/{id}`, which answer 403 here rather than their 501), and charged to
-the client address's anonymous read bucket. Second, two `Authorization` headers on such a read are `400`. With auth off,
-`Authorization` is still ignored entirely.
-
-**Spec pin 3f50697** (RFC-ACDP-0018 §5.2 page size and compression, §6.1 bucket filters; rec-010 added). Measurement only: no behaviour change, no operator action.
+## Unreleased
 
 **Migration `021_changes_bucket_hashes` backfills the change feed at startup (Postgres: size it
 first).** It adds `lineage_hash` / `agent_hash` to `changes` for RFC-ACDP-0018 §6.1 bucket filters
@@ -67,6 +53,22 @@ unchanged. **Do not set it until every consumer runs acdp 0.20 or newer**: acdp 
 reject a capabilities document carrying that key, and startup logs a warning saying so. **Rolling
 back with it set:** `[changes]` refuses unknown keys, so an older binary refuses to start. Remove
 `max_change_bucket_length` (or its env var) before rolling back.
+
+## 0.10.1
+
+**Static read tokens (RFC-ACDP-0008 §6.2 `bearer_static`), off unless configured.** New
+`[[auth.read_tokens]]` entries (hashes only, minted with `acdp-registry read-token generate`) let
+an operator-administered DID read with a long-lived `Authorization: Bearer acdp_rt_…` token, and
+capabilities then list `"bearer_static"`. With none configured nothing changes on the wire.
+Two behaviour changes apply whenever `auth.enabled = true`, configured tokens or not. First, an
+invalid bearer on a data-plane `GET`/`HEAD` is now refused `403` by a gate in front of the
+handlers: before any lookup, for every such route (including `/log/checkpoint` and
+`/key-attestations`, which previously ignored the header, and routes whose profile is off, such as
+`/changes` or `/subscriptions/{id}`, which answer 403 here rather than their 501), and charged to
+the client address's anonymous read bucket. Second, two `Authorization` headers on such a read are `400`. With auth off,
+`Authorization` is still ignored entirely.
+
+**Spec pin 3f50697** (RFC-ACDP-0018 §5.2 page size and compression, §6.1 bucket filters; rec-010 added). Measurement only: no behaviour change, no operator action.
 
 ## 0.10.0
 
