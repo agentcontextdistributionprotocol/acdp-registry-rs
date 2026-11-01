@@ -748,7 +748,8 @@ jobs:
       - name: harness check — no mutant log may show a full disk
         run: |
           set -uo pipefail
-          hits=$(grep -alE 'Disk quota exceeded|No space left on device' mutants.out/log/*.log | wc -l | tr -d ' ')
+          # grep -l exits 1 when nothing matches, which `bash -e` would read as a failure.
+          hits=$( (grep -alE 'Disk quota exceeded|No space left on device' mutants.out/log/*.log || true) | wc -l | tr -d ' ')
           if [ "$hits" -gt 0 ]; then
             echo "::error::$hits mutant log(s) report a full disk. Their verdicts are infrastructure failures, not mutation results; fix the runner's disk and re-run."
             exit 1
