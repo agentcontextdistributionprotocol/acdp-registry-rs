@@ -450,8 +450,24 @@ env:
 
 jobs:
   mutants:
-    name: mutation oracle (scoped ratchet)
+    name: mutation oracle (shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
+    # SHARDED when #523 took the scope to 405. At 399 one -j1 run took 307.0 min of the 330 cap and
+    # the first 405 run (41281572799) was CANCELLED at the cap after 371 mutants:
+    # build median 60.8 s per viable mutant against 53.9 s at 399, test median
+    # unchanged (11.6 vs 10.8 s), so no slow test this time -- the scope and the
+    # runner's build speed simply outgrew one job. 330 cannot rise again (the
+    # hosted job limit is 360), and narrowing examine_globs is ruled out below,
+    # so the scope runs as round-robin shards and the `ratchet` job merges them
+    # (.github/scripts/merge_mutants_shards.py) before the unchanged checks.
+    # Round-robin, not cargo-mutants' default `slice`: it splits every file across
+    # both shards, so neither shard inherits all of one slow file (200/199 at 399).
+    # The per-run figures below are whole-scope runs from before sharding; each
+    # shard now carries about half, so the cap below has ~2x headroom.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     # MEASURED IN CI, against runs of this same workflow -- not scaled from a
     # local figure, which is the wrong instrument: this job runs -j1 on a hosted
     # runner while a developer machine runs -j4.
@@ -622,7 +638,40 @@ jobs:
         # For orientation only, NOT a basis for the cap: U-552's 351-mutant run on
         # a developer machine took 50m51s, but at -j4. This step is -j1 on a hosted
         # runner, so that number is not comparable and must not be scaled into one.
-        run: cargo mutants -j1 || true
+        run: cargo mutants -j1 --shard ${{ matrix.shard }}/2 --sharding round-robin || true
+
+      # Each shard's raw report, for the `ratchet` job to merge. Unconditional for
+      # the same reason as the merged upload below: a shard that died is the finding.
+      - name: upload this shard's report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out/
+          if-no-files-found: warn
+
+  ratchet:
+    name: mutation oracle (scoped ratchet)
+    needs: mutants
+    # always(): a cancelled or failed shard must still reach the merge, which
+    # REFUSES it -- skipping this job would leave the run with no ratchet verdict
+    # at all, and a missing verdict is easy to misread as a passing one.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: download the shard reports
+        uses: actions/download-artifact@v7
+        with:
+          pattern: mutants-shard-*
+          path: shards/
+
+      # The shard count is written here and in the matrix above; the merge refuses
+      # any other number of reports, so the two cannot drift silently.
+      - name: merge the shards into one mutants.out
+        run: python3 .github/scripts/merge_mutants_shards.py --shards 2 --out mutants.out shards/mutants-shard-*
 
       # THE RATCHET. Four assertions, each able to fail on its own, and the
       # script ACCUMULATES rather than exiting at the first failure -- an early
@@ -670,7 +719,7 @@ jobs:
           # exactly ONE test can indicate concentration; a mutant killed by several
           # is evidence of a real behavioural kill, not a harness-wide panic.
           for f in mutants.out/log/*.log; do
-            case "$(basename "$f")" in baseline.log) continue ;; esac
+            case "$(basename "$f")" in *baseline.log) continue ;; esac
             names=$(grep -aoE '^test [a-z0-9_:]+ \.\.\. FAILED' "$f" \
                       | sed 's/^test //; s/ \.\.\. FAILED$//' | sort -u)
             [ -z "$names" ] && continue
