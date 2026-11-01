@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-auth"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "acdp",
  "acdp-registry-types",
@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-core"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "acdp",
  "acdp-registry-auth",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-pg"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "acdp",
  "acdp-registry-store",
@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-server"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "acdp",
  "acdp-registry-auth",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-sqlite"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "acdp",
  "acdp-registry-store",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-store"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "acdp",
  "acdp-registry-types",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-types"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "acdp",
  "axum",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-registry-webhook"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "acdp",
  "acdp-registry-types",

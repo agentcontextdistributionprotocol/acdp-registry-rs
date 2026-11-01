@@ -1,5 +1,12 @@
 
 
+## [0.10.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.10.0...acdp-registry-server/v0.10.1) - 2026-11-01
+
+### Other
+
+- *(spec)* adopt spec pin 3f50697 (RFC-0018 §5.2 page size, §6.1 bucket filters) ([#530](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/530))
+
+
 ## [0.10.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.9.0...acdp-registry-server/v0.10.0) - 2026-11-01
 
 ### Added
