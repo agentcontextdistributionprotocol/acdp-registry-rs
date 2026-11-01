@@ -14,11 +14,19 @@
 //!   `next_cursor` / `has_more` carry the rest, as on search);
 //! - a cursor that does not decode, or whose tag fails under a known key
 //!   → `invalid_cursor` (400);
-//! - a cursor under an unknown key, above the head, or below the oldest
-//!   retained entry → `cursor_expired` (400). Above-head cannot come from
-//!   this registry's own feed (the head never moves back), so it means
-//!   the feed was reset under the cursor; the consumer recovers exactly as
-//!   from a pruned one (§7: re-verify, resume from `since=head`).
+//! - a cursor under an unknown key, above the head, below the oldest
+//!   retained entry, or issued before a sequence reset → `cursor_expired`
+//!   (400). Every cursor carries the head it was issued at and that row's
+//!   fingerprint ([`CursorAnchor`]); a restore that rewinds the feed
+//!   leaves that anchor above the head or on a different row, so **every**
+//!   cursor that could skip entries expires, including one whose position
+//!   the restored feed has since reached again (§5.3, rec-005 F). A cursor
+//!   issued before the backup point still names rows the restore put back,
+//!   so the restore runbook also raises `[changes] cursor_epoch`, which
+//!   expires every cursor of the old epoch. A version-1 cursor, which has
+//!   no anchor, expires the same way. The
+//!   consumer recovers exactly as from a pruned cursor (§7: re-verify,
+//!   resume from `since=head`).
 //!
 //! Visibility (§5.5) is a post-filter over the store's matching rows, one
 //! batched `visible_ctx_ids` per scanned page. A hidden entry never ends a
@@ -33,7 +41,7 @@ use std::sync::Arc;
 use acdp::error::AcdpError;
 use acdp::types::change::{ChangeKind, ChangesResponse, WatchFilter, MAX_CURSOR_LEN};
 use acdp::types::primitives::{AgentDid, CtxId, LineageId};
-use acdp_registry_store::changes::{FeedQuery, FeedRow};
+use acdp_registry_store::changes::{FeedFingerprint, FeedHead, FeedQuery, FeedRow, FEED_ORIGIN_FP};
 use acdp_registry_store::ExtendedRegistryStore;
 use acdp_registry_types::RegistryError;
 use axum::extract::{RawQuery, State};
@@ -41,7 +49,7 @@ use axum::http::HeaderMap;
 use axum::Json;
 
 use super::context::{caller_from_headers, tenant_for_request};
-use crate::changes_key::{ChangesKey, CursorError};
+use crate::changes_key::{ChangesKey, CursorAnchor, CursorError, DecodedCursor};
 use crate::state::AppState;
 use crate::tenant_trust::PeerIp;
 
@@ -65,8 +73,75 @@ pub enum Since {
     Oldest,
     /// `since=head`: no entries, the head cursor.
     Head,
-    /// A decoded cursor position.
+    /// A cursor the request presented: checked against the feed (§5.3).
+    Cursor(DecodedCursor),
+    /// A position the registry itself recorded (the hint worker's
+    /// progress), read as-is.
     Position(u64),
+}
+
+/// The anchor for a cursor issued while the feed head was `seq`, whose
+/// fingerprint is `fp` ([`FeedHead::head_fp`]).
+///
+/// With no fingerprint (retention pruned through the head before migration
+/// 020 recorded one) the cursor anchors on position 0, which every feed
+/// holds: it is still served, without reset detection (only the restore
+/// runbook's epoch covers it), until the next append gives the head a
+/// fingerprint.
+pub fn anchor_at(seq: u64, fp: Option<FeedFingerprint>) -> CursorAnchor {
+    match fp {
+        Some(fp) => CursorAnchor { seq, fp },
+        None => CursorAnchor {
+            seq: 0,
+            fp: FEED_ORIGIN_FP,
+        },
+    }
+}
+
+/// The cursor at the feed head `head`: what `since=head` answers, and what
+/// a change hint carries.
+pub fn head_cursor(key: &ChangesKey, head: &FeedHead) -> String {
+    key.encode_cursor(head.head, anchor_at(head.head, head.head_fp))
+}
+
+/// Whether `anchor` still names the row it was issued on, given the feed
+/// markers `start`. An anchor above the head, on a pruned row other than
+/// the marker, or on a row with another fingerprint was issued before a
+/// sequence reset (§5.3) or cannot be placed (§5.4).
+async fn anchor_holds<S: ExtendedRegistryStore + ?Sized>(
+    store: &S,
+    start: &FeedHead,
+    anchor: CursorAnchor,
+) -> Result<bool, AcdpError> {
+    if anchor.seq > start.head {
+        return Ok(false);
+    }
+    let stored = if anchor.seq == 0 {
+        Some(FEED_ORIGIN_FP)
+    } else if anchor.seq == start.head {
+        start.head_fp
+    } else {
+        // One snapshot for the row and the markers, so a prune between
+        // the two reads cannot make a live anchor look missing.
+        let page = store
+            .changes_page(&FeedQuery {
+                after: anchor.seq - 1,
+                scan_limit: 1,
+                ..FeedQuery::default()
+            })
+            .await?;
+        if anchor.seq == page.pruned_through {
+            page.pruned_through_fp
+        } else if anchor.seq < page.pruned_through {
+            None
+        } else {
+            page.rows
+                .first()
+                .filter(|r| r.seq == anchor.seq)
+                .map(FeedRow::fingerprint)
+        }
+    };
+    Ok(stored == Some(anchor.fp))
 }
 
 /// A parsed `GET /changes` request.
@@ -138,13 +213,13 @@ pub fn parse_request(
             )))
         }
         Some(c) => match key.decode_cursor(c) {
-            Ok(pos) => Since::Position(pos),
+            Ok(cursor) => Since::Cursor(cursor),
             Err(CursorError::Invalid) => {
                 return Err(RegistryError::Acdp(AcdpError::InvalidCursor(
                     "since is not a cursor this registry issued".into(),
                 )))
             }
-            Err(CursorError::UnknownKey) => {
+            Err(CursorError::UnknownKey | CursorError::Stale) => {
                 return Err(RegistryError::Acdp(AcdpError::CursorExpired))
             }
         },
@@ -185,14 +260,22 @@ pub async fn evaluate_changes<S: ExtendedRegistryStore + 'static>(
         Since::Head => {
             let resp = ChangesResponse {
                 changes: Vec::new(),
-                next_cursor: key.encode_cursor(start.head),
+                next_cursor: head_cursor(key, &start),
                 has_more: false,
             };
             return Ok((resp, 0));
         }
         Since::Oldest => start.pruned_through,
-        Since::Position(p) if p > start.head || p < start.pruned_through => {
+        Since::Position(p) | Since::Cursor(DecodedCursor { pos: p, .. })
+            if p > start.head || p < start.pruned_through =>
+        {
             return Err(RegistryError::Acdp(AcdpError::CursorExpired));
+        }
+        Since::Cursor(c) => {
+            if !anchor_holds(store, &start, c.anchor).await? {
+                return Err(RegistryError::Acdp(AcdpError::CursorExpired));
+            }
+            c.pos
         }
         Since::Position(p) => p,
     };
@@ -242,9 +325,10 @@ pub async fn evaluate_changes<S: ExtendedRegistryStore + 'static>(
     };
 
     let target = usize::try_from(req.limit).unwrap_or(usize::MAX);
-    let check_expiry = matches!(req.since, Since::Position(_));
+    let check_expiry = matches!(req.since, Since::Cursor(_) | Since::Position(_));
     let mut changes = Vec::new();
     let mut head = start.head;
+    let mut head_fp = start.head_fp;
     let mut scanned = 0u64;
     'scan: for _ in 0..REFILL_MAX_SCANS {
         let page = store
@@ -253,7 +337,9 @@ pub async fn evaluate_changes<S: ExtendedRegistryStore + 'static>(
                 ..base.clone()
             })
             .await?;
-        head = head.max(page.head);
+        if page.head >= head {
+            (head, head_fp) = (page.head, page.head_fp);
+        }
         // A prune that overtook the read position deleted rows this
         // cursor had not yet been served (§5.4). Without a cursor the
         // request asked only for the oldest retained entry onward.
@@ -291,7 +377,7 @@ pub async fn evaluate_changes<S: ExtendedRegistryStore + 'static>(
 
     let resp = ChangesResponse {
         changes,
-        next_cursor: key.encode_cursor(pos),
+        next_cursor: key.encode_cursor(pos, anchor_at(head, head_fp)),
         has_more: pos < head,
     };
     resp.validate().map_err(|e| {
@@ -372,10 +458,29 @@ mod tests {
     #[test]
     fn since_head_and_cursor_round_trip() {
         assert_eq!(parse("since=head").unwrap().since, Since::Head);
-        let c = key().encode_cursor(42);
+        let anchor = CursorAnchor {
+            seq: 50,
+            fp: [3; 8],
+        };
+        let c = key().encode_cursor(42, anchor);
         assert_eq!(
             parse(&format!("since={c}")).unwrap().since,
-            Since::Position(42)
+            Since::Cursor(DecodedCursor { pos: 42, anchor })
+        );
+    }
+
+    #[test]
+    fn an_anchor_without_a_fingerprint_falls_back_to_the_origin() {
+        assert_eq!(
+            anchor_at(7, Some([1; 8])),
+            CursorAnchor { seq: 7, fp: [1; 8] }
+        );
+        assert_eq!(
+            anchor_at(7, None),
+            CursorAnchor {
+                seq: 0,
+                fp: FEED_ORIGIN_FP
+            }
         );
     }
 
@@ -387,8 +492,13 @@ mod tests {
         assert_eq!(code(parse(&format!("since={long}"))), "invalid_cursor");
         let other = ChangesKey::from_master(&[7u8; 32], 2)
             .unwrap()
-            .encode_cursor(5);
+            .encode_cursor(5, anchor_at(5, Some([0; 8])));
         assert_eq!(code(parse(&format!("since={other}"))), "cursor_expired");
+        // Issued before the restore runbook raised `cursor_epoch`.
+        let old_epoch = key()
+            .with_epoch(3)
+            .encode_cursor(5, anchor_at(5, Some([0; 8])));
+        assert_eq!(code(parse(&format!("since={old_epoch}"))), "cursor_expired");
     }
 
     #[test]

@@ -1368,6 +1368,12 @@ fn default_log_instance() -> String {
 /// holds answers `cursor_expired`, so changing `key_id` (a rotation)
 /// forces consumers to resync rather than misreading positions.
 ///
+/// `cursor_epoch` (env `ACDP_REGISTRY_CHANGES__CURSOR_EPOCH`) is sealed into
+/// every cursor; one issued under another epoch answers `cursor_expired`.
+/// Raise it when restoring the store from a backup (RFC-ACDP-0018 §5.3: a
+/// sequence reset must expire every earlier cursor). Unlike a `key_id`
+/// rotation it leaves sealed subscription secrets readable.
+///
 /// Startup validation also requires the `lifecycle` profile, a receipt
 /// key, a durable store, `retention_seconds` >= 2592000 (30 days, §5.4)
 /// and both page/filter limits >= 100 (§9).
@@ -1385,6 +1391,10 @@ pub struct ChangesConfig {
     /// Key id stamped into every cursor this registry issues.
     #[serde(default = "default_changes_key_id")]
     pub key_id: u8,
+    /// Sealed into every cursor; a cursor from another epoch is expired.
+    /// Raise it on every restore from backup.
+    #[serde(default)]
+    pub cursor_epoch: u32,
     /// How long a feed entry is kept, advertised as
     /// `limits.change_retention_seconds`.
     #[serde(default = "default_change_retention_seconds")]
@@ -1407,6 +1417,7 @@ impl Default for ChangesConfig {
             key_b64: String::new(),
             key_path: None,
             key_id: default_changes_key_id(),
+            cursor_epoch: 0,
             retention_seconds: default_change_retention_seconds(),
             max_change_filters: default_changes_min_limit(),
             max_changes_page: default_changes_min_limit(),

@@ -7879,7 +7879,7 @@ fn lin_vectors_reproduce_lineage_derivation() {
     );
 }
 
-/// The exact number of caps-* fixture ids at spec pin dd5486c, and the
+/// The exact number of caps-* fixture ids at spec pin c40671e, and the
 /// exact number of outcome assertions this test makes (8 base-case
 /// fixtures + caps-007's 3 and caps-008's 3 `reject_variants`). Two separate constants
 /// because they answer two separate "did this silently shrink" questions:
@@ -7973,7 +7973,7 @@ fn caps_vectors_validate_capabilities_document() {
             assert_eq!(
                 variants.len(),
                 3,
-                "{id} must carry exactly 3 reject_variants at spec pin dd5486c: {fx}"
+                "{id} must carry exactly 3 reject_variants at spec pin c40671e: {fx}"
             );
             for v in variants {
                 let name = v["name"].as_str().unwrap_or("?");
@@ -8016,13 +8016,13 @@ fn caps_vectors_validate_capabilities_document() {
     assert_eq!(
         found_ids.len(),
         EXPECTED_CAPS_FIXTURE_COUNT,
-        "expected exactly {EXPECTED_CAPS_FIXTURE_COUNT} caps-* fixtures at spec pin dd5486c: \
+        "expected exactly {EXPECTED_CAPS_FIXTURE_COUNT} caps-* fixtures at spec pin c40671e: \
          found {found_ids:?}"
     );
     assert_eq!(
         asserted, EXPECTED_CAPS_ASSERTION_COUNT,
         "expected exactly {EXPECTED_CAPS_ASSERTION_COUNT} caps-* outcome assertions (8 base \
-         cases + caps-007's and caps-008's 3 reject_variants each) at spec pin dd5486c -- a silently-shrinking \
+         cases + caps-007's and caps-008's 3 reject_variants each) at spec pin c40671e -- a silently-shrinking \
          count here is exactly the vacuous-pass failure mode this ratchet exists to prevent"
     );
 }
@@ -9786,7 +9786,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "rec",
-        "RFC-ACDP-0018 retraction recall, spec pin dd5486c: 9 fixtures, none carrying an \
+        "RFC-ACDP-0018 retraction recall, spec pin c40671e: 9 fixtures, none carrying an \
          endpoint (rec-007's vectors array is the hint-hmac-001 HMAC known-answer \
          vector, not an HTTP exchange). Two grounds, split by fixture. rec-001..005 and \
          rec-008 apply_to acdp-registry-changes, and rec-007 scenarios A-C and F-H to \
@@ -9811,7 +9811,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "mcp",
-        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin dd5486c: 7 fixtures, all \
+        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin c40671e: 7 fixtures, all \
          applies_to_profiles = [acdp-producer-mcp-proxy], none carrying an endpoint \
          (mcp-001's vectors array is a known-answer set). They are obligations of an MCP \
          signing proxy, a producer: an acdp:mcp-tool-result body is an ordinary signed \
@@ -9821,7 +9821,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "trust",
-        "RFC-ACDP-0020 registry trust lists (Draft), spec pin dd5486c: 7 fixtures, all \
+        "RFC-ACDP-0020 registry trust lists (Draft), spec pin c40671e: 7 fixtures, all \
          applies_to_profiles = [acdp-consumer-trust-list], none carrying an endpoint \
          (trust-001's vectors array is a known-answer set). Selecting, validating and \
          applying signed acdp:trust-list bodies is the consumer's evaluation; an \
@@ -19017,7 +19017,13 @@ fn the_shipped_binary_sweeps_legacy_events_on_startup() {
 /// (D, key revocation, is in `tests/changes_http.rs`.)
 /// rec-005 C–D: `since=%%%garbage` is `invalid_cursor`; the advertised limits
 /// meet the floors. (A, 29-day durability, follows from the advertised
-/// retention plus `tests/changes_http.rs`'s prune tests; B likewise.)
+/// retention plus `tests/changes_http.rs`'s prune tests; B likewise.) E and
+/// F are self-tests a black box cannot run: a rotated cursor key is
+/// `cursor_expired` in `rec001_cursor_errors`, and every cursor issued past
+/// a restore's backup point is refused in
+/// `rec005_cursors_from_before_a_sequence_reset_expire` (sqlite) and
+/// `pg_changes_feed_round_trip` (Postgres), with the `cursor_epoch` bump
+/// for the rest unit-tested in `changes_key` and `handlers::changes`.
 ///
 /// rec-003 (filters) is [`rec003_filters_registry_side`]; rec-004
 /// (visibility) and rec-008 (same-transaction atomicity) are exercised in
@@ -19034,7 +19040,8 @@ fn rec_changes_registry_side() {
     for (id, wanted) in [
         ("rec-001", &["A ", "B ", "C ", "D ", "E ", "F ", "G "][..]),
         ("rec-002", &["A ", "B ", "C ", "E ", "F "][..]),
-        ("rec-005", &["C ", "D "][..]),
+        // E and F: the fixture still names them; see the doc comment.
+        ("rec-005", &["C ", "D ", "E ", "F "][..]),
     ] {
         let fx = find_fixture_by_id(&fixtures, id)
             .unwrap_or_else(|| panic!("{id} not found at the pinned spec"));

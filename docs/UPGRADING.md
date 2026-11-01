@@ -32,6 +32,24 @@ Railway needs `ACDP_REGISTRY_RATE_LIMIT__FORWARDED_HEADER_TRUST=any_peer` with
 `ACDP_REGISTRY_RATE_LIMIT__FORWARDED_SKIP_RIGHTMOST=1`. Startup refuses a value above 4, or a non-zero
 value while `X-Forwarded-For` is never read.
 
+**`GET /changes` consumers resync once (RFC-ACDP-0018 §5.3).** Cursors move to a version-2 format that
+carries the feed head they were issued at, so a cursor issued before a restore that rolls `seq` back
+is refused instead of skipping the entries that reuse its numbers. Every cursor issued by 0.9 or
+earlier answers `400 cursor_expired` once after the upgrade. Consumers resync from `since=head`, as
+§7 requires on any expiry, and nothing is misread. Cursors are now 83 characters, up from 51. A
+cursor minted under another master key is now `cursor_expired` even when `key_id` was left
+unchanged; before, that was `invalid_cursor`.
+Migration `020_changes_pruned_fp` adds a nullable column to `changes_meta` and runs at startup.
+**Take a backup before upgrading a SQLite deployment.** SQLite does not start an older release on a
+database migrated by a newer one ([OPERATIONS.md](OPERATIONS.md)), so rolling back to 0.9 means
+restoring that backup. Postgres tolerates the extra migration, and a rollback leaves the column in
+place, harmlessly. Either way, 0.9 refuses the new cursors as invalid, so consumers resync again.
+
+**New: `[changes] cursor_epoch`** (`ACDP_REGISTRY_CHANGES__CURSOR_EPOCH`, default `0`). Raise it by one
+whenever the store is restored from a backup. It replaces the earlier advice to rotate the changes
+key, which also disabled every subscription. See
+[OPERATIONS.md](OPERATIONS.md#restore).
+
 ## 0.9.0
 
 **No upgrade steps.** The spec pin moves to `dd5486c` (RFC-ACDP-0008 read rate limits and static

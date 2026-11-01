@@ -9,12 +9,13 @@
 
 use acdp::error::AcdpError;
 use acdp::types::body::Body;
+use acdp::types::change::ChangeKind;
 use acdp::types::lifecycle::LifecycleEvent;
 use acdp::types::primitives::CtxId;
 use acdp::types::EventReceipt;
 use acdp_registry_store::changes::{
-    feed_appends_for_publish, lifecycle_append, FeedAppend, FeedHead, FeedPage, FeedQuery, FeedRow,
-    Predecessor,
+    feed_appends_for_publish, feed_fingerprint, lifecycle_append, FeedAppend, FeedFingerprint,
+    FeedHead, FeedPage, FeedQuery, FeedRow, Predecessor,
 };
 use acdp_registry_store::event_receipts::receipt_value;
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
@@ -99,18 +100,41 @@ async fn insert(
 }
 
 async fn read_head(tx: &mut Transaction<'_, Sqlite>) -> Result<FeedHead, AcdpError> {
-    let (max_seq, pruned): (Option<i64>, i64) = sqlx::query_as(
-        "SELECT (SELECT MAX(seq) FROM changes), \
-                (SELECT pruned_through FROM changes_meta WHERE id = 1)",
+    let (pruned, pruned_fp): (i64, Option<Vec<u8>>) =
+        sqlx::query_as("SELECT pruned_through, pruned_through_fp FROM changes_meta WHERE id = 1")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(db_err("head"))?;
+    let top: Option<(i64, i64, String, String)> = sqlx::query_as(
+        "SELECT seq, appended_at_ms, kind, ctx_id FROM changes ORDER BY seq DESC LIMIT 1",
     )
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err("head"))?;
-    let pruned = pruned.max(0) as u64;
-    Ok(FeedHead {
-        head: (max_seq.unwrap_or(0).max(0) as u64).max(pruned),
-        pruned_through: pruned,
-    })
+    let top = top
+        .map(|(seq, at, kind, ctx_id)| fingerprint_columns(seq, at, &kind, &ctx_id))
+        .transpose()?;
+    Ok(FeedHead::from_snapshot(
+        top,
+        pruned.max(0) as u64,
+        // A stored value of the wrong width is unusable, like a missing one.
+        pruned_fp.and_then(|fp| FeedFingerprint::try_from(fp).ok()),
+    ))
+}
+
+/// `(seq, fingerprint)` from a row's fingerprinted columns.
+fn fingerprint_columns(
+    seq: i64,
+    appended_at_ms: i64,
+    kind: &str,
+    ctx_id: &str,
+) -> Result<(u64, FeedFingerprint), AcdpError> {
+    let kind = ChangeKind::parse(kind).map_err(|e| {
+        AcdpError::RegistryInternal(format!("stored change {seq} has a bad kind: {e}"))
+    })?;
+    let seq = u64::try_from(seq)
+        .map_err(|_| AcdpError::RegistryInternal(format!("stored change seq {seq} is negative")))?;
+    Ok((seq, feed_fingerprint(seq, appended_at_ms, kind, ctx_id)))
 }
 
 pub(crate) async fn head(pool: &SqlitePool) -> Result<FeedHead, AcdpError> {
@@ -236,17 +260,41 @@ pub(crate) async fn prune(
     else {
         return Ok(0);
     };
+    // Fingerprint the new boundary row before it goes.
+    let boundary = boundary_fp(&mut tx, last).await?;
     let deleted = sqlx::query("DELETE FROM changes WHERE seq <= ?")
         .bind(last)
         .execute(&mut *tx)
         .await
         .map_err(db_err("prune delete"))?
         .rows_affected();
-    sqlx::query("UPDATE changes_meta SET pruned_through = MAX(pruned_through, ?) WHERE id = 1")
-        .bind(last)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err("prune marker"))?;
+    // Both columns read the old `pruned_through`: the fingerprint moves only
+    // with the marker.
+    sqlx::query(
+        "UPDATE changes_meta SET \
+         pruned_through_fp = CASE WHEN ?1 >= pruned_through THEN ?2 ELSE pruned_through_fp END, \
+         pruned_through = MAX(pruned_through, ?1) WHERE id = 1",
+    )
+    .bind(last)
+    .bind(boundary.to_vec())
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err("prune marker"))?;
     tx.commit().await.map_err(db_err("commit"))?;
     Ok(deleted)
+}
+
+/// [`FeedRow::fingerprint`] of the row at `seq`, which the caller is about to
+/// prune and holds in its scan.
+async fn boundary_fp(
+    tx: &mut Transaction<'_, Sqlite>,
+    seq: i64,
+) -> Result<FeedFingerprint, AcdpError> {
+    let (appended_at_ms, kind, ctx_id): (i64, String, String) =
+        sqlx::query_as("SELECT appended_at_ms, kind, ctx_id FROM changes WHERE seq = ?")
+            .bind(seq)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(db_err("prune boundary"))?;
+    Ok(fingerprint_columns(seq, appended_at_ms, &kind, &ctx_id)?.1)
 }

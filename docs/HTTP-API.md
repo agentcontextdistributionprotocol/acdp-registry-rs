@@ -780,6 +780,14 @@ registry does with them:
   minted under a key this registry does not hold is `400 cursor_expired`;
   restart from `since` absent or `head`. A cursor that does not decode or
   authenticate is `400 invalid_cursor`.
+- **Sequence resets (§5.3).** A cursor carries the feed head it was issued at
+  and that row's fingerprint. After a restore that rolls `seq` back, a cursor
+  whose anchor row is gone or is now a different entry is `cursor_expired`,
+  even once new entries have reused its position, so no consumer skips them.
+  A restore also raises `[changes] cursor_epoch`, which expires every cursor
+  of the earlier epoch. A cursor issued by 0.9 or earlier (the 51-character
+  version-1 format) carries no anchor and is `cursor_expired` once; resync
+  from `since=head`.
 
 ### `POST /subscriptions`, `GET /subscriptions/{id}`, `DELETE /subscriptions/{id}` *(ACDP 0.5.0)*
 
@@ -1258,7 +1266,7 @@ This page documents only what **this registry** answers and when.
 | 400 | `invalid_signature` | The producer signature did not verify against the resolved key. |
 | 400 | `unsupported_algorithm` | Signature algorithm outside `supported_signature_algorithms`. |
 | 400 | `invalid_cursor` | A `cursor=` value that does not decode or does not match its query, or a `GET /changes` `since` cursor that does not decode or authenticate. |
-| 400 | `cursor_expired` | A structurally valid cursor whose window has passed; on `GET /changes`, one before the oldest retained entry, past the head, or under a key this registry does not hold. |
+| 400 | `cursor_expired` | A structurally valid cursor whose window has passed; on `GET /changes`, one before the oldest retained entry, past the head, under a key or `cursor_epoch` this registry does not hold, issued before a sequence reset, or in the 51-character format of 0.9 and earlier. |
 | 400 | `superseded_target` | A static supersession violation: any `details.reason` other than the two 409 ones below (e.g. `not_found`, `lineage_mismatch`, `cross_registry_supersession_unsupported`, `lineage_walk_failed`, `revocation_type_mismatch`). |
 | 403 | `not_authorized` | Bad/expired/revoked bearer, challenge failure, an anonymous **search** when `anonymous_public_reads` is off, tenant-scope denial in strict mode, an `X-Tenant-Id` the registry does not trust from the sending peer (`auth.tenant_header_trust`). Retrieval never answers 403 for visibility: see 404. |
 | 403 | `key_not_authorized` | The key resolved fine but is not authorized to sign for that agent. |

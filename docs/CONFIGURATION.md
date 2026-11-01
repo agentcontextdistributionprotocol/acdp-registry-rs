@@ -774,7 +774,10 @@ in a committed file, and keep it distinct from the receipt seed. **Every
 replica serving the same store needs the same key and `key_id`.** Rotating
 (`key_id` changed, new key) invalidates every outstanding cursor: consumers
 get `cursor_expired` and resync from `since` absent or `head`, which the
-protocol allows; nothing is misread.
+protocol allows; nothing is misread. After restoring the store from a backup,
+raise `cursor_epoch` instead
+([OPERATIONS.md, Restore](OPERATIONS.md#restore)). Every older cursor expires
+the same way, and subscription secrets stay readable.
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
@@ -782,6 +785,7 @@ protocol allows; nothing is misread.
 | `key_b64` | string | `""` | Base64 of the 32-byte master key. Env `ACDP_REGISTRY_CHANGES__KEY_B64`. Mutually exclusive with `key_path`. |
 | `key_path` | path | unset | File holding the base64 master key. |
 | `key_id` | u8 | `1` | Stamped into every cursor; a cursor under an id this registry does not hold is `cursor_expired`. Change it when rotating the key. |
+| `cursor_epoch` | u32 | `0` | Sealed into every cursor; a cursor from another epoch is `cursor_expired`. Env `ACDP_REGISTRY_CHANGES__CURSOR_EPOCH`. Raise it by one on every restore from backup (RFC-ACDP-0018 §5.3); never lower it. Same value on every replica. |
 | `retention_seconds` | u64 | `2592000` | Minimum entry lifetime; advertised as `limits.change_retention_seconds`. |
 | `max_change_filters` | u64 | `100` | Total `ctx_id`/`lineage_id`/`agent_id`/`kind` values per request; advertised. |
 | `max_changes_page` | u64 | `100` | Largest `limit`; advertised as `limits.max_changes_page`. |

@@ -93,6 +93,11 @@ impl FeedRow {
         })
     }
 
+    /// This row's [`feed_fingerprint`].
+    pub fn fingerprint(&self) -> FeedFingerprint {
+        feed_fingerprint(self.seq, self.appended_at_ms, self.kind, &self.ctx_id)
+    }
+
     /// The `acdp-change/1` entry this row serves (RFC-ACDP-0018 §4).
     ///
     /// The evidence is re-serialized through its typed form, the same path
@@ -191,8 +196,80 @@ pub struct FeedHead {
     /// The highest position ever assigned: `max(MAX(seq), pruned_through)`.
     /// Zero for a feed that has never had a row.
     pub head: u64,
+    /// The fingerprint of position `head`, from the same snapshot: the head
+    /// row's [`FeedRow::fingerprint`], [`FEED_ORIGIN_FP`] on a feed that has
+    /// never had a row, or `pruned_through_fp` when retention has pruned
+    /// through the head. `None` only in that last case with no recorded
+    /// fingerprint.
+    pub head_fp: Option<FeedFingerprint>,
     /// Every row with `seq <= pruned_through` has been pruned (§5.4).
     pub pruned_through: u64,
+    /// [`FeedRow::fingerprint`] of the row at `pruned_through`, recorded in
+    /// the transaction that pruned it, so a cursor anchored exactly there
+    /// can still be placed. `None` before the first prune that recorded one
+    /// (a feed pruned before migration 020, or never pruned).
+    pub pruned_through_fp: Option<FeedFingerprint>,
+}
+
+impl FeedHead {
+    /// Assemble the markers a backend read in one snapshot. `top` is the row
+    /// with the highest stored seq, if any.
+    pub fn from_snapshot(
+        top: Option<(u64, FeedFingerprint)>,
+        pruned_through: u64,
+        pruned_through_fp: Option<FeedFingerprint>,
+    ) -> Self {
+        let (head, head_fp) = match top {
+            Some((seq, fp)) if seq > pruned_through => (seq, Some(fp)),
+            _ if pruned_through == 0 => (0, Some(FEED_ORIGIN_FP)),
+            _ => (pruned_through, pruned_through_fp),
+        };
+        Self {
+            head,
+            head_fp,
+            pruned_through,
+            pruned_through_fp,
+        }
+    }
+}
+
+/// Eight bytes that identify one feed row by the columns that can never
+/// repeat across a sequence reset: its `seq`, the backend clock at append,
+/// its kind and its context. See [`feed_fingerprint`].
+pub type FeedFingerprint = [u8; 8];
+
+/// The fingerprint of position 0, before any row: a cursor anchored there
+/// was issued on an empty feed, so its holder has seen nothing a reset could
+/// take back.
+pub const FEED_ORIGIN_FP: FeedFingerprint = [0; 8];
+
+/// The fingerprint `/changes` cursors anchor on (RFC-ACDP-0018 §5.3).
+///
+/// Rows are immutable once appended, so a row's fingerprint never changes.
+/// After a sequence reset (a restore from a backup that predates served
+/// entries, or a memory backend's restart), the row now at `seq` is a
+/// different append: at least `appended_at_ms` differs, and so does the
+/// fingerprint. The registry compares a cursor's anchor against the stored row
+/// and refuses it on any difference. The digest covers only scalar columns,
+/// so every backend computes the same bytes regardless of how it stores JSON.
+pub fn feed_fingerprint(
+    seq: u64,
+    appended_at_ms: i64,
+    kind: ChangeKind,
+    ctx_id: &str,
+) -> FeedFingerprint {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"acdp-registry/changes-fp/v1\0");
+    h.update(seq.to_be_bytes());
+    h.update(appended_at_ms.to_be_bytes());
+    h.update(kind.as_str().as_bytes());
+    h.update([0]);
+    h.update(ctx_id.as_bytes());
+    let digest = h.finalize();
+    let mut fp = [0u8; 8];
+    fp.copy_from_slice(&digest[..8]);
+    fp
 }
 
 /// The result of one [`FeedQuery`] scan.
@@ -206,7 +283,11 @@ pub struct FeedPage {
     /// No matching row exists past `last_scanned` (as of the snapshot).
     pub reached_head: bool,
     pub head: u64,
+    /// [`FeedHead::head_fp`] from the scan's snapshot.
+    pub head_fp: Option<FeedFingerprint>,
     pub pruned_through: u64,
+    /// [`FeedHead::pruned_through_fp`] from the scan's snapshot.
+    pub pruned_through_fp: Option<FeedFingerprint>,
 }
 
 impl FeedPage {
@@ -223,7 +304,9 @@ impl FeedPage {
             last_scanned,
             reached_head,
             head: head.head,
+            head_fp: head.head_fp,
             pruned_through: head.pruned_through,
+            pruned_through_fp: head.pruned_through_fp,
         }
     }
 }
@@ -570,6 +653,51 @@ mod tests {
         assert!(no_event.to_change().is_err());
     }
 
+    /// The fingerprint changes with every column it covers, and is stable.
+    #[test]
+    fn feed_fingerprint_covers_seq_clock_kind_and_context() {
+        let base = feed_fingerprint(7, 1_000, ChangeKind::Lifecycle, "acdp://r/c");
+        assert_eq!(
+            base,
+            feed_fingerprint(7, 1_000, ChangeKind::Lifecycle, "acdp://r/c")
+        );
+        for other in [
+            feed_fingerprint(8, 1_000, ChangeKind::Lifecycle, "acdp://r/c"),
+            feed_fingerprint(7, 1_001, ChangeKind::Lifecycle, "acdp://r/c"),
+            feed_fingerprint(7, 1_000, ChangeKind::Superseded, "acdp://r/c"),
+            feed_fingerprint(7, 1_000, ChangeKind::Lifecycle, "acdp://r/d"),
+        ] {
+            assert_ne!(base, other);
+        }
+        assert_ne!(base, FEED_ORIGIN_FP);
+        let mut r = row(7, ChangeKind::Lifecycle, "acdp://r/c", "l", AGENT);
+        r.appended_at_ms = 1_000;
+        assert_eq!(r.fingerprint(), base);
+        // Pinned bytes: every backend, and every release, must agree.
+        assert_eq!(
+            hex(&feed_fingerprint(1, 0, ChangeKind::KeyRevocation, "")),
+            "be58eb08a809dcc6"
+        );
+    }
+
+    #[test]
+    fn head_snapshot_fingerprints_the_head_position() {
+        let fp = [9; 8];
+        let empty = FeedHead::from_snapshot(None, 0, None);
+        assert_eq!((empty.head, empty.head_fp), (0, Some(FEED_ORIGIN_FP)));
+        let live = FeedHead::from_snapshot(Some((5, fp)), 2, Some([1; 8]));
+        assert_eq!((live.head, live.head_fp), (5, Some(fp)));
+        // Pruned through the head: the marker's recorded fingerprint, or
+        // none on a feed pruned before migration 020.
+        let drained = FeedHead::from_snapshot(None, 4, Some([1; 8]));
+        assert_eq!((drained.head, drained.head_fp), (4, Some([1; 8])));
+        assert_eq!(FeedHead::from_snapshot(None, 4, None).head_fp, None);
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
     #[test]
     fn matches_is_or_across_ids_and_with_kind() {
         use ChangeKind::*;
@@ -618,7 +746,9 @@ mod tests {
         };
         let head = FeedHead {
             head: 20,
+            head_fp: Some([7; 8]),
             pruned_through: 3,
+            pruned_through_fp: None,
         };
         let r = |s| row(s, ChangeKind::Lifecycle, "c", "l", "a");
         let full = FeedPage::from_scan(&q, vec![r(7), r(9)], head);

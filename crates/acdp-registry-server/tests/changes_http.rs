@@ -18,8 +18,9 @@ use acdp::producer::Producer;
 use acdp::types::body::Body as AcdpBody;
 use acdp::types::capabilities::{CapabilitiesDocument, Limits};
 use acdp::types::primitives::{AgentDid, ContextType, Visibility};
-use acdp_registry_core::changes_key::ChangesKey;
+use acdp_registry_core::changes_key::{ChangesKey, CursorAnchor};
 use acdp_registry_store::ExtendedRegistryStore;
+use acdp_registry_store::FEED_ORIGIN_FP;
 use acdp_registry_types::RegistryConfig;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -82,6 +83,20 @@ async fn harness(changes: bool) -> SeededHarness {
 
 fn key() -> ChangesKey {
     ChangesKey::from_master(&CHANGES_SEED, 1).unwrap()
+}
+
+/// An anchor no feed in these tests holds: a cursor carrying it is placed
+/// by its position checks alone or refused.
+fn anchor(seq: u64) -> CursorAnchor {
+    CursorAnchor { seq, fp: [0xee; 8] }
+}
+
+/// The anchor of a cursor issued on an empty feed.
+fn origin() -> CursorAnchor {
+    CursorAnchor {
+        seq: 0,
+        fp: FEED_ORIGIN_FP,
+    }
 }
 
 fn did_key_producer(seed: u8) -> Producer {
@@ -320,7 +335,10 @@ async fn rec001_feed_mechanics() {
     let empty = page(&h.router, "", None).await;
     assert!(empty.changes.is_empty());
     assert!(!empty.has_more);
-    assert_eq!(key().decode_cursor(&empty.next_cursor), Ok(0));
+    assert_eq!(
+        key().decode_cursor(&empty.next_cursor).map(|c| c.pos),
+        Ok(0)
+    );
 
     let (a, _) = publish_ctx(&h, 41, "rec001 a", Visibility::Public).await;
     let (b, _) = publish_ctx(&h, 41, "rec001 b", Visibility::Public).await;
@@ -361,12 +379,12 @@ async fn rec001_feed_mechanics() {
     )
     .await;
     assert!(tail.changes.is_empty() && !tail.has_more);
-    assert_eq!(key().decode_cursor(&tail.next_cursor), Ok(3));
+    assert_eq!(key().decode_cursor(&tail.next_cursor).map(|c| c.pos), Ok(3));
 
     // since=head skips history and sees only the next change.
     let head = page(&h.router, "since=head", None).await;
     assert!(head.changes.is_empty() && !head.has_more);
-    assert_eq!(key().decode_cursor(&head.next_cursor), Ok(3));
+    assert_eq!(key().decode_cursor(&head.next_cursor).map(|c| c.pos), Ok(3));
     lifecycle(&h, 41, &b, "republish", "republished").await;
     let after = page(
         &h.router,
@@ -387,7 +405,7 @@ async fn rec001_cursor_errors() {
     let (a, _) = publish_ctx(&h, 42, "rec001 cursors", Visibility::Public).await;
     retract(&h, 42, &a).await;
 
-    let mut tampered = key().encode_cursor(1).into_bytes();
+    let mut tampered = key().encode_cursor(1, anchor(1)).into_bytes();
     let last = tampered.len() - 1;
     tampered[last] = if tampered[last] == b'A' { b'B' } else { b'A' };
     for bad in [
@@ -407,8 +425,8 @@ async fn rec001_cursor_errors() {
 
     let other_key = ChangesKey::from_master(&[8u8; 32], 2)
         .unwrap()
-        .encode_cursor(1);
-    let beyond_head = key().encode_cursor(99);
+        .encode_cursor(1, anchor(1));
+    let beyond_head = key().encode_cursor(99, anchor(99));
     for expired in [other_key, beyond_head] {
         let (status, v) = changes(&h.router, &format!("since={}", enc(&expired)), None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
@@ -561,7 +579,7 @@ async fn rec003_watch_filters() {
     // a poller never rescans what it has already been told is empty.
     let none = page(&h.router, "agent_id=did%3Aweb%3Aagents.test%3Anobody", None).await;
     assert!(none.changes.is_empty() && !none.has_more);
-    assert_eq!(key().decode_cursor(&none.next_cursor), Ok(4));
+    assert_eq!(key().decode_cursor(&none.next_cursor).map(|c| c.pos), Ok(4));
 }
 
 // ─── rec-004: visibility ────────────────────────────────────────────────────
@@ -663,7 +681,10 @@ async fn rec004_empty_page_is_not_the_end() {
         first.has_more,
         "an empty page with entries left is not the end"
     );
-    assert_eq!(key().decode_cursor(&first.next_cursor), Ok(budget));
+    assert_eq!(
+        key().decode_cursor(&first.next_cursor).map(|c| c.pos),
+        Ok(budget)
+    );
     let next = page(
         &h.router,
         &format!("limit={LIMIT}&since={}", enc(&first.next_cursor)),
@@ -721,7 +742,7 @@ async fn rec005_retention_and_expired_cursors() {
     retract(&h, 51, &a).await; // 1
     lifecycle(&h, 51, &a, "republish", "republished").await; // 2
     let at_one = page(&h.router, "limit=1", None).await.next_cursor;
-    let at_zero = key().encode_cursor(0);
+    let at_zero = key().encode_cursor(0, origin());
 
     // A: the pruner, running at t0 + 2 h and at t0 + 29 d with the
     // advertised 30-day retention, deletes nothing; C1 still resumes.
@@ -754,7 +775,10 @@ async fn rec005_retention_and_expired_cursors() {
     assert_eq!(h.store().prune_changes(future, 100).await.unwrap(), 1);
     let drained = page(&h.router, "", None).await;
     assert!(drained.changes.is_empty() && !drained.has_more);
-    assert_eq!(key().decode_cursor(&drained.next_cursor), Ok(2));
+    assert_eq!(
+        key().decode_cursor(&drained.next_cursor).map(|c| c.pos),
+        Ok(2)
+    );
     retract(&h, 51, &a).await;
     assert_eq!(
         seqs(
@@ -766,6 +790,101 @@ async fn rec005_retention_and_expired_cursors() {
             .await
         ),
         vec![3]
+    );
+}
+
+/// Rewind the feed as a restore from a backup taken at `seq` would: later
+/// rows are gone and their numbers will be assigned again.
+async fn restore_feed_to(h: &SeededHarness, seq: i64) {
+    let pool = h.store().pool();
+    sqlx::query("DELETE FROM changes WHERE seq > ?")
+        .bind(seq)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sqlite_sequence SET seq = ? WHERE name = 'changes'")
+        .bind(seq)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn assert_expired(h: &SeededHarness, cursor: &str, why: &str) {
+    let (status, v) = changes(&h.router, &format!("since={}", enc(cursor)), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {v}");
+    assert_eq!(v["error"]["code"], "cursor_expired", "{why}: {v}");
+}
+
+/// rec-005 F: after a restore that reuses served seqs, every cursor issued
+/// past the backup point is `cursor_expired`, both while it is beyond the
+/// restored head and once new entries have reused its numbers. A cursor
+/// issued before the backup point names rows the restore put back and
+/// skips nothing; the runbook's `cursor_epoch` bump expires it (unit-tested
+/// in `changes_key` and `handlers::changes`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rec005_cursors_from_before_a_sequence_reset_expire() {
+    let h = harness(true).await;
+    let (a, _) = publish_ctx(&h, 53, "rec005 reset a", Visibility::Public).await;
+    retract(&h, 53, &a).await; // 1
+    lifecycle(&h, 53, &a, "republish", "republished").await; // 2
+    retract(&h, 53, &a).await; // 3: the backup is taken here
+    let before_backup = page(&h.router, "", None).await.next_cursor;
+    lifecycle(&h, 53, &a, "republish", "republished").await; // 4
+    retract(&h, 53, &a).await; // 5
+    let at_two = page(&h.router, "limit=2", None).await.next_cursor;
+    let at_four = page(&h.router, "limit=4", None).await.next_cursor;
+    let at_head = page(&h.router, "since=head", None).await.next_cursor;
+    let drained = page(&h.router, "", None).await.next_cursor;
+    for (c, pos) in [(&at_two, 2), (&at_four, 4), (&at_head, 5), (&drained, 5)] {
+        assert_eq!(key().decode_cursor(c).map(|c| c.pos), Ok(pos));
+    }
+    let served = [
+        ("at 2", at_two),
+        ("at 4", at_four),
+        ("at the head", at_head),
+        ("drained", drained),
+    ];
+
+    restore_feed_to(&h, 3).await;
+    assert_eq!(h.store().changes_head().await.unwrap().head, 3);
+    for (why, c) in &served {
+        assert_expired(&h, c, &format!("{why}, beyond the restored head")).await;
+    }
+
+    // New entries, on another context, take seqs 4 and 5 again.
+    let (b, _) = publish_ctx(&h, 54, "rec005 reset b", Visibility::Public).await;
+    retract(&h, 54, &b).await;
+    lifecycle(&h, 54, &b, "republish", "republished").await;
+    assert_eq!(h.store().changes_head().await.unwrap().head, 5);
+    for (why, c) in &served {
+        assert_expired(&h, c, &format!("{why}, after its seq was reused")).await;
+    }
+    // Past the old head: the anchor (5) is now below the head and names a
+    // different entry, found by lookup rather than as the head itself.
+    retract(&h, 54, &b).await;
+    assert_eq!(h.store().changes_head().await.unwrap().head, 6);
+    for (why, c) in &served {
+        assert_expired(&h, c, &format!("{why}, once the feed grew past it")).await;
+    }
+
+    // Issued before the backup point: resumes onto the reused seqs and
+    // sees the new entries, so nothing is skipped.
+    let resumed = page(&h.router, &format!("since={}", enc(&before_backup)), None).await;
+    assert_eq!(seqs(&resumed), vec![4, 5, 6]);
+    let resumed = serde_json::to_value(&resumed).unwrap();
+    assert!(
+        resumed["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c.to_string().contains(&b)),
+        "{resumed}"
+    );
+    // A cursor issued after the restore resumes normally.
+    let fresh = page(&h.router, "limit=1", None).await.next_cursor;
+    assert_eq!(
+        seqs(&page(&h.router, &format!("since={}", enc(&fresh)), None).await),
+        vec![2, 3, 4, 5, 6]
     );
 }
 
