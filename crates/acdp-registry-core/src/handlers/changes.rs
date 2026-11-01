@@ -48,8 +48,9 @@ use axum::extract::{RawQuery, State};
 use axum::http::HeaderMap;
 use axum::Json;
 
-use super::context::{caller_from_headers, tenant_for_request};
+use super::context::tenant_for_principal;
 use crate::changes_key::{ChangesKey, CursorAnchor, CursorError, DecodedCursor};
+use crate::read_gate::ReadPrincipal;
 use crate::state::AppState;
 use crate::tenant_trust::PeerIp;
 
@@ -391,9 +392,10 @@ pub async fn changes<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     PeerIp(peer): PeerIp,
+    principal: ReadPrincipal,
     RawQuery(raw): RawQuery,
 ) -> Result<Json<ChangesResponse>, RegistryError> {
-    let result = serve(&state, &headers, peer, raw.as_deref()).await;
+    let result = serve(&state, &headers, peer, &principal, raw.as_deref()).await;
     match &result {
         Ok((_, scanned)) => crate::metrics::record_changes_request("ok", *scanned),
         Err(e) => crate::metrics::record_changes_request(e.wire_code(), 0),
@@ -405,6 +407,7 @@ async fn serve<S: ExtendedRegistryStore + 'static>(
     state: &Arc<AppState<S>>,
     headers: &HeaderMap,
     peer: Option<std::net::IpAddr>,
+    principal: &ReadPrincipal,
     raw: Option<&str>,
 ) -> Result<(ChangesResponse, u64), RegistryError> {
     let key = state.changes.as_ref().ok_or_else(|| {
@@ -416,7 +419,7 @@ async fn serve<S: ExtendedRegistryStore + 'static>(
     })?;
     let cfg = &state.config.changes;
     let req = parse_request(raw, key, cfg.max_change_filters, cfg.max_changes_page)?;
-    let requester = caller_from_headers(state, headers)?;
+    let requester = principal.requester();
     // As on search: with the public arm closed an anonymous reader has no
     // visible entries but key revocations, and is refused rather than
     // served a feed that discloses only its head position.
@@ -427,7 +430,7 @@ async fn serve<S: ExtendedRegistryStore + 'static>(
                 .into(),
         )));
     }
-    let tenant = tenant_for_request(state, headers, peer)?;
+    let tenant = tenant_for_principal(state, headers, peer, principal)?;
     evaluate_changes(state, key, requester.as_ref(), tenant.as_deref(), &req).await
 }
 

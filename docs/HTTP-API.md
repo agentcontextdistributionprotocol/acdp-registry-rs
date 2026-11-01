@@ -232,7 +232,7 @@ this section records only what **this registry** emits in each one
 | `limits` | `max_payload_bytes`, `max_embedded_bytes` and `idempotency_key_ttl_seconds` from `[limits]`; `change_retention_seconds`, `max_change_filters` and `max_changes_page` from `[changes]` when it is enabled; `max_subscriptions_per_requester` from `[events]` when it is enabled; `max_publish_per_minute` is never emitted. |
 | `supports_idempotency_key` | Always `true`. |
 | `anonymous_public_reads` | `auth.anonymous_public_reads`; always present (default `false`). |
-| `read_authentication_methods` | `["bearer_jwt"]` when `auth.enabled = true`, omitted otherwise. |
+| `read_authentication_methods` | `["bearer_jwt"]` when `auth.enabled = true`, plus `"bearer_static"` when `[[auth.read_tokens]]` is configured; omitted otherwise. |
 
 `acdp_version` is unconditionally `"0.5.0"` (RFC-ACDP-0016 §10 — anchors
 handling has no admin-config gate, so its version claim always wins), but

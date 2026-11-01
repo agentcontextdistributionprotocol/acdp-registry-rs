@@ -13,7 +13,6 @@ pub use changes::{
     anchor_at, changes, evaluate_changes, head_cursor, parse_request, ChangesRequest, Since,
     MIN_SCAN_ROWS, REFILL_MAX_SCANS,
 };
-pub(crate) use context::caller_from_headers;
 pub(crate) use context::version_at_least;
 pub use context::{current, lineage, publish, republish, retract, retrieve, retrieve_body, search};
 pub use keyless::{create_key_attestation, list_key_attestations};

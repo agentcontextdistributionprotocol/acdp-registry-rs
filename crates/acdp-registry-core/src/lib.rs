@@ -17,6 +17,7 @@ pub mod playground;
 pub mod publish_reply;
 pub mod rate_limit;
 pub mod rate_limit_shared;
+pub mod read_gate;
 pub mod receipt;
 pub(crate) mod secure_compare;
 pub mod state;
@@ -138,11 +139,13 @@ pub fn build_router_shared<S: ExtendedRegistryStore + 'static>(state: Arc<AppSta
             "/key-attestations",
             get(handlers::list_key_attestations::<S>).post(handlers::create_key_attestation::<S>),
         )
-        // RFC-ACDP-0008 §4.3 read rate limits: GET/HEAD only, decided before
-        // the handler runs so a refusal is always 429 (never a 404/403 built
-        // from a half-run handler). Innermost of this group's layers, so the
-        // 429 still carries the `private` and `Vary` posture below.
-        .route_layer(from_fn_with_state(state.clone(), read_rate_limit::<S>))
+        // RFC-ACDP-0008 §6.2 read authentication then §4.3 read rate limits:
+        // GET/HEAD only, decided before the handler runs, so an invalid
+        // bearer is refused 403 before any lookup and a rate refusal is always
+        // 429 (never a 404/403 built from a half-run handler). Innermost of
+        // this group's layers, so both refusals still carry the `private` and
+        // `Vary` posture below.
+        .route_layer(from_fn_with_state(state.clone(), read_gate::read_gate::<S>))
         // #205 (wire half of #190). These responses depend on WHO is asking --
         // §4.5 visibility, tenant scoping, and the per-requester leaf echo on
         // `/log/*` -- so a shared cache must never reuse one requester's copy
@@ -508,7 +511,8 @@ fn make_request_span(req: &Request) -> tracing::Span {
     tracing::info_span!(
         "http_request",
         method = %req.method(),
-        uri = %req.uri(),
+        // Redacted: a read token pasted into the query must not reach logs.
+        uri = %read_gate::redact_uri(req.uri()),
         request_id = %request_id,
     )
 }
@@ -562,55 +566,6 @@ async fn auth_rate_limit<S: ExtendedRegistryStore + 'static>(
         .await
         {
             return denied;
-        }
-    }
-    next.run(req).await
-}
-
-/// RFC-ACDP-0008 §4.3: read rate limiting over the `data` group's GET/HEAD
-/// routes (writes have their own per-agent budgets).
-///
-/// The bucket is the requester's: `did:<effective_requester_did>` for a
-/// request carrying a valid bearer token, else the client address
-/// ([`rate_limit::read_bucket_key`], resolved by the `[rate_limit]`
-/// forwarded-header policy). A present-but-invalid token is charged to the
-/// client address, so rotating garbage tokens buys no budget; the handler
-/// still refuses it 403. Nothing here logs or echoes the token.
-async fn read_rate_limit<S: ExtendedRegistryStore + 'static>(
-    State(state): State<Arc<AppState<S>>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    if !matches!(*req.method(), Method::GET | Method::HEAD)
-        || (state.read_anonymous_limiter.is_none() && state.read_principal_limiter.is_none())
-    {
-        return next.run(req).await;
-    }
-    let (limiter, key, scope) = match handlers::caller_from_headers(&state, req.headers()) {
-        Ok(Some(did)) => (
-            &state.read_principal_limiter,
-            format!("did:{did}"),
-            metrics::RateLimitScope::ReadPrincipal,
-        ),
-        Ok(None) | Err(_) => {
-            let peer = req
-                .extensions()
-                .get::<tenant_trust::PeerIp>()
-                .and_then(|p| p.0);
-            (
-                &state.read_anonymous_limiter,
-                rate_limit::read_bucket_key(state.client_ip(peer, req.headers())),
-                metrics::RateLimitScope::ReadAnonymous,
-            )
-        }
-    };
-    if let Some(limiter) = limiter {
-        if let Err(retry_after_seconds) = limiter.check(&key) {
-            metrics::record_rate_limit_rejection(scope);
-            return RegistryError::RateLimited {
-                retry_after_seconds,
-            }
-            .into_response();
         }
     }
     next.run(req).await

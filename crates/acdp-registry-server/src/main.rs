@@ -114,6 +114,12 @@ fn install_crypto_provider() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `acdp-registry read-token generate`: an offline operator tool, run
+    // before any config is loaded so it works without one (R7).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("read-token") {
+        return read_token_cli(&args[1..]);
+    }
     init_tracing();
     let _ = dotenvy::dotenv();
     install_crypto_provider()?;
@@ -674,6 +680,9 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
     for w in read_limit_checks(cfg)? {
         tracing::warn!("{w}");
     }
+    for w in read_token_checks(cfg)? {
+        tracing::warn!("{w}");
+    }
     validate_shared_rate_limit(cfg)?;
     if cfg.metrics.enabled {
         // #162: the `/metrics` gate applies only when the TRIMMED token is
@@ -741,6 +750,132 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `read-token generate`: mint a `bearer_static` token (RFC-ACDP-0008 §6.2)
+/// and print it once, with the `[[auth.read_tokens]]` entry that stores only
+/// its hash. The token goes to stdout for the operator to hand to the DID's
+/// holder; the registry never sees it.
+fn read_token_cli(args: &[String]) -> anyhow::Result<()> {
+    const USAGE: &str = "usage: acdp-registry read-token generate";
+    match args {
+        [cmd] if cmd == "generate" => {
+            let (token, sha256) = acdp_registry_auth::generate_read_token();
+            println!("token:  {token}");
+            println!("sha256: {sha256}");
+            println!();
+            println!("[[auth.read_tokens]]");
+            println!("id = \"<label>\"");
+            println!("did = \"<requester DID you administer>\"");
+            println!("sha256 = \"{sha256}\"");
+            println!("operator_administered = true");
+            println!("# expires_at = \"2027-01-01T00:00:00Z\"");
+            Ok(())
+        }
+        [flag] if flag == "--help" || flag == "-h" => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        _ => anyhow::bail!("{USAGE}"),
+    }
+}
+
+/// Startup rules for `[[auth.read_tokens]]` (RFC-ACDP-0008 §6.2). Refusals
+/// are `Err`; warnings are returned, the same shape as [`read_limit_checks`].
+fn read_token_checks(cfg: &RegistryConfig) -> anyhow::Result<Vec<String>> {
+    let auth = &cfg.auth;
+    let mut warnings = Vec::new();
+    if auth.read_tokens.is_empty() {
+        return Ok(warnings);
+    }
+    if !auth.enabled {
+        anyhow::bail!(
+            "auth.read_tokens is set but auth.enabled = false: with auth off every read is \
+             anonymous and the tokens would be silently ignored. Enable auth or remove them."
+        );
+    }
+    if auth.max_read_tokens_per_did < 2 {
+        anyhow::bail!(
+            "auth.max_read_tokens_per_did = {} but rotation needs at least 2 valid tokens per \
+             DID (RFC-ACDP-0008 §6.2)",
+            auth.max_read_tokens_per_did
+        );
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut hashes = std::collections::HashSet::new();
+    let mut per_did: std::collections::BTreeMap<&str, usize> = Default::default();
+    let now = chrono::Utc::now();
+    for e in &auth.read_tokens {
+        if e.id.trim().is_empty() {
+            anyhow::bail!("auth.read_tokens: an entry has an empty id");
+        }
+        let id = &e.id;
+        if !ids.insert(id.as_str()) {
+            anyhow::bail!("auth.read_tokens: duplicate id '{id}'");
+        }
+        if acdp_registry_auth::read_token::parse_sha256_hex(&e.sha256).is_none() {
+            anyhow::bail!(
+                "auth.read_tokens '{id}': sha256 must be 64 lowercase hex characters (the \
+                 SHA-256 of the token, as `acdp-registry read-token generate` prints it)"
+            );
+        }
+        if !hashes.insert(e.sha256.as_str()) {
+            anyhow::bail!(
+                "auth.read_tokens '{id}': the same token hash is configured twice; a token \
+                 binds exactly one DID"
+            );
+        }
+        if !e.operator_administered {
+            anyhow::bail!(
+                "auth.read_tokens '{id}': operator_administered must be true. Configuration \
+                 may bind a token only to a DID this operator administers (RFC-ACDP-0008 \
+                 §6.2); any other DID must prove control through token issuance."
+            );
+        }
+        let method_ok = auth.did_methods.iter().any(|m| {
+            e.did
+                .strip_prefix(m.as_str())
+                .is_some_and(|r| r.len() > 1 && r.starts_with(':'))
+        });
+        if !method_ok {
+            anyhow::bail!(
+                "auth.read_tokens '{id}': did '{}' is not a DID of an accepted method \
+                 (auth.did_methods)",
+                e.did
+            );
+        }
+        if let Some(t) = &e.tenant {
+            if t.trim().is_empty() || t == acdp_registry_types::config::RESERVED_TENANT {
+                anyhow::bail!(
+                    "auth.read_tokens '{id}': tenant must be a real tenant, not empty or the \
+                     reserved '{}'",
+                    acdp_registry_types::config::RESERVED_TENANT
+                );
+            }
+        }
+        if e.expires_at.is_some_and(|t| t <= now) {
+            warnings.push(format!(
+                "auth.read_tokens '{id}' has already expired; it is refused like an unknown token"
+            ));
+        }
+        *per_did.entry(e.did.as_str()).or_default() += 1;
+    }
+    for (did, n) in per_did {
+        if n == 1 {
+            warnings.push(format!(
+                "auth.read_tokens: {did} has a single token; rotating it means a gap unless the \
+                 replacement is added first (RFC-ACDP-0008 §6.2 allows at least 2 at once)"
+            ));
+        }
+        if n > auth.max_read_tokens_per_did {
+            anyhow::bail!(
+                "auth.read_tokens: {did} has {n} tokens, more than auth.max_read_tokens_per_did \
+                 = {}",
+                auth.max_read_tokens_per_did
+            );
+        }
+    }
+    Ok(warnings)
 }
 
 /// Startup rules for `[read_limits]` and `rate_limit.forwarded_header_trust`
@@ -1657,6 +1792,8 @@ fn acdp_version_claim(cfg: &RegistryConfig) -> &'static str {
 /// pinned schema by `served_capabilities_documents_satisfy_the_pinned_schema`
 /// in the same file, which spawns this binary (#385).
 const READ_AUTH_METHOD_BEARER_JWT: &str = "bearer_jwt";
+/// RFC-ACDP-0008 §6.2 static read tokens, advertised iff any is configured.
+const READ_AUTH_METHOD_BEARER_STATIC: &str = "bearer_static";
 
 /// Rows one prune statement may delete, so a long-idle registry catching
 /// up never holds the write lock for one huge delete.
@@ -1909,6 +2046,20 @@ fn advertised_anonymous_reads_per_minute(cfg: &RegistryConfig) -> Option<u64> {
         .then_some(u64::from(reads.anonymous_per_minute))
 }
 
+/// `read_authentication_methods`: `bearer_jwt` whenever auth is on, plus
+/// `bearer_static` when `[[auth.read_tokens]]` has an entry the registry
+/// would accept (R6). Auth off: none, every read is anonymous.
+fn read_authentication_methods(auth: &acdp_registry_types::config::AuthConfig) -> Vec<String> {
+    if !auth.enabled {
+        return vec![];
+    }
+    let mut methods = vec![READ_AUTH_METHOD_BEARER_JWT.to_string()];
+    if !acdp_registry_auth::ReadTokens::from_config(auth).is_empty() {
+        methods.push(READ_AUTH_METHOD_BEARER_STATIC.to_string());
+    }
+    methods
+}
+
 fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
     CapabilitiesDocument {
         // Plan A4 / REG-3 Phase 4: each rung of the claim is gated on what
@@ -2000,11 +2151,7 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
             max_anonymous_reads_per_minute: advertised_anonymous_reads_per_minute(cfg),
             extensions: Default::default(),
         },
-        read_authentication_methods: if cfg.auth.enabled {
-            vec![READ_AUTH_METHOD_BEARER_JWT.into()]
-        } else {
-            vec![]
-        },
+        read_authentication_methods: read_authentication_methods(&cfg.auth),
         anonymous_public_reads: cfg.auth.anonymous_public_reads,
         supports_idempotency_key: true,
         // The SDK has no typed `keyless` field: the member rides in
@@ -3522,6 +3669,125 @@ mod tests {
         cfg.read_limits.enabled = false;
         cfg.read_limits.authenticated_per_minute = 0;
         assert!(read_limit_checks(&cfg).unwrap().is_empty());
+    }
+
+    fn read_token_cfg() -> RegistryConfig {
+        let mut cfg = trust_cfg();
+        cfg.auth.enabled = true;
+        let entry = |id: &str| {
+            let (_, sha256) = acdp_registry_auth::generate_read_token();
+            acdp_registry_types::config::ReadTokenEntry {
+                id: id.into(),
+                did: "did:web:ops.example".into(),
+                sha256,
+                expires_at: None,
+                tenant: None,
+                operator_administered: true,
+            }
+        };
+        cfg.auth.read_tokens = vec![entry("a"), entry("b")];
+        cfg
+    }
+
+    #[test]
+    fn read_token_checks_accept_a_rotation_pair() {
+        assert!(read_token_checks(&read_token_cfg()).unwrap().is_empty());
+        assert!(read_token_checks(&trust_cfg()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_token_checks_refuse_each_misconfiguration() {
+        type Mutate = fn(&mut RegistryConfig);
+        let cases: [(&str, Mutate); 10] = [
+            ("auth.enabled = false", |c| c.auth.enabled = false),
+            ("empty id", |c| c.auth.read_tokens[0].id = " ".into()),
+            ("duplicate id", |c| c.auth.read_tokens[1].id = "a".into()),
+            ("64 lowercase hex", |c| {
+                c.auth.read_tokens[0].sha256 = c.auth.read_tokens[0].sha256.to_uppercase()
+            }),
+            ("configured twice", |c| {
+                c.auth.read_tokens[1].sha256 = c.auth.read_tokens[0].sha256.clone()
+            }),
+            ("operator_administered must be true", |c| {
+                c.auth.read_tokens[0].operator_administered = false
+            }),
+            ("accepted method", |c| {
+                c.auth.read_tokens[0].did = "did:example:x".into()
+            }),
+            ("reserved", |c| {
+                c.auth.read_tokens[0].tenant = Some("default".into())
+            }),
+            ("more than auth.max_read_tokens_per_did", |c| {
+                c.auth.max_read_tokens_per_did = 2;
+                let mut third = c.auth.read_tokens[0].clone();
+                third.id = "c".into();
+                third.sha256 = acdp_registry_auth::generate_read_token().1;
+                c.auth.read_tokens.push(third);
+            }),
+            ("at least 2", |c| {
+                c.auth.max_read_tokens_per_did = 1;
+                c.auth.read_tokens.truncate(1)
+            }),
+        ];
+        for (want, mutate) in cases {
+            let mut cfg = read_token_cfg();
+            mutate(&mut cfg);
+            let err = read_token_checks(&cfg).expect_err(want).to_string();
+            assert!(err.contains(want), "{want}: {err}");
+            assert!(
+                !err.contains(&cfg.auth.read_tokens[0].sha256),
+                "{want}: hash echoed"
+            );
+        }
+    }
+
+    #[test]
+    fn read_token_checks_warn_on_an_expired_entry() {
+        let mut cfg = read_token_cfg();
+        cfg.auth.read_tokens[0].expires_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+        let w = read_token_checks(&cfg).unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("'a' has already expired"), "{w:?}");
+    }
+
+    #[test]
+    fn read_token_checks_warn_on_a_single_token_did() {
+        let mut cfg = read_token_cfg();
+        cfg.auth.read_tokens.truncate(1);
+        let w = read_token_checks(&cfg).unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].contains("did:web:ops.example has a single token"),
+            "{w:?}"
+        );
+    }
+
+    #[test]
+    fn bearer_static_is_advertised_only_with_auth_and_a_token() {
+        let cfg = read_token_cfg();
+        assert_eq!(
+            build_capabilities(&cfg).read_authentication_methods,
+            ["bearer_jwt", "bearer_static"]
+        );
+        let mut no_tokens = read_token_cfg();
+        no_tokens.auth.read_tokens.clear();
+        assert_eq!(
+            build_capabilities(&no_tokens).read_authentication_methods,
+            ["bearer_jwt"]
+        );
+        let mut off = read_token_cfg();
+        off.auth.enabled = false;
+        assert!(build_capabilities(&off)
+            .read_authentication_methods
+            .is_empty());
+    }
+
+    #[test]
+    fn read_token_cli_refuses_unknown_subcommands() {
+        assert!(read_token_cli(&["generate".into()]).is_ok());
+        assert!(read_token_cli(&[]).is_err());
+        assert!(read_token_cli(&["revoke".into()]).is_err());
+        assert!(read_token_cli(&["generate".into(), "x".into()]).is_err());
     }
 
     #[test]

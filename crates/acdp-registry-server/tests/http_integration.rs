@@ -14362,3 +14362,393 @@ async fn read_limits_off_by_default() {
         assert_eq!(s, StatusCode::OK, "{v}");
     }
 }
+
+// ── RFC-ACDP-0008 §6.2 bearer_static read tokens ────────────────────────
+
+/// A `[[auth.read_tokens]]` entry for `did`; returns it with its token.
+fn read_token_entry(
+    id: &str,
+    did: &str,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    tenant: Option<&str>,
+) -> (acdp_registry_types::config::ReadTokenEntry, String) {
+    let (token, sha256) = acdp_registry_auth::generate_read_token();
+    let entry = acdp_registry_types::config::ReadTokenEntry {
+        id: id.into(),
+        did: did.into(),
+        sha256,
+        expires_at,
+        tenant: tenant.map(str::to_string),
+        operator_administered: true,
+    };
+    (entry, token)
+}
+
+struct StaticTokens {
+    valid: String,
+    expired: String,
+    holder: Producer,
+}
+
+fn static_token_cfg(mut cfg: RegistryConfig) -> (RegistryConfig, StaticTokens) {
+    // did:key verifies offline, so the holder can publish in the harness.
+    let holder = did_key_producer(61);
+    let did = acdp::did::key::did_key_from_ed25519(
+        &SigningKey::from_bytes(&[61; 32]).verifying_key_bytes(),
+    );
+    let (good, valid) = read_token_entry("good", &did, None, None);
+    let past = chrono::Utc::now() - chrono::Duration::seconds(5);
+    let (old, expired) = read_token_entry("old", &did, Some(past), None);
+    cfg.auth.enabled = true;
+    cfg.auth.did_methods = vec!["did:web".into(), "did:key".into()];
+    cfg.auth.read_tokens = vec![good, old];
+    (
+        cfg,
+        StaticTokens {
+            valid,
+            expired,
+            holder,
+        },
+    )
+}
+
+async fn static_harness(cfg: RegistryConfig) -> Harness {
+    build_harness_with_caps(cfg, receipts_caps(), None).await
+}
+
+async fn publish_private_as(h: &Harness, p: &Producer, title: &str) -> String {
+    let req = p
+        .publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Private)
+        .build()
+        .unwrap();
+    let (status, v) = publish_with_tenant(&h.router, &req, None).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    v["ctx_id"].as_str().unwrap().to_string()
+}
+
+/// A valid static token reads its DID's private context; anonymous does not.
+#[tokio::test]
+async fn bearer_static_token_reads_as_its_did() {
+    let (cfg, t) = static_token_cfg(config(false));
+    let h = static_harness(cfg).await;
+    let ctx = publish_private_as(&h, &t.holder, "static-private").await;
+    let uri = format!("/contexts/{}", pct_encode_path_segment(&ctx));
+    let (s, _, v) = send(
+        &h.router,
+        read_from("GET", &uri, "192.0.2.1", None, Some(&t.valid)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, _, v) = send(&h.router, read_from("GET", &uri, "192.0.2.1", None, None)).await;
+    assert_ne!(
+        s,
+        StatusCode::OK,
+        "anonymous must not see a private context: {v}"
+    );
+    let (s, _, v) = send(
+        &h.router,
+        read_from(
+            "GET",
+            &format!("{uri}/body"),
+            "192.0.2.1",
+            None,
+            Some(&t.valid),
+        ),
+    )
+    .await;
+    assert_ne!(s, StatusCode::FORBIDDEN, "{v}");
+}
+
+/// Unknown, expired and malformed static tokens -- and an invalid JWT -- are
+/// 403 `not_authorized` on every GET data route, decided before any lookup:
+/// an existing private context and a nonexistent one answer identically, and
+/// the request never falls back to anonymous (a public search still 403s).
+#[tokio::test]
+async fn bad_read_tokens_are_refused_before_lookup_on_every_get_route() {
+    let (cfg, t) = static_token_cfg(config(false));
+    let h = static_harness(cfg).await;
+    let ctx = publish_private_as(&h, &t.holder, "static-lookup").await;
+    let (unknown, _) = acdp_registry_auth::generate_read_token();
+    let bad = [
+        ("unknown", unknown.as_str()),
+        ("expired", t.expired.as_str()),
+        ("malformed", "acdp_rt_short"),
+        ("garbage jwt", "not-a-jwt"),
+    ];
+    let mut uris: Vec<String> = DATA_PLANE_ROUTES
+        .iter()
+        .filter(|(m, _, _)| *m == "GET")
+        .map(|(_, u, _)| u.to_string())
+        .collect();
+    let private_uri = format!("/contexts/{}", pct_encode_path_segment(&ctx));
+    uris.push(private_uri.clone());
+    for (what, token) in bad {
+        let mut bodies = Vec::new();
+        for uri in &uris {
+            let (s, _, v) = send(
+                &h.router,
+                read_from("GET", uri, "192.0.2.2", None, Some(token)),
+            )
+            .await;
+            assert_eq!(s, StatusCode::FORBIDDEN, "{what} {uri}: {v}");
+            assert_eq!(v["error"]["code"], "not_authorized", "{what} {uri}: {v}");
+            let text = v.to_string();
+            assert!(!text.contains(token), "{what}: the token is echoed: {text}");
+            if uri.starts_with("/contexts/ctx") || *uri == private_uri {
+                bodies.push(v["error"]["message"].clone());
+            }
+        }
+        assert!(
+            bodies.windows(2).all(|w| w[0] == w[1]),
+            "{what}: existing and missing contexts must be indistinguishable: {bodies:?}"
+        );
+    }
+}
+
+/// A static token authenticates reads only: bearer-authenticated writes
+/// refuse it 403 rather than treating it as a JWT or as anonymous.
+#[tokio::test]
+async fn bearer_static_token_cannot_authorize_writes() {
+    let (mut cfg, t) = static_token_cfg(config(false));
+    cfg.lifecycle.enabled = true;
+    let h = build_harness_with_caps(cfg, caps_030(), None).await;
+    let ctx = publish_private_as(&h, &t.holder, "static-write").await;
+    // `/subscriptions` (events off here: 501 before any credential check)
+    // refuses through the same `caller_from_headers` as lifecycle.
+    let enc = pct_encode_path_segment(&ctx);
+    for (method, uri, event) in [
+        ("POST", format!("/contexts/{enc}/retract"), "retract"),
+        ("POST", format!("/contexts/{enc}/republish"), "republish"),
+    ] {
+        let mut req = read_from(method, &uri, "192.0.2.3", None, Some(&t.valid));
+        // A correctly signed event from the holder: only the credential is wrong.
+        *req.body_mut() = Body::from(signed_event_envelope(61, &ctx, event, None).to_string());
+        req.headers_mut()
+            .insert("content-type", "application/acdp+json".parse().unwrap());
+        let (s, _, v) = send(&h.router, req).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{method} {uri}: {v}");
+        assert_eq!(v["error"]["code"], "not_authorized", "{method} {uri}: {v}");
+        assert!(
+            v.to_string().contains("bearer_static"),
+            "{method} {uri}: {v}"
+        );
+    }
+}
+
+/// Auth off: Authorization is ignored entirely, so even a garbage bearer or
+/// a static token reads anonymously (S3).
+#[tokio::test]
+async fn auth_off_ignores_any_read_bearer() {
+    let h = harness_from_config(config(false)).await;
+    let (tok, _) = acdp_registry_auth::generate_read_token();
+    for bearer in ["garbage", tok.as_str()] {
+        let (s, _, v) = send(
+            &h.router,
+            read_from("GET", "/contexts/search", "192.0.2.4", None, Some(bearer)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+    }
+}
+
+/// With bearer_static active an `access_token` query parameter is refused
+/// 400 rather than silently ignored; without it the parameter is inert.
+#[tokio::test]
+async fn access_token_query_parameter_is_refused_when_bearer_static_is_active() {
+    let (cfg, t) = static_token_cfg(config(false));
+    let h = static_harness(cfg).await;
+    for uri in [
+        format!("/contexts/search?access_token={}", t.valid),
+        format!("/changes?access%5Ftoken={}", t.valid),
+    ] {
+        let (s, _, v) = send(&h.router, read_from("GET", &uri, "192.0.2.5", None, None)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{uri}: {v}");
+        assert!(!v.to_string().contains(&t.valid), "{v}");
+    }
+    let mut cfg = config(false);
+    cfg.auth.enabled = true;
+    let h = harness_from_config(cfg).await;
+    let (s, _, v) = send(
+        &h.router,
+        read_from(
+            "GET",
+            "/contexts/search?access_token=x",
+            "192.0.2.5",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+/// R12/S5: an invalid token is charged to the client's anonymous bucket
+/// (403 until it is exhausted, then 429); a valid token is charged to its
+/// DID's bucket, independent of the address it comes from.
+#[tokio::test]
+async fn read_token_refusals_and_reads_are_charged_to_the_right_bucket() {
+    let (cfg, t) = static_token_cfg(read_limit_cfg(2, 2));
+    let h = static_harness(cfg).await;
+    let (unknown, _) = acdp_registry_auth::generate_read_token();
+    let peer = "198.51.100.40";
+    for n in 1..=2 {
+        let (s, _, v) = send(
+            &h.router,
+            read_from("GET", "/contexts/search", peer, None, Some(&unknown)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "guess {n}: {v}");
+    }
+    assert_rate_limited(
+        "third guess",
+        &send(
+            &h.router,
+            read_from("GET", "/contexts/search", peer, None, Some(&unknown)),
+        )
+        .await,
+    );
+    // The valid token is not held back by its address's exhausted bucket...
+    for (n, p) in ["198.51.100.40", "198.51.100.41"].iter().enumerate() {
+        let (s, _, v) = send(
+            &h.router,
+            read_from("GET", "/contexts/search", p, None, Some(&t.valid)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "valid read {n}: {v}");
+    }
+    // ...but its DID's budget follows it to a third address.
+    assert_rate_limited(
+        "third valid read",
+        &send(
+            &h.router,
+            read_from(
+                "GET",
+                "/contexts/search",
+                "198.51.100.42",
+                None,
+                Some(&t.valid),
+            ),
+        )
+        .await,
+    );
+}
+
+/// Two Authorization headers are ambiguous: 400, never a pick of one.
+#[tokio::test]
+async fn two_authorization_headers_are_refused() {
+    let (cfg, t) = static_token_cfg(config(false));
+    let h = static_harness(cfg).await;
+    let mut req = read_from("GET", "/contexts/search", "192.0.2.6", None, Some(&t.valid));
+    req.headers_mut()
+        .append("authorization", "Bearer other".parse().unwrap());
+    let (s, _, v) = send(&h.router, req).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+}
+
+/// A static token's configured tenant binds its reads like a tenant-bound
+/// JWT claim: a disagreeing X-Tenant-Id is refused, an agreeing one is not.
+#[tokio::test]
+async fn bearer_static_tenant_binding_is_authoritative() {
+    let mut cfg = trust_tenant_header(config(false));
+    cfg.auth.enabled = true;
+    let (entry, token) =
+        read_token_entry("t", "did:web:agents.test:tenanted", None, Some("tenant-a"));
+    cfg.auth.read_tokens = vec![entry];
+    let h = harness_from_config(cfg).await;
+    let get = |tenant: &'static str| {
+        let mut r = read_from("GET", "/contexts/search", "192.0.2.7", None, Some(&token));
+        r.headers_mut()
+            .insert("x-tenant-id", tenant.parse().unwrap());
+        r
+    };
+    let (s, _, v) = send(&h.router, get("tenant-b")).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    let (s, _, v) = send(&h.router, get("tenant-a")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+/// Under `require_tenant`, a static token with no `tenant` of its own takes
+/// its DID's `[[auth.tenant_agents]]` binding, which satisfies the strict
+/// default-deny. A token whose DID is bound nowhere is refused, never served
+/// untenanted.
+#[tokio::test]
+async fn bearer_static_tenant_falls_back_to_the_agent_binding_under_require_tenant() {
+    let mut cfg = config(false);
+    cfg.auth.enabled = true;
+    cfg.auth.require_tenant = true;
+    cfg.auth.tenant_agents = vec![TenantAgentBinding {
+        agent_did: "did:web:agents.test:bound-reader".into(),
+        tenant_id: "tenant-a".into(),
+    }];
+    let (bound, bound_token) =
+        read_token_entry("bound", "did:web:agents.test:bound-reader", None, None);
+    let (loose, loose_token) =
+        read_token_entry("loose", "did:web:agents.test:unbound-reader", None, None);
+    cfg.auth.read_tokens = vec![bound, loose];
+    let h = harness_from_config(cfg).await;
+    let (s, _, v) = send(
+        &h.router,
+        read_from(
+            "GET",
+            "/contexts/search",
+            "192.0.2.8",
+            None,
+            Some(&bound_token),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "bound DID: {v}");
+    let (s, _, v) = send(
+        &h.router,
+        read_from(
+            "GET",
+            "/contexts/search",
+            "192.0.2.8",
+            None,
+            Some(&loose_token),
+        ),
+    )
+    .await;
+    assert_ne!(
+        s,
+        StatusCode::OK,
+        "an unbound DID must not read untenanted: {v}"
+    );
+}
+
+/// HEAD goes through the same gate as GET: a bad token is 403 before lookup.
+#[tokio::test]
+async fn head_with_a_bad_read_token_is_refused() {
+    let (cfg, t) = static_token_cfg(config(false));
+    let h = static_harness(cfg).await;
+    let (unknown, _) = acdp_registry_auth::generate_read_token();
+    let resp = h
+        .router
+        .clone()
+        .oneshot(read_from(
+            "HEAD",
+            "/contexts/search",
+            "192.0.2.9",
+            None,
+            Some(&unknown),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let resp = h
+        .router
+        .clone()
+        .oneshot(read_from(
+            "HEAD",
+            "/contexts/search",
+            "192.0.2.9",
+            None,
+            Some(&t.valid),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}

@@ -5248,4 +5248,37 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** no header trust (all users share Railway's proxy IP bucket).
 - **Blast radius if wrong:** spoofable anonymous bucket keys (a client could evade or exhaust others' buckets); config-reversible.
 - **Evidence (2026-11-01, Phase 7):** half wrong. Railway rewrites XFF to `<client>, <edge-ip>` and drops client-supplied values (not spoofable), but the rightmost hop is a per-request edge address, so `any_peer` keyed on the edge (#524). Prod moved to the fallback; fix = `rate_limit.forwarded_skip_rightmost = 1` (fix/xff-skip-rightmost).
+- **Evidence (2026-11-01, v0.10.0 prod):** with `any_peer` + `forwarded_skip_rightmost = 1` at 6000/min, a 7500-request burst from one machine gave exactly 6000×200 / 1500×429, and 600 forged-XFF requests right after were all 429. Prod now runs 1200/min anonymous per client. A distinct second source was not probed (unit tests cover per-IP keying).
+- **Status:** UNCONFIRMED (evidence supports it; settle at /reconcile)
+
+## access_token query parameter refusal (Phase 4)
+- **Plan:** plans/bearer-static-read-limits.md
+- **Assumed:** §6.2 "never accepted in a query" leaves the handling of a query-borne token to the registry.
+- **Chose:** while bearer_static is active, any data-plane GET/HEAD with an `access_token` query key (percent-decoded, case-insensitive) is 400 `schema_violation`, not silently ignored; the span URI redacts it either way.
+- **Alternatives:** ignore the parameter (serve anonymously); refuse even when bearer_static is off.
+- **Blast radius if wrong:** one error-status choice on a malformed request; reversible in one line.
+- **Status:** UNCONFIRMED
+
+## Static tokens refused on every /subscriptions route (Phase 4)
+- **Plan:** plans/bearer-static-read-limits.md
+- **Assumed:** R5 names POST/DELETE; GET /subscriptions/{id} reads subscription state, which is write-plane resource management, not context reads.
+- **Chose:** `owner()` keeps `caller_from_headers`, which refuses `acdp_rt_` tokens 403, so a static token cannot use GET /subscriptions/{id} either.
+- **Alternatives:** let GET accept the read principal.
+- **Blast radius if wrong:** a static-token client cannot poll its own subscription; reversible.
+- **Status:** UNCONFIRMED
+
+## Read tokens live on AppState, validated before the IP charge (Phase 4)
+- **Plan:** plans/bearer-static-read-limits.md
+- **Assumed:** S5's "before hash/store lookup" ordering targets Phase 5's store lookup; Phase 4's table is in memory and constant-time.
+- **Chose:** the gate validates first and charges the anonymous IP bucket only on refusal (429 if exhausted, else 403). The table is built on `AppState` from the served config (not on `AuthService`, which test harnesses build from a default config).
+- **Alternatives:** charge the IP bucket before validating every bearer.
+- **Blast radius if wrong:** ordering inside one middleware; reversible.
+- **Status:** UNCONFIRMED
+
+## Zero-lookup evidence for the read gate (Phase 4)
+- **Plan:** plans/bearer-static-read-limits.md
+- **Assumed:** Acceptance 1's "store spy records zero lookups" can be proven structurally: the gate is a route_layer that returns before `next.run`, so no handler (and no store call) runs.
+- **Chose:** prove it behaviourally instead of with a store spy. `bad_read_tokens_are_refused_before_lookup_on_every_get_route` asserts that an existing private context and a missing one answer byte-identically (403), on every GET data route.
+- **Alternatives:** a counting store wrapper around SqliteStore (the trait surface is large).
+- **Blast radius if wrong:** test-only; reversible.
 - **Status:** UNCONFIRMED

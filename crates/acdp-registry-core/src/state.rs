@@ -75,6 +75,10 @@ pub struct AppStateInner<S: ExtendedRegistryStore> {
     /// DID. `None` when `[read_limits]` is off or
     /// `authenticated_per_minute == 0`.
     pub read_principal_limiter: Option<Arc<AgentRateLimiter>>,
+    /// RFC-ACDP-0008 §6.2 `bearer_static` tokens, by hash, from
+    /// `[[auth.read_tokens]]` of the config this state serves. Empty: the
+    /// read gate never accepts a static token.
+    pub read_tokens: acdp_registry_auth::ReadTokens,
     /// #374: the `auth.tenant_header_trust` mode in effect (the config value,
     /// or `none` when the key is absent, #386).
     pub tenant_header_trust: TenantHeaderTrust,
@@ -398,6 +402,7 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
         };
         let read_anonymous_limiter = read_limiter(reads.anonymous_per_minute);
         let read_principal_limiter = read_limiter(reads.authenticated_per_minute);
+        let read_tokens = acdp_registry_auth::ReadTokens::from_config(&config.auth);
         let tenant_header_trust = config.auth.effective_tenant_header_trust();
         let tenant_trusted_proxies =
             TrustedProxies::parse(&rl.trusted_proxies).unwrap_or_else(|e| {
@@ -433,6 +438,7 @@ impl<S: ExtendedRegistryStore> AppStateInner<S> {
             forwarded_skip_rightmost,
             read_anonymous_limiter,
             read_principal_limiter,
+            read_tokens,
             tenant_header_trust,
             tenant_trusted_proxies,
             metrics,

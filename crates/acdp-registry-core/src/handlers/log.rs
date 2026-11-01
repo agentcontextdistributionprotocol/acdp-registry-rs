@@ -40,8 +40,9 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::context::{caller_from_headers, tenant_for_request};
+use super::context::tenant_for_principal;
 use crate::log::LogState;
+use crate::read_gate::ReadPrincipal;
 use crate::state::AppState;
 use crate::tenant_trust::PeerIp;
 
@@ -217,6 +218,7 @@ pub async fn log_proof<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     PeerIp(peer): PeerIp,
+    principal: ReadPrincipal,
     Query(q): Query<LogProofQuery>,
 ) -> Result<Json<serde_json::Value>, RegistryError> {
     let log = log_state(&state)?.clone();
@@ -240,7 +242,7 @@ pub async fn log_proof<S: ExtendedRegistryStore + 'static>(
                 .into(),
         ));
     }
-    inclusion_proof_response(&state, &log, &headers, peer, &q).await
+    inclusion_proof_response(&state, &log, &headers, peer, &principal, &q).await
 }
 
 /// §8.2 inclusion mode.
@@ -249,12 +251,13 @@ async fn inclusion_proof_response<S: ExtendedRegistryStore + 'static>(
     log: &Arc<LogState>,
     headers: &HeaderMap,
     peer: Option<std::net::IpAddr>,
+    principal: &ReadPrincipal,
     q: &LogProofQuery,
 ) -> Result<Json<serde_json::Value>, RegistryError> {
     // Resolve the caller once; a bad bearer or tenant mismatch errors
     // out before any log state is consulted.
-    let requester = caller_from_headers(state, headers)?;
-    let requested_tenant = tenant_for_request(state, headers, peer)?;
+    let requester = principal.requester();
+    let requested_tenant = tenant_for_principal(state, headers, peer, principal)?;
     let current = state.server.store().log_tree_size().await?;
 
     // (record, whether the requester may see the leaf echo)
@@ -447,6 +450,7 @@ pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     headers: HeaderMap,
     PeerIp(peer): PeerIp,
+    principal: ReadPrincipal,
     Query(q): Query<LogEntriesQuery>,
 ) -> Result<Json<serde_json::Value>, RegistryError> {
     let log = log_state(&state)?.clone();
@@ -468,8 +472,8 @@ pub async fn log_entries<S: ExtendedRegistryStore + 'static>(
     }
     let capped_end = end.min(start.saturating_add(LOG_ENTRIES_PAGE_CAP));
 
-    let requester = caller_from_headers(&state, &headers)?;
-    let requested_tenant = tenant_for_request(&state, &headers, peer)?;
+    let requester = principal.requester();
+    let requested_tenant = tenant_for_principal(&state, &headers, peer, &principal)?;
 
     let records = state.server.store().log_entries(start, capped_end).await?;
 

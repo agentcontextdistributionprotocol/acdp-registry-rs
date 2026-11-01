@@ -558,3 +558,63 @@ async fn the_secret_is_stored_sealed_and_the_cursor_starts_at_head() {
         .unwrap()
         .is_none());
 }
+
+/// RFC-ACDP-0008 §6.2 / R5: a `bearer_static` read token authenticates reads
+/// only. Every `/subscriptions` route and `/auth/token/revoke` refuse it 403
+/// `not_authorized`, even for the DID's own subscription, and the refusal
+/// changes nothing.
+#[tokio::test]
+async fn bearer_static_token_is_refused_on_subscriptions_and_revoke() {
+    let mut cfg = config(true, 10);
+    let mut tokens = Vec::new();
+    for id in ["a", "b"] {
+        let (token, sha256) = acdp_registry_auth::generate_read_token();
+        cfg.auth
+            .read_tokens
+            .push(acdp_registry_types::config::ReadTokenEntry {
+                id: id.into(),
+                did: did_of(71),
+                sha256,
+                expires_at: None,
+                tenant: None,
+                operator_administered: true,
+            });
+        tokens.push(token);
+    }
+    let (cfg, caps) = common::with_anonymous_public_reads(cfg, caps(), true);
+    let mut h = SeededHarness::new(cfg.clone(), caps, AUTHORITY).await;
+    h.rebuild_state_with(cfg, |s| s.with_callback_resolver(Arc::new(resolver())));
+    let sub = create_ok(&h, 71).await;
+    let one = format!("/subscriptions/{}", sub.subscription_id);
+    let token = tokens[0].as_str();
+
+    let body = request(agent_filter(71), &format!("https://{HOOK_HOST}/acdp/hints"));
+    let revoke = serde_json::to_vec(&json!({"jti": "x"})).unwrap();
+    for (method, uri, body) in [
+        ("POST", "/subscriptions", Some(body)),
+        ("GET", one.as_str(), None),
+        ("DELETE", one.as_str(), None),
+        ("POST", "/auth/token/revoke", Some(revoke)),
+    ] {
+        let r = call(&h.router, method, uri, Some(token), body).await;
+        assert_eq!(
+            r.status,
+            StatusCode::FORBIDDEN,
+            "{method} {uri}: {}",
+            r.body
+        );
+        assert_eq!(
+            r.body["error"]["code"], "not_authorized",
+            "{method} {uri}: {}",
+            r.body
+        );
+        assert!(
+            r.body.to_string().contains("bearer_static"),
+            "{method} {uri}: {}",
+            r.body
+        );
+    }
+    // The subscription survived the refused DELETE.
+    let r = call(&h.router, "GET", &one, Some(&bearer_for(71)), None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+}
