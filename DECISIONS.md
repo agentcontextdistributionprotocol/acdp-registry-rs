@@ -4810,3 +4810,32 @@ behaviour, it is hard to take back.
   carry no `Vary`.
 
 **Resulting status:** CONFIRMED (2026-11-01). Nothing blocks `/ship`.
+
+## 2026-11-06 — /reconcile: plans/bearer-static-read-limits.md (7 entries, all decided by Opus)
+
+Ranked by blast radius: F2 cursor format (wire-visible but opaque and versioned), F1 issuance scope (auth model, de facto config-only), F3 forwarded-header trust (config-reversible trust boundary), then the four Phase 4 entries (one-line or test-only). None is a one-way door, so all seven were analysed by fresh Opus agents and settled without the owner. No bug or security issue was found.
+
+### bearer_static issuance scope (F1) — CHANGED to config-only
+**Original:** ship config-bound tokens (Phase 4) and DID-proof self-issuance (Phase 5), issuance off by default.
+**Analysis:** Phase 5 is PARKED, so what shipped is the Alternative. Config binding is operator-only: `main.rs` refuses an `auth.read_tokens` entry without `operator_administered = true`. RFC-0008 §6.2 lets config bind only DIDs the operator administers. A non-operator DID (for example Seam) therefore needs Phase 5, or an out-of-band proof of control, before prod turns on `auth.enabled`. Prod runs without `auth.enabled` today, so nothing is served under the gap.
+**Decided by:** Opus. **Status:** CHANGED. Reopen Phase 5 when the first non-operator DID needs a token in an `auth.enabled` deployment (this matches the plan's Phase 5 trigger). Reversible: no schema or wire format is committed.
+
+### /changes cursor reset safety (F2) — CONFIRMED
+v2 cursors seal `pos ‖ anchor_seq ‖ anchor_fp ‖ epoch`. A restore that rewinds the feed leaves the anchor above the head or on a different row. Every cursor issued after the backup point then expires as `cursor_expired` automatically (`handlers/changes.rs` `anchor_holds`; `pruned_through_fp` covers a pruned boundary). The operator's `[changes] cursor_epoch` expires the cursors issued before it, which no stored value can detect. This meets RFC-0018 §5.3 without key rotation, which would disable subscriptions. The format is versioned and opaque, so a v3 costs one consumer resync. **Decided by:** Opus. **Status:** CONFIRMED.
+
+### Railway forwarded-header trust (F3) — CONFIRMED, as amended
+Railway rewrites XFF to `<client>, <edge>` and drops client-supplied values. `any_peer` with `forwarded_skip_rightmost = 1` keys on the real client (`rate_limit.rs` `resolve_client_ip_skipping`). Short or garbled chains fall back to the TCP peer: a shared bucket, never a spoofable one. The prod evidence (v0.10.0) is in ASSUMPTIONS.md. Fully config-reversible. **Decided by:** Opus. **Status:** CONFIRMED.
+
+### access_token query parameter refusal (Phase 4) — CONFIRMED
+While bearer_static is active, an `access_token` query key is refused 400 `schema_violation` in the read gate (`read_gate.rs`). This happens before credential resolution, rate charging or lookup, and the span URI is redacted. 403 stays reserved for tokens presented in `Authorization` that fail validation (§6.2); a query token is never presented, so it is malformed. **Decided by:** Opus. **Status:** CONFIRMED.
+
+### Static tokens refused on every /subscriptions route (Phase 4) — CONFIRMED
+POST/GET/DELETE `/subscriptions` all go through `caller_from_headers`, which refuses `acdp_rt_` with 403 before any store access (`subscriptions.rs` `owner()`). Subscription management stays on one credential class, and the refusal leaks nothing. RFC-0018 §8.1 would also permit static tokens; revisit all three routes together if key-less consumers ask for push hints. **Decided by:** Opus. **Status:** CONFIRMED.
+
+### Read tokens on AppState, validated before the IP charge (Phase 4) — CONFIRMED
+Validation is in-memory and constant-time (`read_token.rs` `ct_eq_32`, 256-bit tokens). A valid token is charged to `did:{did}`. Any refusal is charged to the anonymous per-IP bucket first (429 once exhausted, otherwise 403), so guessing costs budget. **Trigger:** when Phase 5 store-backed issuance unparks, charge before the store lookup (plan S5). **Decided by:** Opus. **Status:** CONFIRMED.
+
+### Zero-lookup evidence for the read gate (Phase 4) — CHANGED (record only)
+Zero lookups are guaranteed structurally: the read gate is a `route_layer` that answers before `next.run`, so on a refusal no handler or store call runs. `bad_read_tokens_are_refused_before_lookup_on_every_get_route` is the regression guard. It asserts 403 `not_authorized` on every GET data route and the same status and message for existing and missing contexts. It is not the byte-identity proof the entry claimed, and the entry is corrected. No test change: the behaviour is already correct. **Decided by:** Opus. **Status:** CHANGED (record corrected).
+
+**Summary:** 5 confirmed, 2 changed (both record corrections, no code change), 0 deferred, all 7 settled without the owner. Nothing blocks `/ship`.

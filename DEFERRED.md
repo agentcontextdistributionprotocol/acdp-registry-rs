@@ -37,3 +37,4 @@ When one of these is settled, edit its status in `ASSUMPTIONS.md` in the same PR
 - RFC-ACDP-0021: lifecycle events signed by a keyless (attested) key are refused (R13); accept them when RFC-ACDP-0009 §2.14 lands lifecycle-event attestations.
 - RFC-ACDP-0021: the Fulcio certificate binding (RFC-ACDP-0009 §2.13) is not implemented; only the registry-minted key attestation is accepted.
 - RFC-ACDP-0021: no webhook or change-feed hint fires when a key attestation is minted or superseded; add one if a consumer needs push notice of new keyless keys.
+- F3 (bearer-static plan): forwarded-header buckets were probed from one source only; a second-source probe would confirm per-client separation (unit tests cover it).
