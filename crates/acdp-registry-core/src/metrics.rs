@@ -43,6 +43,7 @@ pub const RATE_LIMIT_SHARED_TOTAL: &str = "acdp_registry_rate_limit_shared_total
 pub const RATE_LIMIT_SHARED_SECONDS: &str = "acdp_registry_rate_limit_shared_seconds";
 pub const CHANGES_REQUESTS_TOTAL: &str = "acdp_registry_changes_requests_total";
 pub const CHANGES_ROWS_SCANNED_TOTAL: &str = "acdp_registry_changes_rows_scanned_total";
+pub const CHANGES_PAGES_BYTE_CAPPED_TOTAL: &str = "acdp_registry_changes_pages_byte_capped_total";
 pub const CHANGES_PRUNED_TOTAL: &str = "acdp_registry_changes_pruned_total";
 pub const CHANGES_HEAD_SEQ: &str = "acdp_registry_changes_head_seq";
 pub const CHANGES_PRUNED_THROUGH: &str = "acdp_registry_changes_pruned_through";
@@ -211,6 +212,12 @@ pub fn record_witness_cosignature(outcome: &'static str) {
 pub fn record_changes_request(outcome: &'static str, rows_scanned: u64) {
     metrics::counter!(CHANGES_REQUESTS_TOTAL, "outcome" => outcome).increment(1);
     metrics::counter!(CHANGES_ROWS_SCANNED_TOTAL).increment(rows_scanned);
+}
+
+/// One `/changes` page ended early by the §5.2 1 MiB serialized-size bound
+/// rather than by `limit`, the head or the scan budget.
+pub fn record_changes_page_byte_capped() {
+    metrics::counter!(CHANGES_PAGES_BYTE_CAPPED_TOTAL).increment(1);
 }
 
 /// One `/subscriptions` request (RFC-ACDP-0018 §8.1). `op` is `create`,
