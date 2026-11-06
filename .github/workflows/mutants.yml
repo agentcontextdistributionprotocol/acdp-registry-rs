@@ -61,7 +61,7 @@ env:
   # which would trip the classifier's own duplicate-name assertion on every run.
   # docs/mutation-runs/README.md indexes which ledgers are CURRENT, in prose;
   # this variable is the machine-readable half of that index.
-  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/run41305942267-scope-405-outcomes.json"
+  MUTANTS_PRIOR_LEDGER: "docs/mutation-runs/run41352579734-scope-405-outcomes.json"
 
   # Surviving mutants at that sha. Each is enumerated with its own written reason
   # below; this number is the machine-readable half of that list. It ratchets DOWN
@@ -72,7 +72,14 @@ env:
   # backfill adds one call to SqliteStore::migrate(), which shifts the three
   # store.rs survivors by one line (:1254:35 -> :1255:35, :1588:35 -> :1589:35,
   # :2202:5 -> :2203:5) and adds no mutant. The set, count, per-file split and
-  # timeout are otherwise unchanged; re-measured by the run linked in the PR.
+  # timeout are otherwise unchanged. Measured by run 41352579734 (workflow_dispatch
+  # on mutants/changes-buckets-prepin 6e8eee7: this branch with the old pins, so
+  # the ledger gate passes inside every mutant): 405 / 261 caught / 8 missed / 135
+  # unviable / 1 timeout; shard 0 157.1 min, shard 1 156.6 min. The ratchet's only
+  # findings are the three DRIFT-STILL-MISSED lines above. Its merged outcomes.json
+  # is committed unchanged as the new MUTANTS_PRIOR_LEDGER. Runs 41331301973 (runner
+  # disk full) and 41343867643 (every mutant killed by the then-stale ledger gate)
+  # are void.
   #
   # SCOPE 399 -> 405 (#523, RFC-ACDP-0008 §6.2 bearer_static read tokens).
   # context.rs 138 -> 144 (the read principal threaded through the read handlers);
