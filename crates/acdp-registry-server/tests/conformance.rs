@@ -9815,8 +9815,11 @@ const EXCUSED: &[(&str, &str)] = &[
          rec010_bucket_filters_registry_side asserts the advertisement on the shipped \
          binary, runs A-F and the vectors, and checks that a default build omits the \
          limit and refuses bucket parameters (EXERCISED_FIXTURES). G-I are \
-         acdp-consumer-recall, as is rec-006 scenario N. rec-001 scenario H (the \u{a7}5.2 1 MiB page bound) is a SHOULD of \
-         acdp-registry-changes that rec_changes_registry_side does not yet exercise. \
+         acdp-consumer-recall, as is rec-006 scenario N. rec-001 scenario H (the \u{a7}5.2 1 MiB \
+         page bound) runs in rec001_h_page_kept_under_1mib against the shipped binary at \
+         max_changes_page = 1000; its single-oversized-entry sentence cannot be produced \
+         through the API and is a self-test in tests/changes_http.rs \
+         (rec001_h_an_oversized_entry_is_served_alone). \
          None of the family is in acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
     (
@@ -18235,13 +18238,19 @@ fn served_full_features_toml() -> String {
 /// `None`. One `[changes]` table either way: a second would be a TOML
 /// duplicate-table error.
 fn served_features_toml(bucket_len: Option<u16>) -> String {
+    served_features_toml_with(bucket_len, "")
+}
+
+/// [`served_features_toml`] with `changes_extra` (whole `key = value` lines)
+/// appended inside the same `[changes]` table.
+fn served_features_toml_with(bucket_len: Option<u16>, changes_extra: &str) -> String {
     let bucket = bucket_len
         .map(|n| format!("max_change_bucket_length = {n}\n"))
         .unwrap_or_default();
     format!(
         "[receipt]\nsigning_key_seed_b64 = \"{}\"\nhead_receipts = true\n\n\
          [lifecycle]\nenabled = true\n\n[log]\nenabled = true\n\n\
-         [changes]\nenabled = true\nkey_b64 = \"{}\"\n{bucket}",
+         [changes]\nenabled = true\nkey_b64 = \"{}\"\n{bucket}{changes_extra}",
         b64_32(0x2c),
         b64_32(0x2d)
     )
@@ -19086,7 +19095,11 @@ fn rec_changes_registry_side() {
     };
     let root = spec_root().expect("spec root");
     for (id, wanted) in [
-        ("rec-001", &["A ", "B ", "C ", "D ", "E ", "F ", "G "][..]),
+        // H (the 1 MiB page bound) is `rec001_h_page_kept_under_1mib`.
+        (
+            "rec-001",
+            &["A ", "B ", "C ", "D ", "E ", "F ", "G ", "H "][..],
+        ),
         ("rec-002", &["A ", "B ", "C ", "E ", "F "][..]),
         // E and F: the fixture still names them; see the doc comment.
         ("rec-005", &["C ", "D ", "E ", "F "][..]),
@@ -19329,6 +19342,152 @@ fn rec_changes_registry_side() {
     refused("?limit=0", "schema_violation");
     refused("?kind=bogus", "schema_violation");
     refused("?since=%25%25%25garbage", "invalid_cursor");
+}
+
+/// rec-001 H (RFC-ACDP-0018 §5.2) against the shipped binary at
+/// `max_changes_page = 1000`: with more than 1 MiB of lifecycle entries
+/// committed, `limit=1000` returns a body of at most 1 MiB that ends early
+/// with `has_more: true`, and the continuation skips and repeats nothing.
+/// The entry size is measured first, so a build whose 1000 entries cannot
+/// exceed 1 MiB fails here instead of passing vacuously. H's single
+/// oversized entry cannot be produced through the API; it is
+/// `rec001_h_an_oversized_entry_is_served_alone` in `tests/changes_http.rs`.
+/// A separate test so `rec_changes_registry_side` stays fast.
+#[test]
+fn rec001_h_page_kept_under_1mib() {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    const BOUND: usize = 1_048_576;
+
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping rec-001 H");
+        return;
+    };
+    let fx = find_fixture_by_id(&fixtures, "rec-001").expect("rec-001 at the pinned spec");
+    assert!(
+        fx["scenarios"]
+            .as_array()
+            .expect("rec-001 scenarios[]")
+            .iter()
+            .any(|s| s["name"].as_str().is_some_and(|n| n.starts_with("H "))),
+        "rec-001 no longer has scenario H: {fx}"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let extra = format!(
+        "{}\n{}",
+        served_auth_toml(false),
+        served_features_toml_with(None, "max_changes_page = 1000\n")
+    );
+    // Lifecycle events share the per-agent publish budget (60/min by
+    // default); about 800 of them from one producer need it raised.
+    let extra = format!("{extra}\n[limits]\npublish_rate_per_minute = 2000\n");
+    let reg = spawned_registry::SpawnedRegistry::start(dir.path(), "rec1h", "", &extra);
+    let (status, caps) = reg.get("/.well-known/acdp.json");
+    assert_eq!(status, 200, "capabilities: {caps}");
+    assert_eq!(
+        caps["limits"]["max_changes_page"], 1000,
+        "the scenario's input: {caps}"
+    );
+
+    let seed = [0x9d; 32];
+    let agent =
+        acdp::did::key::did_key_from_ed25519(&SigningKey::from_bytes(&seed).verifying_key_bytes());
+    let key_id = acdp::did::key::did_key_url(&agent).expect("did:key url");
+    let req = Producer::new_did_key(SigningKey::from_bytes(&seed))
+        .publish_request()
+        .title("rec001 h")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("publish request");
+    let (status, v) = reg.post("/contexts", &serde_json::to_value(&req).unwrap());
+    assert_eq!(status, 201, "publish: {v}");
+    let ctx = v["ctx_id"].as_str().expect("ctx_id").to_string();
+    let path = |op: &str| format!("/contexts/{}/{op}", pct_encode_path_segment(&ctx));
+    let mut entries = 0usize;
+    let step = |entries: &mut usize| {
+        let (op, ty) = if entries.is_multiple_of(2) {
+            ("retract", LifecycleEventType::Retracted)
+        } else {
+            ("republish", LifecycleEventType::Republished)
+        };
+        let e = LifecycleEvent::new(
+            uuid::Uuid::new_v4().to_string(),
+            CtxId(ctx.clone()),
+            ty,
+            chrono::Utc::now(),
+            AgentDid::new(agent.clone()),
+            None,
+        )
+        .expect("valid event")
+        .sign_with(SigningKey::from_bytes(&seed), key_id.clone())
+        .expect("signed event");
+        let (status, v) = reg.post(&path(op), &json!({ "event": e }));
+        assert_eq!(status, 200, "{op} #{entries}: {v}");
+        *entries += 1;
+    };
+    step(&mut entries);
+    step(&mut entries);
+
+    // Measure: the smaller of a retraction and a republication entry.
+    let (status, raw) = reg.get_raw("/changes?limit=2");
+    assert_eq!(status, 200, "{raw}");
+    let first: Value = serde_json::from_str(&raw).expect("page");
+    let entry_size = first["changes"]
+        .as_array()
+        .expect("changes[]")
+        .iter()
+        .map(|e| serde_json::to_vec(e).expect("entry").len())
+        .min()
+        .expect("two entries");
+    let needed = (BOUND + BOUND / 10).div_ceil(entry_size);
+    assert!(
+        needed <= 1000,
+        "1000 entries of {entry_size} bytes cannot exceed 1 MiB, so this would pass vacuously"
+    );
+    while entries < needed {
+        step(&mut entries);
+    }
+
+    let (status, raw) = reg.get_raw("/changes?limit=1000");
+    assert_eq!(status, 200, "{raw}");
+    assert!(
+        raw.len() <= BOUND,
+        "the first page is {} bytes, over the 1 MiB bound",
+        raw.len()
+    );
+    let page: Value = serde_json::from_str(&raw).expect("page");
+    let mut seqs: Vec<u64> = page["changes"]
+        .as_array()
+        .expect("changes[]")
+        .iter()
+        .map(|e| e["seq"].as_u64().expect("seq"))
+        .collect();
+    assert!(
+        seqs.len() < entries && seqs.len() < 1000,
+        "{} of {entries} entries on a 1 MiB page",
+        seqs.len()
+    );
+    assert_eq!(page["has_more"], true, "an early page is not the end");
+    let cursor = page["next_cursor"].as_str().expect("next_cursor");
+    let (status, rest) = reg.get(&format!(
+        "/changes?limit=1000&since={}",
+        pct_encode_path_segment(cursor)
+    ));
+    assert_eq!(status, 200, "{rest}");
+    seqs.extend(
+        rest["changes"]
+            .as_array()
+            .expect("changes[]")
+            .iter()
+            .map(|e| e["seq"].as_u64().expect("seq")),
+    );
+    assert_eq!(rest["has_more"], false, "{} entries fit two pages", entries);
+    assert_eq!(
+        seqs,
+        (1..=entries as u64).collect::<Vec<_>>(),
+        "the continuation skipped or repeated an entry"
+    );
 }
 
 /// rec-003 A–F (RFC-ACDP-0018 §6) against the shipped binary, with the

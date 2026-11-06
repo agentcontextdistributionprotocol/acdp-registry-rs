@@ -4,6 +4,7 @@
 //! `acdp-registry-core` itself has no compile-time dependency on a
 //! specific storage crate — the binary picks one via Cargo features.
 
+pub mod accept_encoding;
 pub mod callback;
 pub mod changes_key;
 pub mod extract;
@@ -41,6 +42,7 @@ use axum::middleware::{from_fn, from_fn_with_state, map_response, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
@@ -120,7 +122,22 @@ pub fn build_router_shared<S: ExtendedRegistryStore + 'static>(state: Arc<AppSta
         // Change feed (RFC-ACDP-0018 §5). Always mounted: without
         // `acdp-registry-changes` the handler answers 501. Per-requester
         // visibility, so it belongs in this `private` group.
-        .route("/changes", get(handlers::changes::<S>))
+        //
+        // The only compressed route (gzip only; RFC-ACDP-0018 §5.2 measures
+        // the page bound before content coding). A `MethodRouter` layer wraps
+        // the handler alone, so `read_gate` refusals stay uncompressed. The
+        // last `.layer` is outermost: `normalize_accept_encoding` runs first
+        // and keeps tower-http 0.7 from turning any response into a 406
+        // (`accept_encoding.rs`). `CompressionLayer` adds
+        // `Vary: accept-encoding`, identity answers included.
+        .route(
+            "/changes",
+            get(handlers::changes::<S>)
+                .layer(CompressionLayer::new().gzip(true))
+                .layer(axum::middleware::map_request(
+                    accept_encoding::normalize_accept_encoding,
+                )),
+        )
         // Change-hint subscriptions (RFC-ACDP-0018 §8.1). Always mounted:
         // without `acdp-registry-events` the handlers answer 501. Owner-scoped,
         // so `private`; the create response overrides that with `no-store`
