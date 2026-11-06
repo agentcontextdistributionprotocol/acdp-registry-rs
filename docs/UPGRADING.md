@@ -21,7 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## Unreleased
+## 0.11.0
 
 **Migration `021_changes_bucket_hashes` backfills the change feed at startup (Postgres: size it
 first).** It adds `lineage_hash` / `agent_hash` to `changes` for RFC-ACDP-0018 §6.1 bucket filters
