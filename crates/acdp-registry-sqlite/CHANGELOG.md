@@ -1,5 +1,12 @@
 
 
+## [0.11.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.10.1...acdp-registry-sqlite/v0.11.0) - 2026-11-06
+
+### Added
+
+- *(changes)* bucket filters on GET /changes (RFC-ACDP-0018 §6.1), acdp 0.21.0 ([#534](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/534))
+
+
 ## [0.10.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-sqlite/v0.10.0...acdp-registry-sqlite/v0.10.1) - 2026-11-01
 
 No changes. This crate is released at 0.10.1 because the workspace shares a
