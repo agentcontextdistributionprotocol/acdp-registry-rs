@@ -1436,6 +1436,13 @@ fn default_log_instance() -> String {
 /// sequence reset must expire every earlier cursor). Unlike a `key_id`
 /// rotation it leaves sealed subscription secrets readable.
 ///
+/// `max_change_bucket_length` (env
+/// `ACDP_REGISTRY_CHANGES__MAX_CHANGE_BUCKET_LENGTH`) turns on the §6.1
+/// bucket filters (`lineage_bucket` / `agent_bucket`) and is advertised as
+/// `limits.max_change_bucket_length`. Unset (the default), nothing is
+/// advertised and a request carrying either parameter is refused. Startup
+/// refuses a value outside 4..=16 and a value set while `enabled` is false.
+///
 /// Startup validation also requires the `lifecycle` profile, a receipt
 /// key, a durable store, `retention_seconds` >= 2592000 (30 days, §5.4)
 /// and both page/filter limits >= 100 (§9).
@@ -1470,6 +1477,10 @@ pub struct ChangesConfig {
     /// How often the prune task deletes entries older than the retention.
     #[serde(default = "default_changes_prune_interval_seconds")]
     pub prune_interval_seconds: u64,
+    /// The longest bucket filter value served (§6.1), advertised as
+    /// `limits.max_change_bucket_length`. `None` = bucket filters off.
+    #[serde(default)]
+    pub max_change_bucket_length: Option<u16>,
 }
 
 impl Default for ChangesConfig {
@@ -1484,6 +1495,7 @@ impl Default for ChangesConfig {
             max_change_filters: default_changes_min_limit(),
             max_changes_page: default_changes_min_limit(),
             prune_interval_seconds: default_changes_prune_interval_seconds(),
+            max_change_bucket_length: None,
         }
     }
 }
@@ -3508,5 +3520,34 @@ backend = "sqlite"
         );
         env.unset("ACDP_REGISTRY_NOTACONFIGPATH");
         env.unset(key);
+    }
+
+    /// `[changes] max_change_bucket_length`: unset by default, read from the
+    /// file and from its env override, and a typo'd neighbour is still an
+    /// unknown key.
+    #[test]
+    fn change_bucket_length_loads_from_file_and_env() {
+        let mut env = EnvGuard::new();
+        env.unset("ACDP_REGISTRY_CONFIG");
+        env.unset("ACDP_REGISTRY_CHANGES__MAX_CHANGE_BUCKET_LENGTH");
+        assert_eq!(ChangesConfig::default().max_change_bucket_length, None);
+        let plain = toml_fixture(FIXTURE);
+        let cfg = RegistryConfig::load(Some(plain.to_str().unwrap())).expect("loads");
+        assert_eq!(cfg.changes.max_change_bucket_length, None);
+
+        let path = toml_fixture(&format!(
+            "{FIXTURE}[changes]\nmax_change_bucket_length = 8\n"
+        ));
+        let cfg = RegistryConfig::load(Some(path.to_str().unwrap())).expect("loads");
+        assert_eq!(cfg.changes.max_change_bucket_length, Some(8));
+
+        env.set("ACDP_REGISTRY_CHANGES__MAX_CHANGE_BUCKET_LENGTH", "12");
+        let cfg = RegistryConfig::load(Some(plain.to_str().unwrap())).expect("loads");
+        assert_eq!(cfg.changes.max_change_bucket_length, Some(12));
+        env.unset("ACDP_REGISTRY_CHANGES__MAX_CHANGE_BUCKET_LENGTH");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&plain);
+
+        assert!(toml::from_str::<ChangesConfig>("max_change_bucket_len = 8").is_err());
     }
 }

@@ -7277,3 +7277,24 @@ The run is valid for current main because the four scoped files are identical be
 conformance tests from #400, which W2 projected at about 1 s per mutant and a worst case of
 about 13% cap headroom. The measured headroom is 44%. The whole-workspace denominator (1427
 at a66e1f2) was not re-measured.
+
+## 2026-11-06 — mutants ratchet re-pinned for migration 021 (scope 405, unchanged)
+
+Run 41352579734 (`workflow_dispatch` on `mutants/changes-buckets-prepin` 6e8eee7; scoped files
+identical to `feat/changes-buckets`) measured 405 mutants: 261 caught / 8 missed / 135 unviable
+/ 1 timeout, shards 157.1 and 156.6 min. These are the same eight survivors and the same
+timeout as run 41305942267. Migration 021's backfill call in `SqliteStore::migrate()` shifted
+the three store.rs sites by one line (:1254:35, :1588:35, :2202:5 → +1). The merged
+`outcomes.json` is committed byte for byte as
+`docs/mutation-runs/run41352579734-scope-405-outcomes.json`.
+
+Two earlier runs on the branch are void, and the harness now refuses both failure classes:
+
+- **41331301973, runner disk full.** "Disk quota exceeded (os error 122)" from roughly the 70th
+  mutant on: shard 1 scored 202/202 Unviable, and the classifier ordered all eight survivor lines
+  deleted. `mutants.yml` now frees ~25 GB of unused SDKs, builds mutants without debuginfo, and
+  has a ratchet harness check that fails the run if any mutant log reports a full disk.
+- **41343867643, stale ledger gate.** That run went from the re-pinned branch, where
+  `every_committed_survivor_is_in_the_prior_ledger` fails until the new ledger exists. As a
+  result, 124 mutants were killed by that test alone. The rule: dispatch the measuring run from
+  a branch that still has the OLD pins, then commit the new pins and the new ledger together.

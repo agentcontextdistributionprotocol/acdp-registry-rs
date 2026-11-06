@@ -788,7 +788,9 @@ Prerequisites (enforced at startup): `[lifecycle] enabled = true`, a
 configured `[receipt]` key, a durable storage backend (`sqlite` or
 `postgres`), exactly one master-key source, `retention_seconds >= 2592000`
 (30 days, §5.4), and `100 <= max_change_filters, max_changes_page <= 1000`
-(§9 floor; the ceiling bounds per-request work).
+(§9 floor; the ceiling bounds per-request work). `max_change_bucket_length`,
+when set, must be from 4 to 16 and is refused with `enabled = false`; that
+refusal runs whether or not the feed is enabled.
 
 The master key is 32 random bytes, base64. HKDF-SHA-256 derives the cursor
 key from it, so cursors are opaque and tamper-evident (AES-256-GCM). It is a
@@ -810,8 +812,9 @@ the same way, and subscription secrets stay readable.
 | `key_id` | u8 | `1` | Stamped into every cursor; a cursor under an id this registry does not hold is `cursor_expired`. Change it when rotating the key. |
 | `cursor_epoch` | u32 | `0` | Sealed into every cursor; a cursor from another epoch is `cursor_expired`. Env `ACDP_REGISTRY_CHANGES__CURSOR_EPOCH`. Raise it by one on every restore from backup (RFC-ACDP-0018 §5.3); never lower it. Same value on every replica. |
 | `retention_seconds` | u64 | `2592000` | Minimum entry lifetime; advertised as `limits.change_retention_seconds`. |
-| `max_change_filters` | u64 | `100` | Total `ctx_id`/`lineage_id`/`agent_id`/`kind` values per request; advertised. |
+| `max_change_filters` | u64 | `100` | Total `ctx_id`/`lineage_id`/`agent_id`/`kind`/`lineage_bucket`/`agent_bucket` values per request, duplicates included; advertised. |
 | `max_changes_page` | u64 | `100` | Largest `limit`; advertised as `limits.max_changes_page`. |
+| `max_change_bucket_length` | u16 | unset | Turns on the §6.1 bucket filters (`lineage_bucket` / `agent_bucket` on `GET /changes`) and is advertised as `limits.max_change_bucket_length`. 4 to 16; only with `enabled = true`. Unset (the default), nothing is advertised and either parameter is `400 schema_violation`. Env `ACDP_REGISTRY_CHANGES__MAX_CHANGE_BUCKET_LENGTH`. **Rollout:** consumers on acdp 0.19 or older reject a capabilities document carrying this key (their `limits` is closed), and startup logs a warning saying so; set it only once every consumer is on acdp 0.20 or newer. A binary that predates the key refuses to start with it set, so remove it before rolling back ([UPGRADING.md](UPGRADING.md)). |
 | `prune_interval_seconds` | u64 | `3600` | How often the background task deletes entries older than `retention_seconds` plus a one-hour clock-skew margin (in batches of 1000). Runs whether or not `enabled` is set. |
 
 ### `[events]` *(ACDP 0.5.0)*

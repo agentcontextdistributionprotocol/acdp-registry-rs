@@ -1,5 +1,5 @@
 //! RFC-ACDP-0018 change feed on Postgres: every statement against the
-//! `changes` / `changes_meta` tables (migration 017).
+//! `changes` / `changes_meta` tables (migrations 017, 020 and 021).
 //!
 //! Appends run inside the caller's transaction as its LAST statements and
 //! take [`FEED_APPEND_LOCK_KEY`] first. The identity value is drawn while
@@ -18,6 +18,7 @@ use acdp::types::change::ChangeKind;
 use acdp::types::lifecycle::LifecycleEvent;
 use acdp::types::primitives::CtxId;
 use acdp::types::EventReceipt;
+use acdp_registry_store::change_bucket::Bucket;
 use acdp_registry_store::changes::{
     feed_appends_for_publish, feed_fingerprint, lifecycle_append, FeedAppend, FeedFingerprint,
     FeedHead, FeedPage, FeedQuery, FeedRow, Predecessor,
@@ -103,8 +104,9 @@ async fn insert_all(
     for a in appends {
         sqlx::query(&format!(
             "INSERT INTO changes \
-             (kind, ctx_id, lineage_id, agent_id, superseded_by, event, receipt, appended_at_ms) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,{NOW_MS})"
+             (kind, ctx_id, lineage_id, agent_id, superseded_by, event, receipt, appended_at_ms, \
+              lineage_hash, agent_hash) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,{NOW_MS},$8,$9)"
         ))
         .bind(a.kind.as_str())
         .bind(&a.ctx_id)
@@ -113,6 +115,10 @@ async fn insert_all(
         .bind(&a.superseded_by)
         .bind(&a.event)
         .bind(&a.receipt)
+        // Bound, so migration 021's fill-on-NULL trigger (the shim for an
+        // older binary) never computes a hash for this one.
+        .bind(&a.lineage_hash)
+        .bind(&a.agent_hash)
         .execute(&mut **tx)
         .await
         .map_err(db_err("append"))?;
@@ -176,7 +182,7 @@ pub(crate) async fn page(pool: &PgPool, q: &FeedQuery) -> Result<FeedPage, AcdpE
     let head = read_head(&mut tx).await?;
     let mut sql = QueryBuilder::<Postgres>::new(
         "SELECT seq, kind, ctx_id, lineage_id, agent_id, superseded_by, event, receipt, \
-         appended_at_ms FROM changes WHERE seq > ",
+         appended_at_ms, lineage_hash, agent_hash FROM changes WHERE seq > ",
     );
     sql.push_bind(i64::try_from(q.after).unwrap_or(i64::MAX));
     let arms: [(&str, &Vec<String>); 3] = [
@@ -192,12 +198,20 @@ pub(crate) async fn page(pool: &PgPool, q: &FeedQuery) -> Result<FeedPage, AcdpE
     if !q.revocation_agents.is_empty() {
         ors.push(("agent_id", &q.revocation_agents, true));
     }
-    if !ors.is_empty() {
+    let buckets: Vec<(&str, &Bucket)> = q
+        .lineage_buckets
+        .iter()
+        .map(|b| ("lineage_hash", b))
+        .chain(q.agent_buckets.iter().map(|b| ("agent_hash", b)))
+        .collect();
+    if !ors.is_empty() || !buckets.is_empty() {
         sql.push(" AND (");
-        for (i, (col, ids, revocation_only)) in ors.into_iter().enumerate() {
-            if i > 0 {
+        let mut first = true;
+        for (col, ids, revocation_only) in ors {
+            if !first {
                 sql.push(" OR ");
             }
+            first = false;
             if revocation_only {
                 sql.push("(kind = 'key_revocation' AND ");
             }
@@ -207,6 +221,20 @@ pub(crate) async fn page(pool: &PgPool, q: &FeedQuery) -> Result<FeedPage, AcdpE
             if revocation_only {
                 sql.push(")");
             }
+        }
+        // §6.1: one range arm per bucket, each an index range scan. The
+        // columns are COLLATE "C", so the comparison is bytewise.
+        for (col, b) in buckets {
+            if !first {
+                sql.push(" OR ");
+            }
+            first = false;
+            let (lower, upper) = b.range();
+            sql.push("(").push(col).push(" >= ").push_bind(lower);
+            if let Some(upper) = upper {
+                sql.push(" AND ").push(col).push(" < ").push_bind(upper);
+            }
+            sql.push(")");
         }
         sql.push(")");
     }
@@ -244,6 +272,8 @@ fn row_to_feed(r: &PgRow) -> Result<FeedRow, AcdpError> {
         r.try_get("event").map_err(&get)?,
         r.try_get("receipt").map_err(&get)?,
         r.try_get("appended_at_ms").map_err(&get)?,
+        r.try_get("lineage_hash").map_err(&get)?,
+        r.try_get("agent_hash").map_err(&get)?,
     )
 }
 

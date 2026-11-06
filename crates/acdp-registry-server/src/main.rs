@@ -553,6 +553,11 @@ fn validate_config(cfg: &RegistryConfig) -> anyhow::Result<()> {
     }
     validate_keyless(cfg)?;
     validate_changes_retention(&cfg.changes)?;
+    // Always run, not inside `validate_changes`: the refusal of a bucket
+    // length on a disabled feed must be reachable with the feed disabled.
+    for w in change_bucket_length_checks(cfg)? {
+        tracing::warn!("{w}");
+    }
     if cfg.changes.enabled {
         validate_changes(cfg)?;
     }
@@ -1895,6 +1900,50 @@ fn validate_changes_retention(c: &acdp_registry_types::ChangesConfig) -> anyhow:
     Ok(())
 }
 
+/// Startup rules for `[changes] max_change_bucket_length` (RFC-ACDP-0018
+/// §6.1, RFC-ACDP-0007 §3.2). Refusals are `Err`; the warning is returned,
+/// the same shape as [`read_limit_checks`].
+///
+/// The value must lie in the `limits.max_change_bucket_length` schema range,
+/// and it is refused on a disabled feed: it would be neither advertised nor
+/// served, and the operator plainly expected both.
+fn change_bucket_length_checks(cfg: &RegistryConfig) -> anyhow::Result<Vec<String>> {
+    use acdp::types::change::{MAX_CHANGE_BUCKET_LENGTH, MIN_ADVERTISED_CHANGE_BUCKET_LENGTH};
+    let Some(n) = cfg.changes.max_change_bucket_length else {
+        return Ok(Vec::new());
+    };
+    if !(MIN_ADVERTISED_CHANGE_BUCKET_LENGTH..=MAX_CHANGE_BUCKET_LENGTH).contains(&n) {
+        anyhow::bail!(
+            "changes.max_change_bucket_length={n} must be from {MIN_ADVERTISED_CHANGE_BUCKET_LENGTH} to \
+             {MAX_CHANGE_BUCKET_LENGTH} (the limits.max_change_bucket_length range, \
+             RFC-ACDP-0018 §6.1)."
+        );
+    }
+    if !cfg.changes.enabled {
+        anyhow::bail!(
+            "changes.max_change_bucket_length is set but changes.enabled is false: bucket \
+             filters are part of GET /changes (RFC-ACDP-0018 §6.1), so the value would be \
+             neither advertised nor served. Set changes.enabled=true or remove \
+             max_change_bucket_length."
+        );
+    }
+    Ok(vec![format!(
+        "changes.max_change_bucket_length = {n}: capabilities carry \
+         limits.max_change_bucket_length. Consumers on acdp 0.19 or older (closed `limits`) \
+         reject that document; set it only once every consumer tracks the ACDP 0.5.0 schema \
+         (RFC-ACDP-0007 §3.3.1)."
+    )])
+}
+
+/// `limits.max_change_bucket_length`: the configured bucket length, only
+/// while the feed is served (§6.1). Requests carrying a bucket parameter are
+/// accepted exactly when this is advertised.
+fn advertised_change_bucket_length(cfg: &RegistryConfig) -> Option<u16> {
+    cfg.changes
+        .max_change_bucket_length
+        .filter(|_| cfg.changes.enabled)
+}
+
 /// The `acdp-registry-events` prerequisites (RFC-ACDP-0018 §8 and the
 /// profile row): the profile is advertised exactly when `events.enabled`,
 /// which needs the change feed (secrets are sealed under its key; a hint
@@ -2142,6 +2191,9 @@ fn build_capabilities(cfg: &RegistryConfig) -> CapabilitiesDocument {
                 .enabled
                 .then_some(cfg.changes.max_change_filters),
             max_changes_page: cfg.changes.enabled.then_some(cfg.changes.max_changes_page),
+            // RFC-ACDP-0018 §6.1 bucket filters: only when configured (off
+            // by default; acdp 0.19 consumers reject the unknown key).
+            max_change_bucket_length: advertised_change_bucket_length(cfg),
             // §9: MUST be present with acdp-registry-events.
             max_subscriptions_per_requester: cfg
                 .events
@@ -4583,6 +4635,89 @@ mod tests {
         assert_eq!(caps.limits.max_changes_page, None);
     }
 
+    /// `[changes] max_change_bucket_length`: the schema range, through
+    /// `validate_config` (the path startup takes).
+    #[test]
+    fn change_bucket_length_is_range_checked() {
+        for bad in [0u16, 3, 17, 255] {
+            let mut cfg = changes_cfg();
+            cfg.changes.max_change_bucket_length = Some(bad);
+            let msg = validate_config(&cfg).expect_err("out of range").to_string();
+            assert!(msg.contains("max_change_bucket_length"), "{bad}: {msg}");
+            assert!(msg.contains("from 4 to 16"), "{bad}: {msg}");
+        }
+        for ok in [4u16, 8, 16] {
+            let mut cfg = changes_cfg();
+            cfg.changes.max_change_bucket_length = Some(ok);
+            validate_config(&cfg).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+    }
+
+    /// Round-1 item 5: the disabled-feed refusal sits on the always-run
+    /// path. This config is otherwise valid with the feed off, so a check
+    /// that ran only inside `validate_changes` would let it start.
+    #[test]
+    fn change_bucket_length_on_a_disabled_feed_is_refused() {
+        let mut cfg = RegistryConfig::defaults();
+        validate_config(&cfg).expect("the default config starts");
+        cfg.changes.max_change_bucket_length = Some(8);
+        let msg = validate_config(&cfg).expect_err("feed off").to_string();
+        assert!(msg.contains("max_change_bucket_length"), "{msg}");
+        assert!(msg.contains("changes.enabled is false"), "{msg}");
+        // Out of range on a disabled feed: the range is reported first.
+        cfg.changes.max_change_bucket_length = Some(2);
+        let msg = validate_config(&cfg).expect_err("feed off").to_string();
+        assert!(msg.contains("from 4 to 16"), "{msg}");
+    }
+
+    #[test]
+    fn change_bucket_length_warns_naming_old_consumers() {
+        let mut cfg = changes_cfg();
+        assert!(change_bucket_length_checks(&cfg).unwrap().is_empty());
+        cfg.changes.max_change_bucket_length = Some(8);
+        let w = change_bucket_length_checks(&cfg).unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("acdp 0.19"), "{w:?}");
+        assert!(w[0].contains("limits.max_change_bucket_length"), "{w:?}");
+    }
+
+    /// Advertised exactly when configured and the feed is served; the
+    /// default document carries no such key at all.
+    #[test]
+    fn change_bucket_length_is_advertised_only_when_configured() {
+        let wire = |cfg: &RegistryConfig| serde_json::to_value(build_capabilities(cfg)).unwrap();
+        for cfg in [RegistryConfig::defaults(), changes_cfg()] {
+            assert_eq!(
+                build_capabilities(&cfg).limits.max_change_bucket_length,
+                None
+            );
+            assert!(
+                wire(&cfg)["limits"]
+                    .get("max_change_bucket_length")
+                    .is_none(),
+                "{}",
+                wire(&cfg)
+            );
+        }
+        let mut cfg = changes_cfg();
+        cfg.changes.max_change_bucket_length = Some(8);
+        assert_eq!(
+            build_capabilities(&cfg).limits.max_change_bucket_length,
+            Some(8)
+        );
+        let doc = wire(&cfg);
+        assert_eq!(doc["limits"]["max_change_bucket_length"], 8, "{doc}");
+        let back: CapabilitiesDocument = serde_json::from_value(doc).unwrap();
+        assert_eq!(back.limits.max_change_bucket_length, Some(8));
+        assert!(back.limits.extensions.is_empty(), "typed, not an extension");
+        // Never on a disabled feed, even if validation were bypassed.
+        cfg.changes.enabled = false;
+        assert_eq!(
+            build_capabilities(&cfg).limits.max_change_bucket_length,
+            None
+        );
+    }
+
     #[test]
     fn changes_retention_is_checked_even_when_the_feed_is_off() {
         // The pruner runs on every registry, so its settings are validated
@@ -4613,10 +4748,12 @@ mod tests {
         for i in 0..old + 3 {
             let at = if i < old { cutoff - 1 } else { cutoff + 1 };
             sqlx::query(
-                "INSERT INTO changes (kind, ctx_id, lineage_id, agent_id, receipt, appended_at_ms) \
-                 VALUES ('key_revocation', 'c', 'l', 'a', '{}', ?)",
+                "INSERT INTO changes (kind, ctx_id, lineage_id, agent_id, receipt, appended_at_ms, \
+                 lineage_hash, agent_hash) VALUES ('key_revocation', 'c', 'l', 'a', '{}', ?, ?, ?)",
             )
             .bind(at)
+            .bind(acdp_registry_store::bucket_hash("l"))
+            .bind(acdp_registry_store::bucket_hash("a"))
             .execute(store.pool())
             .await
             .unwrap();

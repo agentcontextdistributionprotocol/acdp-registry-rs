@@ -6,8 +6,17 @@ per-mutant verdicts for 95 of this file's 138 mutants were lost exactly that way
 
 ## Index — which ledgers are CURRENT
 
-**One ledger is CURRENT for the whole CI scope: `run41305942267-scope-405-outcomes.json`.**
-It is the `outcomes.json` the `ratchet` job of `mutants.yml` run 41305942267 merged from its
+**One ledger is CURRENT for the whole CI scope: `run41352579734-scope-405-outcomes.json`.**
+It is the merged `outcomes.json` of `mutants.yml` run 41352579734 (a `workflow_dispatch` on
+`mutants/changes-buckets-prepin` 6e8eee7), committed unchanged by the bucket-filter re-pin
+(#534). Scope is still 405. Migration 021's backfill call moved the three store.rs survivors
+down one line; the eight survivors and the one timeout are the same mutants, and there is no
+new miss. The run went from a branch carrying the OLD pins on purpose: on the re-pinned branch
+`every_committed_survivor_is_in_the_prior_ledger` fails inside every mutant until this
+ledger exists, which voided run 41343867643 (124 mutants killed by that test alone). Run
+41331301973 is void too, because the runner's disk filled.
+
+Before that, `run41305942267-scope-405-outcomes.json` was CURRENT. It is the `outcomes.json` the `ratchet` job of `mutants.yml` run 41305942267 merged from its
 two round-robin shards (`.github/scripts/merge_mutants_shards.py`; a `workflow_dispatch` on
 `feat/bearer-static` 7c8aff8), committed unchanged by the bearer_static re-pin (#523). It is
 the first sharded ledger: its log/diff paths carry an `s0__`/`s1__` prefix and it has a
@@ -49,7 +58,8 @@ ledger.
 
 | ledger | scope | result | status |
 |---|---|---|---|
-| `run41305942267-scope-405-outcomes.json` | **405** — context.rs 144 + log.rs 65 + receipt.rs 16 + `sqlite/src/store.rs` 180 | 261 caught / 8 missed / 135 unviable / 1 timeout (2 shards: 220.5 + 144.2 min) | **CURRENT** |
+| `run41352579734-scope-405-outcomes.json` | **405** — context.rs 144 + log.rs 65 + receipt.rs 16 + `sqlite/src/store.rs` 180 | 261 caught / 8 missed / 135 unviable / 1 timeout (2 shards: 157.1 + 156.6 min) | **CURRENT** |
+| `run41305942267-scope-405-outcomes.json` | 405 — context.rs 144 + log.rs 65 + receipt.rs 16 + `sqlite/src/store.rs` 180 | 261 caught / 8 missed / 135 unviable / 1 timeout (2 shards: 220.5 + 144.2 min) | SUPERSEDED by `run41352579734` |
 | `run41124872541-scope-399-outcomes.json` | 399 — context.rs 138 + log.rs 65 + receipt.rs 16 + `sqlite/src/store.rs` 180 | 255 caught / 8 missed / 135 unviable / 1 timeout (307.1 min) | SUPERSEDED by `run41305942267` |
 | `run40283754611-scope-390-outcomes.json` | 390 — context.rs 137 + log.rs 65 + receipt.rs 16 + `sqlite/src/store.rs` 172 | 250 caught / 9 missed (8 pinned; :716:8 killed by a new test) / 130 unviable / 1 timeout (237.8 min) | SUPERSEDED by `run41124872541` |
 | `run40232497328-scope-370-outcomes.json` | 370 — context.rs 136 + log.rs 65 + receipt.rs 16 + `sqlite/src/store.rs` 153 | 239 caught / 8 missed / 122 unviable / 1 timeout (136.2 min) | SUPERSEDED by `run40283754611` |

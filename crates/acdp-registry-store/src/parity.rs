@@ -2388,6 +2388,7 @@ where
             .to_change()
             .unwrap_or_else(|e| panic!("[{label}] row {} is not servable: {e}", row.seq));
         assert_eq!(change.seq(), row.seq, "[{label}]");
+        assert_stored_hashes(row, label);
     }
     let lineage_lifecycle = plain
         .changes_page(&crate::FeedQuery {
@@ -2502,6 +2503,303 @@ where
         feed_rows_for(plain, start, &[&a2_id, a3.ctx_id.as_str()]).await,
         before,
         "[{label}] an idempotent retry must append no row"
+    );
+}
+
+/// A stored row's §6.1 bucket hashes are over the ids it serves.
+fn assert_stored_hashes(row: &crate::FeedRow, label: &str) {
+    use crate::change_bucket::bucket_hash;
+    let change = row
+        .to_change()
+        .unwrap_or_else(|e| panic!("[{label}] row {} is not servable: {e}", row.seq));
+    assert_eq!(
+        row.lineage_hash,
+        bucket_hash(change.lineage_id().as_str()),
+        "[{label}] row {} lineage_hash",
+        row.seq
+    );
+    assert_eq!(
+        row.agent_hash,
+        bucket_hash(change.agent_id().as_str()),
+        "[{label}] row {} agent_hash",
+        row.seq
+    );
+}
+
+/// **RFC-ACDP-0018 §6.1 — every backend serves bucket filters the same
+/// way.**
+///
+/// Producer P publishes candidates until two lineages La and Lb share their
+/// first hash digit but not their second, then supersedes both (rows S_a,
+/// S_b, agent P). Producer Q then publishes a key revocation whose
+/// controller is P (row K, agent P, its own lineage). Assertions are scoped
+/// to those three rows past the start head, as for [`assert_change_feed`];
+/// rows written concurrently by other tests (Postgres) may share a bucket,
+/// so every returned row is checked against [`crate::FeedQuery::matches`]
+/// and its stored hashes instead of being counted.
+///
+/// Legs:
+/// 1. Every returned row carries hashes over the ids it serves.
+/// 2. A 16-digit lineage bucket returns its lineage's row only; the shared
+///    1-digit bucket returns both; the 2-digit bucket of the lower hash
+///    excludes the other lineage, which sorts just above its range (the
+///    range's upper bound decides it).
+/// 3. An agent bucket hears P's `key_revocation` by controller, and `kind`
+///    is AND'd with the buckets.
+/// 4. Buckets are OR'd with `ctx_id`, `lineage_id` and `agent_id`.
+/// 5. A lineage bucket does NOT pull in the key revocation of the watched
+///    lineages' producer: §6.1 has no counterpart of the `ctx_id` rule.
+/// 6. Overlapping buckets return each row once, and a bucket nothing
+///    matches returns nothing.
+pub async fn assert_change_feed_bucket_filter<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    use crate::change_bucket::{bucket_hash, Bucket};
+    use acdp::types::change::{bucket, ChangeKind};
+
+    let signer = || {
+        acdp::types::ReceiptSigner::new(
+            SigningKey::from_bytes(&[92u8; 32]),
+            "did:web:reg.test",
+            "did:web:reg.test#receipt-key-1",
+        )
+        .expect("signer")
+    };
+    let start = store.changes_head().await.expect("changes_head").head;
+    let p = producer(238);
+    let q = producer(239);
+
+    // Two lineages sharing hash digit 1 and differing at digit 2: about
+    // one candidate pair in 16 shares the first digit, so 64 is ample.
+    let mut seen: Vec<(String, acdp::types::publish::PublishResponse)> = Vec::new();
+    let mut pair = None;
+    for i in 0..64 {
+        let r = publish_req(
+            store,
+            p.publish_request()
+                .title(format!("bucket candidate {i}"))
+                .context_type(ContextType::DataSnapshot)
+                .visibility(Visibility::Public)
+                .build()
+                .expect("valid publish request"),
+            None,
+        )
+        .await;
+        let h = bucket_hash(r.lineage_id.as_str());
+        if let Some(j) = seen
+            .iter()
+            .position(|(o, _)| o[..1] == h[..1] && o[1..2] != h[1..2])
+        {
+            pair = Some((seen.swap_remove(j).1, r));
+            break;
+        }
+        seen.push((h, r));
+    }
+    let Some((a, b)) = pair else {
+        panic!(
+            "[{label}] no two of 64 lineages share a first hash digit: {:?}",
+            seen.iter().map(|(h, _)| &h[..2]).collect::<Vec<_>>()
+        );
+    };
+    let supersede = |r: &acdp::types::publish::PublishResponse| {
+        let body = store.get(&r.ctx_id).expect("get").expect("candidate").body;
+        p.supersede_body(&body)
+            .title("bucket successor")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid successor request")
+    };
+    publish_req(store, supersede(&a), Some(signer())).await;
+    publish_req(store, supersede(&b), Some(signer())).await;
+    let k = publish_req(
+        store,
+        q.publish_request()
+            .title("bucket revocation")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .metadata(serde_json::json!({ "revoked_key_controller": agent_did(238) }))
+            .build()
+            .expect("valid revocation request"),
+        Some(signer()),
+    )
+    .await;
+    let rows = feed_rows_for(
+        store,
+        start,
+        &[a.ctx_id.as_str(), b.ctx_id.as_str(), k.ctx_id.as_str()],
+    )
+    .await;
+    assert_eq!(rows.len(), 3, "[{label}] S_a, S_b, K: {rows:?}");
+    let (s_a, s_b, rev) = (rows[0].seq, rows[1].seq, rows[2].seq);
+    assert_eq!(
+        (rows[0].kind, rows[1].kind, rows[2].kind),
+        (
+            ChangeKind::Superseded,
+            ChangeKind::Superseded,
+            ChangeKind::KeyRevocation
+        ),
+        "[{label}]"
+    );
+    assert_eq!(
+        rows[2].agent_id,
+        agent_did(238),
+        "[{label}] K is P's revocation"
+    );
+    let fixture = [s_a, s_b, rev];
+    let (la, lb) = (a.lineage_id.as_str(), b.lineage_id.as_str());
+    let lr = rows[2].lineage_id.clone();
+
+    let lin = |v: &str, n: usize| Bucket::parse(&bucket(v, n), 16).expect("valid bucket");
+    // The fixture rows `query` returns, after checking every returned row.
+    let run = |query: crate::FeedQuery| async move {
+        let page = store
+            .changes_page(&crate::FeedQuery {
+                after: start,
+                scan_limit: 1000,
+                ..query.clone()
+            })
+            .await
+            .expect("changes_page");
+        assert!(page.reached_head, "[{label}] fixture rows fit in one scan");
+        assert!(
+            page.rows.windows(2).all(|w| w[0].seq < w[1].seq),
+            "[{label}] each row once, ascending"
+        );
+        for row in &page.rows {
+            assert!(
+                query.matches(row),
+                "[{label}] row {} does not match {query:?}",
+                row.seq
+            );
+            assert_stored_hashes(row, label);
+        }
+        page.rows
+            .iter()
+            .map(|r| r.seq)
+            .filter(|s| fixture.contains(s))
+            .collect::<Vec<_>>()
+    };
+    let by = |lineage: Vec<Bucket>, agent: Vec<Bucket>| crate::FeedQuery {
+        lineage_buckets: lineage,
+        agent_buckets: agent,
+        ..Default::default()
+    };
+
+    // Leg 2: whole buckets, narrowing, and the upper bound.
+    assert_eq!(
+        run(by(vec![lin(la, 16)], vec![])).await,
+        vec![s_a],
+        "[{label}] La/16"
+    );
+    assert_eq!(
+        run(by(vec![lin(lb, 16)], vec![])).await,
+        vec![s_b],
+        "[{label}] Lb/16"
+    );
+    let shared = run(by(vec![lin(la, 1)], vec![])).await;
+    assert!(
+        shared.starts_with(&[s_a, s_b]) && shared.len() <= 3,
+        "[{label}] a 1-digit bucket is the whole bucket: {shared:?}"
+    );
+    let (lower, upper_seq) = if bucket_hash(la) < bucket_hash(lb) {
+        (la, s_b)
+    } else {
+        (lb, s_a)
+    };
+    let narrow = run(by(vec![lin(lower, 2)], vec![])).await;
+    assert!(
+        !narrow.contains(&upper_seq) && narrow.contains(&(s_a + s_b - upper_seq)),
+        "[{label}] the lineage just above a 2-digit range stays out: {narrow:?}"
+    );
+
+    // Leg 3: agent buckets hear revocations by controller; kind is AND'd.
+    assert_eq!(
+        run(by(vec![], vec![lin(&agent_did(238), 16)])).await,
+        vec![s_a, s_b, rev],
+        "[{label}] P's agent bucket: both supersessions and the revocation"
+    );
+    assert_eq!(
+        run(crate::FeedQuery {
+            kinds: vec![ChangeKind::KeyRevocation],
+            ..by(vec![lin(la, 16)], vec![lin(&agent_did(238), 16)])
+        })
+        .await,
+        vec![rev],
+        "[{label}] buckets AND kind"
+    );
+    assert!(
+        run(by(vec![], vec![lin(&agent_did(239), 16)]))
+            .await
+            .is_empty(),
+        "[{label}] Q published the revocation but controls none of these rows"
+    );
+
+    // Leg 4: OR with the id arms.
+    assert_eq!(
+        run(crate::FeedQuery {
+            ctx_ids: vec![b.ctx_id.as_str().to_string()],
+            ..by(vec![lin(la, 16)], vec![])
+        })
+        .await,
+        vec![s_a, s_b],
+        "[{label}] bucket OR ctx_id"
+    );
+    assert_eq!(
+        run(crate::FeedQuery {
+            lineage_ids: vec![lr.clone()],
+            ..by(vec![lin(la, 16)], vec![])
+        })
+        .await,
+        vec![s_a, rev],
+        "[{label}] bucket OR lineage_id"
+    );
+    assert_eq!(
+        run(crate::FeedQuery {
+            agent_ids: vec![agent_did(238)],
+            kinds: vec![ChangeKind::KeyRevocation],
+            ..by(vec![lin(lb, 16)], vec![])
+        })
+        .await,
+        vec![rev],
+        "[{label}] bucket OR agent_id, AND kind"
+    );
+
+    // Leg 5: no ctx_id-style revocation rule for buckets. The revocation
+    // of P (the watched lineages' producer) is not pulled in; the same
+    // watch through `revocation_agents` (what a ctx_id watch resolves to)
+    // is.
+    assert_eq!(
+        run(by(vec![lin(la, 16), lin(lb, 16)], vec![])).await,
+        vec![s_a, s_b],
+        "[{label}] a lineage bucket must not match its producer's key revocation"
+    );
+    assert_eq!(
+        run(crate::FeedQuery {
+            revocation_agents: vec![agent_did(238)],
+            ..by(vec![lin(la, 16), lin(lb, 16)], vec![])
+        })
+        .await,
+        vec![s_a, s_b, rev],
+        "[{label}] contrast: the ctx_id rule's revocation arm"
+    );
+
+    // Leg 6: overlap and an empty bucket. A 16-digit bucket of a value no
+    // row carries is empty but for a 2^-64 collision.
+    assert_eq!(
+        run(by(vec![lin(la, 1), lin(la, 4), lin(la, 16)], vec![])).await,
+        run(by(vec![lin(la, 1)], vec![])).await,
+        "[{label}] overlapping buckets are one OR"
+    );
+    assert!(
+        run(by(
+            vec![lin("bucket parity: no row has this id", 16)],
+            vec![]
+        ))
+        .await
+        .is_empty(),
+        "[{label}] a bucket no fixture row is in"
     );
 }
 

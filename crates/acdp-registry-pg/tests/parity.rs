@@ -372,6 +372,15 @@ async fn change_feed_matches_the_cross_backend_contract() {
     parity::assert_change_feed(&plain, &minting, "pg").await;
 }
 
+/// RFC-ACDP-0018 §6.1: bucket filters over the stored hashes. Scoped to
+/// fixture rows, so the shared schema is fine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_feed_bucket_filter_matches_the_cross_backend_contract() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let plain = store(&url).await;
+    parity::assert_change_feed_bucket_filter(&plain, "pg").await;
+}
+
 /// RFC-ACDP-0018 §4: one row per receipted event, matching registry_state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn change_feed_lifecycle_rows_match_registry_state() {

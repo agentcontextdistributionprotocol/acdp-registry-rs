@@ -64,6 +64,7 @@ fn caps() -> CapabilitiesDocument {
             change_retention_seconds: None,
             max_change_filters: None,
             max_changes_page: None,
+            max_change_bucket_length: None,
             max_subscriptions_per_requester: None,
             max_reads_per_minute: None,
             max_anonymous_reads_per_minute: None,
@@ -1160,4 +1161,263 @@ async fn anonymous_changes_is_refused_when_public_reads_are_closed() {
     assert_eq!(body["error"]["code"], "not_authorized", "{body}");
     let (status, body) = changes(&h.router, "", Some(&bearer_for(77))).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+// ─── rec-010 / §6.1: bucket filters ─────────────────────────────────────────
+
+/// A harness whose `[changes] max_change_bucket_length` is `len`, advertised
+/// in its capabilities exactly as `build_capabilities` would.
+async fn bucket_harness(len: Option<u16>, public_reads: bool) -> SeededHarness {
+    let mut cfg = config(true);
+    cfg.changes.max_change_bucket_length = len;
+    let mut caps = caps();
+    caps.limits.max_change_bucket_length = len;
+    let (cfg, caps) = common::with_anonymous_public_reads(cfg, caps, public_reads);
+    SeededHarness::new(cfg, caps, AUTHORITY).await
+}
+
+fn assert_field_violation(status: StatusCode, v: &Value, field: &str) {
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"]["code"], "schema_violation", "{v}");
+    assert_eq!(v["error"]["details"]["field"], field, "{v}");
+}
+
+/// §6.1: not advertised (the default) → `lineage_bucket` / `agent_bucket`
+/// are refused, never ignored, whatever their value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bucket_parameters_are_refused_when_not_advertised() {
+    let h = harness(true).await;
+    for (q, field) in [
+        ("lineage_bucket=a", "lineage_bucket"),
+        ("agent_bucket=0f", "agent_bucket"),
+        ("lineage_bucket=", "lineage_bucket"),
+        ("kind=lifecycle&agent_bucket=XYZ", "agent_bucket"),
+    ] {
+        let (status, v) = changes(&h.router, q, None).await;
+        assert_field_violation(status, &v, field);
+        let msg = v["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("not supported"), "{q}: {msg}");
+    }
+}
+
+/// The request matrix with the setting at 8, over HTTP: grammar edges and
+/// the shared `max_change_filters` count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bucket_parameters_are_validated_when_advertised() {
+    let h = bucket_harness(Some(8), true).await;
+    for (q, field) in [
+        ("lineage_bucket=", "lineage_bucket"),
+        ("lineage_bucket", "lineage_bucket"),
+        ("lineage_bucket=Ab", "lineage_bucket"),
+        ("agent_bucket=xyz", "agent_bucket"),
+        ("agent_bucket=%C3%A9", "agent_bucket"),
+        ("lineage_bucket=123456789", "lineage_bucket"),
+    ] {
+        let (status, v) = changes(&h.router, q, None).await;
+        assert_field_violation(status, &v, field);
+    }
+    for q in [
+        "lineage_bucket=12345678",
+        "lineage_bucket=1",
+        "agent_bucket=%61",
+        "lineage_bucket=0&kind=key_revocation",
+    ] {
+        let (status, v) = changes(&h.router, q, None).await;
+        assert_eq!(status, StatusCode::OK, "{q}: {v}");
+    }
+    let many = |n: usize| vec!["agent_bucket=ab"; n].join("&");
+    let (status, v) = changes(&h.router, &format!("{}&kind=lifecycle", many(99)), None).await;
+    assert_eq!(status, StatusCode::OK, "100 values: {v}");
+    let (status, v) = changes(&h.router, &format!("{}&kind=lifecycle", many(100)), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "101 values: {v}");
+    assert_eq!(v["error"]["code"], "schema_violation", "{v}");
+}
+
+/// Round-1 item 4: parsing runs before the anonymous refusal. With public
+/// reads closed, an anonymous request carrying an unsupported or malformed
+/// bucket parameter is a 400; a well-formed one, once advertised, meets the
+/// usual anonymous refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bucket_refusal_order_is_parse_then_anonymous() {
+    let off = bucket_harness(None, false).await;
+    let (status, v) = changes(&off.router, "lineage_bucket=a", None).await;
+    assert_field_violation(status, &v, "lineage_bucket");
+
+    let on = bucket_harness(Some(8), false).await;
+    let (status, v) = changes(&on.router, "lineage_bucket=AB", None).await;
+    assert_field_violation(status, &v, "lineage_bucket");
+    let (status, v) = changes(&on.router, "lineage_bucket=ab", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"]["code"], "not_authorized", "{v}");
+    let (status, v) = changes(&on.router, "lineage_bucket=ab", Some(&bearer_for(77))).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+/// Every entry the requester sees, oldest first, parsed as a consumer would.
+async fn full_feed(app: &axum::Router, bearer: Option<&str>) -> Vec<acdp::types::change::Change> {
+    drain(app, "", 100, bearer)
+        .await
+        .iter()
+        .map(|v| acdp::types::change::Change::from_value(v).unwrap())
+        .collect()
+}
+
+/// The §6.1 oracle: the unfiltered feed, filtered locally by the SDK's
+/// registry-side rule (bucket of the served string, OR'd, `kind` AND'd).
+fn oracle(
+    feed: &[acdp::types::change::Change],
+    filter: &acdp::types::change::WatchFilter,
+) -> Vec<u64> {
+    feed.iter()
+        .filter(|c| filter.matches(c, |_| None))
+        .map(|c| c.seq())
+        .collect()
+}
+
+fn entry_seqs(entries: &[Value]) -> Vec<u64> {
+    entries.iter().map(|e| e["seq"].as_u64().unwrap()).collect()
+}
+
+/// rec-010 B–F against the shipped handler: a bucket page is exactly the
+/// whole bucket, for lineage and agent buckets at lengths 1 and 4, alone,
+/// combined and AND'd with `kind`; an agent bucket carries its producer's
+/// key revocations and a lineage bucket does not; visibility still
+/// post-filters, and `limit=1` paging visits each match once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rec010_bucket_pages_equal_the_whole_bucket() {
+    use acdp::types::change::{bucket, ChangeKind, WatchFilter};
+    const PRODUCERS: [u8; 6] = [120, 121, 122, 123, 124, 125];
+    const OWNER: u8 = 126;
+    const AUDIENCE: u8 = 127;
+    const STRANGER: u8 = 128;
+    let h = bucket_harness(Some(8), true).await;
+    let mut lineages = Vec::new();
+    for seed in PRODUCERS {
+        for i in 0..2 {
+            let (ctx, lineage) =
+                publish_ctx(&h, seed, &format!("rec010 {seed}/{i}"), Visibility::Public).await;
+            retract(&h, seed, &ctx).await;
+            if i == 1 {
+                supersede(&h, seed, &ctx, Visibility::Public, None).await;
+            }
+            lineages.push(lineage);
+        }
+    }
+    let revocation = publish_revocation(&h, PRODUCERS[0], 129).await;
+    let (restricted, restricted_lineage) = publish_for(
+        &h,
+        OWNER,
+        "rec010 restricted",
+        Visibility::Restricted,
+        &[AUDIENCE],
+    )
+    .await;
+    retract(&h, OWNER, &restricted).await;
+
+    let anon_feed = full_feed(&h.router, None).await;
+    let audience = bearer_for(AUDIENCE);
+    let audience_feed = full_feed(&h.router, Some(&audience)).await;
+    assert_eq!(
+        audience_feed.len(),
+        anon_feed.len() + 1,
+        "one restricted entry"
+    );
+    let revocation_seq = anon_feed
+        .iter()
+        .find(|c| c.ctx_id().as_str() == revocation)
+        .map(|c| c.seq())
+        .expect("the revocation entry");
+
+    let mut filters = Vec::new();
+    for n in [1, 4] {
+        filters.push(WatchFilter::new().lineage_bucket(bucket(&lineages[0], n)));
+        filters.push(WatchFilter::new().agent_bucket(bucket(&did_of(PRODUCERS[2]), n)));
+        filters.push(
+            WatchFilter::new()
+                .lineage_bucket(bucket(&lineages[5], n))
+                .lineage_bucket(bucket(&lineages[9], n))
+                .agent_bucket(bucket(&did_of(PRODUCERS[1]), n)),
+        );
+        filters.push(
+            WatchFilter::new()
+                .lineage_bucket(bucket(&lineages[3], n))
+                .kind(ChangeKind::Superseded),
+        );
+        filters.push(WatchFilter::new().lineage_bucket(bucket(&restricted_lineage, n)));
+    }
+    for filter in &filters {
+        let q = filter
+            .query_pairs()
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        for (who, bearer, feed) in [
+            ("anonymous", None, &anon_feed),
+            ("audience", Some(audience.as_str()), &audience_feed),
+        ] {
+            let want = oracle(feed, filter);
+            let got = entry_seqs(&drain(&h.router, &q, 100, bearer).await);
+            assert_eq!(got, want, "{who} ?{q}");
+            // F: paging one at a time visits each match exactly once.
+            let paged = entry_seqs(&drain(&h.router, &q, 1, bearer).await);
+            assert_eq!(paged, want, "{who} ?{q} at limit=1");
+        }
+    }
+    // Not vacuous: a 4-digit bucket is a strict, non-empty subset.
+    let narrow = WatchFilter::new().lineage_bucket(bucket(&lineages[0], 4));
+    let n = oracle(&anon_feed, &narrow).len();
+    assert!(n > 0 && n < anon_feed.len(), "{n} of {}", anon_feed.len());
+
+    // The agent bucket carries the producer's key revocation; the lineage
+    // bucket of the same producer's context does not (no §6 counterpart).
+    let agent_q = format!("agent_bucket={}", bucket(&did_of(PRODUCERS[0]), 8));
+    let by_agent = entry_seqs(&drain(&h.router, &agent_q, 100, None).await);
+    assert!(by_agent.contains(&revocation_seq), "{by_agent:?}");
+    let lineage_q = format!("lineage_bucket={}", bucket(&lineages[0], 8));
+    let by_lineage = entry_seqs(&drain(&h.router, &lineage_q, 100, None).await);
+    assert!(
+        !by_lineage.is_empty() && !by_lineage.contains(&revocation_seq),
+        "{by_lineage:?}"
+    );
+
+    // F: the restricted entry stays hidden from everyone outside its audience.
+    let rq = format!("lineage_bucket={}", bucket(&restricted_lineage, 8));
+    for bearer in [None, Some(bearer_for(STRANGER))] {
+        assert!(drain(&h.router, &rq, 100, bearer.as_deref())
+            .await
+            .is_empty());
+    }
+    for seed in [AUDIENCE, OWNER] {
+        assert_eq!(
+            drain(&h.router, &rq, 100, Some(&bearer_for(seed)))
+                .await
+                .len(),
+            1
+        );
+    }
+
+    // An empty bucket: no entries, the end of the feed, a cursor at the head.
+    let head = audience_feed.last().unwrap().seq();
+    let hashes: Vec<String> = audience_feed
+        .iter()
+        .flat_map(|c| {
+            [
+                bucket(c.lineage_id().as_str(), 4),
+                bucket(c.agent_id().as_str(), 4),
+            ]
+        })
+        .collect();
+    let empty = (0u32..=0xffff)
+        .map(|i| format!("{i:04x}"))
+        .find(|b| !hashes.contains(b))
+        .unwrap();
+    let p = page(
+        &h.router,
+        &format!("lineage_bucket={empty}&agent_bucket={empty}"),
+        None,
+    )
+    .await;
+    assert!(p.changes.is_empty() && !p.has_more, "{p:?}");
+    assert_eq!(key().decode_cursor(&p.next_cursor).map(|c| c.pos), Ok(head));
 }
