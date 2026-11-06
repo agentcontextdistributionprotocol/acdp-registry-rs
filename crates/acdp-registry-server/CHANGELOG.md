@@ -1,5 +1,12 @@
 
 
+## [0.11.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.11.0...acdp-registry-server/v0.11.1) - 2026-11-06
+
+### Other
+
+- *(deps)* minor bumps from #536/#538, holding uuid, serial_test and sha2 ([#546](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/546))
+
+
 ## [0.11.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.10.1...acdp-registry-server/v0.11.0) - 2026-11-06
 
 ### Added
