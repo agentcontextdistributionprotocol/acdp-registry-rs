@@ -5231,7 +5231,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** ship both config-bound tokens (Phase 4) and DID-proof self-issuance (Phase 5) in this run, issuance disabled by default.
 - **Alternatives:** config-only now, issuance when a consumer asks.
 - **Blast radius if wrong:** extra code behind a default-off flag; reversible by removal.
-- **Status:** UNCONFIRMED
+- **Status:** CHANGED (2026-11-06, Opus) — shipped config-only (Phase 4); Phase 5 self-issuance PARKED. See DECISIONS.md.
 
 ## /changes cursor reset safety design (F2)
 - **Plan:** plans/bearer-static-read-limits.md
@@ -5239,7 +5239,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** a v2 cursor (header `0x02 ‖ key_id ‖ kid4`, with the kid HKDF-derived from the master key so a master change that keeps `key_id` gives `cursor_expired`; 62 bytes, 83 chars) seals `pos ‖ anchor_seq ‖ anchor_fp ‖ epoch`. The anchor is the feed head at issue and an 8-byte fingerprint of that row, sha256 over seq, appended_at_ms, kind and ctx_id (`feed_fingerprint`). Decode refuses as `cursor_expired` an anchor above the head, or one whose stored row has another fingerprint. That expires every cursor issued after the backup point automatically. Migration 020 records `changes_meta.pruned_through_fp`, so an anchor on a pruned boundary row still places. An operator-raised `changes.cursor_epoch`, sealed and mismatched → `cursor_expired`, covers cursors issued before the backup point, which the store cannot tell apart. v1 cursors that open are expired once on upgrade. A legacy feed pruned through its head with no recorded fp anchors new cursors at origin (0) until the next append. Not key rotation: it would disable subscriptions. The memory backend is N/A, because `[changes]` requires a durable store.
 - **Alternatives:** mandatory key rotation on restore; DB epoch; position-only fp.
 - **Blast radius if wrong:** cursor format is opaque and versioned; a v3 costs one forced consumer resync.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-11-06, Opus)
 
 ## Railway forwarded-header trust (F3)
 - **Plan:** plans/bearer-static-read-limits.md
@@ -5249,7 +5249,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Blast radius if wrong:** spoofable anonymous bucket keys (a client could evade or exhaust others' buckets); config-reversible.
 - **Evidence (2026-11-01, Phase 7):** half wrong. Railway rewrites XFF to `<client>, <edge-ip>` and drops client-supplied values (not spoofable), but the rightmost hop is a per-request edge address, so `any_peer` keyed on the edge (#524). Prod moved to the fallback; fix = `rate_limit.forwarded_skip_rightmost = 1` (fix/xff-skip-rightmost).
 - **Evidence (2026-11-01, v0.10.0 prod):** with `any_peer` + `forwarded_skip_rightmost = 1` at 6000/min, a 7500-request burst from one machine gave exactly 6000×200 / 1500×429, and 600 forged-XFF requests right after were all 429. Prod now runs 1200/min anonymous per client. A distinct second source was not probed (unit tests cover per-IP keying).
-- **Status:** UNCONFIRMED (evidence supports it; settle at /reconcile)
+- **Status:** CONFIRMED (2026-11-06, Opus) — as amended by the evidence above
 
 ## access_token query parameter refusal (Phase 4)
 - **Plan:** plans/bearer-static-read-limits.md
@@ -5257,7 +5257,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** while bearer_static is active, any data-plane GET/HEAD with an `access_token` query key (percent-decoded, case-insensitive) is 400 `schema_violation`, not silently ignored; the span URI redacts it either way.
 - **Alternatives:** ignore the parameter (serve anonymously); refuse even when bearer_static is off.
 - **Blast radius if wrong:** one error-status choice on a malformed request; reversible in one line.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-11-06, Opus)
 
 ## Static tokens refused on every /subscriptions route (Phase 4)
 - **Plan:** plans/bearer-static-read-limits.md
@@ -5265,7 +5265,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** `owner()` keeps `caller_from_headers`, which refuses `acdp_rt_` tokens 403, so a static token cannot use GET /subscriptions/{id} either.
 - **Alternatives:** let GET accept the read principal.
 - **Blast radius if wrong:** a static-token client cannot poll its own subscription; reversible.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-11-06, Opus)
 
 ## Read tokens live on AppState, validated before the IP charge (Phase 4)
 - **Plan:** plans/bearer-static-read-limits.md
@@ -5273,7 +5273,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** the gate validates first and charges the anonymous IP bucket only on refusal (429 if exhausted, else 403). The table is built on `AppState` from the served config (not on `AuthService`, which test harnesses build from a default config).
 - **Alternatives:** charge the IP bucket before validating every bearer.
 - **Blast radius if wrong:** ordering inside one middleware; reversible.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-11-06, Opus) — flips to charge-first when Phase 5 unparks
 
 ## Zero-lookup evidence for the read gate (Phase 4)
 - **Plan:** plans/bearer-static-read-limits.md
@@ -5281,4 +5281,4 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Chose:** prove it behaviourally instead of with a store spy. `bad_read_tokens_are_refused_before_lookup_on_every_get_route` asserts that an existing private context and a missing one answer byte-identically (403), on every GET data route.
 - **Alternatives:** a counting store wrapper around SqliteStore (the trait surface is large).
 - **Blast radius if wrong:** test-only; reversible.
-- **Status:** UNCONFIRMED
+- **Status:** CHANGED (2026-11-06, Opus) — record corrected: the proof is structural (route_layer answers before next.run); the test is a regression guard comparing status + error message, not byte-identity.

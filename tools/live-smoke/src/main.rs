@@ -6,7 +6,7 @@
 //! retraction must also appear on `GET /changes` and pass
 //! `acdp::client::verify_change`.
 //!
-//! Three subcommands:
+//! Four subcommands:
 //!
 //! ```text
 //! live-smoke did-doc --did did:web:<host> [--keyless-issuer <iss> --keyless-subject <sub>]
@@ -14,7 +14,15 @@
 //! live-smoke run --base-url https://<registry> --producer-did did:key
 //! live-smoke keyless --base-url https://<registry> --controller did:web:<host> \
 //!     --issuer <oidc iss> --subject <oidc sub>
+//! live-smoke seed-lc --base-url https://<registry> --producer-did did:web:<host>
 //! ```
+//!
+//! `seed-lc` leaves standing, read-only fixtures for the spec's live
+//! lifecycle cases, so a consumer that never writes to a third-party
+//! registry can run them: `lc-001` (one context left retracted, one
+//! retracted then republished) and `lc-003` (lineage v1 -> v2 with v2
+//! retracted, so `/lineages/{id}/current` is `not_found`). It checks each
+//! state as served and prints the ids as one JSON line.
 //!
 //! `keyless` (RFC-ACDP-0021) needs no seed: it reads a workload-identity
 //! token minted with the registry DID as audience from `SMOKE_OIDC_TOKEN`,
@@ -469,16 +477,7 @@ async fn run(base_url: &str, producer_did: &str) -> Result<()> {
         Some("live smoke test".into()),
     )?
     .sign_with(key, key_id)?;
-    let path: String = ctx
-        .as_str()
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect();
+    let path = path_segment(ctx.as_str());
     let resp = http
         .post(format!("{base_url}/contexts/{path}/retract"))
         .json(&json!({ "event": event }))
@@ -674,6 +673,267 @@ async fn keyless(base_url: &str, controller: &str, issuer: &str, subject: &str) 
     Ok(())
 }
 
+/// Percent-encodes `id` as one path segment (RFC 3986 unreserved kept).
+fn path_segment(id: &str) -> String {
+    id.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// The producer for `producer_did`: the seed's own did:key for `did:key`,
+/// otherwise a did:web serving `did-doc`'s output.
+fn producer_for(producer_did: &str) -> Result<(Producer, String, String)> {
+    let key = seed()?;
+    let (did, key_id) = if producer_did == "did:key" {
+        let did = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+        let key_id = acdp::did::key::did_key_url(&did)?;
+        (did, key_id)
+    } else {
+        AgentDid::parse_web(producer_did)?;
+        (
+            producer_did.to_string(),
+            format!("{producer_did}#{KEY_FRAGMENT}"),
+        )
+    };
+    let producer = Producer::new_ed25519(key, AgentDid::parse(&did)?, key_id.clone());
+    Ok((producer, did, key_id))
+}
+
+/// POSTs one producer-signed lifecycle event (RFC-ACDP-0013 §5-§6) and
+/// returns the registry status it reports.
+async fn lifecycle(
+    http: &reqwest::Client,
+    base_url: &str,
+    ctx: &CtxId,
+    kind: LifecycleEventType,
+    did: &str,
+    key_id: &str,
+    reason: &str,
+) -> Result<String> {
+    let endpoint = match kind {
+        LifecycleEventType::Retracted => "retract",
+        LifecycleEventType::Republished => "republish",
+        other => bail!("no endpoint for {other:?}"),
+    };
+    let event = LifecycleEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        ctx.clone(),
+        kind,
+        chrono::Utc::now(),
+        AgentDid::parse(did)?,
+        Some(reason.into()),
+    )?
+    .sign_with(seed()?, key_id.to_string())?;
+    let resp = http
+        .post(format!(
+            "{base_url}/contexts/{}/{endpoint}",
+            path_segment(ctx.as_str())
+        ))
+        .json(&json!({ "event": event }))
+        .send()
+        .await?;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    ensure!(status.is_success(), "{endpoint} returned {status}: {body}");
+    Ok(body["registry_state"]["status"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// GET `{base_url}{path}` as JSON, returning the HTTP status too.
+async fn get_json(http: &reqwest::Client, base_url: &str, path: &str) -> Result<(u16, Value)> {
+    let resp = http.get(format!("{base_url}{path}")).send().await?;
+    let status = resp.status().as_u16();
+    Ok((status, resp.json().await.unwrap_or(Value::Null)))
+}
+
+/// Lifecycle event types on a served context, in order.
+fn event_types(served: &Value) -> Vec<String> {
+    served["registry_state"]["lifecycle_events"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| e["event_type"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn seed_lc(base_url: &str, producer_did: &str) -> Result<()> {
+    let base_url = base_url.trim_end_matches('/');
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let client = RegistryClient::new(base_url)?;
+    let (producer, did, key_id) = producer_for(producer_did)?;
+    let stamp = chrono::Utc::now().to_rfc3339();
+    let publish = |title: String, case: &'static str| {
+        producer
+            .publish_request()
+            .title(title)
+            .summary(format!(
+                "acdp-registry-rs live-conformance fixture for {case}; do not depend on its content"
+            ))
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .tags(vec!["live-conformance", case])
+            .build()
+    };
+
+    // lc-001, state after scenario A: retracted, body still served.
+    let retracted = client
+        .publish(&publish(format!("lc-001 retracted {stamp}"), "lc-001")?)
+        .await
+        .context("publish lc-001 retracted")?
+        .ctx_id;
+    let st = lifecycle(
+        &http,
+        base_url,
+        &retracted,
+        LifecycleEventType::Retracted,
+        &did,
+        &key_id,
+        "lc-001 live-conformance fixture",
+    )
+    .await?;
+    ensure!(st == "retracted", "lc-001 retract left status {st}");
+    let (code, served) = get_json(
+        &http,
+        base_url,
+        &format!("/contexts/{}", path_segment(retracted.as_str())),
+    )
+    .await?;
+    ensure!(
+        code == 200
+            && served["registry_state"]["status"] == "retracted"
+            && event_types(&served) == ["retracted"],
+        "lc-001 retracted context served as {code}: {served}"
+    );
+    let (code, _) = get_json(
+        &http,
+        base_url,
+        &format!("/contexts/{}/body", path_segment(retracted.as_str())),
+    )
+    .await?;
+    ensure!(code == 200, "lc-001 retracted body returned {code}");
+
+    // lc-001, state after scenario E: retracted then republished.
+    let republished = client
+        .publish(&publish(format!("lc-001 republished {stamp}"), "lc-001")?)
+        .await
+        .context("publish lc-001 republished")?
+        .ctx_id;
+    lifecycle(
+        &http,
+        base_url,
+        &republished,
+        LifecycleEventType::Retracted,
+        &did,
+        &key_id,
+        "lc-001 live-conformance fixture",
+    )
+    .await?;
+    let st = lifecycle(
+        &http,
+        base_url,
+        &republished,
+        LifecycleEventType::Republished,
+        &did,
+        &key_id,
+        "lc-001 live-conformance fixture",
+    )
+    .await?;
+    ensure!(st == "active", "lc-001 republish left status {st}");
+    let (code, served) = get_json(
+        &http,
+        base_url,
+        &format!("/contexts/{}", path_segment(republished.as_str())),
+    )
+    .await?;
+    ensure!(
+        code == 200
+            && served["registry_state"]["status"] == "active"
+            && event_types(&served) == ["retracted", "republished"],
+        "lc-001 republished context served as {code}: {served}"
+    );
+
+    // lc-003, state after scenarios A-B: v1 superseded by v2, v2 retracted.
+    let v1 = client
+        .publish(&publish(format!("lc-003 v1 {stamp}"), "lc-003")?)
+        .await
+        .context("publish lc-003 v1")?;
+    let v2_req = producer
+        .supersede(v1.ctx_id.clone())
+        .version(2)
+        .title(format!("lc-003 v2 {stamp}"))
+        .summary(
+            "acdp-registry-rs live-conformance fixture for lc-003; do not depend on its content",
+        )
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .tags(vec!["live-conformance", "lc-003"])
+        .build()?;
+    let v2 = client.publish(&v2_req).await.context("publish lc-003 v2")?;
+    ensure!(
+        v2.lineage_id == v1.lineage_id && v2.version == 2,
+        "lc-003 v2 is not v1's successor"
+    );
+    let st = lifecycle(
+        &http,
+        base_url,
+        &v2.ctx_id,
+        LifecycleEventType::Retracted,
+        &did,
+        &key_id,
+        "lc-003 live-conformance fixture",
+    )
+    .await?;
+    ensure!(st == "retracted", "lc-003 retract left status {st}");
+    let lineage = path_segment(v1.lineage_id.as_str());
+    let (code, body) = get_json(&http, base_url, &format!("/lineages/{lineage}/current")).await?;
+    ensure!(
+        code == 404 && body["error"]["code"] == "not_found",
+        "lc-003 /current after retracting the head returned {code}: {body}"
+    );
+    let (code, body) = get_json(&http, base_url, &format!("/lineages/{lineage}")).await?;
+    ensure!(code == 200, "lc-003 /lineages returned {code}: {body}");
+    let statuses: Vec<String> = body["versions"]
+        .as_array()
+        .or_else(|| body["contexts"].as_array())
+        .or_else(|| body.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| {
+                    v["registry_state"]["status"]
+                        .as_str()
+                        .or_else(|| v["status"].as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ensure!(
+        statuses.contains(&"superseded".to_string()) && statuses.contains(&"retracted".to_string()),
+        "lc-003 lineage does not show superseded v1 and retracted v2: {body}"
+    );
+
+    println!(
+        "{}",
+        json!({
+            "lc-001": { "retracted": retracted.as_str(), "retracted_then_republished": republished.as_str() },
+            "lc-003": { "lineage_id": v1.lineage_id.as_str(), "v1_superseded": v1.ctx_id.as_str(), "v2_retracted": v2.ctx_id.as_str() },
+        })
+    );
+    println!("SEED OK");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -693,6 +953,9 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+        Some("seed-lc") => {
+            seed_lc(&arg(&args, "--base-url")?, &arg(&args, "--producer-did")?).await
+        }
         Some("run") => run(&arg(&args, "--base-url")?, &arg(&args, "--producer-did")?).await,
         Some("keyless") => {
             keyless(
@@ -703,6 +966,6 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        _ => bail!("usage: live-smoke did-doc --did <did:web> | run --base-url <url> --producer-did <did:web>|did:key | keyless --base-url <url> --controller <did:web> --issuer <iss> --subject <sub>"),
+        _ => bail!("usage: live-smoke did-doc --did <did:web> | run --base-url <url> --producer-did <did:web>|did:key | keyless --base-url <url> --controller <did:web> --issuer <iss> --subject <sub> | seed-lc --base-url <url> --producer-did <did:web>|did:key"),
     }
 }
