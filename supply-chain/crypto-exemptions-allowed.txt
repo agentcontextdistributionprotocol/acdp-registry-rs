@@ -21,7 +21,6 @@
 #                cover it. Mostly the RustCrypto 0.10/0.13 line pulled in by
 #                jsonwebtoken, ed25519-dalek 2.x and sqlx. Ends with an audit
 #                here, or when that dependency moves to the current line.
-#   zeroize      exempt in acdp-rs as well (see its entry below).
 # A version that acdp-rs's audits.toml on main already certifies, but that
 # supply-chain/imports.lock predates ("import-lag"), is not listed here: run
 # `cargo vet regenerate imports` + `cargo vet regenerate exemptions` (review
@@ -44,6 +43,3 @@ cpufeatures       0.2.17   acdp-rs#339  older-line: via curve25519-dalek 4, ed25
 block-buffer      0.10.4   acdp-rs#339  older-line: via digest 0.10
 crypto-bigint     0.5.5    acdp-rs#339  older-line: via elliptic-curve 0.13, jsonwebtoken
 webpki-roots      0.26.11  acdp-rs#339  older-line: via sqlx 0.8 (tls-rustls)
-
-# --- zeroize: acdp-rs keeps 1.9.0 exempt too (its DECISIONS 322-zeroize) ---
-zeroize           1.9.0    acdp-rs#341  exempt in acdp-rs as well; ends with the zeroize 1.9.1 delta audit

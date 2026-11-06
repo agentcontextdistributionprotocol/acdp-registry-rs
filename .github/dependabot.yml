@@ -5,6 +5,13 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 5
+    # Held below the first release whose rust-version exceeds the workspace
+    # MSRV (1.88, Cargo.toml). Lift with an MSRV bump.
+    ignore:
+      - dependency-name: uuid
+        versions: [">=1.29.0"]      # 1.29 needs rustc 1.89
+      - dependency-name: serial_test
+        versions: [">=4.0.0"]       # 4.x needs rustc 1.93.1
     groups:
       minor-and-patch:
         update-types: [minor, patch]
