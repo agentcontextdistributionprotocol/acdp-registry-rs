@@ -51,18 +51,18 @@ verification, SSRF defenses, or the canonical error-code registry lives in the
 
 | For… | See |
 |------|-----|
-| The publish pipeline algorithm (RFC-ACDP-0003 §2.1), `RegistryServer` / `RegistryStore` | [acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/registry.md) |
-| Building/signing a `PublishRequest`, `content_hash`, supersession | [acdp-rs · Producing](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/producing.md) |
-| The verification pipeline, `VerifiedContext`, retrieval | [acdp-rs · Consuming & Verifying](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/consuming.md) |
-| The `AcdpError` ↔ RFC-ACDP-0007 §5 wire-code registry, retry guidance | [acdp-rs · Errors & Retries](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/errors.md) |
-| SSRF defenses, HTTPS/size/redirect caps, algorithm-downgrade rejection (`WebResolver`) | [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/security.md) |
-| The three-layer model (what is hashed/signed/mutable) | [acdp-rs · Architecture](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/architecture.md) |
-| API reference for the `acdp` crate | [docs.rs/acdp 0.20.0](https://docs.rs/acdp/0.20.0/acdp/) |
+| The publish pipeline algorithm (RFC-ACDP-0003 §2.1), `RegistryServer` / `RegistryStore` | [acdp-rs · Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.21.4/docs/registry.md) |
+| Building/signing a `PublishRequest`, `content_hash`, supersession | [acdp-rs · Producing](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.21.4/docs/producing.md) |
+| The verification pipeline, `VerifiedContext`, retrieval | [acdp-rs · Consuming & Verifying](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.21.4/docs/consuming.md) |
+| The `AcdpError` ↔ RFC-ACDP-0007 §5 wire-code registry, retry guidance | [acdp-rs · Errors & Retries](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.21.4/docs/errors.md) |
+| SSRF defenses, HTTPS/size/redirect caps, algorithm-downgrade rejection (`WebResolver`) | [acdp-rs · Security Model](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.21.4/docs/security.md) |
+| The three-layer model (what is hashed/signed/mutable) | [acdp-rs · Architecture](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.21.4/docs/architecture.md) |
+| API reference for the `acdp` crate | [docs.rs/acdp 0.21.4](https://docs.rs/acdp/0.21.4/acdp/) |
 | The IANA-style registries (profiles, error codes, lifecycle event types, signature algorithms) | [spec · registries](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/8cc186d0577f5bceafde4e94161ce31d0f33e20b/registries) |
 | Normative protocol rules | [RFC set](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/tree/8cc186d0577f5bceafde4e94161ce31d0f33e20b/rfcs) |
 
 `acdp-rs` documents its own registry building blocks, not this registry. Where
-its [Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.20.0/docs/registry.md) guide describes a deployment
+its [Implementing a Registry](https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/acdp-v0.21.4/docs/registry.md) guide describes a deployment
 choice, this registry's docs state what it actually does: for example, it
 enforces its own per-agent publish budget rather than plugging a limiter into
 `RegistryServer` (see [ARCHITECTURE.md](ARCHITECTURE.md#publish-pipeline)),
@@ -92,10 +92,10 @@ starting with `/` is served from the website's root, where it 404s.
   ref — no `main`, tag, or short SHA.
 - **SDK guides:** `https://github.com/agentcontextdistributionprotocol/acdp-rs/blob/<ref>/docs/<page>.md#<anchor>`,
   where `<ref>` is a release tag `acdp-v<semver>` or a full 40-hex SHA — today
-  `acdp-v0.20.0`, the tag `Cargo.lock` depends on. Never `main`.
+  `acdp-v0.21.4`, the tag `Cargo.lock` depends on. Never `main`.
 - **SDK API:** docs.rs with an explicit version matching `Cargo.lock`, e.g.
-  `https://docs.rs/acdp/0.20.0/acdp/`. For re-exported modules use the
-  sub-crate path (`https://docs.rs/acdp-client/0.20.0/acdp_client/verified/`);
+  `https://docs.rs/acdp/0.21.4/acdp/`. For re-exported modules use the
+  sub-crate path (`https://docs.rs/acdp-client/0.21.4/acdp_client/verified/`);
   the `acdp/client/...` form does not exist on docs.rs.
 - **Links to this repository** may use `main` (they are copied as written;
   `main` is the revision these docs describe).

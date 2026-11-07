@@ -5232,6 +5232,7 @@ underlying settings and code were not touched by this pass, only the record of t
 - **Alternatives:** config-only now, issuance when a consumer asks.
 - **Blast radius if wrong:** extra code behind a default-off flag; reversible by removal.
 - **Status:** CHANGED (2026-11-06, Opus) — shipped config-only (Phase 4); Phase 5 self-issuance PARKED. See DECISIONS.md.
+- **Update 2026-11-06:** Phase 5 is now WON'T DO (owner, 2026-11-06), no longer PARKED; the plan is archived to plans/archive/bearer-static-read-limits.md. Reopen trigger unchanged: a client needs a read token without an operator issuing it, or prod turns on `auth.enabled`.
 
 ## /changes cursor reset safety design (F2)
 - **Plan:** plans/bearer-static-read-limits.md

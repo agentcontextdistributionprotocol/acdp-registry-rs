@@ -1,6 +1,6 @@
 # Status and definition of done
 
-**As of 2026-10-31, the stable line is 0.8.x (latest: 0.8.0).** This repository is *done* while `main` is green and no issue is open.
+**As of 2026-11-06, the stable line is 0.11.x (latest: 0.11.1), on spec pin `8cc186d` and `acdp` 0.21.4.** This repository is *done* while `main` is green and no issue is open.
 That is the normal resting state, not a gap to fill.
 
 ## When to reopen it
@@ -29,7 +29,8 @@ Anything else, including a good idea, a sibling repo's design decision, or a cle
 | Item | Why deferred | Re-open when |
 |---|---|---|
 | Multi-audience `bearer_jwt` (#420) and the `GET /auth/revocations` feed (#421) | No control plane is deployed against this registry; it ships with `TRUSTED_ISSUERS` and `REVOCATION_FEEDS` empty. | A real control plane lists this registry as a trusted issuer (trigger 4). |
+| Store-backed `bearer_static` read-token issuance with DID proof, revocation and expiry (bearer-static plan, Phase 5) | WON'T DO (owner, 2026-11-06). Config-bound read tokens (`[auth.read_tokens]`, shipped 0.10.1) cover the only consumer's ask. | A client needs a read token without an operator issuing it, or prod turns on `auth.enabled`. |
 
-The analysis behind both is in the maintainer's local `plans/archive/multi-aud-and-revocation-feed.md` (plans are not tracked in git):
+The analysis behind the first two rows is in the maintainer's local `plans/archive/multi-aud-and-revocation-feed.md`, and behind the third in `plans/archive/bearer-static-read-limits.md` (plans are not tracked in git):
 an allow-listed per-request `audience` bound into a v2 challenge signing input, a provenance-tracked revocation feed with its own
 feed credential and rate limit.
