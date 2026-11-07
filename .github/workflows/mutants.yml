@@ -623,7 +623,7 @@ jobs:
 
       - name: Check out the ACDP spec
         id: spec
-        uses: agentcontextdistributionprotocol/acdp-ci/actions/checkout-spec@015910153b61c32abbe018afe85d44868897bf3b # v1
+        uses: agentcontextdistributionprotocol/acdp-ci/actions/checkout-spec@54a7d49fe2da3b70ce5090c62b7b64b6d38d80c6 # v1
         with:
           # From the pin file, not this action's default, for the same reason as
           # ci.yml: if the two ever diverged, the bumper would resolve a sha from
@@ -635,7 +635,7 @@ jobs:
       # MUTANTS_PRIOR_LEDGER (its `cargo_mutants_version`); check_mutants_pins.py
       # asserts that on every relevant PR, and mutants-pins.yml installs the
       # version it reads from THIS line. Bump it only together with a re-pin.
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: cargo-mutants@27.1.0
 
