@@ -101,7 +101,7 @@ jobs:
           echo "cargo-mutants $v (from mutants.yml)"
           echo "version=$v" >> "$GITHUB_OUTPUT"
       - if: steps.gate.outputs.run == 'true'
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: cargo-mutants@${{ steps.tool.outputs.version }}
 
