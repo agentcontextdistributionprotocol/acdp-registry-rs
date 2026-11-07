@@ -14,9 +14,9 @@
 //! Child stdio goes to FILES, never pipes: an undrained pipe wedges a chatty
 //! child once the OS buffer fills (see `tls_startup.rs`).
 //!
-//! Included with `mod spawned_registry;` from `conformance.rs` and
-//! `http_integration.rs`. A directory module, not a top-level `tests/*.rs`,
-//! so Cargo does not compile it as a test binary of its own.
+//! Included with `mod spawned_registry;` from `conformance.rs`,
+//! `http_integration.rs`, `keyless_e2e.rs` and `pg_e2e.rs`. A directory
+//! module, not a top-level `tests/*.rs`, so Cargo does not compile it as a test binary of its own.
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -54,16 +54,32 @@ impl SpawnedRegistry {
     /// `extra_toml` verbatim. `extra_toml` must not repeat those two tables.
     /// Blocks until `/livez` answers; panics with the child's output if it
     /// exits first or never becomes ready.
+    #[allow(dead_code)]
     pub fn start(dir: &Path, tag: &str, registry_extra: &str, extra_toml: &str) -> Self {
+        let storage = format!(
+            "backend = \"sqlite\"\nsqlite_path = \"{}\"\n",
+            dir.join(format!("{tag}.sqlite")).display()
+        );
+        Self::start_with_storage(dir, tag, registry_extra, &storage, extra_toml)
+    }
+
+    /// [`Self::start`] with the body of the `[storage]` table given verbatim
+    /// (`pg_e2e.rs` points the binary at Postgres this way).
+    #[allow(dead_code)]
+    pub fn start_with_storage(
+        dir: &Path,
+        tag: &str,
+        registry_extra: &str,
+        storage_toml: &str,
+        extra_toml: &str,
+    ) -> Self {
         let port = free_port();
         let cfg = dir.join(format!("{tag}.toml"));
         std::fs::write(
             &cfg,
             format!(
                 "[registry]\nauthority = \"localhost\"\nport = {port}\nbind = \"127.0.0.1\"\n\
-                 {registry_extra}\n\n[storage]\nbackend = \"sqlite\"\nsqlite_path = \"{}\"\n\n\
-                 {extra_toml}\n",
-                dir.join(format!("{tag}.sqlite")).display()
+                 {registry_extra}\n\n[storage]\n{storage_toml}\n\n{extra_toml}\n"
             ),
         )
         .expect("write the registry config");
@@ -131,6 +147,26 @@ impl SpawnedRegistry {
     pub fn post(&self, path: &str, body: &Value) -> (u16, Value) {
         self.request("POST", path, Some(body))
             .unwrap_or_else(|e| panic!("POST {path}: {e}\n{}", self.output()))
+    }
+
+    /// `POST path` with a JSON body and extra request headers (an
+    /// `Authorization` bearer, say); panics on a transport error.
+    #[allow(dead_code)]
+    pub fn post_with_headers(
+        &self,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &Value,
+    ) -> (u16, Value) {
+        let (status, _, body) = self
+            .request_full("POST", path, headers, Some(body))
+            .unwrap_or_else(|e| panic!("POST {path}: {e}\n{}", self.output()));
+        let v = if body.trim().is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(&body).unwrap_or(Value::String(body))
+        };
+        (status, v)
     }
 
     /// `GET path`, returning the body exactly as served (dechunked, not

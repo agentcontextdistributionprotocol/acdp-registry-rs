@@ -54,6 +54,12 @@ ACDP_REGISTRY_TEST_PG_URL=postgres://acdp:acdp@localhost:5432/acdp_registry \
     cargo test -p acdp-registry-pg
 ACDP_REGISTRY_TEST_PG_URL=postgres://acdp:acdp@localhost:5432/acdp_registry \
     cargo test -p acdp-registry-server --no-default-features --features storage-pg --test pg_integration
+# The shipped binary on Postgres (handshake, read tokens, tenancy, change-feed
+# buckets, log proofs, did_methods). No CI job runs it; it TRUNCATES the
+# registry tables, so use a disposable database (docker/docker-compose.yml with
+# a published postgres port works).
+ACDP_REGISTRY_TEST_PG_URL=postgres://acdp:acdp@localhost:5432/acdp_registry ACDP_REQUIRE_PG=1 \
+    cargo test -p acdp-registry-server --no-default-features --features storage-pg --test pg_e2e
 
 # MSRV — the workspace must compile on Rust 1.88.
 cargo +1.88 check --workspace --all-targets
