@@ -21,9 +21,9 @@
 //!
 //! # Gating
 //!
-//! Compiled only with `--features storage-pg`. No CI step selects this file:
-//! the tests job and the coverage job run `--test pg_integration` alone under
-//! that feature, so plain `cargo test` and CI are unchanged. It skips (passes
+//! Compiled only with `--features storage-pg`, so plain `cargo test` never
+//! builds it. CI's `tests` job runs it in the `cargo test (postgres)` step with
+//! `ACDP_REQUIRE_PG=1`; the coverage job does not include it. It skips (passes
 //! with a message) unless `ACDP_REGISTRY_TEST_PG_URL` is set; `ACDP_REQUIRE_PG`
 //! turns the skip into a failure, as in `pg_integration.rs`.
 //!

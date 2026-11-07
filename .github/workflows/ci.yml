@@ -379,6 +379,12 @@ jobs:
         run: |
           cargo test --locked -p acdp-registry-server \
             --features storage-sqlite,playground
+      # ACDP_REQUIRE_PG=1 makes every leg fail, not skip, without the database.
+      # Legs run sequentially against the one service DB: pg_e2e and
+      # pg_integration both truncate it. `pg_e2e` spawns the shipped binary on
+      # Postgres; it reuses the storage-pg build from pg_integration, so it adds
+      # test time, not a second compile. `pg_revocation` is listed explicitly
+      # because the workspace step above has no Postgres URL and skips it.
       - name: cargo test (postgres)
         env:
           ACDP_REGISTRY_TEST_PG_URL: postgres://acdp:acdp@localhost:5432/acdp_registry
@@ -388,6 +394,10 @@ jobs:
           cargo test --locked -p acdp-registry-server \
             --no-default-features --features storage-pg \
             --test pg_integration
+          cargo test --locked -p acdp-registry-server \
+            --no-default-features --features storage-pg \
+            --test pg_e2e
+          cargo test --locked -p acdp-registry-auth --test pg_revocation
       # #216 / H-F: `#[ignore]` written ABOVE `#[test]` de-registers a test while
       # leaving it textually intact, so `conformance.rs`'s own text guards see a
       # present, attribute-wearing function and pass. Measured: the test reports

@@ -331,9 +331,10 @@ Gates a release PR must pass:
   `ACDP_REGISTRY_TEST_PG_URL` is unset. With `ACDP_REQUIRE_PG` set a missing URL is a hard
   failure instead (most tests treat any value as set; the auth crate's `pg_revocation`
   test only fails on exactly `1`, and otherwise skips without printing). CI sets it in
-  the `tests` and `coverage` jobs, but the required `tests` job does not pass the
-  Postgres URL to the workspace run, so the auth Postgres test runs only in the
-  required `coverage` job.
+  the `tests` and `coverage` jobs. The `tests` job does not pass the Postgres URL to
+  its workspace run, so its `cargo test (postgres)` step names the Postgres suites
+  explicitly: `acdp-registry-pg`, `pg_integration`, `pg_e2e` (the shipped binary on
+  Postgres) and the auth crate's `pg_revocation`. `pg_e2e` is not in the coverage job.
 - **Docker smoke.** `docker (build + smoke)` builds the image, boots it against
   Postgres and checks health, then boots the documented compose quickstart through
   `docker/assert-quickstart-boots.sh` (as shipped, and again with auth enabled), and runs
