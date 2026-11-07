@@ -1,5 +1,13 @@
 
 
+## [0.11.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.11.0...acdp-registry-store/v0.11.1) - 2026-11-07
+
+### Other
+
+- *(conformance)* drive lc-001..003 and rev-003 from the fixtures; fix #561; spec pin 8cc186d ([#562](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/562))
+- *(spec)* adopt spec ce39078 with acdp 0.21.3 (RFC-ACDP-0021 §5.3 schema_uri) ([#559](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/559))
+
+
 ## [0.11.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-store/v0.10.1...acdp-registry-store/v0.11.0) - 2026-11-06
 
 ### Added

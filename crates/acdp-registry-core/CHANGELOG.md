@@ -1,5 +1,12 @@
 
 
+## [0.11.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.11.0...acdp-registry-core/v0.11.1) - 2026-11-07
+
+### Other
+
+- *(spec)* adopt spec ce39078 with acdp 0.21.3 (RFC-ACDP-0021 §5.3 schema_uri) ([#559](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/559))
+
+
 ## [0.11.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-core/v0.10.1...acdp-registry-core/v0.11.0) - 2026-11-06
 
 ### Added
