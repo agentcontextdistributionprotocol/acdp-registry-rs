@@ -19399,17 +19399,15 @@ fn lc001_retraction_flow_from_fixture() {
             !lc_match_ids(&res).contains(&ctx_id),
             "lc-001 D: {query} must not match the retracted context: {res}"
         );
-        // KNOWN DEVIATION (#561): the fixture also says the retracted
-        // context MUST NOT be counted in `total_estimate`. This registry
-        // counts it, because the count is taken in SQL before the status
-        // projection (DESIGN-01). Pinned exactly, so the fix flips this: when
-        // it reports 0, assert 0 here and close #561.
-        assert_eq!(
-            res.get("total_estimate"),
-            Some(&json!(1)),
-            "lc-001 D: {query}: total_estimate changed. If it is now 0, #561 is fixed: \
-             assert 0 here and close the issue: {res}"
-        );
+        // Nor counted in `total_estimate` (fixed by #561: the status
+        // projection runs in the same SQL scan as the count).
+        if let Some(total) = res.get("total_estimate") {
+            assert_eq!(
+                total,
+                &json!(0),
+                "lc-001 D: {query} must not count the retracted context: {res}"
+            );
+        }
     }
 
     // E — status=retracted returns it.

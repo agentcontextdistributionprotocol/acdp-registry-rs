@@ -362,6 +362,50 @@ where
     );
 }
 
+/// **#561 — `total_estimate` counts what the status filter keeps, nothing
+/// else** (lc-001 D, RFC-ACDP-0013 §8.2, RFC-ACDP-0005 §3: appearing in
+/// `matches[]` and being counted in `total_estimate` are jointly equivalent).
+///
+/// Two contexts share a per-run search token; one is then retracted. The
+/// default (`active`) search must match and count only the other, and
+/// `status=retracted` only the retracted one. Before #561 both backends took
+/// the count in SQL ahead of the status projection, so the default search
+/// reported `total_estimate: 2` beside a single match.
+pub async fn assert_search_total_follows_status_filter<S>(store: &Arc<S>, label: &str)
+where
+    S: ExtendedRegistryStore + 'static,
+{
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let token = format!("statusprobe{nonce}");
+    let kept = publish_titled(store, 213, &format!("{token} kept")).await;
+    let gone = publish_then_retract(store, 214, &format!("{token} gone")).await;
+    for (status, want) in [(None, &kept), (Some("retracted"), &gone)] {
+        let params = SearchParams {
+            q: Some(token.clone()),
+            status: status.map(str::to_string),
+            ..Default::default()
+        };
+        let resp = store
+            .search(&params, None, true)
+            .expect("search must not error");
+        let ids: Vec<&str> = resp.matches.iter().map(|m| m.ctx_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![want.as_str()],
+            "[{label}] status={status:?}: exactly one match"
+        );
+        assert_eq!(
+            resp.total_estimate,
+            Some(1),
+            "[{label}] status={status:?}: total_estimate must count only what the status \
+             filter keeps in matches[] (#561, lc-001 D)"
+        );
+    }
+}
+
 /// Publish a context and retract it, returning its `ctx_id`. Both backends
 /// reach this through the same trait methods, so the setup cannot drift.
 pub async fn publish_then_retract<S>(store: &Arc<S>, seed: u8, title: &str) -> String

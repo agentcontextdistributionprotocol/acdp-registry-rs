@@ -573,7 +573,11 @@ return fewer than `limit` rows near the end of a result set even though
 **`total_estimate` is returned for every caller, including a tenant-scoped one,
 and it is the caller's own count.** For a request that asserts a tenant it is the
 number of §4.5-visible matches **within that tenant** — never the registry-wide
-figure.
+figure. It also counts only what the `status` filter keeps: a retracted context
+is excluded from the default (`active`) search's `matches[]` **and** from its
+`total_estimate` (RFC-ACDP-0013 §8.2, fixture lc-001 D). The status projection
+runs in the same SQL scan as the count. Before #561 it ran afterwards, so a
+retracted, superseded or expired context was still counted.
 
 This paragraph previously documented the opposite, and the history is worth one
 sentence because the field's meaning changed rather than its presence. It was

@@ -31,6 +31,15 @@ attestation minted from now on carries
 the registry accepts either value (spec #137). A consumer that pins the `schema_uri` by string must
 accept both. No migration, no configuration change.
 
+**Search `total_estimate` no longer counts contexts the `status` filter excludes (behaviour
+change, #561).** A retracted context is now left out of both `matches[]` and `total_estimate` in a
+default (`status=active`) search, as RFC-ACDP-0013 §8.2 and fixture lc-001 D require. The same
+applies to superseded and expired contexts under any `status` that excludes them. Clients that read
+`total_estimate` see a lower, exact number. No migration, no configuration change.
+
+**Spec pin 8cc186d.** The changes since ce39078 are prose only (RFC-ACDP-0001), and the fixtures are
+unchanged.
+
 ## 0.11.0
 
 **Migration `021_changes_bucket_hashes` backfills the change feed at startup (Postgres: size it
