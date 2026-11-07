@@ -1641,6 +1641,37 @@ impl PgStore {
             binds.push(Bind::Ts(before));
         }
 
+        // #561 (lc-001 D, RFC-ACDP-0013 §8.2, RFC-ACDP-0005 §3): the status
+        // projection is pushed into SQL as well, so `COUNT(*) OVER ()` never
+        // counts a context the status filter drops from `matches[]` (a
+        // retracted one under the default `active`, above all). It mirrors
+        // `project_status_inline` plus the retraction flag exactly; the
+        // post-SQL check below stays as a backstop and uses the same `now`.
+        let status_now = Utc::now();
+        match params.status.as_deref().unwrap_or("active") {
+            "retracted" => sql.push_str(" AND retracted"),
+            "active" => {
+                sql.push_str(&format!(
+                    " AND NOT retracted AND status = 'active' \
+                     AND (expires_at IS NULL OR expires_at > ${})",
+                    next()
+                ));
+                binds.push(Bind::Ts(status_now));
+            }
+            "expired" => {
+                sql.push_str(&format!(
+                    " AND NOT retracted AND (status = 'expired' OR (status = 'active' \
+                     AND expires_at IS NOT NULL AND expires_at <= ${}))",
+                    next()
+                ));
+                binds.push(Bind::Ts(status_now));
+            }
+            other => {
+                sql.push_str(&format!(" AND NOT retracted AND status = ${}", next()));
+                binds.push(Bind::Str(other.to_string()));
+            }
+        }
+
         // BUG-02: bind the cursor predicate AND the per-page LIMIT so
         // search doesn't fetch the entire matching set into memory
         // before discarding everything past the page. On a registry
@@ -1682,9 +1713,9 @@ impl PgStore {
 
         // DESIGN-01: `COUNT(*) OVER ()` rides the same scan, so the total
         // is the count of §4.5-visible rows matching the SQL filters
-        // (before the LIMIT). It is an ESTIMATE: the post-SQL status /
-        // tags / derived_from refinements below are not reflected, so it
-        // is an upper bound on the returned matches. Crucially, the §4.5
+        // (before the LIMIT). The status filter is in SQL too (#561); the
+        // post-SQL derived_from refinement below is not, so it is an upper
+        // bound on the returned matches only when that is set. Crucially, the §4.5
         // visibility dimension IS in SQL, so the total never counts a
         // restricted/private context the requester may not see.
         let total_estimate = match rows.first() {
@@ -1696,7 +1727,7 @@ impl PgStore {
             None => Some(0),
         };
 
-        let now = Utc::now();
+        let now = status_now;
         let want_status = params.status.as_deref().unwrap_or("active");
         // REG-P2-8: the `limit + 1` sentinel and the "anchor the next
         // cursor on the last RAW scanned row, not the last visible

@@ -1775,13 +1775,16 @@ impl SqliteStore {
             binds.push(before.to_rfc3339());
         }
 
-        // BUG-02: bind the cursor and LIMIT as part of the SQL query so
-        // pagination doesn't fetch the entire matching set into Rust
-        // and discard it. The +1 sentinel lets us tell whether another
-        // page exists. The visibility filter that runs in Rust below
-        // can still drop a few rows, so the returned page size may be
-        // slightly under `limit`; this is the same trade-off
-        // `list_contexts` accepts.
+        // #561 (lc-001 D): status in SQL too, so `COUNT(*) OVER ()` agrees with `matches[]`.
+        let now = Utc::now();
+        let want_status = params.status.as_deref().unwrap_or("active");
+        #[rustfmt::skip]
+        let (status_sql, status_bind) = match want_status { "retracted" => (SEARCH_RETRACTED_SQLITE, now.to_rfc3339()), "active" => (SEARCH_ACTIVE_SQLITE, now.to_rfc3339()), "expired" => (SEARCH_EXPIRED_SQLITE, now.to_rfc3339()), other => (SEARCH_STATUS_SQLITE, other.to_string()) };
+        sql.push_str(status_sql);
+        binds.push(status_bind);
+
+        // BUG-02: bind the cursor and LIMIT in SQL, not in Rust; the +1 sentinel tells whether
+        // another page exists. Post-SQL tag / derived_from filters can still shorten a page.
         let cursor_anchor = params
             .cursor
             .as_deref()
@@ -1817,9 +1820,9 @@ impl SqliteStore {
 
         // DESIGN-01: `COUNT(*) OVER ()` rides the same scan, so the total
         // is the count of §4.5-visible rows matching the SQL filters
-        // (before the LIMIT). It is an ESTIMATE: the post-SQL status /
-        // tags / derived_from refinements below are not reflected, so it
-        // is an upper bound on the returned matches. Crucially, the §4.5
+        // (before the LIMIT). Status is in SQL too (#561); the post-SQL
+        // tags / derived_from refinements below are not, so with those set
+        // it is an upper bound on the returned matches. Crucially, the §4.5
         // visibility dimension IS in SQL, so the total never counts a
         // restricted/private context the requester may not see.
         let total_estimate = match rows.first() {
@@ -1830,9 +1833,6 @@ impl SqliteStore {
             ),
             None => Some(0),
         };
-
-        let now = Utc::now();
-        let want_status = params.status.as_deref().unwrap_or("active");
 
         // REG-P2-8: the `limit + 1` sentinel and the "anchor the next
         // cursor on the last RAW scanned row, not the last visible
@@ -2317,6 +2317,19 @@ fn project_status_inline(
         other => other.clone(),
     }
 }
+
+/// #561: `search`'s status predicate, mirroring [`project_status_inline`] plus
+/// the retraction flag. Each binds exactly one value: `now` (RFC 3339) for the
+/// first three — the retracted arm only so every arm binds one — and the
+/// requested status string for [`SEARCH_STATUS_SQLITE`].
+const SEARCH_RETRACTED_SQLITE: &str = " AND retracted != 0 AND ? IS NOT NULL";
+const SEARCH_ACTIVE_SQLITE: &str =
+    " AND retracted = 0 AND status = 'active' AND (expires_at IS NULL \
+     OR unixepoch(expires_at, 'subsec') > unixepoch(?, 'subsec'))";
+const SEARCH_EXPIRED_SQLITE: &str =
+    " AND retracted = 0 AND (status = 'expired' OR (status = 'active' \
+     AND expires_at IS NOT NULL AND unixepoch(expires_at, 'subsec') <= unixepoch(?, 'subsec')))";
+const SEARCH_STATUS_SQLITE: &str = " AND retracted = 0 AND status = ?";
 
 fn project_context(mut ctx: FullContext, now: DateTime<Utc>) -> FullContext {
     ctx.registry_state.status =

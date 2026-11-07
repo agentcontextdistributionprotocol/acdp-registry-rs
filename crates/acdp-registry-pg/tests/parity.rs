@@ -558,3 +558,11 @@ async fn a_malformed_keyless_predecessor_fails_closed() {
     })
     .await;
 }
+
+/// #561: `total_estimate` counts only what the status filter keeps (lc-001 D).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn search_total_follows_the_status_filter() {
+    let Some(url) = pg_url_or_skip() else { return };
+    let store = store(&url).await;
+    parity::assert_search_total_follows_status_filter(&store, "pg").await;
+}

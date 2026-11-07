@@ -175,7 +175,7 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
 
-    // kl-001 (spec 546b8c8), embedded; Phase 7 asserts these against the
+    // kl-001 (spec ce39078), embedded; Phase 7 asserts these against the
     // fixture file itself.
     const REGISTRY: &str = "did:web:registry.example.com";
     const CONTROLLER: &str = "did:web:agents.example.com:ci";
@@ -187,11 +187,11 @@ mod tests {
     const V3_POP_CANONICAL: &str = "{\"controller\":\"did:web:agents.example.com:ci\",\"key_fingerprint\":\"sha256:f7b7676c94df7e8fd9998e38f9fff04d8588b00d1801764e3f1877a3feae4477\",\"pop_version\":\"acdp-key-attestation-pop/1\",\"registry_did\":\"did:web:registry.example.com\",\"token_hash\":\"sha256:a375998360472ac02ef1181e21466c19ef2db143cb204c0bc120acc17d991009\"}";
     const V3_POP: &str =
         "wMkYJkQDDFPR4aWUtKkLNebbLaQxt+Qo0EYCYip81vBZVxCNcnoT2EVsOO2VaR9P9Wc4IJr4RG0dL9ImVJF8Ag==";
-    const V1_CANONICAL: &str = "{\"acdp_version\":\"0.5.0\",\"agent_id\":\"did:web:registry.example.com\",\"contributors\":[],\"data_refs\":[],\"derived_from\":[],\"metadata\":{\"algorithm\":\"ed25519\",\"attestation_version\":\"acdp-key-attestation/1\",\"controller\":\"did:web:agents.example.com:ci\",\"identity\":{\"issuer\":\"https://token.actions.githubusercontent.com\",\"subject\":\"repo:example/pipeline:ref:refs/heads/main\",\"type\":\"oidc\"},\"key_fingerprint\":\"sha256:f7b7676c94df7e8fd9998e38f9fff04d8588b00d1801764e3f1877a3feae4477\",\"key_id\":\"did:web:agents.example.com:ci#acdp-kl-f7b7676c94df7e8fd9998e38f9fff04d8588b00d1801764e3f1877a3feae4477\",\"not_after\":\"2026-10-26T09:10:00.000Z\",\"not_before\":\"2026-10-26T09:00:00.000Z\",\"org_wide\":false,\"public_key_jwk\":{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"NLTZBDFWy23PC-sKKUm3VZyUDSvLbb6MU6mzAnjjp0Y\"},\"token_hash\":\"sha256:a375998360472ac02ef1181e21466c19ef2db143cb204c0bc120acc17d991009\"},\"schema_uri\":\"https://schemas.acdp.io/v0.1.0/acdp-key-attestation.schema.json\",\"summary\":\"registry.example.com attests an ephemeral ed25519 key for did:web:agents.example.com:ci (RFC-ACDP-0021).\",\"supersedes\":null,\"title\":\"Key attestation\",\"type\":\"acdp:key-attestation\",\"version\":1,\"visibility\":\"public\"}";
+    const V1_CANONICAL: &str = "{\"acdp_version\":\"0.5.0\",\"agent_id\":\"did:web:registry.example.com\",\"contributors\":[],\"data_refs\":[],\"derived_from\":[],\"metadata\":{\"algorithm\":\"ed25519\",\"attestation_version\":\"acdp-key-attestation/1\",\"controller\":\"did:web:agents.example.com:ci\",\"identity\":{\"issuer\":\"https://token.actions.githubusercontent.com\",\"subject\":\"repo:example/pipeline:ref:refs/heads/main\",\"type\":\"oidc\"},\"key_fingerprint\":\"sha256:f7b7676c94df7e8fd9998e38f9fff04d8588b00d1801764e3f1877a3feae4477\",\"key_id\":\"did:web:agents.example.com:ci#acdp-kl-f7b7676c94df7e8fd9998e38f9fff04d8588b00d1801764e3f1877a3feae4477\",\"not_after\":\"2026-10-26T09:10:00.000Z\",\"not_before\":\"2026-10-26T09:00:00.000Z\",\"org_wide\":false,\"public_key_jwk\":{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"NLTZBDFWy23PC-sKKUm3VZyUDSvLbb6MU6mzAnjjp0Y\"},\"token_hash\":\"sha256:a375998360472ac02ef1181e21466c19ef2db143cb204c0bc120acc17d991009\"},\"schema_uri\":\"https://schemas.agentcontextdistributionprotocol.io/v0.1.0/acdp-key-attestation.schema.json\",\"summary\":\"registry.example.com attests an ephemeral ed25519 key for did:web:agents.example.com:ci (RFC-ACDP-0021).\",\"supersedes\":null,\"title\":\"Key attestation\",\"type\":\"acdp:key-attestation\",\"version\":1,\"visibility\":\"public\"}";
     const V1_CONTENT_HASH: &str =
-        "sha256:fbed72af712224f7d9d6e05a896d3a364c6c709247548a3de059198473399672";
+        "sha256:707eb69ab15a9866f2fa6f42def6821ef27c7a0b91bd844055cad617ff2d1bf5";
     const V1_SIGNATURE: &str =
-        "Ax85cwl90F9sULBDm3guc8Fuwqlg4B6eJmvdaNvx3HM089UwnNmx9eDo6Ic+b3xjUf8rfYfVbjKToRWeMTSDAg==";
+        "Nkw+nwh/9bT0PTEkugq5IhFtcdQv/0pOL9jYUCcwpKfl2b0E9TNaCv1tstRqn2YGKFg2CgGXyaOmEpkkXG1HBQ==";
     const V6_POP_P1363: &str =
         "GcnB3rNSbrTGEzqgolY2+p5CrrdDACDwZ+zY78nI/J5i3upzXXtjJyhsDI/lm2RXuak2ZfVEAnkSj8p7GLBvVQ==";
     const V6_POP_DER: &str = "MEQCIBnJwd6zUm60xhM6oKJWNvqeQq63QwAg8Gfs2O/JyPyeAiBi3upzXXtjJyhsDI/lm2RXuak2ZfVEAnkSj8p7GLBvVQ==";

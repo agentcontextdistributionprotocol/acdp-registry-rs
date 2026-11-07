@@ -7880,7 +7880,7 @@ fn lin_vectors_reproduce_lineage_derivation() {
     );
 }
 
-/// The exact number of caps-* fixture ids at spec pin 3f50697, and the
+/// The exact number of caps-* fixture ids at spec pin ce39078, and the
 /// exact number of outcome assertions this test makes (8 base-case
 /// fixtures + caps-007's 3 and caps-008's 3 `reject_variants`). Two separate constants
 /// because they answer two separate "did this silently shrink" questions:
@@ -7974,7 +7974,7 @@ fn caps_vectors_validate_capabilities_document() {
             assert_eq!(
                 variants.len(),
                 3,
-                "{id} must carry exactly 3 reject_variants at spec pin 3f50697: {fx}"
+                "{id} must carry exactly 3 reject_variants at spec pin ce39078: {fx}"
             );
             for v in variants {
                 let name = v["name"].as_str().unwrap_or("?");
@@ -8017,13 +8017,13 @@ fn caps_vectors_validate_capabilities_document() {
     assert_eq!(
         found_ids.len(),
         EXPECTED_CAPS_FIXTURE_COUNT,
-        "expected exactly {EXPECTED_CAPS_FIXTURE_COUNT} caps-* fixtures at spec pin 3f50697: \
+        "expected exactly {EXPECTED_CAPS_FIXTURE_COUNT} caps-* fixtures at spec pin ce39078: \
          found {found_ids:?}"
     );
     assert_eq!(
         asserted, EXPECTED_CAPS_ASSERTION_COUNT,
         "expected exactly {EXPECTED_CAPS_ASSERTION_COUNT} caps-* outcome assertions (8 base \
-         cases + caps-007's and caps-008's 3 reject_variants each) at spec pin 3f50697 -- a silently-shrinking \
+         cases + caps-007's and caps-008's 3 reject_variants each) at spec pin ce39078 -- a silently-shrinking \
          count here is exactly the vacuous-pass failure mode this ratchet exists to prevent"
     );
 }
@@ -9492,6 +9492,7 @@ fn fixture_family_panics_naming_file_when_id_missing() {
 /// for the full reasoning, including `idem-007`'s separate (version-gated)
 /// not-owed reason.
 const KNOWN_FAMILIES: &[&str] = &[
+    "a2a",
     "anc",
     "body",
     "can",
@@ -9626,37 +9627,21 @@ const EXCUSED: &[(&str, &str)] = &[
         "rot",
         "applies_to_profiles = [acdp-registry-receipts, acdp-consumer], and none of \
          its 1 fixture is in acdp-registry-core's required_fixtures or \
-         conditional_fixtures -- same structural shape as lc (a profile this harness \
-         doesn't advertise), and both are now excused, but rot's is the STRONGER, \
+         conditional_fixtures -- the same structural shape lc had (a profile this harness \
+         doesn't advertise) when lc was excused, but rot's is the STRONGER, \
          substantive ground: RFC-ACDP-0010 \u{a7}10 assigns historical producer-key \
          verification to the consumer holding the receipt, not to the issuing registry, \
          so no harness configuration change would make this registry responsible for it \
-         -- whereas lc's excuse (below) rests solely on this harness's current profile \
-         advertisement, nothing about the obligation itself.",
-    ),
-    (
-        "lc",
-        "profile-gated: applies_to_profiles = [acdp-registry-lifecycle] on all 3 \
-         fixtures (RFC-ACDP-0013), disjoint from this harness's advertised \
-         HARNESS_PROFILES = [acdp-registry-core] -- verified directly against \
-         registries/profiles.json at spec pin d1f06d0, both for applies_to_profiles on \
-         each lc-* fixture and for lc's absence from acdp-registry-core's \
-         required_fixtures and conditional_fixtures. The runtime profile gate \
-         (targets_unadvertised_profile) therefore skips all 3 before they ever reach a \
-         shape, so they are never owed under what this harness advertises today. \
-         REG-11 Phase 14 (a user decision, not re-derived here) declares this \
-         excusable rather than leaving it silently DEFERRED under #115 -- see \
-         DEFERRED's own doc comment for the history. Weaker ground than rot's (above): \
-         advertising acdp-registry-lifecycle would make this obligation live, so this \
-         excuse is a statement about today's harness configuration, not about who owns \
-         the obligation.",
+         -- whereas lc's former excuse rested solely on this harness's profile \
+         advertisement, and lc is now COVERED against the shipped binary.",
     ),
     // REG-11 #130: rcpt/lhr/log, moved here from DEFERRED. Read the three entries
     // below together with this note.
     //
     // EXPLICIT EXTENSION OF A PRIOR USER RULING, STATED RATHER THAN SWEPT IN.
     // Phase 14 declared `lc` EXCUSED on a user decision ("a user decision, not
-    // re-derived here", see lc's entry above). These three are a DIFFERENT and
+    // re-derived here"; lc has since moved to COVERED, its fixtures driven
+    // against the shipped binary). These three are a DIFFERENT and
     // STRONGER case, and the maintainer has explicitly approved extending that
     // ruling to cover them. The extension is recorded here, in the code, on
     // purpose: it is a deliberate widening of a prior ruling, not an assumption
@@ -9787,7 +9772,7 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "rec",
-        "RFC-ACDP-0018 retraction recall, spec pin 3f50697: 10 fixtures, none carrying an \
+        "RFC-ACDP-0018 retraction recall, spec pin ce39078: 10 fixtures, none carrying an \
          endpoint (rec-007's vectors array is the hint-hmac-001 HMAC known-answer \
          vector, not an HTTP exchange). Two grounds, split by fixture. rec-001..005 and \
          rec-008 apply_to acdp-registry-changes, and rec-007 scenarios A-C and F-H to \
@@ -9824,17 +9809,29 @@ const EXCUSED: &[(&str, &str)] = &[
     ),
     (
         "mcp",
-        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin 3f50697: 7 fixtures, all \
-         applies_to_profiles = [acdp-producer-mcp-proxy], none carrying an endpoint \
-         (mcp-001's vectors array is a known-answer set). They are obligations of an MCP \
+        "RFC-ACDP-0019 MCP tool-result provenance (Draft), spec pin ce39078: 8 fixtures, all \
+         applies_to_profiles = [acdp-producer-mcp-proxy], none carrying an HTTP exchange this \
+         replayer extracts (mcp-001's vectors array is a known-answer set; mcp-008 is the \
+         proxy's MCP 2026-07-28 session handling). They are obligations of an MCP \
          signing proxy, a producer: an acdp:mcp-tool-result body is an ordinary signed \
          body to this registry, published through the same path as any other. No harness \
          configuration would make the registry responsible for them, and none is in \
          acdp-registry-core's required_fixtures or conditional_fixtures.",
     ),
     (
+        "a2a",
+        "RFC-ACDP-0022 A2A artifact provenance (Draft), spec pin ce39078: 8 fixtures \
+         (a2a-001..008), all applies_to_profiles within [acdp-producer-a2a, \
+         acdp-consumer-a2a], none carrying an endpoint (a2a-001's vectors are known \
+         answers). They bind an A2A artifact to an agent-signed body and check it on the \
+         holder side: producer and consumer obligations. An A2A-provenance body is an \
+         ordinary signed body to this registry, published through the same path as any \
+         other. No harness configuration would make the registry responsible for them, \
+         and none is in acdp-registry-core's required_fixtures or conditional_fixtures.",
+    ),
+    (
         "trust",
-        "RFC-ACDP-0020 registry trust lists (Draft), spec pin 3f50697: 7 fixtures, all \
+        "RFC-ACDP-0020 registry trust lists (Draft), spec pin ce39078: 7 fixtures, all \
          applies_to_profiles = [acdp-consumer-trust-list], none carrying an endpoint \
          (trust-001's vectors array is a known-answer set). Selecting, validating and \
          applying signed acdp:trust-list bodies is the consumer's evaluation; an \
@@ -9918,6 +9915,18 @@ const COVERED: &[(&str, &[CoverageMechanism])] = &[
         "lin",
         &[CoverageMechanism::Direct(&[
             "lin_vectors_reproduce_lineage_derivation",
+        ])],
+    ),
+    // RFC-ACDP-0013: lc-001..003, scenario by scenario from the fixtures,
+    // against the shipped binary with acdp-registry-lifecycle advertised.
+    // Formerly EXCUSED (profile-gated; REG-11 Phase 14) -- the replay harness
+    // still skips them, as it does kl-*, because it advertises core only.
+    (
+        "lc",
+        &[CoverageMechanism::Direct(&[
+            "lc001_retraction_flow_from_fixture",
+            "lc002_immutable_field_and_authentication_from_fixture",
+            "lc003_retracted_head_from_fixture",
         ])],
     ),
     // RFC-ACDP-0021 (Phase 7): the acdp-registry-keyless fixtures, scenario by
@@ -10265,11 +10274,13 @@ const UNEXERCISED_FIXTURES: &[(&str, Unexercised)] = &[
 /// bearer tokens, RFC-ACDP-0007 open `limits`, RFC-ACDP-0018 clarifications);
 /// still 205 after the `c40671e` bump (RFC-ACDP-0018 sequence-reset text); 206 after
 /// the `3f50697` bump (rec-010 added; rec-001 H and rec-006 N added in place;
-/// RFC-ACDP-0018 §5.2 page size and compression, §6.1 bucket filters).
+/// RFC-ACDP-0018 §5.2 page size and compression, §6.1 bucket filters); 215 after
+/// the `ce39078` bump (a2a-001..008 and mcp-008 added; kl-001 re-minted under the
+/// long-form schema domain, RFC-ACDP-0021 §5.3 legacy schema_uri acceptance).
 /// A `>=` floor passes the very scanner
 /// that is silently missing items, so a 147th fixture must fail the build
 /// and force a human to classify it.
-const TOTAL_FIXTURES_AT_PIN: usize = 206;
+const TOTAL_FIXTURES_AT_PIN: usize = 215;
 
 /// Fixtures the replayer can drive over HTTP, as an equality. Derived in the
 /// test from the same `extract()` the replayer itself dispatches on, so this
@@ -10369,6 +10380,9 @@ const DIRECT_FNS: &[(&str, fn())] = &[
     direct_fn!(can007_registry_created_at_millisecond_truncation),
     direct_fn!(can013_registry_accepts_and_serves_canonical_zero_millisecond_timestamps),
     direct_fn!(lin_vectors_reproduce_lineage_derivation),
+    direct_fn!(lc001_retraction_flow_from_fixture),
+    direct_fn!(lc002_immutable_field_and_authentication_from_fixture),
+    direct_fn!(lc003_retracted_head_from_fixture),
     direct_fn!(kl001_golden_attestation_pop_and_supersession_table),
     direct_fn!(kl002_attestation_request_scenarios),
     direct_fn!(kl003_keyless_publish_scenarios),
@@ -12231,395 +12245,488 @@ async fn rev003_harness(pub_b64: &str) -> common::SeededHarness {
 /// earlier ... registry generation." The supersession attempt itself — the
 /// actual rule under test — is a real HTTP POST like every other scenario;
 /// only the precondition is seeded directly.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rev003_publish_time_rejection_matrix() {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+#[test]
+fn rev003_publish_time_rejection_matrix() {
+    kl_block_on(async {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-    let Some(fixtures) = spec_fixtures() else {
-        eprintln!(
-            "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping rev-003 \
+        let Some(fixtures) = spec_fixtures() else {
+            eprintln!(
+                "conformance: ACDP_SPEC_DIR unset or no fixtures resolvable; skipping rev-003 \
              (set ACDP_REQUIRE_CONFORMANCE to make this a hard failure)"
+            );
+            return;
+        };
+        let Some(fx) = find_fixture_by_id(&fixtures, "rev-003") else {
+            return;
+        };
+        assert_eq!(
+            fx["scenarios"].as_array().map(|a| a.len()),
+            Some(18),
+            "rev-003 must carry exactly 18 scenarios (A-R) at the pinned spec revision: {fx}"
         );
-        return;
-    };
-    let Some(fx) = find_fixture_by_id(&fixtures, "rev-003") else {
-        return;
-    };
-    assert_eq!(
-        fx["scenarios"].as_array().map(|a| a.len()),
-        Some(18),
-        "rev-003 must carry exactly 18 scenarios (A-R) at the pinned spec revision: {fx}"
-    );
 
-    let k1 = SigningKey::from_bytes(&REV003_K1_SEED);
-    let k2 = SigningKey::from_bytes(&REV003_K2_SEED);
-    let k1_pub_b64 = STANDARD.encode(k1.verifying_key_bytes());
-    let k2_pub_b64 = STANDARD.encode(k2.verifying_key_bytes());
-    let k1_fingerprint = acdp::crypto::fingerprint_ed25519(&k1.verifying_key_bytes());
-
-    let harness = rev003_harness(&k2_pub_b64).await;
-    let producer_k2 = Producer::new(
-        k2,
-        AgentDid::new(REV003_AGENT_ID.to_string()),
-        REV003_K2_KEY_ID,
-    );
-    let producer_k1 = Producer::new(
-        k1,
-        AgentDid::new(REV003_AGENT_ID.to_string()),
-        REV003_K1_KEY_ID,
-    );
-
-    let base_metadata = json!({
-        "revoked_key_fingerprint": k1_fingerprint,
-        "compromised_since": "2026-05-01T00:00:00.000Z",
-    });
-
-    // ---- A-G, K, L, N: metadata/visibility shape variations, all
-    //      producer-signed by K2, all differing from control K in exactly
-    //      one respect (mirroring the fixture's own `differs_from_control`
-    //      discipline) — one data table, one loop, rather than ten
-    //      near-identical functions (dk-002's precedent).
-    struct ShapeCase {
-        letter: &'static str,
-        visibility: Visibility,
-        audience: Option<Vec<AgentDid>>,
-        metadata: Value,
-        accept: bool,
-    }
-    let cases = [
-        ShapeCase {
-            letter: "A",
-            visibility: Visibility::Restricted,
-            audience: Some(vec![AgentDid::new(
-                "did:web:consumers.example.com:ops-team".to_string(),
-            )]),
-            metadata: base_metadata.clone(),
-            accept: false,
-        },
-        ShapeCase {
-            letter: "B",
-            visibility: Visibility::Public,
-            audience: None,
-            metadata: json!({"compromised_since": "2026-05-01T00:00:00.000Z"}),
-            accept: false,
-        },
-        ShapeCase {
-            letter: "C",
-            visibility: Visibility::Public,
-            audience: None,
-            metadata: json!({
-                "revoked_key_fingerprint": "sha256:139E3940E64B5491",
-                "compromised_since": "2026-05-01T00:00:00.000Z",
-            }),
-            accept: false,
-        },
-        ShapeCase {
-            letter: "D",
-            visibility: Visibility::Public,
-            audience: None,
-            metadata: json!({"revoked_key_fingerprint": k1_fingerprint}),
-            accept: false,
-        },
-        ShapeCase {
-            letter: "E",
-            visibility: Visibility::Public,
-            audience: None,
-            metadata: json!({
-                "revoked_key_fingerprint": k1_fingerprint,
-                "compromised_since": "2026-05-01T00:00:00Z",
-            }),
-            accept: false,
-        },
-        ShapeCase {
-            letter: "F",
-            visibility: Visibility::Public,
-            audience: None,
-            metadata: json!({
-                "revoked_key_fingerprint": k1_fingerprint,
-                "compromised_since": "2026-05-01T00:00:00.000Z",
-                "reason": "x".repeat(1025),
-            }),
-            accept: false,
-        },
-        ShapeCase {
-            letter: "G",
-            visibility: Visibility::Public,
-            audience: None,
-            metadata: json!({
-                "revoked_key_fingerprint": k1_fingerprint,
-                "compromised_since": "2026-05-01T00:00:00.000Z",
-                "revoked_key_controller": "did:web:agents.example.com:other-producer",
-            }),
-            accept: false,
-        },
-        ShapeCase {
-            letter: "K",
-            visibility: Visibility::Public,
-            audience: None,
-            metadata: base_metadata.clone(),
-            accept: true,
-        },
-        ShapeCase {
-            letter: "L",
-            visibility: Visibility::Public,
-            audience: None,
-            metadata: json!({
-                "revoked_key_fingerprint": k1_fingerprint,
-                "compromised_since": "2026-05-01T00:00:00.000Z",
-                "revoked_key_controller": REV003_AGENT_ID,
-                "revoked_key_id": REV003_K1_KEY_ID,
-                "reason": "laptop theft; private key material presumed exfiltrated",
-            }),
-            accept: true,
-        },
-        ShapeCase {
-            letter: "N",
-            visibility: Visibility::Public,
-            audience: None,
-            metadata: json!({
-                "revoked_key_fingerprint": k1_fingerprint,
-                "compromised_since": "2026-05-01T00:00:00.000Z",
-                "reason": "x".repeat(1024),
-            }),
-            accept: true,
-        },
-    ];
-
-    for case in cases {
-        let mut builder = producer_k2
-            .publish_request()
-            .title("rev-003 key-1 compromised")
-            .context_type(ContextType::KeyRevocation)
-            .visibility(case.visibility)
-            .metadata(case.metadata)
-            .acdp_version("0.3.0");
-        if let Some(audience) = case.audience {
-            builder = builder.audience(audience);
-        }
-        let req = builder
-            .build()
-            .unwrap_or_else(|e| panic!("rev-003 {}: request build failed: {e}", case.letter));
-        let (status, body) =
-            post_publish_json(&harness.router, serde_json::to_value(&req).unwrap()).await;
-        if case.accept {
+        // Every scenario's answer is checked against the fixture's own
+        // `expected` (http_status, error_code, details), not only against the
+        // literals below, and the set of scenarios run is checked at the end.
+        let expected_of: std::collections::BTreeMap<String, Value> = fx["scenarios"]
+            .as_array()
+            .expect("rev-003 scenarios")
+            .iter()
+            .map(|s| {
+                let name = s["name"].as_str().expect("scenario name");
+                let letter = name.split_whitespace().next().expect("scenario letter");
+                (letter.to_string(), s["expected"].clone())
+            })
+            .collect();
+        let ran = std::cell::RefCell::new(std::collections::BTreeSet::<String>::new());
+        let check = |letter: &str, status: StatusCode, body: &Value| {
+            let exp = expected_of
+                .get(letter)
+                .unwrap_or_else(|| panic!("rev-003 has no scenario {letter} at the pin"));
             assert_eq!(
-                status,
-                StatusCode::CREATED,
-                "rev-003 {}: must be accepted, body = {body}",
-                case.letter
+                Some(u64::from(status.as_u16())),
+                exp["http_status"].as_u64(),
+                "rev-003 {letter}: the fixture's http_status: {body}"
             );
-        } else {
-            assert_eq!(
-                status,
-                StatusCode::BAD_REQUEST,
-                "rev-003 {}: must be rejected 400, body = {body}",
-                case.letter
+            match exp["error_code"].as_str() {
+                Some(code) => assert_eq!(
+                    body["error"]["code"], code,
+                    "rev-003 {letter}: the fixture's error_code: {body}"
+                ),
+                None => assert!(
+                    body.get("error").is_none(),
+                    "rev-003 {letter}: the fixture expects acceptance: {body}"
+                ),
+            }
+            if let Some(details) = exp["details"].as_object() {
+                for (k, v) in details {
+                    assert_eq!(
+                        &body["error"]["details"][k], v,
+                        "rev-003 {letter}: the fixture's details.{k}: {body}"
+                    );
+                }
+            }
+            assert!(
+                ran.borrow_mut().insert(letter.to_string()),
+                "rev-003 {letter} checked twice"
             );
-            assert_eq!(
-                body["error"]["code"], "schema_violation",
-                "rev-003 {}: body = {body}",
-                case.letter
-            );
-        }
-    }
+        };
 
-    // ---- I: self-signed by the revoked key (did:web). K1 is still
-    //      authorized -- the realistic just-stolen-key case -- so the
-    //      generic authorization check passes and only RFC-ACDP-0014 §5
-    //      step 2's fingerprint comparison can reject. A SEPARATE, K1-only
-    //      harness (see `rev003_harness`'s doc comment for why the main
-    //      one, pinning K2, cannot also authorize K1).
-    let harness_k1 = rev003_harness(&k1_pub_b64).await;
-    let self_signed_i = producer_k1
-        .publish_request()
-        .title("rev-003 key-1 compromised (self-signed)")
-        .context_type(ContextType::KeyRevocation)
-        .visibility(Visibility::Public)
-        .metadata(base_metadata.clone())
-        .acdp_version("0.3.0")
-        .build()
-        .unwrap();
-    let (status, body) = post_publish_json(
-        &harness_k1.router,
-        serde_json::to_value(&self_signed_i).unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "rev-003 I: body = {body}");
-    assert_eq!(
-        body["error"]["code"], "key_not_authorized",
-        "rev-003 I: body = {body}"
-    );
+        let k1 = SigningKey::from_bytes(&REV003_K1_SEED);
+        let k2 = SigningKey::from_bytes(&REV003_K2_SEED);
+        let k1_pub_b64 = STANDARD.encode(k1.verifying_key_bytes());
+        let k2_pub_b64 = STANDARD.encode(k2.verifying_key_bytes());
+        let k1_fingerprint = acdp::crypto::fingerprint_ed25519(&k1.verifying_key_bytes());
 
-    // ---- J: self-signed by the revoked key (did:key). did:key's identity
-    //      IS the key, so a did:key producer can never issue a
-    //      producer-signed revocation of itself — this is the only shape
-    //      such a publish can take.
-    const REV003_DK_SEED: [u8; 32] = [202u8; 32];
-    let dk_fingerprint = acdp::crypto::fingerprint_ed25519(
-        &SigningKey::from_bytes(&REV003_DK_SEED).verifying_key_bytes(),
-    );
-    let did_key_producer = Producer::new_did_key(SigningKey::from_bytes(&REV003_DK_SEED));
-    let self_signed_j = did_key_producer
-        .publish_request()
-        .title("rev-003 did:key identity key compromised (self-signed)")
-        .context_type(ContextType::KeyRevocation)
-        .visibility(Visibility::Public)
-        .metadata(json!({
-            "revoked_key_fingerprint": dk_fingerprint,
+        let harness = rev003_harness(&k2_pub_b64).await;
+        let producer_k2 = Producer::new(
+            k2,
+            AgentDid::new(REV003_AGENT_ID.to_string()),
+            REV003_K2_KEY_ID,
+        );
+        let producer_k1 = Producer::new(
+            k1,
+            AgentDid::new(REV003_AGENT_ID.to_string()),
+            REV003_K1_KEY_ID,
+        );
+
+        let base_metadata = json!({
+            "revoked_key_fingerprint": k1_fingerprint,
             "compromised_since": "2026-05-01T00:00:00.000Z",
-        }))
-        .acdp_version("0.3.0")
-        .build()
-        .unwrap();
-    let (status, body) = post_publish_json(
-        &harness.router,
-        serde_json::to_value(&self_signed_j).unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "rev-003 J: body = {body}");
-    assert_eq!(
-        body["error"]["code"], "key_not_authorized",
-        "rev-003 J: body = {body}"
-    );
+        });
 
-    // ---- O, R share one real (HTTP-published) key-revocation predecessor:
-    //      O supersedes it with a non-revocation type (MUST reject), R with
-    //      a matching key-revocation type (MUST accept) — the fixture's own
-    //      control/positive pairing. O's rejected attempt never commits, so
-    //      R can reuse the same predecessor at version 2.
-    let v1_for_or = producer_k2
-        .publish_request()
-        .title("rev-003 O/R predecessor")
-        .context_type(ContextType::KeyRevocation)
-        .visibility(Visibility::Public)
-        .metadata(base_metadata.clone())
-        .acdp_version("0.3.0")
-        .build()
-        .unwrap();
-    let (status, body) =
-        post_publish_json(&harness.router, serde_json::to_value(&v1_for_or).unwrap()).await;
-    assert_eq!(
-        status,
-        StatusCode::CREATED,
-        "rev-003 O/R predecessor seed: body = {body}"
-    );
-    let or_ctx_id = CtxId(body["ctx_id"].as_str().unwrap().to_string());
-    let or_lineage_id = LineageId(body["lineage_id"].as_str().unwrap().to_string());
+        // ---- A-G, K, L, N: metadata/visibility shape variations, all
+        //      producer-signed by K2, all differing from control K in exactly
+        //      one respect (mirroring the fixture's own `differs_from_control`
+        //      discipline) — one data table, one loop, rather than ten
+        //      near-identical functions (dk-002's precedent).
+        struct ShapeCase {
+            letter: &'static str,
+            visibility: Visibility,
+            audience: Option<Vec<AgentDid>>,
+            metadata: Value,
+            accept: bool,
+        }
+        let cases = [
+            ShapeCase {
+                letter: "A",
+                visibility: Visibility::Restricted,
+                audience: Some(vec![AgentDid::new(
+                    "did:web:consumers.example.com:ops-team".to_string(),
+                )]),
+                metadata: base_metadata.clone(),
+                accept: false,
+            },
+            ShapeCase {
+                letter: "B",
+                visibility: Visibility::Public,
+                audience: None,
+                metadata: json!({"compromised_since": "2026-05-01T00:00:00.000Z"}),
+                accept: false,
+            },
+            ShapeCase {
+                letter: "C",
+                visibility: Visibility::Public,
+                audience: None,
+                metadata: json!({
+                    "revoked_key_fingerprint": "sha256:139E3940E64B5491",
+                    "compromised_since": "2026-05-01T00:00:00.000Z",
+                }),
+                accept: false,
+            },
+            ShapeCase {
+                letter: "D",
+                visibility: Visibility::Public,
+                audience: None,
+                metadata: json!({"revoked_key_fingerprint": k1_fingerprint}),
+                accept: false,
+            },
+            ShapeCase {
+                letter: "E",
+                visibility: Visibility::Public,
+                audience: None,
+                metadata: json!({
+                    "revoked_key_fingerprint": k1_fingerprint,
+                    "compromised_since": "2026-05-01T00:00:00Z",
+                }),
+                accept: false,
+            },
+            ShapeCase {
+                letter: "F",
+                visibility: Visibility::Public,
+                audience: None,
+                metadata: json!({
+                    "revoked_key_fingerprint": k1_fingerprint,
+                    "compromised_since": "2026-05-01T00:00:00.000Z",
+                    "reason": "x".repeat(1025),
+                }),
+                accept: false,
+            },
+            ShapeCase {
+                letter: "G",
+                visibility: Visibility::Public,
+                audience: None,
+                metadata: json!({
+                    "revoked_key_fingerprint": k1_fingerprint,
+                    "compromised_since": "2026-05-01T00:00:00.000Z",
+                    "revoked_key_controller": "did:web:agents.example.com:other-producer",
+                }),
+                accept: false,
+            },
+            ShapeCase {
+                letter: "K",
+                visibility: Visibility::Public,
+                audience: None,
+                metadata: base_metadata.clone(),
+                accept: true,
+            },
+            ShapeCase {
+                letter: "L",
+                visibility: Visibility::Public,
+                audience: None,
+                metadata: json!({
+                    "revoked_key_fingerprint": k1_fingerprint,
+                    "compromised_since": "2026-05-01T00:00:00.000Z",
+                    "revoked_key_controller": REV003_AGENT_ID,
+                    "revoked_key_id": REV003_K1_KEY_ID,
+                    "reason": "laptop theft; private key material presumed exfiltrated",
+                }),
+                accept: true,
+            },
+            ShapeCase {
+                letter: "N",
+                visibility: Visibility::Public,
+                audience: None,
+                metadata: json!({
+                    "revoked_key_fingerprint": k1_fingerprint,
+                    "compromised_since": "2026-05-01T00:00:00.000Z",
+                    "reason": "x".repeat(1024),
+                }),
+                accept: true,
+            },
+        ];
 
-    let widened_metadata = json!({
-        "revoked_key_fingerprint": k1_fingerprint,
-        "compromised_since": "2026-04-01T00:00:00.000Z",
+        for case in cases {
+            let mut builder = producer_k2
+                .publish_request()
+                .title("rev-003 key-1 compromised")
+                .context_type(ContextType::KeyRevocation)
+                .visibility(case.visibility)
+                .metadata(case.metadata)
+                .acdp_version("0.3.0");
+            if let Some(audience) = case.audience {
+                builder = builder.audience(audience);
+            }
+            let req = builder
+                .build()
+                .unwrap_or_else(|e| panic!("rev-003 {}: request build failed: {e}", case.letter));
+            let (status, body) =
+                post_publish_json(&harness.router, serde_json::to_value(&req).unwrap()).await;
+            check(case.letter, status, &body);
+            if case.accept {
+                assert_eq!(
+                    status,
+                    StatusCode::CREATED,
+                    "rev-003 {}: must be accepted, body = {body}",
+                    case.letter
+                );
+            } else {
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "rev-003 {}: must be rejected 400, body = {body}",
+                    case.letter
+                );
+                assert_eq!(
+                    body["error"]["code"], "schema_violation",
+                    "rev-003 {}: body = {body}",
+                    case.letter
+                );
+            }
+        }
+
+        // ---- I: self-signed by the revoked key (did:web). K1 is still
+        //      authorized -- the realistic just-stolen-key case -- so the
+        //      generic authorization check passes and only RFC-ACDP-0014 §5
+        //      step 2's fingerprint comparison can reject. A SEPARATE, K1-only
+        //      harness (see `rev003_harness`'s doc comment for why the main
+        //      one, pinning K2, cannot also authorize K1).
+        let harness_k1 = rev003_harness(&k1_pub_b64).await;
+        let self_signed_i = producer_k1
+            .publish_request()
+            .title("rev-003 key-1 compromised (self-signed)")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .metadata(base_metadata.clone())
+            .acdp_version("0.3.0")
+            .build()
+            .unwrap();
+        let (status, body) = post_publish_json(
+            &harness_k1.router,
+            serde_json::to_value(&self_signed_i).unwrap(),
+        )
+        .await;
+        check("I", status, &body);
+        assert_eq!(status, StatusCode::FORBIDDEN, "rev-003 I: body = {body}");
+        assert_eq!(
+            body["error"]["code"], "key_not_authorized",
+            "rev-003 I: body = {body}"
+        );
+
+        // ---- J: self-signed by the revoked key (did:key). did:key's identity
+        //      IS the key, so a did:key producer can never issue a
+        //      producer-signed revocation of itself — this is the only shape
+        //      such a publish can take.
+        const REV003_DK_SEED: [u8; 32] = [202u8; 32];
+        let dk_fingerprint = acdp::crypto::fingerprint_ed25519(
+            &SigningKey::from_bytes(&REV003_DK_SEED).verifying_key_bytes(),
+        );
+        let did_key_producer = Producer::new_did_key(SigningKey::from_bytes(&REV003_DK_SEED));
+        let self_signed_j = did_key_producer
+            .publish_request()
+            .title("rev-003 did:key identity key compromised (self-signed)")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .metadata(json!({
+                "revoked_key_fingerprint": dk_fingerprint,
+                "compromised_since": "2026-05-01T00:00:00.000Z",
+            }))
+            .acdp_version("0.3.0")
+            .build()
+            .unwrap();
+        let (status, body) = post_publish_json(
+            &harness.router,
+            serde_json::to_value(&self_signed_j).unwrap(),
+        )
+        .await;
+        check("J", status, &body);
+        assert_eq!(status, StatusCode::FORBIDDEN, "rev-003 J: body = {body}");
+        assert_eq!(
+            body["error"]["code"], "key_not_authorized",
+            "rev-003 J: body = {body}"
+        );
+
+        // ---- O, R share one real (HTTP-published) key-revocation predecessor:
+        //      O supersedes it with a non-revocation type (MUST reject), R with
+        //      a matching key-revocation type (MUST accept) — the fixture's own
+        //      control/positive pairing. O's rejected attempt never commits, so
+        //      R can reuse the same predecessor at version 2.
+        let v1_for_or = producer_k2
+            .publish_request()
+            .title("rev-003 O/R predecessor")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .metadata(base_metadata.clone())
+            .acdp_version("0.3.0")
+            .build()
+            .unwrap();
+        let (status, body) =
+            post_publish_json(&harness.router, serde_json::to_value(&v1_for_or).unwrap()).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "rev-003 O/R predecessor seed: body = {body}"
+        );
+        let or_ctx_id = CtxId(body["ctx_id"].as_str().unwrap().to_string());
+        let or_lineage_id = LineageId(body["lineage_id"].as_str().unwrap().to_string());
+
+        let widened_metadata = json!({
+            "revoked_key_fingerprint": k1_fingerprint,
+            "compromised_since": "2026-04-01T00:00:00.000Z",
+        });
+
+        let o_req = producer_k2
+            .supersede(or_ctx_id.clone())
+            .title("rev-003 O: widened, wrong type")
+            .version(2)
+            .context_type(ContextType::Analysis)
+            .visibility(Visibility::Public)
+            .metadata(widened_metadata.clone())
+            .acdp_version("0.5.0")
+            .expected_lineage_id(or_lineage_id.clone())
+            .build()
+            .unwrap();
+        let (status, body) =
+            post_publish_json(&harness.router, serde_json::to_value(&o_req).unwrap()).await;
+        check("O", status, &body);
+        assert_eq!(status, StatusCode::BAD_REQUEST, "rev-003 O: body = {body}");
+        assert_eq!(
+            body["error"]["code"], "superseded_target",
+            "rev-003 O: body = {body}"
+        );
+        assert_eq!(
+            body["error"]["details"]["reason"], "revocation_type_mismatch",
+            "rev-003 O: body = {body}"
+        );
+
+        let r_req = producer_k2
+            .supersede(or_ctx_id.clone())
+            .title("rev-003 R: widened, same type")
+            .version(2)
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .metadata(widened_metadata.clone())
+            .acdp_version("0.5.0")
+            .expected_lineage_id(or_lineage_id.clone())
+            .build()
+            .unwrap();
+        let (status, body) =
+            post_publish_json(&harness.router, serde_json::to_value(&r_req).unwrap()).await;
+        check("R", status, &body);
+        assert_eq!(status, StatusCode::CREATED, "rev-003 R: body = {body}");
+
+        // ---- Q: (0.5.0) a NEW publish under the retired interim form.
+        let q_req = producer_k2
+            .publish_request()
+            .title("rev-003 Q: interim form, new publish")
+            .context_type(ContextType::Custom(
+                ContextType::KEY_REVOCATION_INTERIM.to_string(),
+            ))
+            .visibility(Visibility::Public)
+            .metadata(base_metadata.clone())
+            .acdp_version("0.3.0")
+            .build()
+            .unwrap();
+        let (status, body) =
+            post_publish_json(&harness.router, serde_json::to_value(&q_req).unwrap()).await;
+        check("Q", status, &body);
+        assert_eq!(status, StatusCode::BAD_REQUEST, "rev-003 Q: body = {body}");
+        assert_eq!(
+            body["error"]["code"], "schema_violation",
+            "rev-003 Q: body = {body}"
+        );
+
+        // ---- P: (0.5.0) non-revocation supersedes an INTERIM-form predecessor
+        //      — must trip the identical rule as O. This registry's own publish
+        //      path can never create that predecessor (see Q above and
+        //      `SeededHarness::store`'s doc comment), so it is seeded directly;
+        //      the supersession attempt itself is a real HTTP POST.
+        let p_predecessor_req = producer_k2
+            .publish_request()
+            .title("rev-003 P predecessor (interim form)")
+            .context_type(ContextType::Custom(
+                ContextType::KEY_REVOCATION_INTERIM.to_string(),
+            ))
+            .visibility(Visibility::Public)
+            .metadata(base_metadata.clone())
+            .acdp_version("0.2.0")
+            .build()
+            .unwrap();
+        let p_ctx_id =
+            CtxId("acdp://registry.test/55555555-5555-4555-8555-555555555555".to_string());
+        let p_lineage_id = LineageId(format!("lin:sha256:{}", "1".repeat(64)));
+        harness
+            .store()
+            .put(AcdpBody::from_publish_request(
+                &p_predecessor_req,
+                p_ctx_id.clone(),
+                p_lineage_id.clone(),
+                AUTHORITY,
+                chrono::Utc::now(),
+            ))
+            .expect("rev-003 P: seeding the interim-form predecessor must succeed");
+
+        let p_req = producer_k2
+            .supersede(p_ctx_id.clone())
+            .title("rev-003 P: widened, wrong type, interim predecessor")
+            .version(2)
+            .context_type(ContextType::Analysis)
+            .visibility(Visibility::Public)
+            .metadata(widened_metadata)
+            .acdp_version("0.5.0")
+            .expected_lineage_id(p_lineage_id)
+            .build()
+            .unwrap();
+        let (status, body) =
+            post_publish_json(&harness.router, serde_json::to_value(&p_req).unwrap()).await;
+        check("P", status, &body);
+        assert_eq!(status, StatusCode::BAD_REQUEST, "rev-003 P: body = {body}");
+        assert_eq!(
+            body["error"]["code"], "superseded_target",
+            "rev-003 P: body = {body}"
+        );
+        assert_eq!(
+            body["error"]["details"]["reason"], "revocation_type_mismatch",
+            "rev-003 P: body = {body}"
+        );
+
+        // H and M are the fixture's SELF-TEST ONLY registry-attested scenarios
+        // (see this test's doc comment): this registry has no registry-attested
+        // revocation path, so the fixture's own escape hatch applies. Every
+        // other scenario must have been run and checked against the fixture.
+        let all: std::collections::BTreeSet<String> = expected_of.keys().cloned().collect();
+        let self_test_only: std::collections::BTreeSet<String> = fx["scenarios"]
+            .as_array()
+            .expect("rev-003 scenarios")
+            .iter()
+            .filter(|s| {
+                s["harness"]
+                    .as_str()
+                    .is_some_and(|h| h.starts_with("SELF-TEST ONLY"))
+            })
+            .map(|s| {
+                s["name"]
+                    .as_str()
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            self_test_only,
+            ["H", "M"].iter().map(|l| l.to_string()).collect(),
+            "rev-003: the SELF-TEST ONLY scenarios at the pin changed"
+        );
+        let ran = ran.into_inner();
+        assert_eq!(
+            ran,
+            all.difference(&self_test_only).cloned().collect(),
+            "rev-003: every scenario except H and M must run"
+        );
     });
-
-    let o_req = producer_k2
-        .supersede(or_ctx_id.clone())
-        .title("rev-003 O: widened, wrong type")
-        .version(2)
-        .context_type(ContextType::Analysis)
-        .visibility(Visibility::Public)
-        .metadata(widened_metadata.clone())
-        .acdp_version("0.5.0")
-        .expected_lineage_id(or_lineage_id.clone())
-        .build()
-        .unwrap();
-    let (status, body) =
-        post_publish_json(&harness.router, serde_json::to_value(&o_req).unwrap()).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "rev-003 O: body = {body}");
-    assert_eq!(
-        body["error"]["code"], "superseded_target",
-        "rev-003 O: body = {body}"
-    );
-    assert_eq!(
-        body["error"]["details"]["reason"], "revocation_type_mismatch",
-        "rev-003 O: body = {body}"
-    );
-
-    let r_req = producer_k2
-        .supersede(or_ctx_id.clone())
-        .title("rev-003 R: widened, same type")
-        .version(2)
-        .context_type(ContextType::KeyRevocation)
-        .visibility(Visibility::Public)
-        .metadata(widened_metadata.clone())
-        .acdp_version("0.5.0")
-        .expected_lineage_id(or_lineage_id.clone())
-        .build()
-        .unwrap();
-    let (status, body) =
-        post_publish_json(&harness.router, serde_json::to_value(&r_req).unwrap()).await;
-    assert_eq!(status, StatusCode::CREATED, "rev-003 R: body = {body}");
-
-    // ---- Q: (0.5.0) a NEW publish under the retired interim form.
-    let q_req = producer_k2
-        .publish_request()
-        .title("rev-003 Q: interim form, new publish")
-        .context_type(ContextType::Custom(
-            ContextType::KEY_REVOCATION_INTERIM.to_string(),
-        ))
-        .visibility(Visibility::Public)
-        .metadata(base_metadata.clone())
-        .acdp_version("0.3.0")
-        .build()
-        .unwrap();
-    let (status, body) =
-        post_publish_json(&harness.router, serde_json::to_value(&q_req).unwrap()).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "rev-003 Q: body = {body}");
-    assert_eq!(
-        body["error"]["code"], "schema_violation",
-        "rev-003 Q: body = {body}"
-    );
-
-    // ---- P: (0.5.0) non-revocation supersedes an INTERIM-form predecessor
-    //      — must trip the identical rule as O. This registry's own publish
-    //      path can never create that predecessor (see Q above and
-    //      `SeededHarness::store`'s doc comment), so it is seeded directly;
-    //      the supersession attempt itself is a real HTTP POST.
-    let p_predecessor_req = producer_k2
-        .publish_request()
-        .title("rev-003 P predecessor (interim form)")
-        .context_type(ContextType::Custom(
-            ContextType::KEY_REVOCATION_INTERIM.to_string(),
-        ))
-        .visibility(Visibility::Public)
-        .metadata(base_metadata.clone())
-        .acdp_version("0.2.0")
-        .build()
-        .unwrap();
-    let p_ctx_id = CtxId("acdp://registry.test/55555555-5555-4555-8555-555555555555".to_string());
-    let p_lineage_id = LineageId(format!("lin:sha256:{}", "1".repeat(64)));
-    harness
-        .store()
-        .put(AcdpBody::from_publish_request(
-            &p_predecessor_req,
-            p_ctx_id.clone(),
-            p_lineage_id.clone(),
-            AUTHORITY,
-            chrono::Utc::now(),
-        ))
-        .expect("rev-003 P: seeding the interim-form predecessor must succeed");
-
-    let p_req = producer_k2
-        .supersede(p_ctx_id.clone())
-        .title("rev-003 P: widened, wrong type, interim predecessor")
-        .version(2)
-        .context_type(ContextType::Analysis)
-        .visibility(Visibility::Public)
-        .metadata(widened_metadata)
-        .acdp_version("0.5.0")
-        .expected_lineage_id(p_lineage_id)
-        .build()
-        .unwrap();
-    let (status, body) =
-        post_publish_json(&harness.router, serde_json::to_value(&p_req).unwrap()).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "rev-003 P: body = {body}");
-    assert_eq!(
-        body["error"]["code"], "superseded_target",
-        "rev-003 P: body = {body}"
-    );
-    assert_eq!(
-        body["error"]["details"]["reason"], "revocation_type_mismatch",
-        "rev-003 P: body = {body}"
-    );
 }
 
 /// **rev-004 (RFC-ACDP-0014 §10's (0.5.0) retirement rule, retrieval half —
@@ -14293,8 +14400,11 @@ macro_rules! exercised_by {
 /// RFC-ACDP-0021 Phase 7 switched the profile on. Twenty-one with `rate-002`,
 /// once the read limiter (RFC-ACDP-0008 §4.3) shipped. Twenty-two with
 /// `rec-010`, once `[changes] max_change_bucket_length` (RFC-ACDP-0018 §6.1)
-/// shipped; its vectors run inside the same registered test.
-const EXERCISED_FIXTURES_AT_PIN: usize = 22;
+/// shipped; its vectors run inside the same registered test. Twenty-five with
+/// `lc-001`, `lc-002` and `lc-003`, which had only in-process mirrors in
+/// `http_integration.rs` that never loaded the fixture files. Twenty-six with
+/// `rev-003`, whose matrix now checks each scenario against the fixture.
+const EXERCISED_FIXTURES_AT_PIN: usize = 26;
 
 #[rustfmt::skip]
 const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
@@ -14335,6 +14445,15 @@ const EXERCISED_FIXTURES: &[(&str, &str, fn())] = &[
     // RFC-ACDP-0008 §4.3: the read limiter against the shipped binary with
     // `[read_limits]` on (configured by the test itself).
     exercised_by!("rate-002", rate002_read_rate_limit_trips_429_with_retry_after),
+    // RFC-ACDP-0013: the acdp-registry-lifecycle fixtures, every scenario
+    // driven from the fixture against the shipped binary with lifecycle,
+    // discovery and head receipts advertised (asserted by each test).
+    exercised_by!("lc-001", lc001_retraction_flow_from_fixture),
+    exercised_by!("lc-002", lc002_immutable_field_and_authentication_from_fixture),
+    exercised_by!("lc-003", lc003_retracted_head_from_fixture),
+    // RFC-ACDP-0014 §4/§5/§10: A-G, I-L, N-R checked against the fixture's
+    // expected answers; H and M are the fixture's SELF-TEST ONLY scenarios.
+    exercised_by!("rev-003", rev003_publish_time_rejection_matrix),
 ];
 
 /// Every fixture this suite claims to have retired must really be requested by
@@ -18964,6 +19083,619 @@ fn chain009_event_receipts_registry_side() {
             "{label}: a consumer must admit both events on the registry basis: {r:?}"
         );
     }
+}
+
+/// The scenarios of lifecycle fixture `id` at the pin, keyed by their leading
+/// letter (`"A — …"` → `"A"`), or `None` when the spec is unavailable. The
+/// fixture must apply to `acdp-registry-lifecycle` alone, which is what
+/// [`lc_registry`] advertises.
+fn lc_fixture(id: &str) -> Option<(Value, std::collections::BTreeMap<String, Value>)> {
+    let Some(fixtures) = spec_fixtures() else {
+        eprintln!("conformance: spec unavailable; skipping {id}");
+        return None;
+    };
+    let fx = find_fixture_by_id(&fixtures, id)?;
+    assert_eq!(
+        fx["applies_to_profiles"],
+        json!(["acdp-registry-lifecycle"]),
+        "{id} binds a lifecycle registry: {fx}"
+    );
+    let scenarios = fx["scenarios"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{id} scenarios[] missing: {fx}"))
+        .iter()
+        .map(|s| {
+            let name = s["name"].as_str().expect("scenario name");
+            let letter = name.split_whitespace().next().expect("scenario letter");
+            (letter.to_string(), s.clone())
+        })
+        .collect();
+    Some((fx, scenarios))
+}
+
+/// Runs a lifecycle fixture's scenarios one by one and checks, at the end,
+/// that every scenario the fixture carries was run — so a scenario added at
+/// a later pin fails the test instead of passing unexamined.
+struct LcScenarios {
+    id: &'static str,
+    scenarios: std::collections::BTreeMap<String, Value>,
+    ran: std::collections::BTreeSet<String>,
+}
+
+impl LcScenarios {
+    fn new(id: &'static str, scenarios: std::collections::BTreeMap<String, Value>) -> Self {
+        Self {
+            id,
+            scenarios,
+            ran: Default::default(),
+        }
+    }
+
+    /// Scenario `letter`, marked as run.
+    fn take(&mut self, letter: &str) -> Value {
+        let s = self.scenarios.get(letter).cloned().unwrap_or_else(|| {
+            panic!(
+                "{} has no scenario {letter} at the pin — re-read the fixture: {:?}",
+                self.id,
+                self.scenarios.keys().collect::<Vec<_>>()
+            )
+        });
+        self.ran.insert(letter.to_string());
+        s
+    }
+
+    /// Assert `(status, body)` against `scenario.expected`: its `outcome`,
+    /// its `http_status` and its `error_code`, each where the fixture gives
+    /// one.
+    fn expect(&self, scenario: &Value, status: u16, body: &Value) {
+        let name = scenario["name"].as_str().unwrap_or("?");
+        let expected = &scenario["expected"];
+        match expected["outcome"].as_str() {
+            Some("success") => assert!(
+                (200..300).contains(&status),
+                "{} {name}: the fixture expects success, got {status}: {body}",
+                self.id
+            ),
+            Some("failure") => assert!(
+                status >= 400,
+                "{} {name}: the fixture expects failure, got {status}: {body}",
+                self.id
+            ),
+            other => panic!("{} {name}: unknown expected.outcome {other:?}", self.id),
+        }
+        if let Some(want) = expected["http_status"].as_u64() {
+            assert_eq!(
+                u64::from(status),
+                want,
+                "{} {name}: http_status: {body}",
+                self.id
+            );
+        }
+        if let Some(code) = expected["error_code"].as_str() {
+            assert_eq!(
+                body["error"]["code"], code,
+                "{} {name}: error_code: {body}",
+                self.id
+            );
+        }
+    }
+
+    /// Every scenario the fixture carries must have been run.
+    fn finish(self) {
+        let all: std::collections::BTreeSet<String> = self.scenarios.keys().cloned().collect();
+        assert_eq!(
+            self.ran,
+            all,
+            "{}: every scenario at the pin must be run; unrun: {:?}",
+            self.id,
+            all.difference(&self.ran).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// The shipped binary with lifecycle, receipts and lineage-head receipts on
+/// (read auth off), after asserting from its own capabilities that it
+/// advertises the profiles the lc-* fixtures bind.
+fn lc_registry(dir: &Path, tag: &str) -> spawned_registry::SpawnedRegistry {
+    let extra = format!(
+        "{}\n{}",
+        served_auth_toml(false),
+        served_full_features_toml()
+    );
+    let reg = spawned_registry::SpawnedRegistry::start(dir, tag, "", &extra);
+    let (status, caps) = reg.get("/.well-known/acdp.json");
+    assert_eq!(status, 200, "capabilities: {caps}");
+    let profiles: Vec<&str> = caps["profiles"]
+        .as_array()
+        .expect("profiles")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for p in [
+        "acdp-registry-lifecycle",
+        "acdp-registry-discovery",
+        "acdp-registry-head-receipts",
+    ] {
+        assert!(
+            profiles.contains(&p),
+            "{tag}: {p} must be advertised: {caps}"
+        );
+    }
+    reg
+}
+
+/// Publish a public did:key context signed with `seed`; returns the publish
+/// response.
+fn lc_publish(reg: &spawned_registry::SpawnedRegistry, seed: u8, title: &str) -> Value {
+    let req = Producer::new_did_key(SigningKey::from_bytes(&[seed; 32]))
+        .publish_request()
+        .title(title)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("publish request");
+    let (status, published) = reg.post(
+        "/contexts",
+        &serde_json::to_value(&req).expect("serialize the publish request"),
+    );
+    assert_eq!(status, 201, "publish: {published}\n{}", reg.output());
+    published
+}
+
+/// A lifecycle event for `ctx_id`, signed by the did:key of `seed` (so its
+/// `actor` is that did:key) with a fresh `event_id`.
+fn lc_event(seed: u8, ctx_id: &str, event_type: &str, reason: Option<&str>) -> Value {
+    use acdp::types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    let did = acdp::did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+    let key_id = acdp::did::key::did_key_url(&did).expect("did:key url");
+    let event = LifecycleEvent::new(
+        uuid::Uuid::new_v4().to_string(),
+        CtxId(ctx_id.to_string()),
+        LifecycleEventType::parse(event_type).expect("a lifecycle event type"),
+        chrono::Utc::now(),
+        AgentDid::new(did),
+        reason.map(str::to_string),
+    )
+    .expect("valid event")
+    .sign_with(key, key_id)
+    .expect("signed event");
+    serde_json::to_value(&event).expect("serialize the event")
+}
+
+fn lc_ctx_path(ctx_id: &str, suffix: &str) -> String {
+    format!("/contexts/{}{suffix}", pct_encode_path_segment(ctx_id))
+}
+
+/// The ctx_ids in a search response's `matches[]`.
+fn lc_match_ids(res: &Value) -> Vec<String> {
+    res["matches"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search response without matches[]: {res}"))
+        .iter()
+        .map(|m| m["ctx_id"].as_str().expect("match ctx_id").to_string())
+        .collect()
+}
+
+/// lc-001 (RFC-ACDP-0013 §6–§8), driven scenario by scenario from the
+/// fixture at the pin, against the shipped binary advertising
+/// `acdp-registry-lifecycle` and `acdp-registry-discovery`.
+///
+/// The fixture's identities (`did:web:agents.example.com:test-producer`,
+/// `registry.example.com`) are examples no test can sign for, so the
+/// producer is a did:key; what is taken from the fixture is the retract
+/// request's endpoint, `event_type` and `reason`, the search query, and
+/// every scenario's expected `outcome` / `http_status` / `error_code`.
+/// The in-process mirror in `http_integration.rs` keeps the extra checks
+/// (idempotent retry, duplicate `event_id`).
+#[test]
+fn lc001_retraction_flow_from_fixture() {
+    let Some((fx, scenarios)) = lc_fixture("lc-001") else {
+        return;
+    };
+    let mut lc = LcScenarios::new("lc-001", scenarios);
+    let retract = &fx["input"]["retract_request"];
+    assert_eq!(
+        retract["method"], "POST",
+        "lc-001 retract_request: {retract}"
+    );
+    let endpoint = retract["path"]
+        .as_str()
+        .and_then(|p| p.rsplit('/').next())
+        .expect("retract_request.path");
+    assert_eq!(
+        endpoint, "retract",
+        "lc-001 retract_request.path: {retract}"
+    );
+    let fx_event = &retract["body"]["event"];
+    let event_type = fx_event["event_type"].as_str().expect("event_type");
+    let reason = fx_event["reason"].as_str();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = lc_registry(dir.path(), "lc-001");
+    const SEED: u8 = 0x61;
+    // The fixture's search scenarios query `q=golden`.
+    let published = lc_publish(&reg, SEED, "lc-001 golden context");
+    let ctx_id = published["ctx_id"].as_str().expect("ctx_id").to_string();
+    let (status, before) = reg.get(&lc_ctx_path(&ctx_id, ""));
+    assert_eq!(status, 200, "pre-retract full retrieval: {before}");
+    let (status, bare_before) = reg.get_raw(&lc_ctx_path(&ctx_id, "/body"));
+    assert_eq!(status, 200, "pre-retract /body: {bare_before}");
+    let (_, body_headers_before, _) = reg.get_with_headers(&lc_ctx_path(&ctx_id, "/body"), &[]);
+
+    // A — retract succeeds and appends the signed event, served verbatim.
+    let s = lc.take("A");
+    let e0 = lc_event(SEED, &ctx_id, event_type, reason);
+    let (status, v) = reg.post(&lc_ctx_path(&ctx_id, "/retract"), &json!({ "event": e0 }));
+    lc.expect(&s, status, &v);
+    assert_eq!(v["registry_state"]["status"], "retracted", "lc-001 A: {v}");
+    assert_eq!(
+        v["registry_state"]["lifecycle_events"],
+        json!([e0]),
+        "lc-001 A: the submitted event, verbatim including its signature"
+    );
+
+    // B — mark-not-delete: full retrieval keeps the body; /body is untouched.
+    let s = lc.take("B");
+    let (status, full) = reg.get(&lc_ctx_path(&ctx_id, ""));
+    lc.expect(&s, status, &full);
+    assert_eq!(status, 200, "lc-001 B: {full}");
+    assert_eq!(
+        full["body"], before["body"],
+        "lc-001 B: the body is unchanged"
+    );
+    assert_eq!(full["registry_state"]["status"], "retracted");
+    assert_eq!(full["registry_state"]["lifecycle_events"], json!([e0]));
+    let (status, bare_after) = reg.get_raw(&lc_ctx_path(&ctx_id, "/body"));
+    assert_eq!(status, 200, "lc-001 B: /body after retraction");
+    assert_eq!(
+        bare_after, bare_before,
+        "lc-001 B: /body bytes are unchanged"
+    );
+    let (_, body_headers_after, _) = reg.get_with_headers(&lc_ctx_path(&ctx_id, "/body"), &[]);
+    for name in ["etag", "cache-control", "content-type"] {
+        let pick = |h: &spawned_registry::Headers| {
+            h.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            pick(&body_headers_after),
+            pick(&body_headers_before),
+            "lc-001 B: /body {name} is unchanged"
+        );
+    }
+
+    // C — a second retract (fresh event_id, valid signature) is a 409 and
+    // appends nothing.
+    let s = lc.take("C");
+    let e_double = lc_event(SEED, &ctx_id, event_type, None);
+    let (status, v) = reg.post(
+        &lc_ctx_path(&ctx_id, "/retract"),
+        &json!({ "event": e_double }),
+    );
+    lc.expect(&s, status, &v);
+    let (_, full) = reg.get(&lc_ctx_path(&ctx_id, ""));
+    assert_eq!(
+        full["registry_state"]["lifecycle_events"],
+        json!([e0]),
+        "lc-001 C: a rejected transition appends no event"
+    );
+
+    // D — the default search, and status=superseded / status=expired,
+    // exclude the retracted context.
+    let s = lc.take("D");
+    let behavior = s["expected"]["behavior"].as_str().unwrap_or_default();
+    assert!(
+        behavior.contains("q=golden"),
+        "lc-001 D: the fixture's query changed: {behavior}"
+    );
+    for query in [
+        "/contexts/search?q=golden",
+        "/contexts/search?q=golden&status=superseded",
+        "/contexts/search?q=golden&status=expired",
+    ] {
+        let (status, res) = reg.get(query);
+        lc.expect(&s, status, &res);
+        assert!(
+            !lc_match_ids(&res).contains(&ctx_id),
+            "lc-001 D: {query} must not match the retracted context: {res}"
+        );
+        // Nor counted in `total_estimate` (fixed by #561: the status
+        // projection runs in the same SQL scan as the count).
+        if let Some(total) = res.get("total_estimate") {
+            assert_eq!(
+                total,
+                &json!(0),
+                "lc-001 D: {query} must not count the retracted context: {res}"
+            );
+        }
+    }
+
+    // E — status=retracted returns it.
+    let s = lc.take("E");
+    let (status, res) = reg.get("/contexts/search?q=golden&status=retracted");
+    lc.expect(&s, status, &res);
+    assert_eq!(lc_match_ids(&res), vec![ctx_id.clone()], "lc-001 E: {res}");
+
+    // F — republish reverses; the history keeps both events, in order.
+    let s = lc.take("F");
+    let e1 = lc_event(SEED, &ctx_id, "republished", None);
+    let (status, v) = reg.post(&lc_ctx_path(&ctx_id, "/republish"), &json!({ "event": e1 }));
+    lc.expect(&s, status, &v);
+    assert_eq!(v["registry_state"]["status"], "active", "lc-001 F: {v}");
+    assert_eq!(
+        v["registry_state"]["lifecycle_events"],
+        json!([e0, e1]),
+        "lc-001 F: append-only history"
+    );
+    let (_, res) = reg.get("/contexts/search?q=golden");
+    assert_eq!(
+        lc_match_ids(&res),
+        vec![ctx_id.clone()],
+        "lc-001 F: the default search match returns: {res}"
+    );
+
+    lc.finish();
+}
+
+/// lc-002 (RFC-ACDP-0013 §5, §6 steps 1–3), driven from the fixture at the
+/// pin against the shipped binary. Each scenario's request members other
+/// than `event` (A's `body`, B's `summary`) are sent verbatim from the
+/// fixture beside a freshly signed event of the fixture's `event_type`; C's
+/// foreign actor and D's missing signature are checked against the fixture's
+/// own event before being reproduced. After every rejection the target must
+/// be unchanged: still active, no lifecycle event.
+#[test]
+fn lc002_immutable_field_and_authentication_from_fixture() {
+    let Some((_, scenarios)) = lc_fixture("lc-002") else {
+        return;
+    };
+    let mut lc = LcScenarios::new("lc-002", scenarios);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = lc_registry(dir.path(), "lc-002");
+    const SEED: u8 = 0x62;
+    const OTHER: u8 = 0x63;
+    let published = lc_publish(&reg, SEED, "lc-002 target");
+    let ctx_id = published["ctx_id"].as_str().expect("ctx_id").to_string();
+    let producer_did = acdp::did::key::did_key_from_ed25519(
+        &SigningKey::from_bytes(&[SEED; 32]).verifying_key_bytes(),
+    );
+
+    let unchanged = |letter: &str| {
+        let (status, full) = reg.get(&lc_ctx_path(&ctx_id, ""));
+        assert_eq!(status, 200, "lc-002 {letter}: {full}");
+        assert_eq!(
+            full["registry_state"]["status"], "active",
+            "lc-002 {letter}: no state change: {full}"
+        );
+        let events = full["registry_state"]
+            .get("lifecycle_events")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        assert_eq!(events, 0, "lc-002 {letter}: no event appended: {full}");
+    };
+    let request_of = |s: &Value| -> (String, Value) {
+        let req = &s["request"];
+        assert_eq!(req["method"], "POST", "lc-002: {s}");
+        let endpoint = req["path"]
+            .as_str()
+            .and_then(|p| p.rsplit('/').next())
+            .expect("request.path")
+            .to_string();
+        (endpoint, req["body"].clone())
+    };
+
+    // A and B — body content offered through a lifecycle endpoint.
+    for letter in ["A", "B"] {
+        let s = lc.take(letter);
+        let (endpoint, fx_body) = request_of(&s);
+        let event_type = fx_body["event"]["event_type"].as_str().expect("event_type");
+        let mut envelope = json!({ "event": lc_event(SEED, &ctx_id, event_type, None) });
+        let extra: Vec<&String> = fx_body
+            .as_object()
+            .expect("request body object")
+            .keys()
+            .filter(|k| *k != "event")
+            .collect();
+        assert!(
+            !extra.is_empty(),
+            "lc-002 {letter}: the fixture request carries a body-content member: {fx_body}"
+        );
+        for k in extra {
+            envelope[k.as_str()] = fx_body[k.as_str()].clone();
+        }
+        let (status, v) = reg.post(&lc_ctx_path(&ctx_id, &format!("/{endpoint}")), &envelope);
+        lc.expect(&s, status, &v);
+        unchanged(letter);
+    }
+
+    // C — the actor is not the producer.
+    let s = lc.take("C");
+    let (endpoint, fx_body) = request_of(&s);
+    assert_ne!(
+        fx_body["event"]["actor"], "did:web:agents.example.com:test-producer",
+        "lc-002 C: the fixture's actor is a different agent: {fx_body}"
+    );
+    let event_type = fx_body["event"]["event_type"].as_str().expect("event_type");
+    let foreign = lc_event(OTHER, &ctx_id, event_type, None);
+    assert_ne!(foreign["actor"], producer_did.as_str());
+    let (status, v) = reg.post(
+        &lc_ctx_path(&ctx_id, &format!("/{endpoint}")),
+        &json!({ "event": foreign }),
+    );
+    lc.expect(&s, status, &v);
+    unchanged("C");
+
+    // D — an unsigned producer event.
+    let s = lc.take("D");
+    let (endpoint, fx_body) = request_of(&s);
+    assert!(
+        fx_body["event"].get("signature").is_none(),
+        "lc-002 D: the fixture's event is unsigned: {fx_body}"
+    );
+    let event_type = fx_body["event"]["event_type"].as_str().expect("event_type");
+    let mut unsigned = lc_event(SEED, &ctx_id, event_type, None);
+    unsigned
+        .as_object_mut()
+        .expect("event object")
+        .remove("signature");
+    let (status, v) = reg.post(
+        &lc_ctx_path(&ctx_id, &format!("/{endpoint}")),
+        &json!({ "event": unsigned }),
+    );
+    lc.expect(&s, status, &v);
+    unchanged("D");
+
+    lc.finish();
+}
+
+/// lc-003 (RFC-ACDP-0013 §8.3, RFC-ACDP-0011 §4 as amended), driven from
+/// the fixture at the pin against the shipped binary, which also advertises
+/// `acdp-registry-head-receipts`, so scenario D's receipt conditions apply.
+/// Precondition as the fixture states it: v1 superseded by v2 (the head),
+/// then v2 retracted.
+#[test]
+fn lc003_retracted_head_from_fixture() {
+    let Some((fx, scenarios)) = lc_fixture("lc-003") else {
+        return;
+    };
+    let mut lc = LcScenarios::new("lc-003", scenarios);
+    let precondition = fx["input"]["precondition"].as_str().unwrap_or_default();
+    assert!(
+        precondition.contains("v1 (superseded by v2)") && precondition.contains("retracts v2"),
+        "lc-003: the precondition changed: {precondition}"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = lc_registry(dir.path(), "lc-003");
+    const SEED: u8 = 0x64;
+    let p = Producer::new_did_key(SigningKey::from_bytes(&[SEED; 32]));
+    let publish = |req: &PublishRequest| {
+        let (status, v) = reg.post(
+            "/contexts",
+            &serde_json::to_value(req).expect("serialize the publish request"),
+        );
+        assert_eq!(status, 201, "lc-003 publish: {v}\n{}", reg.output());
+        v
+    };
+    let r1 = publish(
+        &p.publish_request()
+            .title("lc-003 v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("v1"),
+    );
+    let v1_ctx = r1["ctx_id"].as_str().expect("ctx_id").to_string();
+    let lineage_id = r1["lineage_id"].as_str().expect("lineage_id").to_string();
+    let r2 = publish(
+        &p.supersede(CtxId(v1_ctx.clone()))
+            .version(2)
+            .title("lc-003 v2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("v2"),
+    );
+    let v2_ctx = r2["ctx_id"].as_str().expect("ctx_id").to_string();
+    let current = format!("/lineages/{}/current", pct_encode_path_segment(&lineage_id));
+    let (status, cur) = reg.get(&current);
+    assert_eq!(status, 200, "lc-003 precondition: {cur}");
+    assert_eq!(
+        cur["body"]["ctx_id"],
+        v2_ctx.as_str(),
+        "lc-003: v2 is the head"
+    );
+    let (_, v2_before) = reg.get(&lc_ctx_path(&v2_ctx, ""));
+    let e0 = lc_event(SEED, &v2_ctx, "retracted", Some("lc-003 bad head"));
+    let (status, v) = reg.post(&lc_ctx_path(&v2_ctx, "/retract"), &json!({ "event": e0 }));
+    assert_eq!(status, 200, "lc-003 precondition retract: {v}");
+
+    // A — no eligible head remains: /current is not_found, never v1 and
+    // never v2-as-retracted.
+    let s = lc.take("A");
+    let (status, a_body) = reg.get(&current);
+    lc.expect(&s, status, &a_body);
+    assert!(
+        a_body.get("body").is_none(),
+        "lc-003 A: no fallback head is served: {a_body}"
+    );
+
+    // B — the lineage array is still the full record; v2 stays retrievable.
+    let s = lc.take("B");
+    let (status, arr) = reg.get(&format!(
+        "/lineages/{}",
+        pct_encode_path_segment(&lineage_id)
+    ));
+    lc.expect(&s, status, &arr);
+    let arr = arr.as_array().unwrap_or_else(|| panic!("lc-003 B: {arr}"));
+    assert_eq!(arr.len(), 2, "lc-003 B: both versions: {arr:?}");
+    assert_eq!(arr[0]["body"]["ctx_id"], v1_ctx.as_str());
+    assert_eq!(arr[0]["registry_state"]["status"], "superseded");
+    assert_eq!(arr[1]["body"]["ctx_id"], v2_ctx.as_str());
+    assert_eq!(arr[1]["registry_state"]["status"], "retracted");
+    assert_eq!(arr[1]["registry_state"]["lifecycle_events"], json!([e0]));
+    let (status, v2_full) = reg.get(&lc_ctx_path(&v2_ctx, ""));
+    lc.expect(&s, status, &v2_full);
+    assert_eq!(
+        v2_full["body"], v2_before["body"],
+        "lc-003 B: body unchanged"
+    );
+
+    // C — recovery: v3 supersedes the retracted v2 and becomes the head;
+    // v2 keeps reporting `retracted` (§7.2 precedence).
+    let s = lc.take("C");
+    let r3 = publish(
+        &p.supersede(CtxId(v2_ctx.clone()))
+            .version(3)
+            .title("lc-003 v3")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("v3"),
+    );
+    let v3_ctx = r3["ctx_id"].as_str().expect("ctx_id").to_string();
+    let (status, c_body) = reg.get(&current);
+    lc.expect(&s, status, &c_body);
+    assert_eq!(
+        c_body["body"]["ctx_id"],
+        v3_ctx.as_str(),
+        "lc-003 C: {c_body}"
+    );
+    assert_eq!(c_body["registry_state"]["status"], "active", "lc-003 C");
+    let (_, v2_full) = reg.get(&lc_ctx_path(&v2_ctx, ""));
+    assert_eq!(
+        v2_full["registry_state"]["status"], "retracted",
+        "lc-003 C: retracted dominates the new superseded fact: {v2_full}"
+    );
+
+    // D — head receipts never name a retracted head: none on A's 404; C's
+    // names v3 at version 3, active.
+    let s = lc.take("D");
+    lc.expect(&s, status, &c_body);
+    assert!(
+        a_body.get("lineage_head_receipt").is_none(),
+        "lc-003 D: a 404 carries no head claim: {a_body}"
+    );
+    let receipt = &c_body["lineage_head_receipt"];
+    assert!(
+        receipt.is_object(),
+        "lc-003 D: /current carries a receipt: {c_body}"
+    );
+    assert_eq!(
+        receipt["head_ctx_id"],
+        v3_ctx.as_str(),
+        "lc-003 D: {receipt}"
+    );
+    assert_eq!(receipt["head_version"], 3, "lc-003 D: {receipt}");
+    assert_eq!(receipt["head_status"], "active", "lc-003 D: {receipt}");
+    assert_eq!(
+        receipt["lineage_id"],
+        lineage_id.as_str(),
+        "lc-003 D: {receipt}"
+    );
+
+    lc.finish();
 }
 
 /// Phase 4b wiring, end to end on the shipped binary: events accepted while
