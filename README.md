@@ -156,7 +156,9 @@ cd docker
 docker compose up --build
 ```
 
-This is a local stack built from source with auth off. For a real deployment
+This is a local stack built from source with auth off. It accepts `did:key`
+producers as well as `did:web`, because a `did:web` document on this machine
+is not fetchable by the registry. For a real deployment
 (pinned image or release binary, receipts and lifecycle on, signing-key
 handling, TLS, backups, upgrades) follow [`docs/DEPLOY.md`](docs/DEPLOY.md). It
 ships a production Compose file and a Kubernetes manifest under

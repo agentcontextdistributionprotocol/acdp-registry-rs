@@ -22,7 +22,13 @@ max_connections = 20
 
 [auth]
 enabled              = false
-did_methods          = ["did:web"]
+# did:key is listed because this is the local stack: its authority is
+# `localhost`, and a did:web producer needs a DID document the registry can
+# fetch over public HTTPS (loopback and private addresses are refused, RFC-ACDP-0008
+# §4.8), so with did:web alone nothing run on this machine can publish here.
+# did:key verifies offline. deploy/compose, deploy/kubernetes and the Railway
+# notes list both methods too. Drop "did:key" to get the dk-003 refusal.
+did_methods          = ["did:web", "did:key"]
 token_ttl_seconds    = 3600
 challenge_ttl_seconds = 300
 token_leeway_seconds = 30
