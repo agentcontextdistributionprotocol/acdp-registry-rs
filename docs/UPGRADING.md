@@ -21,7 +21,7 @@ belongs in the per-crate changelogs.
 
 ---
 
-## Unreleased
+## 0.11.1
 
 **Spec pin ce39078, acdp 0.21.3: new key attestations carry the long-form `schema_uri`.** A key
 attestation minted from now on carries
@@ -39,6 +39,15 @@ applies to superseded and expired contexts under any `status` that excludes them
 
 **Spec pin 8cc186d.** The changes since ce39078 are prose only (RFC-ACDP-0001), and the fixtures are
 unchanged.
+
+**acdp 0.21.4: a `did:web` producer's DID document must be served as JSON (behaviour change).**
+When the registry resolves a `did:web` producer (publish, lifecycle events, keyless controllers), the
+`/.well-known/did.json` (or path) response must now carry `Content-Type: application/did+json` or
+`application/json` (parameters such as `charset` ignored), as RFC-ACDP-0001 §5.11 step 3 requires.
+Any other media type, or none, is a permanent `key_resolution_failed`, the same as an unparseable
+document. Before upgrading, check each `did:web` producer you serve with
+`curl -sI https://<host>/.well-known/did.json | grep -i content-type`. The registry's own
+`/.well-known/did.json` is already served as `application/json`. No migration, no configuration change.
 
 ## 0.11.0
 
