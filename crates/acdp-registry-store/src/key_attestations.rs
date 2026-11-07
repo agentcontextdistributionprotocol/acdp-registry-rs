@@ -631,4 +631,87 @@ mod tests {
             "keyless key id, no member"
         );
     }
+
+    /// RFC-ACDP-0021 §5.3 (spec ce39078): this registry mints the long-form
+    /// `schema_uri`, and an attestation stored before the domain move keeps
+    /// the short-domain one forever (bodies are immutable). Both paths that
+    /// read a stored attestation body (the index derivation and the §6.3
+    /// step 3 record) accept either; any other value is still refused.
+    #[test]
+    fn a_stored_attestation_under_the_legacy_schema_uri_still_verifies() {
+        use acdp::crypto::SigningKey;
+        use acdp::producer::Producer;
+        use acdp::types::keyless::{
+            keyless_key_id, token_hash, Jwk, ATTESTATION_VERSION, KEY_ATTESTATION_SCHEMA_URI,
+            LEGACY_KEY_ATTESTATION_SCHEMA_URI,
+        };
+        use acdp::types::primitives::{AgentDid, Visibility};
+
+        let jwk = Jwk::from_ed25519(&SigningKey::from_bytes(&[7; 32]).verifying_key_bytes());
+        let fp = jwk.fingerprint().expect("fingerprint");
+        let att = KeyAttestation {
+            attestation_version: ATTESTATION_VERSION.into(),
+            controller: "did:web:agents.test".into(),
+            identity: oidc("repo:example/pipeline"),
+            org_wide: false,
+            key_id: keyless_key_id("did:web:agents.test", &fp).expect("key id"),
+            algorithm: "ed25519".into(),
+            public_key_jwk: jwk,
+            key_fingerprint: fp,
+            not_before: at(1_000),
+            not_after: at(2_000),
+            token_hash: token_hash("legacy-token"),
+        };
+        let body_with = |schema_uri: &str| {
+            let req = Producer::new(
+                SigningKey::from_bytes(&[91; 32]),
+                AgentDid::new("did:web:reg.test".to_string()),
+                "did:web:reg.test#receipt-key-1",
+            )
+            .publish_request()
+            .title("Key attestation")
+            .summary("reg.test attests an ephemeral ed25519 key (RFC-ACDP-0021).")
+            .context_type(ContextType::Custom(KEY_ATTESTATION_TYPE.into()))
+            .visibility(Visibility::Public)
+            .metadata(serde_json::to_value(&att).expect("metadata"))
+            .schema_uri(schema_uri)
+            .acdp_version("0.5.0")
+            .build()
+            .expect("request");
+            let id = "acdp://reg.test/00000000-0000-4000-8000-000000000009";
+            Body::from_publish_request(
+                &req,
+                CtxId(id.into()),
+                LineageId(id.into()),
+                "reg.test",
+                at(1_000),
+            )
+        };
+
+        for uri in [
+            KEY_ATTESTATION_SCHEMA_URI,
+            LEGACY_KEY_ATTESTATION_SCHEMA_URI,
+        ] {
+            let body = body_with(uri);
+            let row = index_row_for(&body, "reg.test")
+                .unwrap_or_else(|e| panic!("{uri}: {e}"))
+                .unwrap_or_else(|| panic!("{uri}: not recognised as an attestation"));
+            assert_eq!(row.key_id, att.key_id, "{uri}");
+            let record = KeyAttestationRecord::from_parts(
+                body.ctx_id.as_str(),
+                body.content_hash.0.clone(),
+                Status::Active,
+                1_000,
+                &body,
+            )
+            .unwrap_or_else(|e| panic!("{uri}: {e}"));
+            assert_eq!(record.attestation, att, "{uri}");
+        }
+
+        let foreign = body_with("https://example.com/not-an-attestation.schema.json");
+        assert!(
+            index_row_for(&foreign, "reg.test").is_err(),
+            "a schema_uri that is neither §5.3 value is still refused"
+        );
+    }
 }

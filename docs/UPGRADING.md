@@ -21,6 +21,16 @@ belongs in the per-crate changelogs.
 
 ---
 
+## Unreleased
+
+**Spec pin ce39078, acdp 0.21.3: new key attestations carry the long-form `schema_uri`.** A key
+attestation minted from now on carries
+`https://schemas.agentcontextdistributionprotocol.io/v0.1.0/acdp-key-attestation.schema.json`
+(RFC-ACDP-0021 §5.3). Attestations already stored keep
+`https://schemas.acdp.io/v0.1.0/acdp-key-attestation.schema.json` and still back keyless publishes:
+the registry accepts either value (spec #137). A consumer that pins the `schema_uri` by string must
+accept both. No migration, no configuration change.
+
 ## 0.11.0
 
 **Migration `021_changes_bucket_hashes` backfills the change feed at startup (Postgres: size it
