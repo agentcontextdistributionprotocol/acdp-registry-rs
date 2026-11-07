@@ -1,5 +1,12 @@
 
 
+## [0.11.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-pg/v0.11.0...acdp-registry-pg/v0.11.1) - 2026-11-07
+
+### Other
+
+- *(conformance)* drive lc-001..003 and rev-003 from the fixtures; fix #561; spec pin 8cc186d ([#562](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/562))
+
+
 ## [0.11.0](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-pg/v0.10.1...acdp-registry-pg/v0.11.0) - 2026-11-06
 
 ### Added
