@@ -56,4 +56,4 @@
 # tree that IS at the pin.
 repository: agentcontextdistributionprotocol/agentcontextdistributionprotocol
 ref: f3c3e5b4c95c3738c2cc4efece32fe541b59084b
-conformance-digest: rfc6962-sha256:9b79e2bc766bb632d09c4906cd7eef20a3bf1b5481af2d98d576888b3386fb6e
+conformance-digest: rfc6962-sha256:448b6a68be3089027e4a6cbba2b3048d98334f3cb3a18af5fd2f3a1e90f46805
