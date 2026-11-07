@@ -240,6 +240,33 @@ This is the configuration of the reference deployment at
 healthcheck on `/healthz`, and one replica. The full production guide,
 including backups and upgrades, is [docs/DEPLOY.md](../docs/DEPLOY.md).
 
+### Changing a variable on the reference deployment (Doppler)
+
+On the reference deployment, Doppler project `acdp-registry`, config `prd`, is
+the source of truth for the service's variables. **Do not edit them in the
+Railway dashboard.** To change one, set it in Doppler, then sync:
+
+```bash
+doppler secrets set SOME_KEY -p acdp-registry -c prd   # prompts for the value; it is not echoed
+deploy/doppler-sync.sh            # dry run: key names and changed/unchanged, never values
+deploy/doppler-sync.sh --apply    # on a clean tree: push changed keys, check the hash, redeploy
+```
+
+- The sync manages only the keys listed in
+  [`deploy/doppler-keys.txt`](../deploy/doppler-keys.txt). It sets and updates
+  them and never deletes anything. To bring a new variable under Doppler, add
+  it to Doppler `prd` and append its name to that file in a PR.
+- `ACDP_REGISTRY_STORAGE__POSTGRES_URL` (a `${{ Postgres.DATABASE_URL }}`
+  reference) and the `RAILWAY_*` system variables stay Railway-managed. The
+  script refuses to manage either kind.
+- Values move by pipe only, and nothing is printed or written to disk. The
+  script compares a sha256 of the managed set (Doppler vs Railway) and
+  redeploys only when a value actually changed. `--no-redeploy` sets the values
+  and leaves them for the next deploy.
+- Railway holds no Doppler token. The script needs the `doppler` CLI and a
+  Railway login (the `railway` CLI, or `RAILWAY_API_TOKEN` set to an account or
+  workspace token).
+
 ## Local parity
 
 `docker/docker-compose.yml` runs the same image against a local Postgres — use it

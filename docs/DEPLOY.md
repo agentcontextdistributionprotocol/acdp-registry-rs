@@ -368,7 +368,14 @@ from this guide. It is on Railway, following
 - the GHCR image, pinned to a release
 - a Railway Postgres service
 - receipts and lifecycle on, with anonymous public reads
-- the signing key held in Doppler
+- every variable held in Doppler (`acdp-registry` / `prd`), except the
+  Postgres URL reference and Railway's own `RAILWAY_*` variables
+
+To change a variable there, change it in Doppler, then run
+`deploy/doppler-sync.sh` (a dry run) and `deploy/doppler-sync.sh --apply`. Do
+not edit it in the Railway dashboard. The managed keys are listed in
+[`deploy/doppler-keys.txt`](../deploy/doppler-keys.txt), and the procedure is in
+[docker/RAILWAY.md](../docker/RAILWAY.md#changing-a-variable-on-the-reference-deployment-doppler).
 
 Use it to test a consumer against a real registry. It is a reference
 instance, not a service with an SLA.
