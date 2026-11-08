@@ -57,6 +57,10 @@ for i, a in enumerate(argv):
                 if line == "Authorization: Bearer " + os.environ["EXPECT_TOKEN"]:
                     token_ok = True
 rec(tool="curl-header", token_via_fd=token_ok)
+# Railway itself would also accept the token inline in argv (the old, leaky form);
+# authenticate it here too so the leak is reported by the argv check, not hidden
+# behind an auth error.
+authed = token_ok or ("Authorization: Bearer " + os.environ["EXPECT_TOKEN"]) in argv
 body = json.loads(sys.stdin.read())
 q = body["query"]
 kind = ("ids" if "project(id" in q else "vars" if "variables(" in q else
@@ -71,6 +75,8 @@ hit = fail and fail["on"] == kind and n >= fail.get("nth", 1)
 state_path = os.environ["FAKE_STATE"]
 if hit:
     mode = fail["mode"]
+    if mode == "http_401":
+        sys.stderr.write("curl: (22) The requested URL returned error: 401\n"); sys.exit(22)
     if mode == "http_500":
         sys.stderr.write("curl: (22) The requested URL returned error: 500\n"); sys.exit(22)
     if mode == "network":
@@ -85,8 +91,13 @@ if hit:
         "empty": "",
         "not_object": "[]",
         "variables_null": '{"data":{"variables":null}}',
+        "variables_string": '{"data":{"variables":"oops"}}',
+        "variables_array": '{"data":{"variables":[]}}',
     }[mode]
     sys.stdout.write(out); sys.exit(0)
+if not authed:
+    # What Railway does for a missing or wrong token: HTTP 200, data null, errors.
+    print('{"data":null,"errors":[{"message":"Not Authorized"}]}'); sys.exit(0)
 if kind == "ids":
     print(json.dumps({"data": {"project": {
         "environments": {"edges": [{"node": {"id": "env-1", "name": "production"}}]},
@@ -143,7 +154,7 @@ def _write(path, text):
 
 
 RAILWAY_FAILURES = ["errors", "data_null", "data_missing", "data_null_empty_errors", "partial_errors",
-                    "http_500", "network", "garbage", "empty", "not_object"]
+                    "http_401", "http_500", "network", "garbage", "empty", "not_object"]
 
 
 class Harness:
@@ -177,7 +188,7 @@ class Harness:
         _write(self.p["cfg"], json.dumps(cfg))
         _write(self.p["doppler.json"], json.dumps(DOPPLER))
 
-    def run(self, *args):
+    def run(self, *args, env_override=None):
         env = {
             "PATH": self.bin + os.pathsep + os.environ["PATH"],
             "HOME": self.home,
@@ -187,6 +198,11 @@ class Harness:
             "FAKE_STATE": self.p["state"], "FAKE_CFG": self.p["cfg"], "FAKE_DOPPLER_DATA": self.p["doppler.json"],
             "LC_ALL": "C",
         }
+        for k, v in (env_override or {}).items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
         r = subprocess.run(["bash", os.path.join(self.repo, "deploy", "doppler-sync.sh"), *args],
                            env=env, capture_output=True, text=True, timeout=60)
         self.out = r.stdout + r.stderr
@@ -243,8 +259,21 @@ class FailClosed(Base):
             self.check(fail={"on": "ids", "mode": mode})
 
     def test_railway_variables_read_failures(self):
-        for mode in RAILWAY_FAILURES + ["variables_null"]:
+        for mode in RAILWAY_FAILURES + ["variables_null", "variables_string", "variables_array"]:
             self.check(fail={"on": "vars", "mode": mode})
+
+    def test_wrong_railway_token(self):
+        # Railway answers a bad or expired token with HTTP 200, data null and errors.
+        for args in ((), ("--apply",)):
+            with self.subTest(args=args):
+                h = self.harness(railway_state={}).run(*args, env_override={"RAILWAY_API_TOKEN": TOKEN + "-wrong"})
+                self.assert_failed_closed(h)
+
+    def test_no_token_refuses_before_any_request(self):
+        h = self.harness(railway_state={}).run(env_override={"RAILWAY_API_TOKEN": None})
+        self.assertNotEqual(h.code, 0)
+        self.assertIn("no Railway token", h.out)
+        self.assertFalse([e for e in h.log if e["tool"] == "curl"], "made a request without a token")
 
     def test_doppler_read_failures(self):
         for mode in ("fail", "garbage", "empty"):
