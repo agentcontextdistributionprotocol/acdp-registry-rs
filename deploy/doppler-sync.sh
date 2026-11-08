@@ -77,17 +77,34 @@ railway_token="${RAILWAY_API_TOKEN:-$(jq -r '.user.accessToken // .user.token //
 [ -n "$railway_token" ] || die "no Railway token: log in with the railway CLI or set RAILWAY_API_TOKEN"
 
 # POST a GraphQL request whose JSON body arrives on stdin, so values never reach argv.
+# The token travels as a header read from a file descriptor (printf is a shell
+# builtin), so it is never in curl's argv either, where `ps` would show it.
+#
+# Fails closed. A bad or expired token makes Railway answer HTTP 200 with
+# `data: null` and an `errors` array; read as "no variables", that would list
+# every key as new and --apply would rewrite them all. So this exits non-zero on
+# a network error or non-2xx (curl -f), an unparsable body, a non-empty
+# `errors`, or a null or missing `data`. Each function below is ONE pipeline on
+# purpose: under `x="$(f)" || die`, bash disables `set -e` inside f, so only the
+# exit status of f's last pipeline (with pipefail) carries a failure out.
 railway_gql() {
   curl -fsS https://backboard.railway.com/graphql/v2 \
-    -H "Authorization: Bearer $railway_token" -H 'content-type: application/json' --data-binary @- |
-    jq -e 'if .errors then error("railway: \(.errors | map(.message) | join("; "))") else .data end'
+    -H @<(printf 'Authorization: Bearer %s\n' "$railway_token") -H 'content-type: application/json' --data-binary @- |
+    jq -e '
+      if type != "object" then error("railway: the response is not a JSON object")
+      elif (.errors // null) != null and .errors != [] then
+        error("railway: \(.errors | if type == "array" then map(.message? // "unknown error") | join("; ") else "unknown error" end)")
+      elif (.data // null) == null then error("railway: the response has no data")
+      else .data end'
 }
 gql() { jq -nc --arg q "$1" --argjson v "${2:-{\}}" '{query: $q, variables: $v}' | railway_gql; }
 
 ids="$(gql 'query($p: String!){project(id: $p){environments{edges{node{id name}}} services{edges{node{id name}}}}}' \
-  "$(jq -nc --arg p "$RAILWAY_PROJECT_ID" '{p: $p}')")"
-env_id="$(jq -r --arg n "$RAILWAY_ENVIRONMENT" '.project.environments.edges[].node | select(.name == $n) | .id' <<<"$ids")"
-svc_id="$(jq -r --arg n "$RAILWAY_SERVICE" '.project.services.edges[].node | select(.name == $n) | .id' <<<"$ids")"
+  "$(jq -nc --arg p "$RAILWAY_PROJECT_ID" '{p: $p}')")" || die "reading the Railway project failed; nothing changed"
+env_id="$(jq -r --arg n "$RAILWAY_ENVIRONMENT" '.project.environments.edges[].node | select(.name == $n) | .id' <<<"$ids")" ||
+  die "the Railway project response is malformed; nothing changed"
+svc_id="$(jq -r --arg n "$RAILWAY_SERVICE" '.project.services.edges[].node | select(.name == $n) | .id' <<<"$ids")" ||
+  die "the Railway project response is malformed; nothing changed"
 [ -n "$env_id" ] || die "Railway environment $RAILWAY_ENVIRONMENT not found in project $RAILWAY_PROJECT_ID"
 [ -n "$svc_id" ] || die "Railway service $RAILWAY_SERVICE not found in project $RAILWAY_PROJECT_ID"
 scope="$(jq -nc --arg p "$RAILWAY_PROJECT_ID" --arg e "$env_id" --arg s "$svc_id" '{p: $p, e: $e, s: $s}')"
@@ -95,10 +112,11 @@ scope="$(jq -nc --arg p "$RAILWAY_PROJECT_ID" --arg e "$env_id" --arg s "$svc_id
 # Raw (unrendered) service variables, so a reference shows up as ${{...}}, not its resolved value.
 railway_vars() {
   gql 'query($p: String!, $e: String!, $s: String!){variables(projectId: $p, environmentId: $e, serviceId: $s, unrendered: true)}' \
-    "$scope" | jq -c '.variables'
+    "$scope" | jq -ce '.variables | if type == "object" then . else error("railway: variables is not an object") end'
 }
 doppler_vars() {
-  doppler secrets download --project "$DOPPLER_PROJECT" --config "$DOPPLER_CONFIG" --no-file --format json
+  doppler secrets download --project "$DOPPLER_PROJECT" --config "$DOPPLER_CONFIG" --no-file --format json |
+    jq -ce 'if type == "object" then . else error("doppler: the download is not a JSON object") end'
 }
 
 # sha256 of the sorted KEY=VALUE lines of the managed keys (a missing key hashes as absent).
@@ -106,8 +124,8 @@ managed_hash() {
   jq -r --argjson k "$keys_json" '. as $v | $k[] as $key | select($v | has($key)) | "\($key)=\($v[$key])"' | LC_ALL=C sort | shasum -a 256 | cut -c1-16
 }
 
-rv="$(railway_vars)"
-dv="$(doppler_vars)"
+rv="$(railway_vars)" || die "reading the Railway variables failed; nothing changed"
+dv="$(doppler_vars)" || die "reading the Doppler secrets failed; nothing changed"
 
 # Per key: status only. The comparison happens inside jq; values never leave it.
 plan="$(printf '%s\n%s\n' "$dv" "$rv" | jq -sc --argjson k "$keys_json" '
@@ -118,19 +136,19 @@ plan="$(printf '%s\n%s\n' "$dv" "$rv" | jq -sc --argjson k "$keys_json" '
     elif ($r | has($key)) and ($r[$key] | contains("${{")) then "railway-reference"
     elif ($r | has($key) | not) then "new"
     elif $r[$key] == $d[$key] then "unchanged"
-    else "changed" end)}]')"
+    else "changed" end)}]')" || die "comparing Doppler with Railway failed; nothing changed"
 
 say "Doppler $DOPPLER_PROJECT/$DOPPLER_CONFIG -> Railway $RAILWAY_SERVICE ($RAILWAY_ENVIRONMENT), ${#keys[@]} managed key(s):"
-jq -r '.[] | "  \(.key)\t\(.status)"' <<<"$plan" >&2
-unmanaged="$(jq -r --argjson k "$keys_json" 'keys - $k | join(" ")' <<<"$rv")"
+jq -r '.[] | "  \(.key)\t\(.status)"' <<<"$plan" >&2 || die "printing the plan failed; nothing changed"
+unmanaged="$(jq -r --argjson k "$keys_json" 'keys - $k | join(" ")' <<<"$rv")" || die "listing unmanaged keys failed; nothing changed"
 [ -z "$unmanaged" ] || say "  left alone (not in doppler-keys.txt): $unmanaged"
 
-bad="$(jq -r '[.[] | select(.status | IN("missing-in-doppler", "doppler-value-is-a-reference", "railway-reference")) | .key] | join(" ")' <<<"$plan")"
+bad="$(jq -r '[.[] | select(.status | IN("missing-in-doppler", "doppler-value-is-a-reference", "railway-reference")) | .key] | join(" ")' <<<"$plan")" || die "reading the plan failed; nothing changed"
 [ -z "$bad" ] || die "refusing: $bad (see status above; a Railway reference must stay Railway-managed, so drop it from doppler-keys.txt)"
-todo="$(jq -r '.[] | select(.status | IN("new", "changed")) | .key' <<<"$plan")"
+todo="$(jq -r '.[] | select(.status | IN("new", "changed")) | .key' <<<"$plan")" || die "reading the plan failed; nothing changed"
 
-before="$(managed_hash <<<"$rv")"
-want="$(managed_hash <<<"$dv")"
+before="$(managed_hash <<<"$rv")" || die "hashing the Railway variables failed; nothing changed"
+want="$(managed_hash <<<"$dv")" || die "hashing the Doppler secrets failed; nothing changed"
 say "hash: railway $before, doppler $want ($([ "$before" = "$want" ] && echo match || echo differ))"
 
 if [ "$mode" = dry-run ]; then
@@ -148,16 +166,16 @@ for key in $todo; do
   doppler_vars | jq -c --arg key "$key" --argjson s "$scope" '{
       query: "mutation($i: VariableUpsertInput!){variableUpsert(input: $i)}",
       variables: {i: {projectId: $s.p, environmentId: $s.e, serviceId: $s.s, name: $key, value: .[$key], skipDeploys: true}}}' |
-    railway_gql >/dev/null
+    railway_gql >/dev/null || die "setting $key failed; keys before it were set, no redeploy; rerun to finish"
   say "  set $key"
 done
 
-after="$(railway_vars | managed_hash)"
+after="$(railway_vars | managed_hash)" || die "reading the Railway variables after apply failed; no redeploy"
 [ "$after" = "$want" ] || die "hash after apply is $after, expected $want; check the service in Railway"
 say "hash after apply: $after (match)"
 
 if [ "$redeploy" = 1 ]; then
-  gql 'mutation($e: String!, $s: String!){serviceInstanceRedeploy(environmentId: $e, serviceId: $s)}' "$scope" >/dev/null
+  gql 'mutation($e: String!, $s: String!){serviceInstanceRedeploy(environmentId: $e, serviceId: $s)}' "$scope" >/dev/null || die "the redeploy request failed; the values are set and apply on the next deploy"
   say "redeploy triggered for $RAILWAY_SERVICE so the new values take effect"
 else
   say "no redeploy (--no-redeploy): the values apply on the next deploy"
