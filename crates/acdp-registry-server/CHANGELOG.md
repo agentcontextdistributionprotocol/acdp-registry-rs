@@ -1,5 +1,13 @@
 
 
+## [0.11.2](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.11.1...acdp-registry-server/v0.11.2) - 2026-11-08
+
+### Other
+
+- run pg_e2e and auth pg_revocation in the tests job ([#567](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/567))
+- *(pg)* shipped binary on Postgres end to end; fix(docker): accept did:key locally ([#566](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/pull/566))
+
+
 ## [0.11.1](https://github.com/agentcontextdistributionprotocol/acdp-registry-rs/compare/acdp-registry-server/v0.11.0...acdp-registry-server/v0.11.1) - 2026-11-07
 
 ### Other
